@@ -181,3 +181,96 @@ class SingletonEntry:
     actor_cls_name: str
     kwargs: dict[str, Any]
     status: Literal["active", "orphan"]
+
+
+# Sharding types
+
+
+@dataclass(frozen=True, slots=True)
+class ShardedMessage:
+    """Message wrapper for sharded entity communication via Raft.
+
+    Encapsulates a message that needs to be routed to a specific entity
+    within a sharded actor type. This message is appended to the Raft log
+    to ensure consistent ordering across the cluster.
+    """
+
+    entity_type: str  # The sharded actor type name (e.g., "account")
+    entity_id: str  # The specific entity ID (e.g., "user-1")
+    payload: Any  # The actual message to deliver
+    reply_to: str | None = None  # Node ID for ask responses (bypasses Raft)
+    request_id: str | None = None  # For correlating ask responses
+
+
+@dataclass(frozen=True, slots=True)
+class ShardAllocationCommand:
+    """Command to allocate a shard to a node via Raft consensus.
+
+    Used to maintain consistent shard-to-node mappings across the cluster.
+    """
+
+    action: Literal["allocate", "deallocate"]
+    entity_type: str
+    shard_id: int
+    node_id: str
+
+
+@dataclass
+class ShardedEntityConfig:
+    """Configuration for a sharded entity type."""
+
+    entity_type: str
+    actor_cls_name: str
+    num_shards: int
+    kwargs: dict[str, Any]  # Default constructor kwargs
+
+
+@dataclass(frozen=True, slots=True)
+class RegisterShardedEntityCommand:
+    """Command to register a sharded entity type across the cluster via Raft."""
+
+    entity_type: str
+    actor_cls_name: str
+    num_shards: int
+    kwargs: tuple[tuple[str, Any], ...]  # Constructor kwargs as tuple for hashability
+
+
+# State replication types
+
+
+@dataclass(frozen=True, slots=True)
+class EntityStateUpdate:
+    """Command to replicate entity state across the cluster via Raft.
+
+    Flow:
+    1. Primary processes message, updates state
+    2. Primary creates EntityStateUpdate with new state
+    3. EntityStateUpdate goes to Raft log
+    4. All nodes apply (backups store in _backup_states)
+
+    Versioning:
+    - version is monotonic per (entity_type, entity_id)
+    - Nodes only apply if version > local version
+    - Prevents out-of-order application after partitions
+    """
+
+    entity_type: str
+    entity_id: str
+    state: bytes  # Serialized state via msgpack
+    version: int  # Monotonic version for ordering
+    primary_node: str  # Node that originated the update
+    timestamp: float  # Timestamp from primary
+
+
+@dataclass(frozen=True, slots=True)
+class EntityStateDelete:
+    """Command to remove entity state via Raft.
+
+    Used when entity is explicitly removed or
+    during garbage collection of inactive entities.
+    """
+
+    entity_type: str
+    entity_id: str
+    version: int
+    reason: Literal["explicit", "gc", "migration"]

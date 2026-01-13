@@ -13,13 +13,13 @@ This model drastically simplifies concurrent programming by eliminating classic 
 Using uv:
 
 ```bash
-uv add git+https://github.com/gabfssilva/casty.git
+uv add casty
 ```
 
 Or using pip:
 
 ```bash
-pip install git+https://github.com/gabfssilva/casty.git
+pip install casty
 ```
 
 Casty requires Python 3.12 or higher due to its use of PEP 695 generics syntax.
@@ -357,6 +357,249 @@ if system.is_leader:
 
 When a follower is far behind (its `next_index` points before the leader's first log entry), the leader sends an `InstallSnapshot` RPC instead of log entries.
 
+### Singleton Actors
+
+Singleton actors are cluster-wide unique actors — only one instance exists across the entire cluster, regardless of which node you spawn it from. This is useful for coordinating global state, managing shared resources, or implementing services that should only run once.
+
+```python
+from casty import DistributedActorSystem
+
+@dataclass
+class GetConfig:
+    pass
+
+class ConfigManager(Actor[GetConfig]):
+    def __init__(self):
+        self.config = {"feature_x": True, "max_connections": 100}
+
+    async def receive(self, msg: GetConfig, ctx: Context) -> None:
+        ctx.reply(self.config)
+
+async def main():
+    async with DistributedActorSystem("0.0.0.0", 8001, expected_cluster_size=3) as system:
+        # Spawn a singleton - only one instance will exist cluster-wide
+        config = await system.spawn(ConfigManager, name="config", singleton=True)
+
+        # From any node, you can get a reference to the singleton
+        config_ref = await system.lookup("config", singleton=True)
+
+        # If the singleton exists on another node, you get a RemoteRef
+        current_config = await config_ref.ask(GetConfig())
+```
+
+Key characteristics of singleton actors:
+- **Unique**: Only one instance exists across the cluster
+- **Transparent location**: You get either a local `ActorRef` or a `RemoteRef` depending on where the singleton lives
+- **Raft-replicated registry**: The singleton registry is replicated via Raft for consistency
+- **Automatic routing**: Messages are automatically routed to the node hosting the singleton
+
+### Cluster Sharding
+
+Cluster Sharding allows you to distribute actors across multiple nodes based on entity IDs. This is perfect for scenarios where you have many entities (users, accounts, devices, etc.) that need to be distributed for scalability, while maintaining strong consistency through Raft.
+
+```python
+from dataclasses import dataclass
+from casty import Actor, Context, DistributedActorSystem
+
+@dataclass
+class Deposit:
+    amount: float
+
+@dataclass
+class GetBalance:
+    pass
+
+class Account(Actor[Deposit | GetBalance]):
+    def __init__(self, entity_id: str):
+        self.entity_id = entity_id
+        self.balance = 0.0
+
+    async def receive(self, msg: Deposit | GetBalance, ctx: Context) -> None:
+        match msg:
+            case Deposit(amount):
+                self.balance += amount
+            case GetBalance():
+                ctx.reply(self.balance)
+
+async def main():
+    async with DistributedActorSystem("0.0.0.0", 8001, expected_cluster_size=3) as system:
+        # Create a sharded actor type with 100 shards
+        accounts = await system.spawn(Account, name="account", shards=100)
+
+        # Access entities using subscription syntax
+        await accounts["user-1"].send(Deposit(100))
+        await accounts["user-1"].send(Deposit(50))
+
+        balance = await accounts["user-1"].ask(GetBalance())
+        assert balance == 150.0
+
+        # Different entities can be on different nodes
+        await accounts["user-2"].send(Deposit(200))
+        await accounts["user-3"].send(Deposit(300))
+```
+
+#### How Sharding Works
+
+1. **Shard Allocation**: When you spawn with `shards=N`, Casty creates N shards and distributes them across cluster nodes using round-robin allocation via Raft consensus.
+
+2. **Entity Routing**: Each entity ID is mapped to a shard using `hash(entity_id) % num_shards`. The same entity ID always routes to the same shard.
+
+3. **Message Ordering**: Messages go through the Raft log, ensuring consistent ordering across the cluster. This guarantees that two messages to the same entity are applied in the order they were sent.
+
+4. **Lazy Entity Creation**: Entity actors are created on-demand when they receive their first message. The actor receives the `entity_id` as a constructor parameter.
+
+5. **Response Routing**: For `ask()` requests, the response bypasses Raft and goes directly back to the requesting node for lower latency.
+
+#### ShardedRef and EntityRef
+
+The `spawn(..., shards=N)` method returns a `ShardedRef` instead of an `ActorRef`:
+
+```python
+# ShardedRef provides access to entities
+accounts = await system.spawn(Account, name="account", shards=100)
+
+# Get an EntityRef for a specific entity
+user_ref = accounts["user-1"]
+
+# EntityRef supports send and ask
+await user_ref.send(Deposit(100))
+balance = await user_ref.ask(GetBalance())
+
+# You can also use ShardedRef directly
+await accounts.send("user-1", Deposit(100))
+balance = await accounts.ask("user-1", GetBalance())
+```
+
+#### Distributed Sharding
+
+Sharding works seamlessly in distributed clusters. Actor and message types are automatically imported on other nodes when needed:
+
+```python
+async with node1, node2, node3:
+    # Wait for leader election
+    leader = ...  # wait for leader election
+
+    # Spawn sharded actor - types are auto-imported on all nodes
+    accounts = await leader.spawn(Account, name="account", shards=100)
+
+    # Entities are distributed across nodes automatically
+    await accounts["user-1"].send(Deposit(100))  # May route to any node
+```
+
+The auto-import mechanism uses Python's `importlib` to dynamically load classes by their fully qualified name. This means actor and message classes must be importable (i.e., defined in a proper Python module, not in `__main__` or a notebook).
+
+### State Replication
+
+Sharded entity state is automatically replicated to backup nodes in memory, enabling state restoration on failover. This ensures entities survive node crashes without losing their state — **no configuration required**.
+
+```python
+async with DistributedActorSystem("0.0.0.0", 8001, expected_cluster_size=3) as system:
+    accounts = await system.spawn(Account, name="account", shards=100)
+
+    # State is automatically replicated to 2 backup nodes (default)
+    await accounts["user-1"].send(Deposit(100))
+
+    # If this node crashes, the entity will be recreated on another node
+    # with its state restored from backup
+```
+
+To customize replication behavior, pass a `ReplicationConfig`:
+
+```python
+from casty import DistributedActorSystem, ReplicationConfig
+
+# Disable replication (for development/testing)
+config = ReplicationConfig(memory_replicas=0)
+
+# Or increase backup copies
+config = ReplicationConfig(memory_replicas=3)
+
+async with DistributedActorSystem(
+    "0.0.0.0", 8001,
+    expected_cluster_size=3,
+    replication=config,
+) as system:
+    ...
+```
+
+#### How State Replication Works
+
+1. **State Extraction**: After processing each message, the entity's state is serialized (using the actor's `__dict__` by default, excluding private fields).
+
+2. **Replication via Raft**: The serialized state is appended to the Raft log with a version number, ensuring consistent ordering.
+
+3. **Backup Storage**: Backup nodes store the state in an in-memory `BackupStateManager` with LRU eviction.
+
+4. **State Restoration**: When an entity is recreated (after failover), Casty first checks for backup state and restores it before processing new messages.
+
+#### Customizing State Serialization (Optional)
+
+By default, state replication works automatically without any changes to your actor class. Casty serializes all fields from `__dict__` except those starting with `_`:
+
+```python
+# This works automatically - no special inheritance needed
+class Account(Actor[Deposit | GetBalance]):
+    def __init__(self, entity_id: str):
+        self.entity_id = entity_id
+        self.balance = 0.0        # Replicated automatically
+        self.name = "test"        # Replicated automatically
+        self._cache = {}          # Ignored (starts with _)
+```
+
+For more control over which fields are persisted, you can optionally use the `PersistentActorMixin` or `@persistent` decorator:
+
+```python
+from casty import Actor, Context, PersistentActorMixin, persistent
+
+# Option 1: Using mixin with explicit exclusion
+class Account(PersistentActorMixin, Actor[Deposit | GetBalance]):
+    __casty_exclude_fields__ = {"temp_data", "metrics"}
+
+    def __init__(self, entity_id: str):
+        self.entity_id = entity_id
+        self.balance = 0.0      # Persisted
+        self.temp_data = None   # Excluded explicitly
+        self.metrics = {}       # Excluded explicitly
+
+# Option 2: Using decorator with whitelist (only these fields)
+@persistent("balance", "transaction_count")
+class Counter(Actor[Increment | GetCount]):
+    def __init__(self, entity_id: str):
+        self.entity_id = entity_id      # Not persisted
+        self.balance = 0.0              # Persisted
+        self.transaction_count = 0      # Persisted
+        self.temp_data = None           # Not persisted
+
+# Option 3: Full control with protocol methods
+class ComplexActor(Actor[SomeMessage]):
+    def __casty_get_state__(self) -> dict:
+        return {"important": self.important_state}
+
+    def __casty_set_state__(self, state: dict) -> None:
+        self.important_state = state["important"]
+        self._derived = self._compute_derived()  # Recompute derived fields
+```
+
+#### Replication Presets
+
+For common use cases, Casty provides preset configurations:
+
+```python
+from casty import ReplicationConfig, ReplicationPresets
+
+# Development - no replication overhead
+config = ReplicationPresets.development()
+
+# High performance - async replication
+config = ReplicationPresets.high_performance()
+
+# Balanced (recommended) - 2 replicas in memory
+config = ReplicationPresets.balanced()
+
+# High durability - for critical data
+config = ReplicationPresets.high_durability()
+```
+
 ### Message Serialization
 
 For communication between nodes, messages need to be serialized. Casty uses msgpack and automatically supports dataclasses and Python primitive types (int, float, str, bool, None, bytes, list, dict).
@@ -490,12 +733,23 @@ The code is organized into well-defined layers. The core layer contains `actor.p
 The mixins follow the single responsibility principle:
 - **`PeerMixin`**: Manages TCP connections between nodes and the gossip protocol
 - **`MessagingMixin`**: Implements lookup and remote message sending
-- **`ElectionMixin`**: Handles leader election with election restriction
-- **`PersistenceMixin`**: Manages durable state (term, voted_for, log) with fsync
-- **`LogReplicationMixin`**: Implements AppendEntries RPC and commit advancement
-- **`SnapshotMixin`**: Handles snapshot creation and InstallSnapshot RPC
+- **`SingletonMixin`**: Handles cluster-wide singleton actors with Raft-replicated registry
 
-The `DistributedActorSystem` inherits from all of them, composing the functionalities.
+The Multi-Raft layer (`cluster/multiraft/`) provides:
+- **`RaftGroup`**: Self-contained Raft consensus implementation for one group
+- **`MultiRaftManager`**: Manages multiple independent Raft groups with batched messaging
+
+The sharding system adds:
+- **`ShardedRef`** / **`EntityRef`**: Type-safe references for sharded entities
+- **Shard allocation**: Round-robin distribution via Raft consensus
+- **Entity lifecycle**: Lazy creation and message routing
+
+The persistence layer (`cluster/persistence.py`) provides:
+- **`BackupStateManager`**: In-memory backup state storage with LRU eviction
+- **`ReplicationConfig`**: Configurable replication strategies and modes
+- **State protocols**: `PersistentActorMixin` and `@persistent` for custom serialization
+
+The `DistributedActorSystem` composes all these functionalities into a cohesive distributed actor runtime.
 
 ### The Envelope Pattern
 
@@ -535,13 +789,24 @@ Casty was designed with several principles in mind.
 
 ## Known Limitations
 
-There is no backpressure in actor mailboxes. If an actor receives messages faster than it can process them, the queue grows indefinitely. For high-load production systems, consider implementing rate limiting at the application level.
+**No backpressure**: Actor mailboxes have no backpressure mechanism. If an actor receives messages faster than it can process them, the queue grows indefinitely. For high-load production systems, consider implementing rate limiting at the application level.
 
-Membership changes (adding/removing nodes from a running cluster) are not yet supported. The cluster size must be known at startup.
+**Static cluster membership**: Adding or removing nodes from a running cluster (membership changes) is not yet supported. The cluster size must be known at startup.
+
+**State replication is in-memory only**: Sharded entity state is replicated to backup nodes in memory, surviving individual node crashes. However, if all nodes restart simultaneously, state is lost. Disk persistence (SQLite, PostgreSQL, etc.) is planned for future releases.
+
+**Classes must be importable**: Actor and message classes must be defined in proper Python modules (not `__main__` or notebooks) for the auto-import mechanism to work in distributed clusters.
 
 ## Contributing
 
-Contributions are welcome! Casty is a young project with plenty of room for improvements. Some areas of interest include Erlang/Elixir-style hierarchical supervision support, metrics and observability, membership changes (joint consensus), and performance optimizations.
+Contributions are welcome! Casty is a young project with plenty of room for improvements. Some areas of interest include:
+
+- **Hierarchical supervision**: Erlang/Elixir-style supervision trees for fault tolerance
+- **Metrics and observability**: Built-in instrumentation for monitoring cluster health
+- **Dynamic membership**: Adding/removing nodes from running clusters (joint consensus)
+- **Disk persistence**: SQLite, PostgreSQL, or other storage backends for durable state
+- **Shard rebalancing**: Automatic redistribution when nodes join/leave
+- **Performance optimizations**: Batching, compression, and connection pooling
 
 ## License
 

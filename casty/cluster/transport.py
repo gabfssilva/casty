@@ -32,6 +32,8 @@ class MessageType(IntEnum):
     # Singleton messages
     SINGLETON_INFO_REQ = 16  # Request singleton info from cluster
     SINGLETON_INFO_RES = 17  # Response with singleton info
+    # Multi-Raft batching
+    BATCHED_RAFT_MSG = 18  # Batched Raft messages for multiple groups
 
 
 @dataclass(slots=True)

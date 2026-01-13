@@ -14,7 +14,7 @@ async def wait_for_leader(
     poll_interval: float = 0.1,
 ) -> "DistributedActorSystem":
     """
-    Poll until exactly one leader emerges.
+    Poll until exactly one leader emerges and all nodes agree on the leader.
 
     Returns the leader node.
     Raises TimeoutError if no leader elected within timeout.
@@ -23,7 +23,16 @@ async def wait_for_leader(
     while elapsed < timeout:
         leaders = [n for n in nodes if n.is_leader]
         if len(leaders) == 1:
-            return leaders[0]
+            leader = leaders[0]
+            # Check if all followers agree on the leader
+            all_agree = True
+            for node in nodes:
+                if not node.is_leader:
+                    if node.leader_id != leader.node_id:
+                        all_agree = False
+                        break
+            if all_agree:
+                return leader
         await asyncio.sleep(poll_interval)
         elapsed += poll_interval
 
