@@ -56,8 +56,17 @@ class PeerMixin:
         # Store peer
         self._cluster.peers[peer_info] = transport
 
-        # Announce ourselves
-        await self._send_announce(transport)
+        # Announce ourselves (with timeout to avoid hanging if peer disconnects)
+        try:
+            await asyncio.wait_for(self._send_announce(transport), timeout=5.0)
+        except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+            log.warning(f"Failed to announce to {peer_info}: {e}")
+            self._cluster.peers.pop(peer_info, None)
+            try:
+                await transport.close()
+            except Exception:
+                pass
+            return
 
         # Start receive loop in background (non-blocking to allow more connections)
         task = asyncio.create_task(self._receive_loop(transport))

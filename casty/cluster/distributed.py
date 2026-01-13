@@ -19,9 +19,10 @@ from .mixins import (
     MessagingMixin,
     PeerMixin,
     PersistenceMixin,
+    SingletonMixin,
     SnapshotMixin,
 )
-from .raft_types import RaftLog
+from .raft_types import RaftLog, SingletonEntry
 from .serialize import deserialize, get_type_name
 from .transport import MessageType, Transport
 
@@ -51,6 +52,10 @@ class ClusterState:
     type_registry: dict[str, type] = field(default_factory=dict)
     pending_lookups: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
     pending_asks: dict[str, asyncio.Future[Any]] = field(default_factory=dict)
+    # Singleton registries
+    singleton_registry: dict[str, SingletonEntry] = field(default_factory=dict)  # Global, replicated via Raft
+    singleton_actor_classes: dict[str, type] = field(default_factory=dict)  # Local, for auto-recreate
+    singleton_local_refs: dict[str, ActorRef[Any]] = field(default_factory=dict)  # Local refs to singletons hosted here
     # Election state (Raft)
     node_id: str = field(default_factory=lambda: str(uuid4()))
     known_nodes: dict[str, Transport] = field(default_factory=dict)
@@ -85,6 +90,7 @@ class DistributedActorSystem(
     PersistenceMixin,
     LogReplicationMixin,
     SnapshotMixin,
+    SingletonMixin,
     PeerMixin,
     MessagingMixin,
     ActorSystem,
@@ -163,9 +169,23 @@ class DistributedActorSystem(
         actor_cls: type[Actor[M]],
         *,
         name: str | None = None,
+        singleton: bool = False,
         **kwargs: Any,
     ) -> ActorRef[M]:
-        """Spawn actor and register if named."""
+        """Spawn actor and register if named.
+
+        Args:
+            actor_cls: The actor class to instantiate.
+            name: Optional name for the actor.
+            singleton: If True, creates a cluster-wide singleton.
+                      If the singleton already exists, returns a RemoteRef.
+            **kwargs: Constructor arguments for the actor.
+        """
+        if singleton:
+            if name is None:
+                raise ValueError("Singleton actors must have a name")
+            return await self._spawn_singleton(actor_cls, name, kwargs)
+
         ref = await super().spawn(actor_cls, name=name, **kwargs)
         if name:
             self._cluster.registry[name] = ref
@@ -204,8 +224,13 @@ class DistributedActorSystem(
         # Start election loop
         self._election_task = asyncio.create_task(self._election_loop())
 
-        async with self._server:
+        # Run the server until cancelled or shutdown
+        # Note: We don't use `async with self._server` to avoid double wait_closed()
+        # calls during shutdown (once in shutdown() and once in __aexit__).
+        try:
             await self._server.serve_forever()
+        except asyncio.CancelledError:
+            pass
 
     async def _receive_loop(self, transport: Transport) -> None:
         """Process incoming messages from a peer."""
@@ -253,6 +278,10 @@ class DistributedActorSystem(
                         await self._handle_install_snapshot_request(transport, msg)
                     case MessageType.INSTALL_SNAPSHOT_RES:
                         await self._handle_install_snapshot_response(msg)
+                    case MessageType.SINGLETON_INFO_REQ:
+                        await self._handle_singleton_info_request(transport, msg)
+                    case MessageType.SINGLETON_INFO_RES:
+                        pass  # Currently not used, for future monitoring
 
         except asyncio.IncompleteReadError:
             log.info("Peer disconnected")
@@ -268,34 +297,60 @@ class DistributedActorSystem(
                 if self._running and peer_node_id == self._cluster.leader_id:
                     log.info(f"Leader {peer_node_id[:8]} disconnected, will trigger re-election")
                     self._cluster.leader_id = None
+                # Note: Singleton orphaning is handled lazily on next spawn attempt
+                # We don't do it here to avoid blocking shutdown
 
     async def shutdown(self) -> None:
         """Stop actors and close network connections."""
+        log.debug(f"Node {self._cluster.node_id[:8]}: Starting shutdown")
         self._running = False
 
         if self._election_task:
+            log.debug(f"Node {self._cluster.node_id[:8]}: Cancelling election task")
             self._election_task.cancel()
             try:
-                await self._election_task
+                await asyncio.wait_for(self._election_task, timeout=2.0)
             except asyncio.CancelledError:
                 pass
+            except asyncio.TimeoutError:
+                log.warning(f"Node {self._cluster.node_id[:8]}: Election task cancel timed out")
 
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-
+        # Cancel receive tasks first to allow clean connection shutdown
+        log.debug(f"Node {self._cluster.node_id[:8]}: Cancelling {len(self._receive_tasks)} receive tasks")
         for task in list(self._receive_tasks):
             task.cancel()
         if self._receive_tasks:
-            await asyncio.gather(*self._receive_tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._receive_tasks, return_exceptions=True),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                log.warning(f"Node {self._cluster.node_id[:8]}: Receive tasks cancel timed out")
         self._receive_tasks.clear()
 
+        # Close transports before server to ensure clean connection teardown
+        log.debug(f"Node {self._cluster.node_id[:8]}: Closing {len(self._cluster.peers)} transports")
         for transport in list(self._cluster.peers.values()):
-            await transport.close()
+            try:
+                await asyncio.wait_for(transport.close(), timeout=1.0)
+            except asyncio.TimeoutError:
+                log.warning(f"Node {self._cluster.node_id[:8]}: Transport close timed out")
         self._cluster.peers.clear()
         self._cluster.known_nodes.clear()
 
+        # Now close the server - all connection handlers should be done
+        if self._server:
+            log.debug(f"Node {self._cluster.node_id[:8]}: Closing server")
+            self._server.close()
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), timeout=2.0)
+            except asyncio.TimeoutError:
+                log.warning(f"Node {self._cluster.node_id[:8]}: Server wait_closed timed out")
+
+        log.debug(f"Node {self._cluster.node_id[:8]}: Calling super().shutdown()")
         await super().shutdown()
+        log.debug(f"Node {self._cluster.node_id[:8]}: Shutdown complete")
 
     async def __aenter__(self) -> "DistributedActorSystem":
         """Enter async context manager, starting the server in background."""

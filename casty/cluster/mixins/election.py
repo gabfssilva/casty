@@ -270,6 +270,9 @@ class ElectionMixin:
 
         # Send AppendEntries as heartbeats
         for peer_node_id, transport in peers_snapshot:
+            # Stop if shutting down
+            if not self._running:
+                return
             async with self._cluster.election_lock:
                 next_idx = self._cluster.next_index.get(peer_node_id, 1)
                 prev_log_index = next_idx - 1

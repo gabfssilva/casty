@@ -10,14 +10,16 @@ This model drastically simplifies concurrent programming by eliminating classic 
 
 ## Installation
 
+Using uv:
+
 ```bash
-pip install casty
+uv add git+https://github.com/gabfssilva/casty.git
 ```
 
-Or using uv:
+Or using pip:
 
 ```bash
-uv add casty
+pip install git+https://github.com/gabfssilva/casty.git
 ```
 
 Casty requires Python 3.12 or higher due to its use of PEP 695 generics syntax.

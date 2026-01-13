@@ -10,6 +10,7 @@ from ..raft_types import (
     AppendEntriesRequest,
     AppendEntriesResponse,
     LogEntry,
+    SingletonCommand,
 )
 from ..serialize import deserialize, serialize
 from ..transport import MessageType, Transport, WireMessage
@@ -73,6 +74,9 @@ class LogReplicationMixin:
         elapsed = 0.0
         poll_interval = 0.05
         while elapsed < timeout:
+            # Stop waiting if system is shutting down
+            if not self._running:
+                return False
             if self._cluster.raft_log.commit_index >= index:
                 return True
             await asyncio.sleep(poll_interval)
@@ -83,15 +87,25 @@ class LogReplicationMixin:
         self, peers: list[tuple[str, Transport]], term: int
     ) -> None:
         """Send AppendEntries to all followers."""
+        if not self._running:
+            return
         for peer_id, transport in peers:
-            asyncio.create_task(
-                self._send_append_entries_to_peer(peer_id, transport, term)
-            )
+            if not self._running:
+                return
+            try:
+                await asyncio.wait_for(
+                    self._send_append_entries_to_peer(peer_id, transport, term),
+                    timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                log.debug(f"Timeout sending AppendEntries to {peer_id[:8]}")
 
     async def _send_append_entries_to_peer(
         self, peer_id: str, transport: Transport, term: int
     ) -> None:
         """Send AppendEntries RPC to a single peer."""
+        if not self._running:
+            return
         async with self._cluster.election_lock:
             if self._cluster.state != "leader" or self._cluster.term != term:
                 return
@@ -329,11 +343,19 @@ class LogReplicationMixin:
         while self._cluster.raft_log.last_applied < self._cluster.raft_log.commit_index:
             next_apply = self._cluster.raft_log.last_applied + 1
             entry = self._cluster.raft_log.get_entry(next_apply)
-            if entry and self._apply_callback:
-                try:
-                    await self._apply_callback(entry.command)
-                except Exception as e:
-                    log.error(f"Failed to apply command at index {next_apply}: {e}")
+            if entry:
+                # Apply singleton commands internally
+                if isinstance(entry.command, SingletonCommand):
+                    try:
+                        await self._apply_singleton_command(entry.command)  # type: ignore
+                    except Exception as e:
+                        log.error(f"Failed to apply singleton command at index {next_apply}: {e}")
+                # Apply user callback
+                elif self._apply_callback:
+                    try:
+                        await self._apply_callback(entry.command)
+                    except Exception as e:
+                        log.error(f"Failed to apply command at index {next_apply}: {e}")
             self._cluster.raft_log.last_applied = next_apply
 
     async def _send_heartbeats_with_entries(self) -> None:

@@ -5,6 +5,7 @@ from .log_replication import LogReplicationMixin
 from .messaging import MessagingMixin
 from .peer import PeerMixin
 from .persistence import PersistenceMixin
+from .singleton import SingletonMixin
 from .snapshot import SnapshotMixin
 
 __all__ = [
@@ -13,5 +14,6 @@ __all__ = [
     "MessagingMixin",
     "PeerMixin",
     "PersistenceMixin",
+    "SingletonMixin",
     "SnapshotMixin",
 ]

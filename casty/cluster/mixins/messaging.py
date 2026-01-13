@@ -22,14 +22,21 @@ class MessagingMixin:
 
     _cluster: ClusterState
 
+    def _get_local_ref(self, name: str) -> ActorRef | None:
+        """Get a local actor ref by name (checking both registries)."""
+        if name in self._cluster.registry:
+            return self._cluster.registry[name]
+        if name in self._cluster.singleton_local_refs:
+            return self._cluster.singleton_local_refs[name]
+        return None
+
     async def _deliver_remote_message(self, msg: WireMessage) -> None:
         """Deliver a message from a remote peer to a local actor."""
         target_name = msg.target_name
-        if target_name not in self._cluster.registry:
+        ref = self._get_local_ref(target_name)
+        if ref is None:
             log.warning(f"Actor '{target_name}' not found for remote message")
             return
-
-        ref = self._cluster.registry[target_name]
         try:
             payload = deserialize(msg.payload, self._cluster.type_registry)
             await ref.send(payload)
@@ -43,7 +50,7 @@ class MessagingMixin:
     ) -> None:
         """Handle a lookup request from a peer."""
         target_name = msg.target_name
-        found = target_name in self._cluster.registry
+        found = self._get_local_ref(target_name) is not None
 
         response = WireMessage(
             msg_type=MessageType.LOOKUP_RES,
@@ -74,7 +81,8 @@ class MessagingMixin:
         request_id = msg.payload[:36].decode("utf-8")
         message_data = msg.payload[36:]
 
-        if target_name not in self._cluster.registry:
+        ref = self._get_local_ref(target_name)
+        if ref is None:
             log.warning(f"Actor '{target_name}' not found for remote ask")
             response = WireMessage(
                 msg_type=MessageType.ASK_RES,
@@ -83,8 +91,6 @@ class MessagingMixin:
             )
             await transport.send(response)
             return
-
-        ref = self._cluster.registry[target_name]
         try:
             payload = deserialize(message_data, self._cluster.type_registry)
             result = await ref.ask(payload)
@@ -120,8 +126,17 @@ class MessagingMixin:
             except Exception as e:
                 future.set_exception(e)
 
-    async def lookup[T](self, name: str) -> ActorRef[T]:
-        """Look up an actor by name (local first, then remote)."""
+    async def lookup[T](self, name: str, *, singleton: bool = False) -> ActorRef[T]:
+        """Look up an actor by name.
+
+        Args:
+            name: The actor name to look up.
+            singleton: If True, looks up in the singleton registry (global).
+                      If False, looks up in local registry first, then peers.
+        """
+        if singleton:
+            return await self._lookup_singleton(name)  # type: ignore
+
         # Local first
         if name in self._cluster.registry:
             return self._cluster.registry[name]  # type: ignore

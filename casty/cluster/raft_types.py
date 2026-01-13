@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,3 +155,29 @@ class Snapshot:
     last_included_index: int
     last_included_term: int
     data: bytes  # Serialized state machine state
+
+
+# Singleton types
+
+
+@dataclass(frozen=True, slots=True)
+class SingletonCommand:
+    """Command to manage singleton actors in the cluster (replicated via Raft)."""
+
+    action: Literal["register", "unregister", "orphan"]
+    name: str
+    node_id: str
+    actor_cls_name: str  # Fully qualified class name for auto-recreate
+    kwargs: tuple[tuple[str, Any], ...]  # Constructor kwargs as tuple of tuples (for hashability)
+    timestamp: float
+
+
+@dataclass
+class SingletonEntry:
+    """State of a singleton actor in the cluster."""
+
+    name: str
+    node_id: str
+    actor_cls_name: str
+    kwargs: dict[str, Any]
+    status: Literal["active", "orphan"]

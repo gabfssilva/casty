@@ -29,6 +29,9 @@ class MessageType(IntEnum):
     # Snapshot messages (Raft)
     INSTALL_SNAPSHOT_REQ = 14  # Leader InstallSnapshot RPC
     INSTALL_SNAPSHOT_RES = 15  # Follower InstallSnapshot response
+    # Singleton messages
+    SINGLETON_INFO_REQ = 16  # Request singleton info from cluster
+    SINGLETON_INFO_RES = 17  # Response with singleton info
 
 
 @dataclass(slots=True)
