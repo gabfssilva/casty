@@ -1,138 +1,317 @@
-"""Message serialization for Casty cluster using msgpack."""
+"""Serialization for cluster communication.
+
+Uses msgpack for efficient binary serialization of messages,
+commands, and state.
+"""
+
+from __future__ import annotations
 
 import importlib
-from dataclasses import asdict, is_dataclass
-from typing import Any, TypeVar
+from dataclasses import asdict, is_dataclass, fields
+from typing import Any, TypeVar, get_type_hints
 
 import msgpack
 
+T = TypeVar("T")
 
-def _import_type(type_name: str) -> type:
-    """Import a type from its fully qualified name.
+
+# Type registry for deserialization
+_type_registry: dict[str, type] = {}
+
+
+def register_type(cls: type) -> type:
+    """Register a type for serialization.
+
+    Registered types can be serialized and deserialized by name.
 
     Args:
-        type_name: Full type name like 'myapp.messages.Increment'
+        cls: The class to register
 
     Returns:
-        The imported class
+        The same class (for use as decorator)
+
+    Usage:
+        @register_type
+        @dataclass
+        class MyMessage:
+            value: int
     """
-    module_name, class_name = type_name.rsplit(".", 1)
-    module = importlib.import_module(module_name)
-    return getattr(module, class_name)
-
-# Primitive types that can be serialized directly (excluding containers)
-_SCALAR_PRIMITIVES = (int, float, str, bool, type(None), bytes)
+    _type_registry[f"{cls.__module__}.{cls.__qualname__}"] = cls
+    return cls
 
 
-def _convert_for_msgpack(obj: Any) -> Any:
-    """Recursively convert objects for msgpack serialization.
+def get_registered_type(name: str) -> type | None:
+    """Get a registered type by name.
 
-    Converts dataclasses to dicts with type information preserved.
+    Args:
+        name: Fully qualified type name
+
+    Returns:
+        The type or None if not found
     """
-    if obj is None or isinstance(obj, _SCALAR_PRIMITIVES):
-        return obj
-    elif isinstance(obj, dict):
-        return {k: _convert_for_msgpack(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [_convert_for_msgpack(item) for item in obj]
-    elif is_dataclass(obj) and not isinstance(obj, type):
-        # Convert dataclass to dict with type info
+    return _type_registry.get(name)
+
+
+def _resolve_type(name: str) -> type | None:
+    """Resolve a type by fully qualified name.
+
+    First checks the registry, then tries to import dynamically.
+
+    Args:
+        name: Fully qualified type name (e.g., "myapp.MyClass")
+
+    Returns:
+        The type or None if not found
+    """
+    # Check registry first
+    if name in _type_registry:
+        return _type_registry[name]
+
+    # Try to import dynamically
+    try:
+        parts = name.rsplit(".", 1)
+        if len(parts) == 2:
+            module_name, class_name = parts
+            module = importlib.import_module(module_name)
+            return getattr(module, class_name, None)
+    except (ImportError, AttributeError):
+        pass
+
+    return None
+
+
+def _serialize_value(value: Any) -> Any:
+    """Serialize a single value to msgpack-compatible form.
+
+    Args:
+        value: Value to serialize
+
+    Returns:
+        Serializable form of the value
+    """
+    from enum import Enum
+
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return value
+
+    # Handle Enums specially - serialize as type + value
+    if isinstance(value, Enum):
+        type_name = f"{type(value).__module__}.{type(value).__qualname__}"
+        return {"__enum__": type_name, "__value__": value.name}
+
+    if isinstance(value, (list, tuple)):
+        return [_serialize_value(v) for v in value]
+
+    if isinstance(value, dict):
+        return {k: _serialize_value(v) for k, v in value.items()}
+
+    if isinstance(value, set):
+        return {"__set__": [_serialize_value(v) for v in value]}
+
+    if is_dataclass(value) and not isinstance(value, type):
+        # Serialize dataclass
+        type_name = f"{type(value).__module__}.{type(value).__qualname__}"
+        data = {}
+        for field in fields(value):
+            field_value = getattr(value, field.name)
+            data[field.name] = _serialize_value(field_value)
+        return {"__type__": type_name, "__data__": data}
+
+    # Try to serialize as dict if possible
+    if hasattr(value, "__dict__"):
+        type_name = f"{type(value).__module__}.{type(value).__qualname__}"
         return {
-            "__type__": f"{type(obj).__module__}.{type(obj).__qualname__}",
-            "__data__": {k: _convert_for_msgpack(v) for k, v in asdict(obj).items()},
+            "__type__": type_name,
+            "__data__": {k: _serialize_value(v) for k, v in value.__dict__.items()},
         }
-    else:
-        raise TypeError(f"Cannot serialize {type(obj)}")
+
+    # Fallback: convert to string
+    return str(value)
+
+
+def _deserialize_value(value: Any) -> Any:
+    """Deserialize a value from msgpack form.
+
+    Args:
+        value: Serialized value
+
+    Returns:
+        Deserialized value
+    """
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return value
+
+    if isinstance(value, list):
+        return [_deserialize_value(v) for v in value]
+
+    if isinstance(value, dict):
+        # Check for special markers
+        if "__set__" in value:
+            return set(_deserialize_value(v) for v in value["__set__"])
+
+        if "__enum__" in value and "__value__" in value:
+            # Deserialize enum
+            type_name = value["__enum__"]
+            enum_value = value["__value__"]
+            cls = _resolve_type(type_name)
+            if cls is not None:
+                return cls[enum_value]  # Get enum member by name
+            return enum_value  # Fallback to string
+
+        if "__type__" in value and "__data__" in value:
+            type_name = value["__type__"]
+            data = value["__data__"]
+
+            # Resolve the type
+            cls = _resolve_type(type_name)
+            if cls is None:
+                # Can't resolve type, return raw dict
+                return {k: _deserialize_value(v) for k, v in data.items()}
+
+            # Deserialize field values
+            deserialized_data = {k: _deserialize_value(v) for k, v in data.items()}
+
+            # Create instance
+            if is_dataclass(cls):
+                return cls(**deserialized_data)
+            else:
+                # Try to create instance with kwargs
+                try:
+                    return cls(**deserialized_data)
+                except TypeError:
+                    # Fallback: create instance and set attributes
+                    obj = object.__new__(cls)
+                    for k, v in deserialized_data.items():
+                        setattr(obj, k, v)
+                    return obj
+
+        # Regular dict
+        return {k: _deserialize_value(v) for k, v in value.items()}
+
+    return value
 
 
 def serialize(obj: Any) -> bytes:
-    """Serialize a value to msgpack bytes.
-
-    Supports primitives (int, float, str, bool, None, bytes, list, dict)
-    and dataclass instances. Type information is encoded for dataclasses.
-    Handles nested dataclasses within dicts and lists.
-    """
-    if obj is None or isinstance(obj, _SCALAR_PRIMITIVES):
-        data = {"__primitive__": True, "__value__": obj}
-    elif isinstance(obj, (dict, list, tuple)):
-        data = {"__primitive__": True, "__value__": _convert_for_msgpack(obj)}
-    elif is_dataclass(obj) and not isinstance(obj, type):
-        data = {
-            "__type__": f"{type(obj).__module__}.{type(obj).__qualname__}",
-            "__data__": {k: _convert_for_msgpack(v) for k, v in asdict(obj).items()},
-        }
-    else:
-        raise TypeError(f"Cannot serialize {type(obj)}")
-
-    return msgpack.packb(data, use_bin_type=True)
-
-
-def _convert_from_msgpack(obj: Any, type_registry: dict[str, type]) -> Any:
-    """Recursively convert deserialized msgpack data back to Python objects.
-
-    Reconstructs dataclasses from dicts with __type__ markers.
-    """
-    if obj is None or isinstance(obj, _SCALAR_PRIMITIVES):
-        return obj
-    elif isinstance(obj, dict):
-        # Check if this is a serialized dataclass
-        if "__type__" in obj and "__data__" in obj:
-            type_name = obj["__type__"]
-            obj_data = obj["__data__"]
-
-            # Try registry first, then dynamic import
-            if type_name in type_registry:
-                cls = type_registry[type_name]
-            else:
-                cls = _import_type(type_name)
-                type_registry[type_name] = cls
-
-            # Recursively convert nested data
-            converted_data = {k: _convert_from_msgpack(v, type_registry) for k, v in obj_data.items()}
-            return cls(**converted_data)
-        else:
-            return {k: _convert_from_msgpack(v, type_registry) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_convert_from_msgpack(item, type_registry) for item in obj]
-    else:
-        return obj
-
-
-def deserialize[T](data: bytes, type_registry: dict[str, type[T]]) -> T:
-    """Deserialize msgpack bytes to original value.
-
-    Types are automatically imported if not in the registry.
+    """Serialize an object to bytes.
 
     Args:
-        data: The msgpack bytes to deserialize
-        type_registry: A mapping from type names to type classes (used as cache)
+        obj: Object to serialize
 
     Returns:
-        The deserialized value (primitive or dataclass instance)
+        Serialized bytes
+    """
+    serialized = _serialize_value(obj)
+    return msgpack.packb(serialized, use_bin_type=True)
+
+
+def deserialize(data: bytes) -> Any:
+    """Deserialize bytes to an object.
+
+    Args:
+        data: Serialized bytes
+
+    Returns:
+        Deserialized object
     """
     unpacked = msgpack.unpackb(data, raw=False)
-
-    # Handle primitives (may contain nested dataclasses)
-    if unpacked.get("__primitive__"):
-        value = unpacked["__value__"]
-        return _convert_from_msgpack(value, type_registry)  # type: ignore
-
-    # Handle top-level dataclasses
-    type_name = unpacked["__type__"]
-    obj_data = unpacked["__data__"]
-
-    # Try registry first, then dynamic import
-    if type_name in type_registry:
-        cls = type_registry[type_name]
-    else:
-        cls = _import_type(type_name)
-        type_registry[type_name] = cls  # Cache for next time
-
-    # Recursively convert nested data
-    converted_data = {k: _convert_from_msgpack(v, type_registry) for k, v in obj_data.items()}
-    return cls(**converted_data)
+    return _deserialize_value(unpacked)
 
 
-def get_type_name(cls: type) -> str:
-    """Get the full type name for registration."""
-    return f"{cls.__module__}.{cls.__qualname__}"
+def serialize_to_dict(obj: Any) -> dict:
+    """Serialize an object to a dictionary.
+
+    Useful for debugging or JSON export.
+
+    Args:
+        obj: Object to serialize
+
+    Returns:
+        Dictionary representation
+    """
+    return _serialize_value(obj)
+
+
+def deserialize_from_dict(data: dict) -> Any:
+    """Deserialize a dictionary to an object.
+
+    Args:
+        data: Dictionary representation
+
+    Returns:
+        Deserialized object
+    """
+    return _deserialize_value(data)
+
+
+# Register built-in types from control plane
+def _register_builtin_types() -> None:
+    """Register built-in types for serialization."""
+    # Import and register control plane commands
+    from .control_plane.commands import (
+        JoinCluster,
+        LeaveCluster,
+        NodeFailed,
+        NodeRecovered,
+        RegisterSingleton,
+        UnregisterSingleton,
+        TransferSingleton,
+        RegisterEntityType,
+        UnregisterEntityType,
+        UpdateEntityTypeConfig,
+        RegisterNamedActor,
+        UnregisterNamedActor,
+    )
+
+    for cls in [
+        JoinCluster,
+        LeaveCluster,
+        NodeFailed,
+        NodeRecovered,
+        RegisterSingleton,
+        UnregisterSingleton,
+        TransferSingleton,
+        RegisterEntityType,
+        UnregisterEntityType,
+        UpdateEntityTypeConfig,
+        RegisterNamedActor,
+        UnregisterNamedActor,
+    ]:
+        register_type(cls)
+
+    # Import and register raft messages
+    from .control_plane.raft import (
+        LogEntry,
+        VoteRequest,
+        VoteResponse,
+        AppendEntriesRequest,
+        AppendEntriesResponse,
+    )
+
+    for cls in [
+        LogEntry,
+        VoteRequest,
+        VoteResponse,
+        AppendEntriesRequest,
+        AppendEntriesResponse,
+    ]:
+        register_type(cls)
+
+    # Import and register gossip messages
+    from .data_plane.gossip import (
+        Ping,
+        PingReq,
+        Ack,
+        MembershipUpdate,
+        MemberInfo,
+    )
+
+    for cls in [Ping, PingReq, Ack, MembershipUpdate, MemberInfo]:
+        register_type(cls)
+
+
+# Initialize on import
+try:
+    _register_builtin_types()
+except ImportError:
+    # Modules may not be available yet during initial setup
+    pass

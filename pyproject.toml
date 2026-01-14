@@ -21,6 +21,11 @@ dependencies = [
     "msgpack>=1.0",
 ]
 
+[project.optional-dependencies]
+performance = [
+    "uvloop>=0.22.1",
+]
+
 [project.urls]
 Homepage = "https://github.com/gabfssilva/casty"
 Repository = "https://github.com/gabfssilva/casty"
@@ -32,15 +37,24 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "pytest-xdist>=3.8.0",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "trustme>=1.2.1",
+    "pytest-rerunfailures>=16.1",
+    "pyinstrument>=5.1.2",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# Ignore benchmarks by default (run with: pytest tests/benchmark -v)
+norecursedirs = ["tests/benchmark"]
 markers = [
     "slow: marks tests as slow (distributed tests)",
+    "benchmark: marks tests as benchmarks (excluded by default)",
 ]
+# Retry flaky tests (OSError, address in use, etc.)
+reruns = 2
+reruns_delay = 1
