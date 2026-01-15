@@ -50,6 +50,10 @@ class ActorMessageType(IntEnum):
     # Sharded type registration (for consistency levels)
     SHARDED_TYPE_REGISTER = 0x30
     SHARDED_TYPE_ACK = 0x31
+    # Three-way merge messages
+    MERGE_REQUEST = 0x40
+    MERGE_STATE = 0x41
+    MERGE_COMPLETE = 0x42
 
 
 class HandshakeMessageType(IntEnum):
@@ -259,6 +263,56 @@ class ShardedTypeAck:
     error: str | None = None
 
 
+# =============================================================================
+# Wire Protocol Messages - Three-Way Merge (0x02, types 0x40-0x42)
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class MergeRequest:
+    """Wire: Request actor state for merge.
+
+    Sent when conflict is detected between versions.
+    The receiving node should respond with MergeState.
+    """
+
+    request_id: str
+    entity_type: str
+    entity_id: str
+    my_version: int
+    my_base_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class MergeState:
+    """Wire: Actor state snapshot for merge.
+
+    Response to MergeRequest containing state and base snapshot
+    for three-way merge.
+    """
+
+    request_id: str
+    entity_type: str
+    entity_id: str
+    version: int
+    base_version: int
+    state: bytes  # msgpack serialized current state
+    base_state: bytes  # msgpack serialized base snapshot
+
+
+@dataclass(frozen=True, slots=True)
+class MergeComplete:
+    """Wire: Acknowledgment of merge completion.
+
+    Sent after merge is complete to synchronize versions.
+    """
+
+    request_id: str
+    entity_type: str
+    entity_id: str
+    new_version: int
+
+
 # Wire message union type
 type WireActorMessage = (
     ActorMessage
@@ -275,6 +329,9 @@ type WireActorMessage = (
     | SingletonAskResponse
     | ShardedTypeRegister
     | ShardedTypeAck
+    | MergeRequest
+    | MergeState
+    | MergeComplete
 )
 
 

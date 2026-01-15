@@ -65,6 +65,9 @@ from .messages import (
     SingletonAskResponse,
     ShardedTypeRegister,
     ShardedTypeAck,
+    MergeRequest,
+    MergeState,
+    MergeComplete,
     # Internal API
     RemoteSend,
     RemoteAsk,
@@ -91,6 +94,7 @@ from .messages import (
     ActorUnregistered,
     ClusterEvent,
 )
+from casty.merge import MergeableActor, is_mergeable
 from .remote_ref import RemoteRef, RemoteActorError
 from .singleton_ref import SingletonRef, SingletonError
 
@@ -267,6 +271,7 @@ class Cluster(Actor):
         self._hash_ring = HashRing()
         self._sharded_types: dict[str, type[Actor[Any]]] = {}
         self._local_entities: dict[str, dict[str, LocalRef]] = {}
+        self._entity_wrappers: dict[str, dict[str, MergeableActor]] = {}  # For merge tracking
 
         # Singleton state
         self._singleton_types: dict[str, type[Actor[Any]]] = {}  # name -> actor class
@@ -428,6 +433,7 @@ class Cluster(Actor):
         await self._gossip.send(GossipSubscribe("_sharded/*", ctx.self_ref))
         await self._gossip.send(GossipSubscribe("_singletons/*", ctx.self_ref))
         await self._gossip.send(GossipSubscribe("_singleton_meta/*", ctx.self_ref))
+        await self._gossip.send(GossipSubscribe("__merge/*", ctx.self_ref))  # For three-way merge
 
         # Register protocol handlers with TransportMux
         await self._mux.send(RegisterHandler(ProtocolType.SWIM, self._swim))
@@ -603,6 +609,11 @@ class Cluster(Actor):
                         log.error(f"Failed to import singleton type {singleton_name}: {class_fqn}: {e}")
             return
 
+        # Handle merge version updates (for three-way merge conflict detection)
+        if key.startswith("__merge/"):
+            await self._handle_merge_version_change(key, value, ctx)
+            return
+
     # =========================================================================
     # Entity (Sharding) Handlers
     # =========================================================================
@@ -718,9 +729,32 @@ class Cluster(Actor):
             if actor_cls is None:
                 raise ValueError(f"Unknown sharded type: {entity_type}")
 
+            # Spawn the actor
             ref = await self._ctx.spawn(actor_cls, entity_id=entity_id)
             entities[entity_id] = ref
-            log.debug(f"Spawned entity: {entity_type}:{entity_id}")
+
+            # Check if actor is Mergeable and wrap it
+            # Access actor instance via supervision tree
+            child_node = self._ctx._supervision_node.children.get(ref.id)
+            actor_instance = child_node.actor_instance if child_node else None
+            if actor_instance and is_mergeable(actor_instance):
+                wrapper = MergeableActor(actor_instance)
+                wrapper.set_node_id(self.node_id)
+
+                # Track wrapper
+                if entity_type not in self._entity_wrappers:
+                    self._entity_wrappers[entity_type] = {}
+                self._entity_wrappers[entity_type][entity_id] = wrapper
+
+                # Take initial snapshot
+                wrapper.take_snapshot()
+
+                # Publish initial version to gossip
+                await self._publish_version(entity_type, entity_id, wrapper)
+
+                log.debug(f"Spawned mergeable entity: {entity_type}:{entity_id}")
+            else:
+                log.debug(f"Spawned entity: {entity_type}:{entity_id}")
 
         return entities[entity_id]
 
@@ -740,6 +774,12 @@ class Cluster(Actor):
             try:
                 ref = await self._get_or_create_entity(entity_type, entity_id)
                 await ref.send(payload)
+
+                # Increment version for mergeable entities
+                wrapper = self._entity_wrappers.get(entity_type, {}).get(entity_id)
+                if wrapper:
+                    wrapper.increment_version()
+                    await self._publish_version(entity_type, entity_id, wrapper)
             except Exception as e:
                 log.error(f"Failed to deliver to entity {key}: {e}")
         else:
@@ -778,6 +818,13 @@ class Cluster(Actor):
             try:
                 ref = await self._get_or_create_entity(entity_type, entity_id)
                 result = await ref.ask(payload, timeout=self.config.ask_timeout)
+
+                # Increment version for mergeable entities
+                wrapper = self._entity_wrappers.get(entity_type, {}).get(entity_id)
+                if wrapper:
+                    wrapper.increment_version()
+                    await self._publish_version(entity_type, entity_id, wrapper)
+
                 ctx.reply(result)
             except Exception as e:
                 log.error(f"Failed to ask entity {key}: {e}")
@@ -1035,6 +1082,12 @@ class Cluster(Actor):
                     payload_dict = msgpack.unpackb(payload, raw=False)
                     message = deserialize_message(payload_type, payload_dict)
                     await ref.send(message)
+
+                    # Increment version for mergeable entities
+                    wrapper = self._entity_wrappers.get(entity_type, {}).get(entity_id)
+                    if wrapper:
+                        wrapper.increment_version()
+                        await self._publish_version(entity_type, entity_id, wrapper)
                 except Exception as e:
                     log.error(f"Failed to deliver to entity {entity_type}:{entity_id}: {e}")
 
@@ -1057,6 +1110,12 @@ class Cluster(Actor):
                     message = deserialize_message(payload_type, payload_dict)
                     result = await ref.ask(message, timeout=self.config.ask_timeout)
                     log.debug(f"[{self.node_id}] Entity responded with: {result}")
+
+                    # Increment version for mergeable entities
+                    wrapper = self._entity_wrappers.get(entity_type, {}).get(entity_id)
+                    if wrapper:
+                        wrapper.increment_version()
+                        await self._publish_version(entity_type, entity_id, wrapper)
 
                     result_type = f"{type(result).__module__}.{type(result).__qualname__}"
                     if hasattr(result, "__dict__"):
@@ -1248,6 +1307,26 @@ class Cluster(Actor):
                         log.warning(f"ShardedTypeAck failed from {from_node}: {error}")
                 else:
                     log.debug(f"No pending registration for request_id={request_id}")
+
+            # Three-way merge messages
+            case MergeRequest(request_id, entity_type, entity_id, their_version, their_base_version):
+                await self._handle_merge_request(
+                    request_id, entity_type, entity_id,
+                    their_version, their_base_version,
+                    from_node
+                )
+
+            case MergeState(request_id, entity_type, entity_id, version, base_version, state, base_state):
+                await self._handle_merge_state(
+                    request_id, entity_type, entity_id,
+                    version, base_version, state, base_state,
+                    from_node
+                )
+
+            case MergeComplete(request_id, entity_type, entity_id, new_version):
+                await self._handle_merge_complete(
+                    request_id, entity_type, entity_id, new_version, from_node
+                )
 
             case _:
                 log.warning(f"[{self.node_id}] Unhandled actor message type: {type(msg).__name__}: {msg}")
@@ -1468,6 +1547,192 @@ class Cluster(Actor):
                         log.info(f"Singleton {singleton_name} failed over to this node")
                     else:
                         log.warning(f"Cannot failover singleton {singleton_name}: class not registered")
+
+    # =========================================================================
+    # Three-Way Merge Handlers
+    # =========================================================================
+
+    async def _publish_version(
+        self, entity_type: str, entity_id: str, wrapper: MergeableActor
+    ) -> None:
+        """Publish entity version to gossip for conflict detection."""
+        if not self._gossip:
+            return
+
+        key = f"__merge/{entity_type}:{entity_id}"
+        value_dict = {
+            "version": wrapper.version,
+            "node_id": wrapper.node_id,
+        }
+        value_bytes = msgpack.packb(value_dict, use_bin_type=True)
+
+        await self._gossip.send(
+            Publish(key=key, value=value_bytes, ttl=None),
+        )
+
+    async def _handle_merge_version_change(
+        self,
+        key: str,
+        value: bytes | None,
+        ctx: Context,
+    ) -> None:
+        """Handle version update from gossip for three-way merge detection."""
+        if value is None:
+            return  # Deletion - ignore
+
+        # Parse key: "__merge/entity_type:entity_id"
+        entity_key = key[9:]  # Strip "__merge/"
+        parts = entity_key.split(":", 1)
+        if len(parts) != 2:
+            return
+
+        entity_type, entity_id = parts
+
+        # Parse value
+        value_dict = msgpack.unpackb(value, raw=False)
+        remote_version = value_dict.get("version", 0)
+        remote_node_id = value_dict.get("node_id", "")
+
+        # Skip our own updates
+        if remote_node_id == self.node_id:
+            return
+
+        # Check if we have this entity locally
+        wrapper = self._entity_wrappers.get(entity_type, {}).get(entity_id)
+        if not wrapper:
+            return  # We don't have it, no conflict
+
+        local_version = wrapper.version
+        local_node_id = wrapper.node_id
+
+        # Detect conflict: same version, different nodes
+        if local_version == remote_version and local_node_id != remote_node_id:
+            log.info(
+                f"Conflict detected for {entity_type}:{entity_id} "
+                f"(local={local_node_id}:v{local_version}, remote={remote_node_id}:v{remote_version})"
+            )
+
+            # Deterministic tiebreaker: lower node_id initiates
+            if self.node_id < remote_node_id:
+                await self._initiate_merge(entity_type, entity_id, remote_node_id, ctx)
+
+    async def _initiate_merge(
+        self,
+        entity_type: str,
+        entity_id: str,
+        peer_node: str,
+        ctx: Context,
+    ) -> None:
+        """Initiate three-way merge with peer node."""
+        wrapper = self._entity_wrappers.get(entity_type, {}).get(entity_id)
+        if not wrapper:
+            log.warning(f"Cannot initiate merge: no wrapper for {entity_type}:{entity_id}")
+            return
+
+        self._request_counter += 1
+        request_id = f"{self.node_id}-merge-{self._request_counter}"
+
+        version, base_version, _, _ = wrapper.get_merge_info()
+
+        msg = MergeRequest(
+            request_id=request_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            my_version=version,
+            my_base_version=base_version,
+        )
+
+        if self._mux:
+            data = ActorCodec.encode(msg)
+            await self._mux.send(Send(ProtocolType.ACTOR, peer_node, data))
+            log.debug(f"Sent MergeRequest {request_id} to {peer_node}")
+
+    async def _handle_merge_request(
+        self,
+        request_id: str,
+        entity_type: str,
+        entity_id: str,
+        _their_version: int,
+        _their_base_version: int,
+        from_node: str,
+    ) -> None:
+        """Handle MergeRequest - send our state back."""
+        wrapper = self._entity_wrappers.get(entity_type, {}).get(entity_id)
+        if not wrapper:
+            log.warning(f"MergeRequest for unknown entity: {entity_type}:{entity_id}")
+            return
+
+        version, base_version, state, base_state = wrapper.get_merge_info()
+
+        msg = MergeState(
+            request_id=request_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            version=version,
+            base_version=base_version,
+            state=msgpack.packb(state, use_bin_type=True),
+            base_state=msgpack.packb(base_state, use_bin_type=True) if base_state else b"",
+        )
+
+        if self._mux:
+            data = ActorCodec.encode(msg)
+            await self._mux.send(Send(ProtocolType.ACTOR, from_node, data))
+            log.debug(f"Sent MergeState {request_id} to {from_node}")
+
+    async def _handle_merge_state(
+        self,
+        request_id: str,
+        entity_type: str,
+        entity_id: str,
+        their_version: int,
+        _their_base_version: int,
+        state_bytes: bytes,
+        base_state_bytes: bytes,
+        from_node: str,
+    ) -> None:
+        """Handle MergeState - execute merge locally."""
+        wrapper = self._entity_wrappers.get(entity_type, {}).get(entity_id)
+        if not wrapper:
+            log.warning(f"MergeState for unknown entity: {entity_type}:{entity_id}")
+            return
+
+        their_state = msgpack.unpackb(state_bytes, raw=False)
+        their_base_state = msgpack.unpackb(base_state_bytes, raw=False) if base_state_bytes else None
+
+        # Execute three-way merge
+        wrapper.execute_merge(their_base_state, their_state, their_version)
+
+        # Take snapshot after merge
+        wrapper.take_snapshot()
+
+        # Publish new version to gossip
+        await self._publish_version(entity_type, entity_id, wrapper)
+
+        # Send completion acknowledgment
+        msg = MergeComplete(
+            request_id=request_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            new_version=wrapper.version,
+        )
+
+        if self._mux:
+            data = ActorCodec.encode(msg)
+            await self._mux.send(Send(ProtocolType.ACTOR, from_node, data))
+
+        log.info(f"Merge complete for {entity_type}:{entity_id}, new version={wrapper.version}")
+
+    async def _handle_merge_complete(
+        self,
+        request_id: str,
+        entity_type: str,
+        entity_id: str,
+        _new_version: int,
+        _from_node: str,
+    ) -> None:
+        """Handle MergeComplete - peer has merged."""
+        # Log completion
+        log.debug(f"Merge protocol complete: {request_id}, entity={entity_type}:{entity_id}")
 
     # =========================================================================
     # Helpers

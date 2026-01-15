@@ -41,6 +41,10 @@ from .messages import (
     # Sharded type registration
     ShardedTypeRegister,
     ShardedTypeAck,
+    # Merge messages
+    MergeRequest,
+    MergeState,
+    MergeComplete,
     WireActorMessage,
     # Handshake messages
     NodeHandshake,
@@ -73,6 +77,9 @@ _ACTOR_MESSAGE_CLASSES: dict[ActorMessageType, type] = {
     ActorMessageType.SINGLETON_ASK_RESPONSE: SingletonAskResponse,
     ActorMessageType.SHARDED_TYPE_REGISTER: ShardedTypeRegister,
     ActorMessageType.SHARDED_TYPE_ACK: ShardedTypeAck,
+    ActorMessageType.MERGE_REQUEST: MergeRequest,
+    ActorMessageType.MERGE_STATE: MergeState,
+    ActorMessageType.MERGE_COMPLETE: MergeComplete,
 }
 
 _ACTOR_CLASS_TO_TYPE: dict[type, ActorMessageType] = {
@@ -178,6 +185,31 @@ def _encode_actor_message(msg: WireActorMessage) -> dict[str, Any]:
                 "success": msg.success,
                 "error": msg.error,
             }
+        case MergeRequest():
+            return {
+                "request_id": msg.request_id,
+                "entity_type": msg.entity_type,
+                "entity_id": msg.entity_id,
+                "my_version": msg.my_version,
+                "my_base_version": msg.my_base_version,
+            }
+        case MergeState():
+            return {
+                "request_id": msg.request_id,
+                "entity_type": msg.entity_type,
+                "entity_id": msg.entity_id,
+                "version": msg.version,
+                "base_version": msg.base_version,
+                "state": msg.state,
+                "base_state": msg.base_state,
+            }
+        case MergeComplete():
+            return {
+                "request_id": msg.request_id,
+                "entity_type": msg.entity_type,
+                "entity_id": msg.entity_id,
+                "new_version": msg.new_version,
+            }
         case _:
             raise ValueError(f"Unknown actor message type: {type(msg)}")
 
@@ -282,6 +314,31 @@ def _decode_actor_message(
                 success=data["success"],
                 error=data.get("error"),
             )
+        case ActorMessageType.MERGE_REQUEST:
+            return MergeRequest(
+                request_id=data["request_id"],
+                entity_type=data["entity_type"],
+                entity_id=data["entity_id"],
+                my_version=data["my_version"],
+                my_base_version=data["my_base_version"],
+            )
+        case ActorMessageType.MERGE_STATE:
+            return MergeState(
+                request_id=data["request_id"],
+                entity_type=data["entity_type"],
+                entity_id=data["entity_id"],
+                version=data["version"],
+                base_version=data["base_version"],
+                state=data["state"],
+                base_state=data["base_state"],
+            )
+        case ActorMessageType.MERGE_COMPLETE:
+            return MergeComplete(
+                request_id=data["request_id"],
+                entity_type=data["entity_type"],
+                entity_id=data["entity_id"],
+                new_version=data["new_version"],
+            )
         case _:
             raise ValueError(f"Unknown actor message type: {msg_type}")
 
@@ -384,7 +441,7 @@ class ClusterCodec:
             ValueError: If message type is unknown.
         """
         # Determine protocol and message type
-        if isinstance(msg, (ActorMessage, AskRequest, AskResponse, RegisterActor, LookupActor, LookupResponse, EntitySend, EntityAskRequest, EntityAskResponse, SingletonSend, SingletonAskRequest, SingletonAskResponse)):
+        if isinstance(msg, (ActorMessage, AskRequest, AskResponse, RegisterActor, LookupActor, LookupResponse, EntitySend, EntityAskRequest, EntityAskResponse, SingletonSend, SingletonAskRequest, SingletonAskResponse, ShardedTypeRegister, ShardedTypeAck, MergeRequest, MergeState, MergeComplete)):
             protocol = ProtocolType.ACTOR
             msg_type = _ACTOR_CLASS_TO_TYPE.get(type(msg))
             if msg_type is None:
