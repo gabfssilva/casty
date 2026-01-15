@@ -54,6 +54,10 @@ class ActorMessageType(IntEnum):
     MERGE_REQUEST = 0x40
     MERGE_STATE = 0x41
     MERGE_COMPLETE = 0x42
+    # Replication messages (0x50-0x5F)
+    REPLICATE_WRITE = 0x50
+    REPLICATE_WRITE_ACK = 0x51
+    HINTED_HANDOFF = 0x56
 
 
 class HandshakeMessageType(IntEnum):
@@ -313,6 +317,59 @@ class MergeComplete:
     new_version: int
 
 
+# =============================================================================
+# Wire Protocol Messages - Replication (0x02, types 0x50-0x5F)
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class ReplicateWrite:
+    """Wire: Coordinator sends write to replica.
+
+    Sent by ReplicationCoordinator to all replicas for coordination.
+    The replica should process the message and send ReplicateWriteAck back.
+    """
+
+    entity_type: str
+    entity_id: str
+    payload_type: str  # FQN for deserialization
+    payload: bytes  # msgpack serialized
+    coordinator_id: str
+    request_id: str  # For tracking acks
+    actor_cls_fqn: str = ""  # For auto-registration
+
+
+@dataclass(frozen=True, slots=True)
+class ReplicateWriteAck:
+    """Wire: Replica acknowledges write to coordinator.
+
+    Response to ReplicateWrite. Sent back to coordinator.
+    """
+
+    request_id: str
+    entity_type: str
+    entity_id: str
+    node_id: str
+    success: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HintedHandoff:
+    """Wire: Replay stored write to recovered replica.
+
+    Sent when a replica recovers to replay writes that were stored
+    while the replica was offline.
+    """
+
+    entity_type: str
+    entity_id: str
+    payload_type: str
+    payload: bytes
+    original_timestamp: float
+    actor_cls_fqn: str = ""
+
+
 # Wire message union type
 type WireActorMessage = (
     ActorMessage
@@ -332,6 +389,9 @@ type WireActorMessage = (
     | MergeRequest
     | MergeState
     | MergeComplete
+    | ReplicateWrite
+    | ReplicateWriteAck
+    | HintedHandoff
 )
 
 
@@ -533,6 +593,57 @@ class RemoteSingletonAsk:
 
     singleton_name: str
     payload: Any
+
+
+# =============================================================================
+# Internal API Messages - Replication
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinateReplicatedWrite:
+    """Internal: Cluster asks ReplicationCoordinator to handle write.
+
+    Sent to ReplicationCoordinator to coordinate a replicated write
+    across all replicas based on consistency level.
+    """
+
+    entity_type: str
+    entity_id: str
+    payload: Any
+    preference_list: list[str]
+    consistency: Any  # ShardConsistency - use Any to avoid circular import
+    actor_type: str  # "sharded" | "singleton" | "named"
+
+
+@dataclass(frozen=True, slots=True)
+class RegisterReplicatedType:
+    """Internal: Register type with replication metadata.
+
+    Sent to ReplicationCoordinator to register a replicated actor type
+    with its replication factor and consistency level.
+    """
+
+    type_name: str  # entity_type for sharded, actor_name for singleton/named
+    actor_cls: type
+    actor_type: str  # "sharded" | "singleton" | "named"
+    replication_factor: int
+    write_consistency: Any  # ShardConsistency
+
+
+@dataclass(frozen=True, slots=True)
+class LocalReplicaWrite:
+    """Internal: Deliver replicated write to local entity.
+
+    Sent from ReplicationCoordinator to Cluster to deliver
+    a replicated write to a local entity (and send ack back).
+    """
+
+    entity_type: str
+    entity_id: str
+    payload: Any
+    request_id: str
+    actor_cls_fqn: str
 
 
 # =============================================================================

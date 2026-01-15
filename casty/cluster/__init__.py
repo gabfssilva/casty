@@ -76,6 +76,9 @@ from .consistency import (
     AtLeast,
 )
 
+# Replication configuration
+from .replication_config import Replication
+
 __all__ = [
     # Configuration
     "ClusterConfig",
@@ -114,4 +117,6 @@ __all__ = [
     "Eventual",
     "Quorum",
     "AtLeast",
+    # Replication configuration
+    "Replication",
 ]

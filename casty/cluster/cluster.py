@@ -97,6 +97,16 @@ from .messages import (
 from casty.merge import MergeableActor, is_mergeable
 from .remote_ref import RemoteRef, RemoteActorError
 from .singleton_ref import SingletonRef, SingletonError
+from casty.replication import ReplicationCoordinator
+from casty.replication.metadata import ReplicationMetadata
+from .messages import (
+    RegisterReplicatedType,
+    CoordinateReplicatedWrite,
+    ReplicateWrite,
+    ReplicateWriteAck,
+    HintedHandoff,
+    LocalReplicaWrite,
+)
 
 if TYPE_CHECKING:
     pass
@@ -262,6 +272,7 @@ class Cluster(Actor):
         self._swim: LocalRef | None = None
         self._gossip: LocalRef | None = None
         self._scheduler: LocalRef | None = None
+        self._replication_coordinator: LocalRef | None = None
 
         # Actor registry
         self._local_actors: dict[str, LocalRef] = {}
@@ -277,6 +288,9 @@ class Cluster(Actor):
         self._singleton_types: dict[str, type[Actor[Any]]] = {}  # name -> actor class
         self._local_singletons: dict[str, LocalRef] = {}  # name -> ref (if owned)
         self._singleton_locations: dict[str, str] = {}  # name -> node_id (from gossip)
+
+        # Replication state
+        self._replicated_types: dict[str, ReplicationMetadata] = {}  # type_name -> metadata
 
         # Request tracking
         self._pending_asks: dict[str, PendingAsk] = {}
@@ -399,6 +413,24 @@ class Cluster(Actor):
             case RemoteSingletonAsk(singleton_name, payload):
                 await self._handle_singleton_ask(singleton_name, payload, ctx)
 
+            # ----- Replication Messages -----
+            case RegisterReplicatedType(type_name, actor_cls, actor_type, rf, wc):
+                await self._handle_register_replicated_type(type_name, actor_cls, actor_type, rf, wc, ctx)
+
+            case LocalReplicaWrite(entity_type, entity_id, payload, request_id, actor_cls_fqn):
+                await self._handle_local_replica_write(entity_type, entity_id, payload, request_id, actor_cls_fqn)
+
+            case ReplicateWrite(entity_type, entity_id, payload_type, payload_bytes, coordinator_id, request_id, actor_cls_fqn):
+                await self._handle_replicate_write(entity_type, entity_id, payload_type, payload_bytes, coordinator_id, request_id, actor_cls_fqn, ctx)
+
+            case ReplicateWriteAck(request_id, entity_type, entity_id, node_id, success, error):
+                await self._replication_coordinator.send(
+                    ReplicateWriteAck(request_id, entity_type, entity_id, node_id, success, error)
+                ) if self._replication_coordinator else None
+
+            case HintedHandoff(entity_type, entity_id, payload_type, payload_bytes, original_timestamp, actor_cls_fqn):
+                await self._handle_hinted_handoff(entity_type, entity_id, payload_type, payload_bytes, actor_cls_fqn)
+
     # =========================================================================
     # TransportMux Event Handlers
     # =========================================================================
@@ -434,6 +466,14 @@ class Cluster(Actor):
         await self._gossip.send(GossipSubscribe("_singletons/*", ctx.self_ref))
         await self._gossip.send(GossipSubscribe("_singleton_meta/*", ctx.self_ref))
         await self._gossip.send(GossipSubscribe("__merge/*", ctx.self_ref))  # For three-way merge
+
+        # Spawn ReplicationCoordinator for managing replicated writes
+        self._replication_coordinator = await ctx.spawn(
+            ReplicationCoordinator,
+            node_id=self.node_id,
+            cluster=ctx.self_ref,
+            mux=self._mux,
+        )
 
         # Register protocol handlers with TransportMux
         await self._mux.send(RegisterHandler(ProtocolType.SWIM, self._swim))
@@ -492,6 +532,10 @@ class Cluster(Actor):
         if self._mux:
             await self._mux.send(ConnectTo(node_id, address))
 
+        # Notify ReplicationCoordinator of node recovery (for hinted handoff replay)
+        if self._replication_coordinator:
+            await self._replication_coordinator.send(NodeJoined(node_id, address))
+
         await self._broadcast_event(NodeJoined(node_id, address))
 
     async def _handle_member_failed(self, node_id: str, ctx: Context) -> None:
@@ -513,6 +557,10 @@ class Cluster(Actor):
                         RemoteActorError(pending.target_actor, pending.target_node, "Node failed")
                     )
                 del self._pending_asks[request_id]
+
+        # Notify ReplicationCoordinator of node failure (for hinted handoff storage)
+        if self._replication_coordinator:
+            await self._replication_coordinator.send(NodeFailed(node_id))
 
         # Check for singleton failover
         await self._check_singleton_failover(node_id, ctx)
@@ -717,9 +765,20 @@ class Cluster(Actor):
             pending.reply_future.set_result(None)
 
     async def _get_or_create_entity(
-        self, entity_type: str, entity_id: str
+        self, entity_type: str, entity_id: str, actor_cls_fqn: str = ""
     ) -> LocalRef:
         """Get or create a local entity actor."""
+        # Auto-register type if FQN provided and not already registered
+        if actor_cls_fqn and entity_type not in self._sharded_types:
+            try:
+                actor_cls = _import_class(actor_cls_fqn)
+                self._sharded_types[entity_type] = actor_cls
+                self._local_entities[entity_type] = {}
+                log.debug(f"Auto-registered sharded type: {entity_type} from {actor_cls_fqn}")
+            except Exception as e:
+                log.error(f"Failed to auto-register sharded type {entity_type}: {e}")
+                raise ValueError(f"Failed to import actor class: {actor_cls_fqn}")
+
         entities = self._local_entities.get(entity_type)
         if entities is None:
             raise ValueError(f"Unknown entity type: {entity_type}")
@@ -762,6 +821,26 @@ class Cluster(Actor):
         self, entity_type: str, entity_id: str, payload: Any, ctx: Context
     ) -> None:
         """Handle entity send request with hash ring routing."""
+        # Check if this entity type is replicated
+        metadata = self._replicated_types.get(entity_type)
+        if metadata:
+            # Route through ReplicationCoordinator
+            key = f"{entity_type}:{entity_id}"
+            preference_list = self._hash_ring.get_preference_list(key, metadata.replication_factor)
+            if self._replication_coordinator:
+                await self._replication_coordinator.send(
+                    CoordinateReplicatedWrite(
+                        entity_type=entity_type,
+                        entity_id=entity_id,
+                        payload=payload,
+                        preference_list=preference_list,
+                        consistency=metadata.write_consistency,
+                        actor_type="sharded",
+                    )
+                )
+            return
+
+        # Non-replicated entity - use existing logic
         key = f"{entity_type}:{entity_id}"
         target_node = self._hash_ring.get_node(key)
 
@@ -1328,6 +1407,18 @@ class Cluster(Actor):
                     request_id, entity_type, entity_id, new_version, from_node
                 )
 
+            case ReplicateWrite(entity_type, entity_id, payload_type, payload_bytes, coordinator_id, request_id, actor_cls_fqn):
+                await self._handle_replicate_write(entity_type, entity_id, payload_type, payload_bytes, coordinator_id, request_id, actor_cls_fqn, ctx)
+
+            case ReplicateWriteAck(request_id, entity_type, entity_id, node_id, success, error):
+                if self._replication_coordinator:
+                    await self._replication_coordinator.send(
+                        ReplicateWriteAck(request_id, entity_type, entity_id, node_id, success, error)
+                    )
+
+            case HintedHandoff(entity_type, entity_id, payload_type, payload_bytes, original_timestamp, actor_cls_fqn):
+                await self._handle_hinted_handoff(entity_type, entity_id, payload_type, payload_bytes, actor_cls_fqn)
+
             case _:
                 log.warning(f"[{self.node_id}] Unhandled actor message type: {type(msg).__name__}: {msg}")
 
@@ -1733,6 +1824,162 @@ class Cluster(Actor):
         """Handle MergeComplete - peer has merged."""
         # Log completion
         log.debug(f"Merge protocol complete: {request_id}, entity={entity_type}:{entity_id}")
+
+    # =========================================================================
+    # Replication Handlers
+    # =========================================================================
+
+    async def _handle_register_replicated_type(
+        self,
+        type_name: str,
+        actor_cls: type[Actor[Any]],
+        actor_type: str,
+        replication_factor: int,
+        write_consistency: ShardConsistency,
+        ctx: Context,
+    ) -> None:
+        """Register a replicated actor type."""
+        metadata = ReplicationMetadata(
+            type_name=type_name,
+            actor_cls=actor_cls,
+            actor_type=actor_type,
+            replication_factor=replication_factor,
+            write_consistency=write_consistency,
+        )
+        self._replicated_types[type_name] = metadata
+        log.info(
+            f"Registered replicated type: {type_name} "
+            f"(type={actor_type}, rf={replication_factor}, {write_consistency})"
+        )
+
+        # Also register with ReplicationCoordinator
+        if self._replication_coordinator:
+            await self._replication_coordinator.send(
+                RegisterReplicatedType(
+                    type_name=type_name,
+                    actor_cls=actor_cls,
+                    actor_type=actor_type,
+                    replication_factor=replication_factor,
+                    write_consistency=write_consistency,
+                )
+            )
+
+    async def _handle_local_replica_write(
+        self,
+        entity_type: str,
+        entity_id: str,
+        payload: Any,
+        request_id: str,
+        actor_cls_fqn: str,
+    ) -> None:
+        """Handle local replica write from ReplicationCoordinator."""
+        try:
+            ref = await self._get_or_create_entity(entity_type, entity_id, actor_cls_fqn)
+            await ref.send(payload)
+
+            # Increment version for mergeable entities
+            wrapper = self._entity_wrappers.get(entity_type, {}).get(entity_id)
+            if wrapper:
+                wrapper.increment_version()
+                await self._publish_version(entity_type, entity_id, wrapper)
+
+            # Send ack back to coordinator
+            await self._replication_coordinator.send(
+                ReplicateWriteAck(
+                    request_id=request_id,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    node_id=self.node_id,
+                    success=True,
+                )
+            ) if self._replication_coordinator else None
+        except Exception as e:
+            log.error(f"Local replica write failed: {e}")
+            await self._replication_coordinator.send(
+                ReplicateWriteAck(
+                    request_id=request_id,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    node_id=self.node_id,
+                    success=False,
+                    error=str(e),
+                )
+            ) if self._replication_coordinator else None
+
+    async def _handle_replicate_write(
+        self,
+        entity_type: str,
+        entity_id: str,
+        payload_type: str,
+        payload_bytes: bytes,
+        coordinator_id: str,
+        request_id: str,
+        actor_cls_fqn: str,
+        ctx: Context,
+    ) -> None:
+        """Handle replicated write from remote coordinator."""
+        try:
+            # Deserialize payload
+            payload_dict = msgpack.unpackb(payload_bytes, raw=False)
+            payload_cls = _import_class(payload_type)
+            payload = _deserialize_recursive(payload_cls, payload_dict)
+
+            # Deliver to local entity
+            ref = await self._get_or_create_entity(entity_type, entity_id, actor_cls_fqn)
+            await ref.send(payload)
+
+            # Increment version for mergeable entities
+            wrapper = self._entity_wrappers.get(entity_type, {}).get(entity_id)
+            if wrapper:
+                wrapper.increment_version()
+                await self._publish_version(entity_type, entity_id, wrapper)
+
+            # Send ack back to coordinator
+            ack_msg = ReplicateWriteAck(
+                request_id=request_id,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                node_id=self.node_id,
+                success=True,
+            )
+            data = ActorCodec.encode(ack_msg)
+            await self._mux.send(Send(ProtocolType.ACTOR, coordinator_id, data)) if self._mux else None
+        except Exception as e:
+            log.error(f"Failed to process replicate write: {e}")
+            # Send failure ack
+            ack_msg = ReplicateWriteAck(
+                request_id=request_id,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                node_id=self.node_id,
+                success=False,
+                error=str(e),
+            )
+            data = ActorCodec.encode(ack_msg)
+            await self._mux.send(Send(ProtocolType.ACTOR, coordinator_id, data)) if self._mux else None
+
+    async def _handle_hinted_handoff(
+        self,
+        entity_type: str,
+        entity_id: str,
+        payload_type: str,
+        payload_bytes: bytes,
+        actor_cls_fqn: str,
+    ) -> None:
+        """Handle hinted handoff - replay a previously failed write."""
+        try:
+            # Deserialize payload
+            payload_dict = msgpack.unpackb(payload_bytes, raw=False)
+            payload_cls = _import_class(payload_type)
+            payload = _deserialize_recursive(payload_cls, payload_dict)
+
+            # Deliver to local entity
+            ref = await self._get_or_create_entity(entity_type, entity_id, actor_cls_fqn)
+            await ref.send(payload)
+
+            log.debug(f"Replayed hinted handoff for {entity_type}:{entity_id}")
+        except Exception as e:
+            log.error(f"Failed to process hinted handoff: {e}")
 
     # =========================================================================
     # Helpers

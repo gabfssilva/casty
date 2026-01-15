@@ -6,8 +6,8 @@ Casty provides a type-safe actor model implementation with:
 - Sharded actors with consistent hashing
 - Event sourcing for persistence
 
-Basic usage:
-    from casty import Actor, ActorSystem, Context
+Basic usage with @on decorator:
+    from casty import Actor, ActorSystem, Context, on
     from dataclasses import dataclass
 
     @dataclass
@@ -22,12 +22,13 @@ Basic usage:
         def __init__(self):
             self.count = 0
 
-        async def receive(self, msg: Increment | GetCount, ctx: Context):
-            match msg:
-                case Increment(amount):
-                    self.count += amount
-                case GetCount():
-                    ctx.reply(self.count)
+        @on(Increment)
+        async def handle_increment(self, msg: Increment, ctx: Context):
+            self.count += msg.amount
+
+        @on(GetCount)
+        async def handle_query(self, msg: GetCount, ctx: Context):
+            ctx.reply(self.count)
 
     async def main():
         async with ActorSystem() as system:
@@ -35,6 +36,15 @@ Basic usage:
             await counter.send(Increment(5))
             result = await counter.ask(GetCount())
             print(result)  # 5
+
+Or use traditional match statements in receive():
+    class Counter(Actor[Increment | GetCount]):
+        async def receive(self, msg: Increment | GetCount, ctx: Context):
+            match msg:
+                case Increment(amount):
+                    self.count += amount
+                case GetCount():
+                    ctx.reply(self.count)
 """
 
 import asyncio
@@ -73,7 +83,7 @@ def is_uvloop_enabled() -> bool:
 
 
 # Core actor primitives
-from .actor import Actor, ActorId, LocalRef, CompositeRef, Behavior, Context, Envelope, EntityRef, ShardedRef
+from .actor import Actor, ActorId, LocalRef, CompositeRef, Behavior, Context, Envelope, EntityRef, ShardedRef, on
 
 # Actor system
 from .system import ActorSystem
@@ -109,6 +119,7 @@ __all__ = [
     "Behavior",
     "Context",
     "Envelope",
+    "on",
     # Sharding
     "EntityRef",
     "ShardedRef",

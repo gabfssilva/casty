@@ -15,6 +15,25 @@ if TYPE_CHECKING:
     from .cluster.remote_ref import RemoteRef
 
 
+def on(msg_type: type):
+    """Decorator to register a message handler by type.
+
+    Usage:
+        class Counter(Actor[Increment | GetCount]):
+            @on(Increment)
+            async def handle_increment(self, msg: Increment, ctx: Context):
+                self.count += msg.amount
+
+            @on(GetCount)
+            async def handle_query(self, msg: GetCount, ctx: Context):
+                ctx.reply(self.count)
+    """
+    def decorator(fn):
+        fn._handler_for = msg_type
+        return fn
+    return decorator
+
+
 def _flatten_union_types(tp: type | None) -> tuple[type, ...]:
     """Flatten union types into a tuple of concrete types.
 
@@ -475,9 +494,28 @@ class Actor[M](ABC):
 
     Type parameter M represents the message type(s) this actor can receive.
     Use union types for multiple message types: Actor[Msg1 | Msg2 | Msg3]
+
+    Message handlers can be registered using the @on decorator:
+        class Counter(Actor[Increment | GetCount]):
+            @on(Increment)
+            async def handle_increment(self, msg: Increment, ctx: Context):
+                self.count += msg.amount
     """
 
     _ctx: Context[M]
+    _handlers: dict[type, Callable] = {}
+
+    def __init_subclass__(cls):
+        """Collect all @on decorated handlers from the class hierarchy."""
+        super().__init_subclass__()
+        cls._handlers = {}
+        for attr_name in dir(cls):
+            try:
+                attr = getattr(cls, attr_name)
+                if hasattr(attr, '_handler_for'):
+                    cls._handlers[attr._handler_for] = attr
+            except AttributeError:
+                pass
 
     # Lifecycle hooks
 
@@ -575,17 +613,25 @@ class Actor[M](ABC):
         for k, v in state.items():
             setattr(self, k, v)
 
-    @abstractmethod
     async def receive(self, msg: M, ctx: Context[M]) -> None:
         """Process a message.
 
-        This is the main message handler that must be implemented.
+        This is the main message handler. Can be overridden with custom logic,
+        or use @on decorators to register handlers by message type.
 
         Args:
             msg: The message to process
             ctx: The execution context providing system access
         """
-        ...
+        # Check if there are registered handlers via @on decorators
+        if self.__class__._handlers:
+            handler = self.__class__._handlers.get(type(msg))
+            if handler is not None:
+                return await handler(self, msg, ctx)
+
+        # If no handler found and receive was overridden, it will be called
+        # If not overridden and no handler, raise NotImplementedError
+        raise NotImplementedError(f"No handler for {type(msg).__name__}")
 
 
 # Sharded actor types

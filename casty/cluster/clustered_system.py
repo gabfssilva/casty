@@ -15,7 +15,8 @@ from casty.supervision import SupervisorConfig
 
 from .cluster import Cluster
 from .config import ClusterConfig
-from .consistency import ShardConsistency, Eventual
+from .consistency import ShardConsistency
+from .replication_config import Replication
 from .messages import (
     LocalRegister,
     LocalUnregister,
@@ -107,6 +108,7 @@ class ClusteredActorSystem(ActorSystem):
         singleton: bool = False,
         consistency: ShardConsistency | None = None,
         durable: bool = False,
+        replication: Replication | None = None,
         **kwargs: Any,
     ) -> LocalRef[M] | ShardedRef[M] | SingletonRef[M]:
         """Spawn an actor, optionally registering it in the cluster.
@@ -131,24 +133,57 @@ class ClusteredActorSystem(ActorSystem):
                         - Quorum(): Wait for majority
                         - AtLeast(n): Wait for at least n nodes
             durable: If True, persist actor state with WAL
+            replication: Configuration for replication (factor + consistency level)
             **kwargs: Constructor arguments for the actor
 
         Returns:
             LocalRef for regular actors, ShardedRef for sharded actors,
             SingletonRef for singleton actors
         """
+        from casty.cluster.messages import RegisterReplicatedType
+
+        # Default replication config (no replication)
+        replication = replication or Replication()
+        write_consistency = replication.resolve_consistency()
+
         # Handle singleton actors
         if singleton:
             if not name:
                 raise ValueError("Singleton actors require a name")
             if sharded:
                 raise ValueError("Actor cannot be both singleton and sharded")
+
+            # Register as replicated type if factor > 1
+            if replication.factor > 1 and self._cluster:
+                await self._cluster.send(
+                    RegisterReplicatedType(
+                        type_name=name,
+                        actor_cls=actor_cls,
+                        actor_type="singleton",
+                        replication_factor=replication.factor,
+                        write_consistency=write_consistency,
+                    )
+                )
+
             return await self._spawn_singleton(actor_cls, name)
 
         # Handle sharded actors
         if sharded:
             if not name:
                 raise ValueError("Sharded actors require a name (entity_type)")
+
+            # Register as replicated type if factor > 1
+            if replication.factor > 1 and self._cluster:
+                await self._cluster.send(
+                    RegisterReplicatedType(
+                        type_name=name,
+                        actor_cls=actor_cls,
+                        actor_type="sharded",
+                        replication_factor=replication.factor,
+                        write_consistency=write_consistency,
+                    )
+                )
+
             return await self._spawn_sharded(actor_cls, name, consistency)
 
         # Spawn the actor locally first

@@ -45,6 +45,10 @@ from .messages import (
     MergeRequest,
     MergeState,
     MergeComplete,
+    # Replication messages
+    ReplicateWrite,
+    ReplicateWriteAck,
+    HintedHandoff,
     WireActorMessage,
     # Handshake messages
     NodeHandshake,
@@ -80,6 +84,9 @@ _ACTOR_MESSAGE_CLASSES: dict[ActorMessageType, type] = {
     ActorMessageType.MERGE_REQUEST: MergeRequest,
     ActorMessageType.MERGE_STATE: MergeState,
     ActorMessageType.MERGE_COMPLETE: MergeComplete,
+    ActorMessageType.REPLICATE_WRITE: ReplicateWrite,
+    ActorMessageType.REPLICATE_WRITE_ACK: ReplicateWriteAck,
+    ActorMessageType.HINTED_HANDOFF: HintedHandoff,
 }
 
 _ACTOR_CLASS_TO_TYPE: dict[type, ActorMessageType] = {
@@ -210,6 +217,34 @@ def _encode_actor_message(msg: WireActorMessage) -> dict[str, Any]:
                 "entity_id": msg.entity_id,
                 "new_version": msg.new_version,
             }
+        case ReplicateWrite():
+            return {
+                "entity_type": msg.entity_type,
+                "entity_id": msg.entity_id,
+                "payload_type": msg.payload_type,
+                "payload": msg.payload,
+                "coordinator_id": msg.coordinator_id,
+                "request_id": msg.request_id,
+                "actor_cls_fqn": msg.actor_cls_fqn,
+            }
+        case ReplicateWriteAck():
+            return {
+                "request_id": msg.request_id,
+                "entity_type": msg.entity_type,
+                "entity_id": msg.entity_id,
+                "node_id": msg.node_id,
+                "success": msg.success,
+                "error": msg.error,
+            }
+        case HintedHandoff():
+            return {
+                "entity_type": msg.entity_type,
+                "entity_id": msg.entity_id,
+                "payload_type": msg.payload_type,
+                "payload": msg.payload,
+                "original_timestamp": msg.original_timestamp,
+                "actor_cls_fqn": msg.actor_cls_fqn,
+            }
         case _:
             raise ValueError(f"Unknown actor message type: {type(msg)}")
 
@@ -338,6 +373,34 @@ def _decode_actor_message(
                 entity_type=data["entity_type"],
                 entity_id=data["entity_id"],
                 new_version=data["new_version"],
+            )
+        case ActorMessageType.REPLICATE_WRITE:
+            return ReplicateWrite(
+                entity_type=data["entity_type"],
+                entity_id=data["entity_id"],
+                payload_type=data["payload_type"],
+                payload=data["payload"],
+                coordinator_id=data["coordinator_id"],
+                request_id=data["request_id"],
+                actor_cls_fqn=data.get("actor_cls_fqn", ""),
+            )
+        case ActorMessageType.REPLICATE_WRITE_ACK:
+            return ReplicateWriteAck(
+                request_id=data["request_id"],
+                entity_type=data["entity_type"],
+                entity_id=data["entity_id"],
+                node_id=data["node_id"],
+                success=data["success"],
+                error=data.get("error"),
+            )
+        case ActorMessageType.HINTED_HANDOFF:
+            return HintedHandoff(
+                entity_type=data["entity_type"],
+                entity_id=data["entity_id"],
+                payload_type=data["payload_type"],
+                payload=data["payload"],
+                original_timestamp=data["original_timestamp"],
+                actor_cls_fqn=data.get("actor_cls_fqn", ""),
             )
         case _:
             raise ValueError(f"Unknown actor message type: {msg_type}")
