@@ -184,7 +184,7 @@ class ClusteredActorSystem(ActorSystem):
                     )
                 )
 
-            return await self._spawn_sharded(actor_cls, name, consistency)
+            return await self._spawn_sharded(actor_cls, name, write_consistency)
 
         # Spawn the actor locally first
         ref = await super().spawn(
@@ -234,9 +234,16 @@ class ClusteredActorSystem(ActorSystem):
         )
 
         # Create ShardedRef with routing callbacks
+        # For non-Eventual consistency, we use ask to wait for replication
+        should_wait = consistency.should_wait() if consistency else False
+
         async def send_callback(et: str, entity_id: str, msg: Any) -> None:
             if self._cluster:
-                await self._cluster.send(RemoteEntitySend(et, entity_id, msg))
+                if should_wait:
+                    # Wait for replication to complete
+                    await self._cluster.ask(RemoteEntitySend(et, entity_id, msg), timeout=10.0)
+                else:
+                    await self._cluster.send(RemoteEntitySend(et, entity_id, msg))
 
         async def ask_callback(et: str, entity_id: str, msg: Any, timeout: float) -> Any:
             if self._cluster:

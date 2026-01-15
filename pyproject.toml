@@ -25,6 +25,9 @@ dependencies = [
 performance = [
     "uvloop>=0.22.1",
 ]
+quic = [
+    "aioquic>=1.3.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/gabfssilva/casty"
@@ -43,6 +46,7 @@ dev = [
     "trustme>=1.2.1",
     "pytest-rerunfailures>=16.1",
     "pyinstrument>=5.1.2",
+    "pytest-cov>=7.0.0",
 ]
 
 [tool.pytest.ini_options]

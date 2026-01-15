@@ -61,9 +61,6 @@ from .messages import (
     ClusterEvent,
 )
 
-# Codec
-from .codec import ClusterCodec, ProtocolType
-
 # Consistent hashing
 from .hash_ring import HashRing
 
@@ -78,6 +75,9 @@ from .consistency import (
 
 # Replication configuration
 from .replication_config import Replication
+
+# Development utilities
+from .development import DevelopmentCluster
 
 __all__ = [
     # Configuration
@@ -106,9 +106,6 @@ __all__ = [
     "ActorRegistered",
     "ActorUnregistered",
     "ClusterEvent",
-    # Codec
-    "ClusterCodec",
-    "ProtocolType",
     # Consistent hashing
     "HashRing",
     # Consistency levels
@@ -119,4 +116,6 @@ __all__ = [
     "AtLeast",
     # Replication configuration
     "Replication",
+    # Development utilities
+    "DevelopmentCluster",
 ]

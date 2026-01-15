@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from asyncio import Queue, Task
+from contextlib import contextmanager, asynccontextmanager, AsyncExitStack
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -52,6 +54,15 @@ class ActorSystem:
         self._running = True
         self._scheduler: LocalRef[Schedule] | None = None
 
+    @classmethod
+    @asynccontextmanager
+    async def all(cls, *system: tuple["ActorSystem", ...]):
+        async with AsyncExitStack() as stack:
+            for s in system:
+                await stack.enter_async_context(s)
+
+            yield system
+
     @staticmethod
     def clustered(
         host: str = "0.0.0.0",
@@ -59,6 +70,8 @@ class ActorSystem:
         seeds: list[str] | None = None,
         *,
         node_id: str | None = None,
+        advertise_host: str | None = None,
+        advertise_port: int | None = None,
     ) -> "ClusteredActorSystem":
         """Factory method to create a clustered actor system.
 
@@ -70,6 +83,8 @@ class ActorSystem:
             port: Port to bind the server to (default: 0 = auto-assign)
             seeds: List of seed nodes in "host:port" format
             node_id: Unique identifier for this node (auto-generated if None)
+            advertise_host: Host to announce to other nodes (for NAT/proxy)
+            advertise_port: Port to announce to other nodes (for NAT/proxy)
 
         Returns:
             A ClusteredActorSystem instance
@@ -94,6 +109,8 @@ class ActorSystem:
         config = ClusterConfig(
             bind_host=host,
             bind_port=port,
+            advertise_host=advertise_host,
+            advertise_port=advertise_port,
             node_id=node_id,
         )
 
@@ -341,16 +358,21 @@ class ActorSystem:
                 except asyncio.TimeoutError:
                     continue
 
-                ctx._current_envelope = envelope
-                ctx.sender = envelope.sender
+                # Create immutable context for this message
+                # This allows async callbacks to safely use ctx.reply() after handler returns
+                msg_ctx = dataclasses.replace(
+                    ctx,
+                    _current_envelope=envelope,
+                    sender=envelope.sender,
+                )
                 current_msg = envelope.payload
 
                 try:
+
                     # WAL: Log message BEFORE processing
                     if wal_ref:
                         from .persistence import Append
                         import msgpack
-                        import dataclasses
 
                         # Convert dataclass to dict for serialization
                         if dataclasses.is_dataclass(current_msg):
@@ -361,10 +383,10 @@ class ActorSystem:
                         await wal_ref.send(Append(msg_bytes))
 
                     # Use behavior from stack if available, otherwise default receive
-                    if ctx._behavior_stack:
-                        await ctx._behavior_stack[-1](envelope.payload, ctx)
+                    if msg_ctx._behavior_stack:
+                        await msg_ctx._behavior_stack[-1](envelope.payload, msg_ctx)
                     else:
-                        await actor.receive(envelope.payload, ctx)
+                        await actor.receive(envelope.payload, msg_ctx)
 
                     # WAL: Snapshot periodically
                     if wal_ref:
@@ -383,8 +405,6 @@ class ActorSystem:
                     log.exception(f"Actor {actor_id} failed processing message")
                     await self._handle_failure(node, exc, current_msg)
                 finally:
-                    ctx._current_envelope = None
-                    ctx.sender = None
                     current_msg = None
 
         except asyncio.CancelledError:
@@ -537,9 +557,8 @@ class ActorSystem:
         # Update node with new instance
         node.actor_instance = new_actor
 
-        # Transfer context
-        new_actor._ctx = actor._ctx
-        new_actor._ctx._supervision_node = node
+        # Transfer context with updated supervision node (Context is frozen)
+        new_actor._ctx = dataclasses.replace(actor._ctx, _supervision_node=node)
 
         # Call post_restart
         try:

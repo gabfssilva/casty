@@ -1,9 +1,11 @@
 """Cluster protocol messages for Casty.
 
-This module defines all messages used by the Cluster actor for:
-- Wire protocol (sent over TCP between nodes)
-- Internal API (sent within the local actor system)
+This module defines:
+- Protocol type enums (for wire protocol)
+- Internal API messages (sent within the local actor system)
 - Events (broadcast to subscribers)
+
+Wire protocol messages are now defined in wire.py using @serializable.
 """
 
 from __future__ import annotations
@@ -31,7 +33,11 @@ class ProtocolType(IntEnum):
 
 
 class ActorMessageType(IntEnum):
-    """Message types within ACTOR protocol."""
+    """Message types within ACTOR protocol.
+
+    These IDs match the message_id used in @serializable decorators in wire.py.
+    Kept for backwards compatibility.
+    """
 
     ACTOR_MESSAGE = 0x01
     ASK_REQUEST = 0x02
@@ -54,10 +60,15 @@ class ActorMessageType(IntEnum):
     MERGE_REQUEST = 0x40
     MERGE_STATE = 0x41
     MERGE_COMPLETE = 0x42
-    # Replication messages (0x50-0x5F)
+    # Replication messages (0x50-0x5F) - Legacy message-based
     REPLICATE_WRITE = 0x50
     REPLICATE_WRITE_ACK = 0x51
     HINTED_HANDOFF = 0x56
+    # WAL-based replication (0x60-0x6F)
+    REPLICATE_WAL_ENTRY = 0x60
+    REPLICATE_WAL_ACK = 0x61
+    REQUEST_CATCH_UP = 0x62
+    CATCH_UP_ENTRIES = 0x63
 
 
 class HandshakeMessageType(IntEnum):
@@ -65,367 +76,6 @@ class HandshakeMessageType(IntEnum):
 
     NODE_HANDSHAKE = 0x01
     NODE_HANDSHAKE_ACK = 0x02
-
-
-# =============================================================================
-# Wire Protocol Messages - Actor (0x02)
-# =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class ActorMessage:
-    """Fire-and-forget message to remote actor.
-
-    Sent when using remote_ref.send(msg).
-    """
-
-    target_actor: str
-    payload_type: str  # Fully-qualified class name for deserialization
-    payload: bytes  # msgpack serialized message
-
-
-@dataclass(frozen=True, slots=True)
-class AskRequest:
-    """Request part of ask pattern.
-
-    Sent when using remote_ref.ask(msg).
-    """
-
-    request_id: str
-    target_actor: str
-    payload_type: str
-    payload: bytes
-
-
-@dataclass(frozen=True, slots=True)
-class AskResponse:
-    """Response part of ask pattern.
-
-    Sent as response to AskRequest.
-    """
-
-    request_id: str
-    success: bool
-    payload_type: str | None  # None if error
-    payload: bytes  # Result or error message
-
-
-@dataclass(frozen=True, slots=True)
-class RegisterActor:
-    """Announce actor registration to cluster.
-
-    Sent when a new actor is registered with a name.
-    """
-
-    actor_name: str
-    node_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class LookupActor:
-    """Query for actor location.
-
-    Request to find which node hosts an actor.
-    """
-
-    actor_name: str
-    request_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class LookupResponse:
-    """Response to actor lookup.
-
-    Contains the node_id where the actor is hosted.
-    """
-
-    actor_name: str
-    request_id: str
-    node_id: str | None  # None if not found
-
-
-# =============================================================================
-# Wire Protocol Messages - Sharded Entities (0x02, types 0x10-0x12)
-# =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class EntitySend:
-    """Fire-and-forget message to sharded entity.
-
-    Sent when using sharded_ref["entity-id"].send(msg).
-    """
-
-    entity_type: str
-    entity_id: str
-    payload_type: str  # Fully-qualified class name for deserialization
-    payload: bytes  # msgpack serialized message
-    actor_cls_fqn: str = ""  # Fully-qualified actor class name for auto-registration
-
-
-@dataclass(frozen=True, slots=True)
-class EntityAskRequest:
-    """Request part of ask pattern for sharded entity.
-
-    Sent when using sharded_ref["entity-id"].ask(msg).
-    """
-
-    request_id: str
-    entity_type: str
-    entity_id: str
-    payload_type: str
-    payload: bytes
-    actor_cls_fqn: str = ""  # Fully-qualified actor class name for auto-registration
-
-
-@dataclass(frozen=True, slots=True)
-class EntityAskResponse:
-    """Response part of ask pattern for sharded entity.
-
-    Sent as response to EntityAskRequest.
-    """
-
-    request_id: str
-    success: bool
-    payload_type: str | None  # None if error
-    payload: bytes  # Result or error message
-
-
-# =============================================================================
-# Wire Protocol Messages - Singleton Actors (0x02, types 0x20-0x22)
-# =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class SingletonSend:
-    """Fire-and-forget message to singleton actor.
-
-    Sent when using singleton_ref.send(msg).
-    """
-
-    singleton_name: str
-    payload_type: str  # Fully-qualified class name for deserialization
-    payload: bytes  # msgpack serialized message
-    actor_cls_fqn: str = ""  # Fully-qualified actor class name for auto-registration
-
-
-@dataclass(frozen=True, slots=True)
-class SingletonAskRequest:
-    """Request part of ask pattern for singleton actor.
-
-    Sent when using singleton_ref.ask(msg).
-    """
-
-    request_id: str
-    singleton_name: str
-    payload_type: str
-    payload: bytes
-    actor_cls_fqn: str = ""  # Fully-qualified actor class name for auto-registration
-
-
-@dataclass(frozen=True, slots=True)
-class SingletonAskResponse:
-    """Response part of ask pattern for singleton actor.
-
-    Sent as response to SingletonAskRequest.
-    """
-
-    request_id: str
-    success: bool
-    payload_type: str | None  # None if error
-    payload: bytes  # Result or error message
-
-
-# =============================================================================
-# Wire Protocol Messages - Sharded Type Registration (0x02, types 0x30-0x31)
-# =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class ShardedTypeRegister:
-    """Wire: Register a sharded type on remote node.
-
-    Sent when spawning sharded actors with consistency > Eventual.
-    The remote node should register the type and send an ack.
-    """
-
-    request_id: str
-    entity_type: str
-    actor_cls_fqn: str  # Fully-qualified class name for import
-
-
-@dataclass(frozen=True, slots=True)
-class ShardedTypeAck:
-    """Wire: Acknowledgment of sharded type registration.
-
-    Response to ShardedTypeRegister.
-    """
-
-    request_id: str
-    entity_type: str
-    success: bool
-    error: str | None = None
-
-
-# =============================================================================
-# Wire Protocol Messages - Three-Way Merge (0x02, types 0x40-0x42)
-# =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class MergeRequest:
-    """Wire: Request actor state for merge.
-
-    Sent when conflict is detected between versions.
-    The receiving node should respond with MergeState.
-    """
-
-    request_id: str
-    entity_type: str
-    entity_id: str
-    my_version: int
-    my_base_version: int
-
-
-@dataclass(frozen=True, slots=True)
-class MergeState:
-    """Wire: Actor state snapshot for merge.
-
-    Response to MergeRequest containing state and base snapshot
-    for three-way merge.
-    """
-
-    request_id: str
-    entity_type: str
-    entity_id: str
-    version: int
-    base_version: int
-    state: bytes  # msgpack serialized current state
-    base_state: bytes  # msgpack serialized base snapshot
-
-
-@dataclass(frozen=True, slots=True)
-class MergeComplete:
-    """Wire: Acknowledgment of merge completion.
-
-    Sent after merge is complete to synchronize versions.
-    """
-
-    request_id: str
-    entity_type: str
-    entity_id: str
-    new_version: int
-
-
-# =============================================================================
-# Wire Protocol Messages - Replication (0x02, types 0x50-0x5F)
-# =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class ReplicateWrite:
-    """Wire: Coordinator sends write to replica.
-
-    Sent by ReplicationCoordinator to all replicas for coordination.
-    The replica should process the message and send ReplicateWriteAck back.
-    """
-
-    entity_type: str
-    entity_id: str
-    payload_type: str  # FQN for deserialization
-    payload: bytes  # msgpack serialized
-    coordinator_id: str
-    request_id: str  # For tracking acks
-    actor_cls_fqn: str = ""  # For auto-registration
-
-
-@dataclass(frozen=True, slots=True)
-class ReplicateWriteAck:
-    """Wire: Replica acknowledges write to coordinator.
-
-    Response to ReplicateWrite. Sent back to coordinator.
-    """
-
-    request_id: str
-    entity_type: str
-    entity_id: str
-    node_id: str
-    success: bool
-    error: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class HintedHandoff:
-    """Wire: Replay stored write to recovered replica.
-
-    Sent when a replica recovers to replay writes that were stored
-    while the replica was offline.
-    """
-
-    entity_type: str
-    entity_id: str
-    payload_type: str
-    payload: bytes
-    original_timestamp: float
-    actor_cls_fqn: str = ""
-
-
-# Wire message union type
-type WireActorMessage = (
-    ActorMessage
-    | AskRequest
-    | AskResponse
-    | RegisterActor
-    | LookupActor
-    | LookupResponse
-    | EntitySend
-    | EntityAskRequest
-    | EntityAskResponse
-    | SingletonSend
-    | SingletonAskRequest
-    | SingletonAskResponse
-    | ShardedTypeRegister
-    | ShardedTypeAck
-    | MergeRequest
-    | MergeState
-    | MergeComplete
-    | ReplicateWrite
-    | ReplicateWriteAck
-    | HintedHandoff
-)
-
-
-# =============================================================================
-# Wire Protocol Messages - Handshake (0x03)
-# =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class NodeHandshake:
-    """Initial connection handshake.
-
-    First message sent when connecting to another node.
-    """
-
-    node_id: str
-    address: tuple[str, int]
-    protocol_version: int = 1
-
-
-@dataclass(frozen=True, slots=True)
-class NodeHandshakeAck:
-    """Handshake acknowledgment.
-
-    Response to NodeHandshake.
-    """
-
-    node_id: str
-    address: tuple[str, int]
-    accepted: bool
-    reason: str | None = None
-
-
-WireHandshakeMessage = NodeHandshake | NodeHandshakeAck
 
 
 # =============================================================================
@@ -614,6 +264,20 @@ class CoordinateReplicatedWrite:
     preference_list: list[str]
     consistency: Any  # ShardConsistency - use Any to avoid circular import
     actor_type: str  # "sharded" | "singleton" | "named"
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinateWALReplication:
+    """Internal: Coordinate WAL-based replication.
+
+    Sent to ReplicationCoordinator to replicate a WAL entry to all
+    replicas. Unlike CoordinateReplicatedWrite which sends the original
+    message, this sends the resulting state after processing.
+    """
+
+    wal_entry: Any  # ReplicationWALEntry - use Any to avoid circular import
+    preference_list: list[str]
+    consistency: Any  # ShardConsistency - use Any to avoid circular import
 
 
 @dataclass(frozen=True, slots=True)

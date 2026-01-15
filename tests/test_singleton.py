@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import pytest
 
 from casty import Actor, ActorSystem, Context
+from casty.cluster import DevelopmentCluster
 from casty.cluster.singleton_ref import SingletonRef
 
 
@@ -121,41 +122,31 @@ class TestSingletonMultiNode:
     @pytest.mark.asyncio
     async def test_singleton_only_one_instance(self):
         """Only one singleton instance should exist across cluster."""
-        async with ActorSystem.clustered(
-            host="127.0.0.1", port=18100, node_id="node-1"
-        ) as system1:
+        async with DevelopmentCluster(2) as (system1, system2):
             await asyncio.sleep(0.5)
 
-            async with ActorSystem.clustered(
-                host="127.0.0.1",
-                port=18101,
-                node_id="node-2",
-                seeds=["127.0.0.1:18100"],
-            ) as system2:
-                await asyncio.sleep(0.5)
+            # Both nodes spawn "same" singleton
+            counter1 = await system1.spawn(
+                SingletonCounter, name="global-counter", singleton=True
+            )
+            await asyncio.sleep(0.2)
 
-                # Both nodes spawn "same" singleton
-                counter1 = await system1.spawn(
-                    SingletonCounter, name="global-counter", singleton=True
-                )
-                await asyncio.sleep(0.2)
+            counter2 = await system2.spawn(
+                SingletonCounter, name="global-counter", singleton=True
+            )
+            await asyncio.sleep(0.2)
 
-                counter2 = await system2.spawn(
-                    SingletonCounter, name="global-counter", singleton=True
-                )
-                await asyncio.sleep(0.2)
+            # Increment from both nodes
+            await counter1.send(Increment())
+            await counter2.send(Increment())
+            await asyncio.sleep(0.3)
 
-                # Increment from both nodes
-                await counter1.send(Increment())
-                await counter2.send(Increment())
-                await asyncio.sleep(0.3)
+            # Both should see same count (messages went to same actor)
+            count1 = await counter1.ask(GetCount())
+            count2 = await counter2.ask(GetCount())
 
-                # Both should see same count (messages went to same actor)
-                count1 = await counter1.ask(GetCount())
-                count2 = await counter2.ask(GetCount())
-
-                assert count1 == 2
-                assert count2 == 2
+            assert count1 == 2
+            assert count2 == 2
 
 
 class TestSingletonRef:

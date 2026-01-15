@@ -37,6 +37,11 @@ class ClusterConfig:
     bind_host: str = "0.0.0.0"
     bind_port: int = 0  # 0 = auto-assign
 
+    # Advertised address (for NAT/proxy scenarios)
+    # If set, this address is announced to other nodes instead of bind address
+    advertise_host: str | None = None
+    advertise_port: int | None = None
+
     # Identity
     node_id: str | None = None
 
@@ -92,6 +97,8 @@ class ClusterConfig:
         return ClusterConfig(
             bind_host=host,
             bind_port=port,
+            advertise_host=self.advertise_host,
+            advertise_port=self.advertise_port,
             node_id=self.node_id,
             seeds=self.seeds.copy(),
             swim_config=self.swim_config.with_bind_address(host, port),
@@ -117,6 +124,8 @@ class ClusterConfig:
         return ClusterConfig(
             bind_host=self.bind_host,
             bind_port=self.bind_port,
+            advertise_host=self.advertise_host,
+            advertise_port=self.advertise_port,
             node_id=self.node_id,
             seeds=seeds.copy(),
             swim_config=self.swim_config.with_seeds(swim_seeds),
@@ -132,7 +141,30 @@ class ClusterConfig:
         return ClusterConfig(
             bind_host=self.bind_host,
             bind_port=self.bind_port,
+            advertise_host=self.advertise_host,
+            advertise_port=self.advertise_port,
             node_id=node_id,
+            seeds=self.seeds.copy(),
+            swim_config=self.swim_config,
+            connect_timeout=self.connect_timeout,
+            handshake_timeout=self.handshake_timeout,
+            ask_timeout=self.ask_timeout,
+            max_pending_asks=self.max_pending_asks,
+            ask_cleanup_interval=self.ask_cleanup_interval,
+        )
+
+    def with_advertise_address(self, host: str, port: int) -> ClusterConfig:
+        """Return a copy with updated advertise address.
+
+        The advertise address is announced to other nodes instead of the
+        bind address. Useful for NAT traversal or proxy scenarios.
+        """
+        return ClusterConfig(
+            bind_host=self.bind_host,
+            bind_port=self.bind_port,
+            advertise_host=host,
+            advertise_port=port,
+            node_id=self.node_id,
             seeds=self.seeds.copy(),
             swim_config=self.swim_config,
             connect_timeout=self.connect_timeout,

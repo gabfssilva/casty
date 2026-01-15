@@ -119,9 +119,11 @@ class TransportMux(Actor):
         self,
         node_id: str,
         bind_address: tuple[str, int] = ("0.0.0.0", 7946),
+        advertise_address: tuple[str, int] | None = None,
     ):
         self._node_id = node_id
         self._bind_address = bind_address
+        self._advertise_address = advertise_address
 
         # TCP server
         self._server: LocalRef | None = None
@@ -148,6 +150,16 @@ class TransportMux(Actor):
     def listening_address(self) -> tuple[str, int] | None:
         """Return the address we're listening on."""
         return self._listening_address
+
+    @property
+    def announced_address(self) -> tuple[str, int] | None:
+        """Return the address announced to other nodes.
+
+        Uses advertise_address if set, otherwise listening_address or bind_address.
+        """
+        if self._advertise_address:
+            return self._advertise_address
+        return self._listening_address or self._bind_address
 
     @property
     def connected_nodes(self) -> list[str]:
@@ -199,7 +211,7 @@ class TransportMux(Actor):
             # ----- Commands -----
             case RegisterHandler(protocol, handler):
                 self._handlers[protocol] = handler
-                log.debug(f"[{self._node_id}] Registered handler for {protocol.name}")
+                log.info(f"[{self._node_id}] Registered handler for {protocol.name}: {handler}")
 
             case ConnectTo(node_id, address):
                 await self._connect_to(node_id, address, ctx)
@@ -257,7 +269,7 @@ class TransportMux(Actor):
             # Send handshake
             handshake = _Handshake(
                 node_id=self._node_id,
-                address=self._listening_address or self._bind_address,
+                address=self.announced_address or self._bind_address,
             )
             await self._send_frame(
                 connection,
@@ -348,7 +360,7 @@ class TransportMux(Actor):
                 # Incoming handshake - send ack
                 ack = _HandshakeAck(
                     node_id=self._node_id,
-                    address=self._listening_address or self._bind_address,
+                    address=self.announced_address or self._bind_address,
                 )
                 await self._send_frame(
                     connection,
@@ -414,6 +426,8 @@ class TransportMux(Actor):
             protocol, payload, remaining = result
             conn.recv_buffer = bytearray(remaining)
 
+            log.debug(f"[{self._node_id}] Decoded frame from {node_id}: protocol={protocol.name}, payload_size={len(payload)}")
+
             # Skip handshake messages (shouldn't happen after promotion)
             if protocol == ProtocolType.HANDSHAKE:
                 log.warning(f"[{self._node_id}] Unexpected handshake from {node_id}")
@@ -422,14 +436,18 @@ class TransportMux(Actor):
             # Route to handler
             handler = self._handlers.get(protocol)
             if handler:
-                await handler.send(
-                    Incoming(
+                log.debug(f"[{self._node_id}] Routing {len(payload)} bytes from {node_id} to handler {handler} for {protocol.name}")
+                try:
+                    import sys
+                    incoming_msg = Incoming(
                         from_node=node_id,
                         from_address=conn.address,
                         data=payload,
-                    ),
-                    sender=self._ctx.self_ref,
-                )
+                    )
+                    await handler.send(incoming_msg, sender=self._ctx.self_ref)
+                    log.debug(f"[{self._node_id}] Successfully sent Incoming to handler")
+                except Exception as e:
+                    log.error(f"[{self._node_id}] Failed to send Incoming to handler: {e}", exc_info=True)
             else:
                 log.warning(f"[{self._node_id}] No handler for protocol {protocol.name}")
 
@@ -518,7 +536,7 @@ class TransportMux(Actor):
         """Send framed data to a specific node."""
         conn = self._connections.get(to_node)
         if not conn:
-            log.debug(f"[{self._node_id}] Cannot send to {to_node}: not connected")
+            log.warning(f"[{self._node_id}] Cannot send to {to_node}: not connected. Available connections: {list(self._connections.keys())}")
             return
 
         await self._send_frame(conn.connection, protocol, data)

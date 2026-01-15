@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import pytest
 
 from casty import ActorSystem, Actor, Context
+from casty.cluster import DevelopmentCluster
 
 
 # Test messages
@@ -287,155 +288,92 @@ class TestMultiNodeSharding:
     @pytest.mark.asyncio
     async def test_two_node_cluster_forms(self):
         """Two nodes should form a cluster via seeds."""
-        async with ActorSystem.clustered(
-            host="127.0.0.1",
-            port=17946,
-            node_id="node-1",
-        ) as system1:
-            await asyncio.sleep(0.3)
+        async with DevelopmentCluster(2) as (system1, system2):
+            await asyncio.sleep(0.5)
 
-            async with ActorSystem.clustered(
-                host="127.0.0.1",
-                port=17947,
-                node_id="node-2",
-                seeds=["127.0.0.1:17946"],
-            ) as system2:
-                # Wait for cluster to form
-                await asyncio.sleep(0.5)
-
-                # Both nodes should see each other
-                assert system1.node_id == "node-1"
-                assert system2.node_id == "node-2"
+            # Both nodes should see each other
+            assert system1.node_id == "node-0"
+            assert system2.node_id == "node-1"
 
     @pytest.mark.asyncio
     async def test_sharded_entity_remote_send(self):
         """Entities should be routed to correct node based on hash."""
-        async with ActorSystem.clustered(
-            host="127.0.0.1",
-            port=17948,
-            node_id="node-1",
-        ) as system1:
+        async with DevelopmentCluster(2) as (system1, system2):
+            await asyncio.sleep(0.5)
+
+            # Spawn sharded type on node 1
+            accounts = await system1.spawn(Account, name="accounts", sharded=True)
+
+            # Send to multiple entities - some will hash to node-2
+            for i in range(20):
+                await accounts[f"user-{i}"].send(UpdateBalance(10))
+
             await asyncio.sleep(0.3)
 
-            async with ActorSystem.clustered(
-                host="127.0.0.1",
-                port=17949,
-                node_id="node-2",
-                seeds=["127.0.0.1:17948"],
-            ) as system2:
-                await asyncio.sleep(0.5)
-
-                # Spawn sharded type on node 1
-                accounts = await system1.spawn(Account, name="accounts", sharded=True)
-
-                # Send to multiple entities - some will hash to node-2
-                # We test many entities to ensure some route remotely
-                for i in range(20):
-                    await accounts[f"user-{i}"].send(UpdateBalance(10))
-
-                await asyncio.sleep(0.3)
-
-                # Verify all entities received their messages
-                for i in range(20):
-                    balance = await accounts[f"user-{i}"].ask(GetBalance())
-                    assert balance == 10, f"Entity user-{i} has wrong balance: {balance}"
+            # Verify all entities received their messages
+            for i in range(20):
+                balance = await accounts[f"user-{i}"].ask(GetBalance())
+                assert balance == 10, f"Entity user-{i} has wrong balance: {balance}"
 
     @pytest.mark.asyncio
     async def test_sharded_entity_remote_ask(self):
         """Ask should work across nodes with proper response routing."""
-        async with ActorSystem.clustered(
-            host="127.0.0.1",
-            port=17950,
-            node_id="node-1",
-        ) as system1:
-            await asyncio.sleep(0.3)
+        async with DevelopmentCluster(2) as (system1, system2):
+            await asyncio.sleep(0.5)
 
-            async with ActorSystem.clustered(
-                host="127.0.0.1",
-                port=17951,
-                node_id="node-2",
-                seeds=["127.0.0.1:17950"],
-            ) as system2:
-                await asyncio.sleep(0.5)
+            accounts = await system1.spawn(Account, name="accounts", sharded=True)
 
-                accounts = await system1.spawn(Account, name="accounts", sharded=True)
+            # Test multiple entities with ask
+            for i in range(10):
+                entity_id = f"account-{i}"
+                await accounts[entity_id].send(UpdateBalance(i * 10))
 
-                # Test multiple entities with ask
-                for i in range(10):
-                    entity_id = f"account-{i}"
-                    await accounts[entity_id].send(UpdateBalance(i * 10))
+            await asyncio.sleep(0.2)
 
-                await asyncio.sleep(0.2)
-
-                # Ask each entity for its balance
-                for i in range(10):
-                    entity_id = f"account-{i}"
-                    balance = await accounts[entity_id].ask(GetBalance())
-                    assert balance == i * 10
+            # Ask each entity for its balance
+            for i in range(10):
+                entity_id = f"account-{i}"
+                balance = await accounts[entity_id].ask(GetBalance())
+                assert balance == i * 10
 
     @pytest.mark.asyncio
     async def test_entity_receives_correct_id_remote(self):
         """Entity should receive correct entity_id even when remote."""
-        async with ActorSystem.clustered(
-            host="127.0.0.1",
-            port=17952,
-            node_id="node-1",
-        ) as system1:
-            await asyncio.sleep(0.3)
+        async with DevelopmentCluster(2) as (system1, system2):
+            await asyncio.sleep(0.5)
 
-            async with ActorSystem.clustered(
-                host="127.0.0.1",
-                port=17953,
-                node_id="node-2",
-                seeds=["127.0.0.1:17952"],
-            ) as system2:
-                await asyncio.sleep(0.5)
+            accounts = await system1.spawn(Account, name="accounts", sharded=True)
 
-                accounts = await system1.spawn(Account, name="accounts", sharded=True)
+            # Test multiple entities
+            test_ids = ["remote-test-1", "remote-test-2", "remote-test-3"]
+            for eid in test_ids:
+                await accounts[eid].send(UpdateBalance(1))
 
-                # Test multiple entities
-                test_ids = ["remote-test-1", "remote-test-2", "remote-test-3"]
-                for eid in test_ids:
-                    # Trigger creation
-                    await accounts[eid].send(UpdateBalance(1))
+            await asyncio.sleep(0.2)
 
-                await asyncio.sleep(0.2)
-
-                # Verify each entity knows its ID
-                for eid in test_ids:
-                    received_id = await accounts[eid].ask(GetEntityId())
-                    assert received_id == eid
+            # Verify each entity knows its ID
+            for eid in test_ids:
+                received_id = await accounts[eid].ask(GetEntityId())
+                assert received_id == eid
 
     @pytest.mark.asyncio
     async def test_deterministic_routing_multi_node(self):
         """Same entity should always route to same node."""
-        async with ActorSystem.clustered(
-            host="127.0.0.1",
-            port=17954,
-            node_id="node-1",
-        ) as system1:
-            await asyncio.sleep(0.3)
+        async with DevelopmentCluster(2) as (system1, system2):
+            await asyncio.sleep(0.5)
 
-            async with ActorSystem.clustered(
-                host="127.0.0.1",
-                port=17955,
-                node_id="node-2",
-                seeds=["127.0.0.1:17954"],
-            ) as system2:
-                await asyncio.sleep(0.5)
+            accounts = await system1.spawn(Account, name="accounts", sharded=True)
 
-                accounts = await system1.spawn(Account, name="accounts", sharded=True)
+            # Send multiple messages to same entity
+            entity_id = "deterministic-test"
+            await accounts[entity_id].send(UpdateBalance(100))
+            await accounts[entity_id].send(UpdateBalance(200))
+            await accounts[entity_id].send(UpdateBalance(300))
 
-                # Send multiple messages to same entity
-                entity_id = "deterministic-test"
-                await accounts[entity_id].send(UpdateBalance(100))
-                await accounts[entity_id].send(UpdateBalance(200))
-                await accounts[entity_id].send(UpdateBalance(300))
+            await asyncio.sleep(0.2)
 
-                await asyncio.sleep(0.2)
+            accounts2 = await system2.spawn(Account, name="accounts", sharded=True)
 
-                accounts2 = await system2.spawn(Account, name="accounts", sharded=True)
-
-                # All messages should have gone to same actor instance
-                balance = await accounts2[entity_id].ask(GetBalance())
-                assert balance == 600
+            # All messages should have gone to same actor instance
+            balance = await accounts2[entity_id].ask(GetBalance())
+            assert balance == 600

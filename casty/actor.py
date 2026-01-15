@@ -360,9 +360,12 @@ class CompositeRef[M]:
 type Behavior[M] = Callable[["M", "Context[M]"], Awaitable[None]]
 
 
-@dataclass
+@dataclass(frozen=True)
 class Context[M]:
-    """Context available to the actor during message processing.
+    """Immutable context available to the actor during message processing.
+
+    A new Context is created for each message, ensuring that async callbacks
+    can safely use ctx.reply() even after the handler returns.
 
     Provides access to the actor system, self reference,
     child management, and message reply functionality.
@@ -373,8 +376,9 @@ class Context[M]:
     parent: LocalRef[Any] | None = None
     sender: LocalRef[Any] | None = None
     _current_envelope: Envelope[M] | None = field(default=None, repr=False)
+    # These are shared references - the objects they point to may be mutated
     _supervision_node: Any = field(default=None, repr=False)
-    _behavior_stack: list[Behavior[M]] = field(default_factory=list, repr=False)
+    _behavior_stack: list[Behavior[M]] = field(default_factory=list, repr=False, hash=False)
 
     async def spawn[T](
         self,
@@ -625,7 +629,8 @@ class Actor[M](ABC):
         """
         # Check if there are registered handlers via @on decorators
         if self.__class__._handlers:
-            handler = self.__class__._handlers.get(type(msg))
+            msg_type = type(msg)
+            handler = self.__class__._handlers.get(msg_type)
             if handler is not None:
                 return await handler(self, msg, ctx)
 

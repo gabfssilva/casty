@@ -110,6 +110,9 @@ from .persistence import (
     PersistentActor,
 )
 
+# Declarative codec
+from .codec import serializable, ProtocolCodec, encode, decode
+
 __all__ = [
     # Core
     "Actor",
@@ -141,6 +144,11 @@ __all__ = [
     "Recover",
     "Close",
     "PersistentActor",
+    # Codec
+    "serializable",
+    "ProtocolCodec",
+    "encode",
+    "decode",
     # Utilities
     "is_uvloop_enabled",
 ]

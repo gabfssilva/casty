@@ -18,6 +18,7 @@ from casty.cluster import (
     Eventual,
     Quorum,
     AtLeast,
+    DevelopmentCluster,
 )
 
 
@@ -158,44 +159,13 @@ class TestStrongConsistency:
     """Test Strong consistency across cluster."""
 
     @pytest.mark.asyncio
-    async def test_strong_waits_for_all_nodes(self, base_port):
+    async def test_strong_waits_for_all_nodes(self):
         """Strong consistency waits for all nodes to ack."""
-        systems = []
-        try:
-            # Create 3-node cluster
-            system1 = ActorSystem.clustered(
-                host="127.0.0.1",
-                port=base_port,
-                node_id="node-1",
-            )
-            await system1.start()
-            systems.append(system1)
-
-            await asyncio.sleep(0.3)
-
-            system2 = ActorSystem.clustered(
-                host="127.0.0.1",
-                port=base_port + 1,
-                seeds=[f"127.0.0.1:{base_port}"],
-                node_id="node-2",
-            )
-            await system2.start()
-            systems.append(system2)
-
-            system3 = ActorSystem.clustered(
-                host="127.0.0.1",
-                port=base_port + 2,
-                seeds=[f"127.0.0.1:{base_port}"],
-                node_id="node-3",
-            )
-            await system3.start()
-            systems.append(system3)
-
-            # Wait for cluster to form
+        async with DevelopmentCluster(3) as systems:
             await asyncio.sleep(1.0)
 
             # Spawn with Strong consistency - should wait for all nodes
-            accounts = await system1.spawn(
+            accounts = await systems[0].spawn(
                 ValueActor,
                 name="accounts",
                 sharded=True,
@@ -205,7 +175,6 @@ class TestStrongConsistency:
             assert accounts is not None
 
             # After Strong consistency returns, all nodes should have the type
-            # Test by sending to entities that hash to different nodes
             for i in range(10):
                 await accounts[f"acc-{i}"].send(SetValue(i * 10))
 
@@ -216,32 +185,14 @@ class TestStrongConsistency:
                 result = await accounts[f"acc-{i}"].ask(GetValue())
                 assert result == i * 10
 
-        finally:
-            for s in systems:
-                await s.shutdown()
-
 
 class TestQuorumConsistency:
     """Test Quorum consistency."""
 
     @pytest.mark.asyncio
-    async def test_quorum_waits_for_majority(self, base_port):
+    async def test_quorum_waits_for_majority(self):
         """Quorum consistency waits for majority of nodes."""
-        systems = []
-        try:
-            # Create 3-node cluster
-            for i in range(3):
-                system = ActorSystem.clustered(
-                    host="127.0.0.1",
-                    port=base_port + i,
-                    seeds=[f"127.0.0.1:{base_port}"] if i > 0 else None,
-                    node_id=f"node-{i+1}",
-                )
-                await system.start()
-                systems.append(system)
-                await asyncio.sleep(0.3)
-
-            # Wait for cluster to form
+        async with DevelopmentCluster(3) as systems:
             await asyncio.sleep(1.0)
 
             # Spawn with Quorum consistency - should wait for 2 of 3 nodes
@@ -260,32 +211,14 @@ class TestQuorumConsistency:
             result = await accounts["test-1"].ask(GetValue())
             assert result == 42
 
-        finally:
-            for s in systems:
-                await s.shutdown()
-
 
 class TestAtLeastConsistency:
     """Test AtLeast(n) consistency."""
 
     @pytest.mark.asyncio
-    async def test_at_least_waits_for_n_nodes(self, base_port):
+    async def test_at_least_waits_for_n_nodes(self):
         """AtLeast(n) waits for specified number of nodes."""
-        systems = []
-        try:
-            # Create 5-node cluster
-            for i in range(5):
-                system = ActorSystem.clustered(
-                    host="127.0.0.1",
-                    port=base_port + i,
-                    seeds=[f"127.0.0.1:{base_port}"] if i > 0 else None,
-                    node_id=f"node-{i+1}",
-                )
-                await system.start()
-                systems.append(system)
-                await asyncio.sleep(0.2)
-
-            # Wait for cluster to form
+        async with DevelopmentCluster(5) as systems:
             await asyncio.sleep(1.5)
 
             # Spawn with AtLeast(3) - should wait for at least 3 nodes
@@ -303,10 +236,6 @@ class TestAtLeastConsistency:
             await asyncio.sleep(0.1)
             result = await accounts["entity-1"].ask(GetValue())
             assert result == 123
-
-        finally:
-            for s in systems:
-                await s.shutdown()
 
 
 class TestConsistencyWithSingleNode:
