@@ -106,6 +106,7 @@ class ClusteredActorSystem(ActorSystem):
         sharded: bool = False,
         singleton: bool = False,
         consistency: ShardConsistency | None = None,
+        durable: bool = False,
         **kwargs: Any,
     ) -> LocalRef[M] | ShardedRef[M] | SingletonRef[M]:
         """Spawn an actor, optionally registering it in the cluster.
@@ -129,6 +130,7 @@ class ClusteredActorSystem(ActorSystem):
                         - Strong(): Wait for all nodes
                         - Quorum(): Wait for majority
                         - AtLeast(n): Wait for at least n nodes
+            durable: If True, persist actor state with WAL
             **kwargs: Constructor arguments for the actor
 
         Returns:
@@ -154,6 +156,7 @@ class ClusteredActorSystem(ActorSystem):
             actor_cls,
             name=name,
             supervision=supervision,
+            durable=durable,
             **kwargs,
         )
 

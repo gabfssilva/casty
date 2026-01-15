@@ -119,6 +119,7 @@ class ActorSystem:
         *,
         name: str | None = None,
         supervision: SupervisorConfig | None = None,
+        durable: bool = False,
         **kwargs: Any,
     ) -> LocalRef[M]:
         """Create and start a new root actor.
@@ -127,6 +128,7 @@ class ActorSystem:
             actor_cls: The actor class to instantiate
             name: Optional name for the actor
             supervision: Override supervision configuration
+            durable: If True, persist actor state with WAL
             **kwargs: Constructor arguments for the actor
 
         Returns:
@@ -137,6 +139,7 @@ class ActorSystem:
             name=name,
             supervision=supervision,
             parent_id=None,
+            durable=durable,
             **kwargs,
         )
 
@@ -184,6 +187,7 @@ class ActorSystem:
         name: str | None = None,
         supervision: SupervisorConfig | None = None,
         parent_id: ActorId | None = None,
+        durable: bool = False,
         **kwargs: Any,
     ) -> LocalRef[M]:
         """Internal spawn logic with supervision registration."""
@@ -217,15 +221,103 @@ class ActorSystem:
         )
         actor._ctx = ctx
 
+        # Setup WAL if durable
+        wal_ref: LocalRef | None = None
+        if durable:
+            from .persistence import WriteAheadLog, Recover
+            import msgpack
+
+            # Spawn WAL actor as child
+            wal_ref = await self._spawn_child(
+                parent_ctx=ctx,
+                actor_cls=WriteAheadLog,
+                name=f"wal-{actor_id.name or actor_id.uid.hex[:8]}",
+                actor_id=actor_id,
+            )
+
+            # Recover state from WAL
+            snapshot, events = await wal_ref.ask(Recover(), timeout=10.0)
+
+            if snapshot is not None:
+                # Restore from snapshot
+                state = msgpack.unpackb(snapshot)
+                self._apply_state(actor, state)
+
+            # TODO: Decide if we replay events after snapshot
+
         # Store mailbox for restart
         self._mailboxes[actor_id] = mailbox
 
         # Start actor task
         task = asyncio.create_task(
-            self._run_actor_loop(actor, actor_id, mailbox, ctx, node)
+            self._run_actor_loop(actor, actor_id, mailbox, ctx, node, wal_ref)
         )
         self._actors[actor_id] = task
         return ref
+
+    def _apply_state(self, actor: Actor[Any], state: dict[str, Any]) -> None:
+        """Apply state to actor."""
+        if hasattr(actor, "set_state"):
+            actor.set_state(state)
+        else:
+            # Default: restore public attributes
+            for key, value in state.items():
+                if not key.startswith("_"):
+                    setattr(actor, key, value)
+
+    def _get_state(self, actor: Actor[Any]) -> dict[str, Any]:
+        """Get state from actor."""
+        if hasattr(actor, "get_state"):
+            return actor.get_state()
+
+        # Default: serialize public attributes
+        exclude = getattr(actor, "__casty_exclude_fields__", set())
+        state = {}
+        for key, value in actor.__dict__.items():
+            if not key.startswith("_") and key not in exclude:
+                state[key] = value
+        return state
+
+    async def snapshot_durable_actor[M](self, actor_ref: LocalRef[M]) -> None:
+        """Force a state snapshot on a durable actor.
+
+        This immediately persists the current actor state to the WAL,
+        bypassing the automatic snapshot interval (default 1000 messages).
+
+        Useful before graceful shutdown or at strategic points in your application.
+
+        Args:
+            actor_ref: Reference to the durable actor
+
+        Example:
+            counter = await system.spawn(Counter, durable=True)
+            await counter.send(Increment(10))
+            await system.snapshot_durable_actor(counter)  # Force snapshot now
+        """
+        from .persistence import Snapshot
+        import msgpack
+
+        # Get the supervision node for this actor
+        actor_id = actor_ref.id
+        node = self._supervision_tree.get_node(actor_id)
+        if not node:
+            raise ValueError(f"Actor {actor_id} not found")
+
+        # Find WAL child actor
+        wal_ref = None
+        for child_id in node.children.keys():
+            child_node = self._supervision_tree.get_node(child_id)
+            if child_node and "wal" in str(child_node.actor_id):
+                wal_ref = child_node.actor_ref
+                break
+
+        if not wal_ref:
+            raise ValueError(f"Actor {actor_id} is not durable (no WAL actor found)")
+
+        # Extract and snapshot state
+        state = self._get_state(node.actor_instance)
+        state_bytes = msgpack.packb(state, use_bin_type=True)
+        await wal_ref.send(Snapshot(state_bytes))
 
     async def _run_actor_loop[M](
         self,
@@ -234,9 +326,11 @@ class ActorSystem:
         mailbox: Queue[Envelope[M]],
         ctx: Context[M],
         node: SupervisionNode,
+        wal_ref: LocalRef | None = None,
     ) -> None:
         """Actor run loop with supervision handling."""
         current_msg: M | None = None
+        snapshot_counter = 0
 
         try:
             await actor.on_start()
@@ -252,11 +346,36 @@ class ActorSystem:
                 current_msg = envelope.payload
 
                 try:
+                    # WAL: Log message BEFORE processing
+                    if wal_ref:
+                        from .persistence import Append
+                        import msgpack
+                        import dataclasses
+
+                        # Convert dataclass to dict for serialization
+                        if dataclasses.is_dataclass(current_msg):
+                            msg_dict = dataclasses.asdict(current_msg)
+                            msg_bytes = msgpack.packb(msg_dict, use_bin_type=True)
+                        else:
+                            msg_bytes = msgpack.packb(current_msg, use_bin_type=True)
+                        await wal_ref.send(Append(msg_bytes))
+
                     # Use behavior from stack if available, otherwise default receive
                     if ctx._behavior_stack:
                         await ctx._behavior_stack[-1](envelope.payload, ctx)
                     else:
                         await actor.receive(envelope.payload, ctx)
+
+                    # WAL: Snapshot periodically
+                    if wal_ref:
+                        snapshot_counter += 1
+                        if snapshot_counter >= 1000:  # TODO: configurable
+                            from .persistence import Snapshot
+                            state = self._get_state(actor)
+                            state_bytes = msgpack.packb(state, use_bin_type=True)
+                            await wal_ref.send(Snapshot(state_bytes))
+                            snapshot_counter = 0
+
                     # Success - reset failure tracking
                     if node.restart_record:
                         node.restart_record.record_success()
@@ -277,6 +396,12 @@ class ActorSystem:
                 await actor.on_stop()
             except Exception:
                 log.exception(f"Error in on_stop for {actor_id}")
+
+            # Close WAL
+            if wal_ref:
+                from .persistence import Close
+                await wal_ref.send(Close())
+
             await self._supervision_tree.unregister(actor_id)
             self._actors.pop(actor_id, None)
             self._mailboxes.pop(actor_id, None)

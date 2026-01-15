@@ -88,6 +88,18 @@ from .supervision import (
     supervised,
 )
 
+# Persistence and WAL
+from .persistence import (
+    WriteAheadLog,
+    StoreBackend,
+    FileStoreBackend,
+    Append,
+    Snapshot,
+    Recover,
+    Close,
+    PersistentActor,
+)
+
 __all__ = [
     # Core
     "Actor",
@@ -109,6 +121,15 @@ __all__ = [
     "SupervisorConfig",
     "SupervisorConfigPresets",
     "supervised",
+    # Persistence & WAL
+    "WriteAheadLog",
+    "StoreBackend",
+    "FileStoreBackend",
+    "Append",
+    "Snapshot",
+    "Recover",
+    "Close",
+    "PersistentActor",
     # Utilities
     "is_uvloop_enabled",
 ]

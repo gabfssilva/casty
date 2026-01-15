@@ -1,0 +1,31 @@
+services:
+  cluster-node:
+    build:
+      context: ../..
+      dockerfile: examples/06-rate-limiter/Dockerfile
+    command: ["python", "-c", "import subprocess, os; container_id = os.environ.get('HOSTNAME', 'node')[:8]; node_id = f'node-{container_id}'; port = '9000'; cmd = ['uv', 'run', 'python', 'cluster_node.py', '--node-id', node_id, '--port', port, '--seed-nodes', 'cluster-node:9000']; subprocess.run(cmd)"]
+    ports:
+      - "9000"
+    networks:
+      - casty-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 9000), timeout=1)"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+    deploy:
+      replicas: 10
+
+  client:
+    build:
+      context: ../..
+      dockerfile: examples/06-rate-limiter/Dockerfile
+    command: ["uv", "run", "python", "client.py"]
+    depends_on:
+      - cluster-node
+    networks:
+      - casty-net
+
+networks:
+  casty-net:
+    driver: bridge
