@@ -5,12 +5,75 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from asyncio import Future, Queue
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Union, get_args, get_origin
+from types import UnionType
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from .supervision import SupervisorConfig, SupervisionDecision
     from .system import ActorSystem
+    from .cluster.remote_ref import RemoteRef
+
+
+def _flatten_union_types(tp: type | None) -> tuple[type, ...]:
+    """Flatten union types into a tuple of concrete types.
+
+    Handles both typing.Union and PEP 604 unions (X | Y).
+
+    Examples:
+        int | str -> (int, str)
+        Union[int, str, float] -> (int, str, float)
+        int -> (int,)
+    """
+    if tp is None:
+        return ()
+
+    origin = get_origin(tp)
+
+    # Handle Union types (typing.Union or X | Y)
+    if origin is Union or isinstance(tp, UnionType):
+        args = get_args(tp)
+        result: list[type] = []
+        for arg in args:
+            # Recursively flatten nested unions
+            result.extend(_flatten_union_types(arg))
+        return tuple(result)
+
+    # Handle regular types
+    if isinstance(tp, type):
+        return (tp,)
+
+    # For other cases (like generics), try to get the origin
+    if origin is not None and isinstance(origin, type):
+        return (origin,)
+
+    return ()
+
+
+def _extract_actor_message_types(actor_cls: type["Actor[Any]"]) -> tuple[type, ...]:
+    """Extract the message types M from Actor[M].
+
+    Walks the class hierarchy to find Actor[M] and extracts M.
+    """
+    for base in getattr(actor_cls, "__orig_bases__", ()):
+        origin = get_origin(base)
+        if origin is Actor:
+            args = get_args(base)
+            if args:
+                return _flatten_union_types(args[0])
+
+    # Check parent classes
+    for parent in actor_cls.__mro__[1:]:
+        if parent is Actor or parent is ABC or parent is object:
+            continue
+        for base in getattr(parent, "__orig_bases__", ()):
+            origin = get_origin(base)
+            if origin is Actor:
+                args = get_args(base)
+                if args:
+                    return _flatten_union_types(args[0])
+
+    return ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,17 +98,17 @@ class Envelope[M]:
 
     payload: M
     reply_to: Future[Any] | None = None
-    sender: "ActorRef[Any] | None" = None
+    sender: "LocalRef[Any] | None" = None
 
 
-class ActorRef[M]:
+class LocalRef[M]:
     """Opaque reference to send messages to an actor.
 
     Type-safe reference that allows sending messages to an actor
     without exposing its internal implementation.
     """
 
-    __slots__ = ("_id", "_mailbox", "_system", "_send_impl")
+    __slots__ = ("_id", "_mailbox", "_system", "_send_impl", "_accepted_types")
 
     def __init__(
         self,
@@ -53,18 +116,39 @@ class ActorRef[M]:
         mailbox: Queue[Envelope[M]],
         system: "ActorSystem",
         send_impl: Callable[[Envelope[M]], Awaitable[None]] | None = None,
+        accepted_types: tuple[type, ...] = (),
     ) -> None:
         self._id = actor_id
         self._mailbox = mailbox
         self._system = system
         self._send_impl = send_impl
+        self._accepted_types = accepted_types
+
+    @property
+    def accepted_types(self) -> tuple[type, ...]:
+        """Get the message types this ref accepts."""
+        return self._accepted_types
+
+    def accepts(self, msg: Any) -> bool:
+        """Check if this ref accepts the given message type."""
+        if not self._accepted_types:
+            return True  # No type info, accept anything
+        return isinstance(msg, self._accepted_types)
 
     @property
     def id(self) -> ActorId:
         """Get the actor's unique identifier."""
         return self._id
 
-    async def send(self, msg: M, *, sender: "ActorRef[Any] | None" = None) -> None:
+    async def schedule[R](
+        self,
+        timeout: float,
+        message: R,
+        listener: LocalRef[R] | None = None,
+    ) -> None:
+        await self._system.schedule(timeout=timeout, listener=listener or self, message=message)
+
+    async def send(self, msg: M, *, sender: "LocalRef[Any] | None" = None) -> None:
         """Send message (fire-and-forget).
 
         Args:
@@ -82,7 +166,7 @@ class ActorRef[M]:
         msg: M,
         *,
         timeout: float = 5.0,
-        sender: "ActorRef[Any] | None" = None,
+        sender: "LocalRef[Any] | None" = None,
     ) -> R:
         """Send message and await response.
 
@@ -128,12 +212,133 @@ class ActorRef[M]:
         return f"ActorRef({self._id})"
 
     def __eq__(self, other: object) -> bool:
-        if isinstance(other, ActorRef):
+        if isinstance(other, LocalRef):
             return self._id == other._id
         return False
 
     def __hash__(self) -> int:
         return hash(self._id)
+
+    def __or__[T](
+        self, other: "LocalRef[T] | RemoteRef[T] | CompositeRef[T]"
+    ) -> "CompositeRef[M | T]":
+        """Combine refs with type-based routing.
+
+        Usage:
+            combined = ref1 | ref2
+            await combined.send(msg)  # Routes to ref1 or ref2 based on msg type
+        """
+        return CompositeRef.from_refs(self, other)
+
+
+# Type alias for any ref that can be combined
+type AnyRef = "LocalRef[Any] | RemoteRef[Any] | CompositeRef[Any]"
+
+
+class CompositeRef[M]:
+    """Reference that routes messages to different actors based on message type.
+
+    Created using the | operator on LocalRef/RemoteRef instances:
+        combined = ref1 | ref2  # ref1 accepts Msg1, ref2 accepts Msg2
+        await combined.send(some_msg)  # Routes based on isinstance check
+
+    The first ref that accepts the message type wins.
+    """
+
+    __slots__ = ("_refs", "_type_to_ref")
+
+    def __init__(
+        self,
+        refs: tuple["LocalRef[Any] | RemoteRef[Any]", ...],
+        type_to_ref: dict[type, "LocalRef[Any] | RemoteRef[Any]"],
+    ) -> None:
+        self._refs = refs
+        self._type_to_ref = type_to_ref
+
+    @classmethod
+    def from_refs(
+        cls,
+        *refs: "LocalRef[Any] | RemoteRef[Any] | CompositeRef[Any]",
+    ) -> "CompositeRef[Any]":
+        """Create a CompositeRef from multiple refs."""
+        all_refs: list[LocalRef[Any] | RemoteRef[Any]] = []
+        type_to_ref: dict[type, LocalRef[Any] | RemoteRef[Any]] = {}
+
+        for ref in refs:
+            if isinstance(ref, CompositeRef):
+                # Flatten nested CompositeRefs
+                for inner_ref in ref._refs:
+                    all_refs.append(inner_ref)
+                type_to_ref.update(ref._type_to_ref)
+            else:
+                all_refs.append(ref)
+                # Map each accepted type to this ref
+                for msg_type in ref._accepted_types:
+                    if msg_type not in type_to_ref:
+                        type_to_ref[msg_type] = ref
+
+        return cls(tuple(all_refs), type_to_ref)
+
+    def _find_ref(self, msg: Any) -> "LocalRef[Any] | RemoteRef[Any]":
+        """Find the appropriate ref for a message."""
+        msg_type = type(msg)
+
+        # Direct type match
+        if msg_type in self._type_to_ref:
+            return self._type_to_ref[msg_type]
+
+        # Check isinstance for inheritance
+        for accepted_type, ref in self._type_to_ref.items():
+            if isinstance(msg, accepted_type):
+                return ref
+
+        # Fallback: try refs without type info, or first ref that accepts
+        for ref in self._refs:
+            if ref.accepts(msg):
+                return ref
+
+        raise TypeError(
+            f"No actor ref accepts message of type {msg_type.__name__}. "
+            f"Known types: {list(self._type_to_ref.keys())}"
+        )
+
+    async def send(self, msg: M, *, sender: "LocalRef[Any] | None" = None) -> None:
+        """Send message to the appropriate actor based on message type."""
+        ref = self._find_ref(msg)
+        await ref.send(msg, sender=sender)
+
+    async def ask[R](
+        self,
+        msg: M,
+        *,
+        timeout: float = 5.0,
+        sender: "LocalRef[Any] | None" = None,
+    ) -> R:
+        """Send message and await response from the appropriate actor."""
+        ref = self._find_ref(msg)
+        return await ref.ask(msg, timeout=timeout, sender=sender)
+
+    def __rshift__(self, msg: M) -> Awaitable[None]:
+        """Operator >> for send (tell pattern)."""
+        return self.send(msg)
+
+    def __lshift__[R](self, msg: M) -> Awaitable[R]:
+        """Operator << for ask (request-response pattern)."""
+        return self.ask(msg)
+
+    def __or__[T](
+        self, other: "LocalRef[T] | RemoteRef[T] | CompositeRef[T]"
+    ) -> "CompositeRef[M | T]":
+        """Chain with another ref."""
+        return CompositeRef.from_refs(self, other)
+
+    def __repr__(self) -> str:
+        types = [t.__name__ for t in self._type_to_ref.keys()]
+        return f"CompositeRef({', '.join(types)})"
+
+
+# Type alias for behavior functions
+type Behavior[M] = Callable[["M", "Context[M]"], Awaitable[None]]
 
 
 @dataclass
@@ -144,11 +349,13 @@ class Context[M]:
     child management, and message reply functionality.
     """
 
-    self_ref: ActorRef[M]
+    self_ref: LocalRef[M]
     system: "ActorSystem"
-    sender: ActorRef[Any] | None = None
+    parent: LocalRef[Any] | None = None
+    sender: LocalRef[Any] | None = None
     _current_envelope: Envelope[M] | None = field(default=None, repr=False)
     _supervision_node: Any = field(default=None, repr=False)
+    _behavior_stack: list[Behavior[M]] = field(default_factory=list, repr=False)
 
     async def spawn[T](
         self,
@@ -157,7 +364,7 @@ class Context[M]:
         name: str | None = None,
         supervision: "SupervisorConfig | None" = None,
         **kwargs: Any,
-    ) -> ActorRef[T]:
+    ) -> LocalRef[T]:
         """Spawn a new actor as a child of this actor.
 
         Args:
@@ -188,7 +395,7 @@ class Context[M]:
                 self._current_envelope.reply_to.set_result(response)
 
     @property
-    def children(self) -> dict[ActorId, ActorRef[Any]]:
+    def children(self) -> dict[ActorId, LocalRef[Any]]:
         """Get all child actors spawned by this actor."""
         if self._supervision_node is None:
             return {}
@@ -197,7 +404,7 @@ class Context[M]:
             for child_id, node in self._supervision_node.children.items()
         }
 
-    async def stop_child(self, child: ActorRef[Any]) -> bool:
+    async def stop_child(self, child: LocalRef[Any]) -> bool:
         """Stop a specific child actor.
 
         Args:
@@ -208,7 +415,7 @@ class Context[M]:
         """
         return await self.system._stop_child(self, child.id)
 
-    async def restart_child(self, child: ActorRef[Any]) -> ActorRef[Any]:
+    async def restart_child(self, child: LocalRef[Any]) -> LocalRef[Any]:
         """Manually restart a child actor.
 
         Args:
@@ -222,6 +429,42 @@ class Context[M]:
     async def stop_all_children(self) -> None:
         """Stop all child actors."""
         await self.system._stop_all_children(self)
+
+    def become(self, behavior: Behavior[M], *, discard_old: bool = False) -> None:
+        """Switch the actor's message handling behavior.
+
+        Similar to Akka's become(), this allows an actor to change how it
+        processes messages dynamically - useful for implementing state machines.
+
+        Args:
+            behavior: The new message handler function (async def handler(msg, ctx))
+            discard_old: If True, replaces the current behavior without stacking.
+                        If False (default), pushes onto behavior stack for unbecome().
+
+        Example:
+            async def receive(self, msg, ctx):
+                match msg:
+                    case Activate():
+                        ctx.become(self.active)
+
+            async def active(self, msg, ctx):
+                match msg:
+                    case Deactivate():
+                        ctx.unbecome()
+        """
+        if discard_old and self._behavior_stack:
+            self._behavior_stack[-1] = behavior
+        else:
+            self._behavior_stack.append(behavior)
+
+    def unbecome(self) -> None:
+        """Revert to the previous behavior.
+
+        Pops the current behavior from the stack, reverting to the previous one.
+        If the stack is empty, the actor continues using its default receive().
+        """
+        if self._behavior_stack:
+            self._behavior_stack.pop()
 
 
 class Actor[M](ABC):
@@ -279,7 +522,7 @@ class Actor[M](ABC):
 
     async def on_child_failure(
         self,
-        child: ActorRef[Any],
+        child: LocalRef[Any],
         exc: Exception,
     ) -> "SupervisionDecision | None":
         """Called when a child actor fails.

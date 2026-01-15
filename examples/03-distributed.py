@@ -11,9 +11,7 @@ Run with:
 import asyncio
 from dataclasses import dataclass
 
-from casty import Actor, Context
-from casty.cluster import DistributedActorSystem
-
+from casty import Actor, Context, ActorSystem
 
 # Messages
 @dataclass
@@ -105,11 +103,10 @@ async def main():
     print("=" * 60)
     print()
 
-    async with DistributedActorSystem("127.0.0.1", 0) as system:
+    async with ActorSystem.clustered("127.0.0.1", 0) as system:
         # Wait for Raft election (single node becomes leader)
         await asyncio.sleep(1.0)
         print(f"Node: {system.node_id}")
-        print(f"Is Leader: {system.is_leader}")
         print()
 
         # Create singleton cache (cluster-wide unique)
@@ -117,7 +114,6 @@ async def main():
         cache = await system.spawn(
             CacheManager,
             name="global-cache",
-            singleton=True,
         )
 
         # Use the cache

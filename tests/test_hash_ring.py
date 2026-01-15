@@ -1,200 +1,237 @@
-"""Tests for consistent hashing hash ring."""
+"""Tests for HashRing consistent hashing."""
 
 import pytest
 
-from casty.cluster.data_plane import HashRing, HashRingConfig, VirtualNode
+from casty.cluster.hash_ring import HashRing, VirtualNode
 
 
-class TestHashRingConfig:
-    """Tests for HashRingConfig."""
+class TestHashRingBasic:
+    """Basic HashRing operations."""
 
-    def test_default_config(self):
-        """Test default configuration values."""
-        config = HashRingConfig()
-        assert config.virtual_nodes == 150
-        assert config.hash_function == "md5"
-
-    def test_custom_config(self):
-        """Test custom configuration."""
-        config = HashRingConfig(virtual_nodes=100, hash_function="sha1")
-        assert config.virtual_nodes == 100
-        assert config.hash_function == "sha1"
-
-
-class TestVirtualNode:
-    """Tests for VirtualNode."""
-
-    def test_virtual_node_creation(self):
-        """Test creating a virtual node."""
-        vnode = VirtualNode(node_id="node-1", virtual_id=5, position=12345)
-        assert vnode.node_id == "node-1"
-        assert vnode.virtual_id == 5
-        assert vnode.position == 12345
-
-    def test_virtual_node_comparison(self):
-        """Test virtual node comparison by position."""
-        v1 = VirtualNode(node_id="node-1", virtual_id=0, position=100)
-        v2 = VirtualNode(node_id="node-2", virtual_id=0, position=200)
-        v3 = VirtualNode(node_id="node-1", virtual_id=1, position=50)
-
-        assert v3 < v1 < v2
-        assert not v2 < v1
-
-    def test_virtual_node_immutable(self):
-        """Test that virtual nodes are frozen."""
-        vnode = VirtualNode(node_id="node-1", virtual_id=0, position=100)
-        with pytest.raises(AttributeError):
-            vnode.position = 200  # type: ignore
-
-
-class TestHashRing:
-    """Tests for HashRing basic operations."""
-
-    def test_empty_ring(self):
-        """Test empty hash ring."""
+    def test_empty_ring_returns_none(self):
+        """Empty ring should return None for any key."""
         ring = HashRing()
-        assert len(ring) == 0
-        assert ring.node_count == 0
-        assert ring.vnode_count == 0
-        assert ring.nodes == frozenset()
+        assert ring.get_node("any-key") is None
+        assert ring.get_preference_list("any-key") == []
 
     def test_add_single_node(self):
-        """Test adding a single node."""
+        """Single node should handle all keys."""
         ring = HashRing()
         ring.add_node("node-1")
 
-        assert len(ring) == 1
         assert ring.node_count == 1
+        assert ring.vnode_count == 150  # default virtual nodes
         assert "node-1" in ring
-        assert ring.vnode_count == 150  # Default virtual nodes
+        assert ring.get_node("any-key") == "node-1"
+        assert ring.get_node("another-key") == "node-1"
 
-    def test_add_multiple_nodes(self):
-        """Test adding multiple nodes."""
-        ring = HashRing()
-        ring.add_node("node-1")
-        ring.add_node("node-2")
-        ring.add_node("node-3")
-
-        assert len(ring) == 3
-        assert ring.nodes == frozenset({"node-1", "node-2", "node-3"})
-        assert ring.vnode_count == 450
-
-    def test_add_duplicate_node(self):
-        """Test that adding duplicate node is idempotent."""
+    def test_add_duplicate_node_is_idempotent(self):
+        """Adding same node twice should be no-op."""
         ring = HashRing()
         ring.add_node("node-1")
         ring.add_node("node-1")
 
-        assert len(ring) == 1
+        assert ring.node_count == 1
         assert ring.vnode_count == 150
 
     def test_remove_node(self):
-        """Test removing a node."""
+        """Removing a node should remove all its virtual nodes."""
         ring = HashRing()
         ring.add_node("node-1")
         ring.add_node("node-2")
+
+        assert ring.node_count == 2
+        assert ring.vnode_count == 300
 
         ring.remove_node("node-1")
 
-        assert len(ring) == 1
+        assert ring.node_count == 1
+        assert ring.vnode_count == 150
         assert "node-1" not in ring
         assert "node-2" in ring
-        assert ring.vnode_count == 150
 
-    def test_remove_nonexistent_node(self):
-        """Test removing a node that doesn't exist."""
+    def test_remove_nonexistent_node_is_noop(self):
+        """Removing non-existent node should be no-op."""
         ring = HashRing()
         ring.add_node("node-1")
+        ring.remove_node("node-2")  # doesn't exist
 
-        moves = ring.remove_node("node-999")
-        assert moves == []
-        assert len(ring) == 1
+        assert ring.node_count == 1
 
-    def test_custom_virtual_nodes(self):
-        """Test with custom number of virtual nodes."""
-        config = HashRingConfig(virtual_nodes=50)
-        ring = HashRing(config)
-        ring.add_node("node-1")
-
-        assert ring.vnode_count == 50
-
-
-class TestHashRingLookup:
-    """Tests for hash ring key lookup."""
-
-    def test_get_node_empty_ring(self):
-        """Test lookup on empty ring."""
-        ring = HashRing()
-        assert ring.get_node("key") is None
-
-    def test_get_node_single_node(self):
-        """Test lookup with single node."""
+    def test_nodes_property(self):
+        """nodes property should return frozenset of all nodes."""
         ring = HashRing()
         ring.add_node("node-1")
+        ring.add_node("node-2")
 
-        # All keys should map to the only node
-        assert ring.get_node("key1") == "node-1"
-        assert ring.get_node("key2") == "node-1"
-        assert ring.get_node("key3") == "node-1"
+        nodes = ring.nodes
+        assert isinstance(nodes, frozenset)
+        assert nodes == {"node-1", "node-2"}
 
-    def test_get_node_deterministic(self):
-        """Test that lookup is deterministic."""
+
+class TestHashRingDeterminism:
+    """Hash ring should be deterministic."""
+
+    def test_same_key_same_node(self):
+        """Same key should always map to same node."""
         ring = HashRing()
         ring.add_node("node-1")
         ring.add_node("node-2")
         ring.add_node("node-3")
 
-        # Same key should always return same node
-        node = ring.get_node("user:123")
-        for _ in range(100):
-            assert ring.get_node("user:123") == node
+        key = "users:user-123"
+        node1 = ring.get_node(key)
+        node2 = ring.get_node(key)
+        node3 = ring.get_node(key)
 
-    def test_get_node_distribution(self):
-        """Test that keys are distributed across nodes."""
+        assert node1 == node2 == node3
+
+    def test_deterministic_across_instances(self):
+        """Different ring instances with same nodes should give same results."""
+        ring1 = HashRing()
+        ring1.add_node("node-1")
+        ring1.add_node("node-2")
+        ring1.add_node("node-3")
+
+        ring2 = HashRing()
+        ring2.add_node("node-1")
+        ring2.add_node("node-2")
+        ring2.add_node("node-3")
+
+        for i in range(100):
+            key = f"entity:{i}"
+            assert ring1.get_node(key) == ring2.get_node(key)
+
+    def test_add_order_independent(self):
+        """Node addition order shouldn't affect key mapping."""
+        ring1 = HashRing()
+        ring1.add_node("node-1")
+        ring1.add_node("node-2")
+        ring1.add_node("node-3")
+
+        ring2 = HashRing()
+        ring2.add_node("node-3")
+        ring2.add_node("node-1")
+        ring2.add_node("node-2")
+
+        for i in range(100):
+            key = f"entity:{i}"
+            assert ring1.get_node(key) == ring2.get_node(key)
+
+
+class TestHashRingDistribution:
+    """Hash ring should distribute keys evenly."""
+
+    def test_distribution_across_nodes(self):
+        """Keys should be roughly evenly distributed."""
         ring = HashRing()
         ring.add_node("node-1")
         ring.add_node("node-2")
         ring.add_node("node-3")
 
-        # Check distribution of many keys
-        distribution: dict[str, int] = {"node-1": 0, "node-2": 0, "node-3": 0}
-        for i in range(1000):
-            node = ring.get_node(f"key-{i}")
-            assert node is not None
-            distribution[node] += 1
+        counts = {"node-1": 0, "node-2": 0, "node-3": 0}
+        num_keys = 10000
 
-        # Each node should get a reasonable share (roughly 1/3 each)
-        for node, count in distribution.items():
-            assert 200 < count < 500, f"{node} got {count} keys, expected ~333"
+        for i in range(num_keys):
+            key = f"entity:{i}"
+            node = ring.get_node(key)
+            counts[node] += 1
 
-    def test_preference_list_empty_ring(self):
-        """Test preference list on empty ring."""
+        # Each node should get roughly 1/3 of keys
+        # Allow 20% deviation
+        expected = num_keys / 3
+        for node, count in counts.items():
+            deviation = abs(count - expected) / expected
+            assert deviation < 0.20, f"{node} got {count}, expected ~{expected}"
+
+    def test_minimal_rebalancing_on_add(self):
+        """Adding a node should only move ~1/n keys."""
         ring = HashRing()
-        assert ring.get_preference_list("key") == []
+        ring.add_node("node-1")
+        ring.add_node("node-2")
+
+        # Record initial assignments
+        keys = [f"entity:{i}" for i in range(1000)]
+        initial = {key: ring.get_node(key) for key in keys}
+
+        # Add third node
+        ring.add_node("node-3")
+
+        # Count how many keys moved
+        moved = 0
+        for key in keys:
+            if ring.get_node(key) != initial[key]:
+                moved += 1
+
+        # Roughly 1/3 should move to new node
+        move_ratio = moved / len(keys)
+        assert 0.20 < move_ratio < 0.45, f"Moved {move_ratio:.1%}, expected ~33%"
+
+    def test_minimal_rebalancing_on_remove(self):
+        """Removing a node should only move its keys."""
+        ring = HashRing()
+        ring.add_node("node-1")
+        ring.add_node("node-2")
+        ring.add_node("node-3")
+
+        # Record initial assignments
+        keys = [f"entity:{i}" for i in range(1000)]
+        initial = {key: ring.get_node(key) for key in keys}
+
+        # Remove one node
+        ring.remove_node("node-2")
+
+        # Only keys that were on node-2 should move
+        moved = 0
+        for key in keys:
+            old_node = initial[key]
+            new_node = ring.get_node(key)
+            if old_node != new_node:
+                moved += 1
+                assert old_node == "node-2", "Only node-2's keys should move"
+
+        # Roughly 1/3 should have moved
+        move_ratio = moved / len(keys)
+        assert 0.20 < move_ratio < 0.45, f"Moved {move_ratio:.1%}"
+
+
+class TestPreferenceList:
+    """Tests for preference list (replication)."""
 
     def test_preference_list_single_node(self):
-        """Test preference list with single node."""
+        """Single node cluster returns one-element list."""
         ring = HashRing()
         ring.add_node("node-1")
 
-        prefs = ring.get_preference_list("key", n=3)
+        prefs = ring.get_preference_list("any-key", n=3)
         assert prefs == ["node-1"]
 
-    def test_preference_list_multiple_nodes(self):
-        """Test preference list returns unique physical nodes."""
+    def test_preference_list_returns_unique_nodes(self):
+        """Preference list should not have duplicates."""
         ring = HashRing()
         ring.add_node("node-1")
         ring.add_node("node-2")
         ring.add_node("node-3")
 
-        prefs = ring.get_preference_list("user:123", n=3)
+        prefs = ring.get_preference_list("any-key", n=3)
         assert len(prefs) == 3
-        assert len(set(prefs)) == 3  # All unique
-        # Primary is first
-        assert prefs[0] == ring.get_node("user:123")
+        assert len(set(prefs)) == 3  # all unique
 
-    def test_preference_list_limited(self):
-        """Test preference list respects n limit."""
+    def test_preference_list_first_is_primary(self):
+        """First node in preference list should be primary."""
+        ring = HashRing()
+        ring.add_node("node-1")
+        ring.add_node("node-2")
+        ring.add_node("node-3")
+
+        key = "users:user-456"
+        prefs = ring.get_preference_list(key, n=3)
+        primary = ring.get_node(key)
+
+        assert prefs[0] == primary
+
+    def test_preference_list_respects_n(self):
+        """Should return at most n nodes."""
         ring = HashRing()
         ring.add_node("node-1")
         ring.add_node("node-2")
@@ -205,148 +242,100 @@ class TestHashRingLookup:
         prefs = ring.get_preference_list("key", n=2)
         assert len(prefs) == 2
 
-    def test_preference_list_more_than_nodes(self):
-        """Test preference list when n > node count."""
-        ring = HashRing()
-        ring.add_node("node-1")
-        ring.add_node("node-2")
-
-        prefs = ring.get_preference_list("key", n=5)
-        assert len(prefs) == 2
-
-
-class TestHashRingRebalancing:
-    """Tests for minimal rebalancing on node changes."""
-
-    def test_add_node_minimal_movement(self):
-        """Test that adding a node moves minimal keys."""
-        ring = HashRing()
-        ring.add_node("node-1")
-        ring.add_node("node-2")
-
-        # Record initial placements
-        initial: dict[str, str] = {}
-        for i in range(1000):
-            key = f"key-{i}"
-            node = ring.get_node(key)
-            assert node is not None
-            initial[key] = node
-
-        # Add a third node
-        ring.add_node("node-3")
-
-        # Count how many keys moved
-        moved = 0
-        for key, old_node in initial.items():
-            new_node = ring.get_node(key)
-            if new_node != old_node:
-                moved += 1
-
-        # Should be roughly 1/3 of keys (moving to new node)
-        assert 200 < moved < 500, f"Moved {moved} keys, expected ~333"
-
-    def test_remove_node_minimal_movement(self):
-        """Test that removing a node moves minimal keys."""
+    def test_preference_list_deterministic(self):
+        """Preference list should be deterministic."""
         ring = HashRing()
         ring.add_node("node-1")
         ring.add_node("node-2")
         ring.add_node("node-3")
 
-        # Record initial placements
-        initial: dict[str, str] = {}
-        for i in range(1000):
-            key = f"key-{i}"
-            node = ring.get_node(key)
-            assert node is not None
-            initial[key] = node
+        key = "orders:order-789"
+        prefs1 = ring.get_preference_list(key, n=3)
+        prefs2 = ring.get_preference_list(key, n=3)
 
-        # Remove one node
-        ring.remove_node("node-2")
-
-        # Count how many keys moved
-        moved = 0
-        for key, old_node in initial.items():
-            new_node = ring.get_node(key)
-            if old_node == "node-2":
-                # Keys from removed node must move
-                assert new_node in ("node-1", "node-3")
-                moved += 1
-            else:
-                # Keys from other nodes should stay
-                assert new_node == old_node
-
-        # Should be roughly 1/3 of keys (from removed node)
-        assert 200 < moved < 500, f"Moved {moved} keys, expected ~333"
+        assert prefs1 == prefs2
 
 
-class TestHashRingRanges:
-    """Tests for range-based operations."""
+class TestIsResponsible:
+    """Tests for is_responsible method."""
 
-    def test_get_ranges_for_node_empty(self):
-        """Test ranges for non-existent node."""
-        ring = HashRing()
-        ring.add_node("node-1")
-
-        ranges = ring.get_ranges_for_node("node-999")
-        assert ranges == []
-
-    def test_get_ranges_for_node_single(self):
-        """Test ranges for single node (should cover entire ring)."""
-        ring = HashRing()
-        ring.add_node("node-1")
-
-        ranges = ring.get_ranges_for_node("node-1")
-        # Should have as many ranges as virtual nodes
-        assert len(ranges) == 150
-
-    def test_get_ranges_for_node_multiple(self):
-        """Test ranges are split among nodes."""
-        ring = HashRing()
-        ring.add_node("node-1")
-        ring.add_node("node-2")
-
-        ranges1 = ring.get_ranges_for_node("node-1")
-        ranges2 = ring.get_ranges_for_node("node-2")
-
-        # Each should have their virtual nodes' ranges
-        assert len(ranges1) == 150
-        assert len(ranges2) == 150
-
-    def test_get_nodes_for_range_empty(self):
-        """Test nodes for range on empty ring."""
-        ring = HashRing()
-        nodes = ring.get_nodes_for_range(0, 1000)
-        assert nodes == []
-
-    def test_get_nodes_for_range(self):
-        """Test getting nodes responsible for a range."""
+    def test_is_responsible_primary(self):
+        """Primary node should be responsible."""
         ring = HashRing()
         ring.add_node("node-1")
         ring.add_node("node-2")
         ring.add_node("node-3")
 
-        nodes = ring.get_nodes_for_range(0, 1000000, n=3)
-        assert len(nodes) == 3
-        assert len(set(nodes)) == 3  # All unique
+        key = "entity:123"
+        primary = ring.get_node(key)
+
+        assert ring.is_responsible(primary, key) is True
+
+    def test_is_responsible_non_primary(self):
+        """Non-primary nodes should not be responsible."""
+        ring = HashRing()
+        ring.add_node("node-1")
+        ring.add_node("node-2")
+        ring.add_node("node-3")
+
+        key = "entity:123"
+        primary = ring.get_node(key)
+        others = [n for n in ring.nodes if n != primary]
+
+        for other in others:
+            assert ring.is_responsible(other, key) is False
 
 
-class TestHashRingRepr:
+class TestVirtualNodes:
+    """Tests for virtual node configuration."""
+
+    def test_custom_virtual_nodes(self):
+        """Should respect custom virtual node count."""
+        ring = HashRing(virtual_nodes=50)
+        ring.add_node("node-1")
+
+        assert ring.vnode_count == 50
+
+    def test_more_vnodes_better_distribution(self):
+        """More virtual nodes should give better distribution."""
+        # Low vnode count
+        ring_low = HashRing(virtual_nodes=10)
+        ring_low.add_node("node-1")
+        ring_low.add_node("node-2")
+
+        # High vnode count
+        ring_high = HashRing(virtual_nodes=200)
+        ring_high.add_node("node-1")
+        ring_high.add_node("node-2")
+
+        def measure_deviation(ring):
+            counts = {"node-1": 0, "node-2": 0}
+            for i in range(1000):
+                counts[ring.get_node(f"key:{i}")] += 1
+            return abs(counts["node-1"] - counts["node-2"]) / 1000
+
+        low_deviation = measure_deviation(ring_low)
+        high_deviation = measure_deviation(ring_high)
+
+        # Higher vnodes should have lower deviation
+        assert high_deviation <= low_deviation
+
+
+class TestRepr:
     """Tests for string representation."""
 
-    def test_repr_empty(self):
-        """Test repr of empty ring."""
-        ring = HashRing()
-        assert "HashRing" in repr(ring)
-        assert "nodes=0" in repr(ring)
-        assert "vnodes=0" in repr(ring)
+    def test_repr(self):
+        """repr should show node and vnode counts."""
+        ring = HashRing(virtual_nodes=100)
+        ring.add_node("node-1")
+        ring.add_node("node-2")
 
-    def test_repr_with_nodes(self):
-        """Test repr with nodes."""
+        assert repr(ring) == "HashRing(nodes=2, vnodes=200)"
+
+    def test_len(self):
+        """len should return physical node count."""
         ring = HashRing()
         ring.add_node("node-1")
         ring.add_node("node-2")
 
-        r = repr(ring)
-        assert "HashRing" in r
-        assert "nodes=2" in r
-        assert "vnodes=300" in r
+        assert len(ring) == 2

@@ -1,331 +1,221 @@
-"""Tests for singleton actors in distributed system."""
+"""Tests for singleton actors."""
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
 
 import pytest
 
 from casty import Actor, ActorSystem, Context
-from casty.cluster.control_plane import RaftConfig
+from casty.cluster.singleton_ref import SingletonRef
 
 
-# Fast config for tests
-FAST_RAFT_CONFIG = RaftConfig(
-    heartbeat_interval=0.05,
-    election_timeout_min=0.1,
-    election_timeout_max=0.2,
-)
-
-
-@dataclass
-class GetState:
-    """Message to get actor state."""
+@dataclass(frozen=True)
+class GetNodeId:
     pass
 
 
-@dataclass
+@dataclass(frozen=True)
 class Increment:
-    """Message to increment counter."""
-    amount: int = 1
+    pass
 
 
-class SingletonCounter(Actor[GetState | Increment]):
-    """A singleton counter actor for testing."""
+@dataclass(frozen=True)
+class GetCount:
+    pass
+
+
+class SingletonCounter(Actor[Increment | GetCount | GetNodeId]):
+    """Simple counter for testing singletons."""
 
     def __init__(self):
         self.count = 0
-        self.node_id: str | None = None
+        self.node_id = "unknown"
 
-    async def receive(self, msg: GetState | Increment, ctx: Context) -> None:
+    async def on_start(self) -> None:
+        if hasattr(self._ctx, "system") and hasattr(self._ctx.system, "node_id"):
+            self.node_id = self._ctx.system.node_id or "unknown"
+
+    async def receive(self, msg: Increment | GetCount | GetNodeId, ctx: Context) -> None:
         match msg:
-            case GetState():
-                ctx.reply({
-                    "count": self.count,
-                    "node_id": self.node_id,
-                })
-            case Increment(amount):
-                self.count += amount
+            case Increment():
+                self.count += 1
+            case GetCount():
+                ctx.reply(self.count)
+            case GetNodeId():
+                ctx.reply(self.node_id)
 
 
-class TestSingletonBasic:
-    """Basic singleton tests."""
-
-    @pytest.mark.asyncio
-    async def test_singleton_spawn_returns_ref(self):
-        """Test that spawning a singleton returns an ActorRef."""
-        async with ActorSystem.distributed(
-            "127.0.0.1", 0, raft_config=FAST_RAFT_CONFIG
-        ) as system:
-            await asyncio.sleep(0.3)  # Wait for election
-
-            ref = await system.spawn(
-                SingletonCounter,
-                name="counter-singleton",
-                singleton=True,
-            )
-
-            assert ref is not None
-            assert hasattr(ref, "send")
-            assert hasattr(ref, "ask")
+class TestSingletonSpawn:
+    """Test spawning singleton actors."""
 
     @pytest.mark.asyncio
-    async def test_singleton_receives_messages(self):
-        """Test that singleton can receive and process messages."""
-        async with ActorSystem.distributed(
-            "127.0.0.1", 0, raft_config=FAST_RAFT_CONFIG
-        ) as system:
+    async def test_spawn_singleton_returns_singleton_ref(self):
+        """spawn with singleton=True should return SingletonRef."""
+        async with ActorSystem.clustered("127.0.0.1", 0) as system:
             await asyncio.sleep(0.3)
 
-            ref = await system.spawn(
-                SingletonCounter,
-                name="counter",
-                singleton=True,
+            counter = await system.spawn(
+                SingletonCounter, name="counter", singleton=True
             )
 
-            # Send messages
-            await ref.send(Increment(5))
-            await ref.send(Increment(3))
-            await asyncio.sleep(0.1)
-
-            # Ask for state
-            state = await ref.ask(GetState())
-            assert state["count"] == 8
+            assert isinstance(counter, SingletonRef)
 
     @pytest.mark.asyncio
-    async def test_singleton_requires_name(self):
-        """Test that singleton without name raises error."""
-        async with ActorSystem.distributed(
-            "127.0.0.1", 0, raft_config=FAST_RAFT_CONFIG
-        ) as system:
+    async def test_spawn_singleton_requires_name(self):
+        """spawn with singleton=True should require a name."""
+        async with ActorSystem.clustered("127.0.0.1", 0) as system:
             await asyncio.sleep(0.3)
 
-            with pytest.raises(ValueError, match="require"):
+            with pytest.raises(ValueError, match="require a name"):
                 await system.spawn(SingletonCounter, singleton=True)
 
     @pytest.mark.asyncio
-    async def test_singleton_cannot_be_sharded(self):
-        """Test that singleton and sharded are mutually exclusive."""
-        async with ActorSystem.distributed(
-            "127.0.0.1", 0, raft_config=FAST_RAFT_CONFIG
-        ) as system:
+    async def test_spawn_singleton_excludes_sharded(self):
+        """Cannot be both singleton and sharded."""
+        async with ActorSystem.clustered("127.0.0.1", 0) as system:
             await asyncio.sleep(0.3)
 
-            with pytest.raises(ValueError, match="both"):
+            with pytest.raises(ValueError, match="both singleton and sharded"):
                 await system.spawn(
-                    SingletonCounter,
-                    name="counter",
-                    singleton=True,
-                    sharded=True,
+                    SingletonCounter, name="x", singleton=True, sharded=True
                 )
 
 
-class TestSingletonLookup:
-    """Tests for singleton lookup."""
+class TestSingletonMessaging:
+    """Test sending messages to singletons."""
 
     @pytest.mark.asyncio
-    async def test_singleton_can_be_looked_up(self):
-        """Test that singleton can be found by name."""
-        async with ActorSystem.distributed(
-            "127.0.0.1", 0, raft_config=FAST_RAFT_CONFIG
-        ) as system:
+    async def test_singleton_send(self):
+        """Should be able to send messages to singleton."""
+        async with ActorSystem.clustered("127.0.0.1", 0) as system:
             await asyncio.sleep(0.3)
 
-            # Spawn singleton
-            original = await system.spawn(
-                SingletonCounter,
-                name="lookup-counter",
-                singleton=True,
+            counter = await system.spawn(
+                SingletonCounter, name="counter", singleton=True
             )
 
-            # Send a message
-            await original.send(Increment(10))
-            await asyncio.sleep(0.05)
-
-            # Look it up
-            found = await system.lookup("lookup-counter")
-
-            assert found is not None
-            state = await found.ask(GetState())
-            assert state["count"] == 10
-
-    @pytest.mark.asyncio
-    async def test_lookup_nonexistent_singleton(self):
-        """Test that looking up nonexistent singleton returns None."""
-        async with ActorSystem.distributed(
-            "127.0.0.1", 0, raft_config=FAST_RAFT_CONFIG
-        ) as system:
-            await asyncio.sleep(0.3)
-
-            found = await system.lookup("nonexistent-singleton")
-            assert found is None
-
-
-class TestSingletonRegistry:
-    """Tests for singleton registration in cluster state."""
-
-    @pytest.mark.asyncio
-    async def test_singleton_registered_in_cluster_state(self):
-        """Test that singleton is registered in cluster state."""
-        async with ActorSystem.distributed(
-            "127.0.0.1", 0, raft_config=FAST_RAFT_CONFIG
-        ) as system:
-            await asyncio.sleep(0.3)
-
-            await system.spawn(
-                SingletonCounter,
-                name="registered-counter",
-                singleton=True,
-            )
-
-            # Give time for Raft to commit
-            await asyncio.sleep(0.2)
-
-            # Check cluster state
-            state = system.cluster_state
-            singleton_info = state.get_singleton("registered-counter")
-
-            # May be None if we're not leader
-            if system.is_leader:
-                assert singleton_info is not None
-                assert singleton_info.name == "registered-counter"
-                assert singleton_info.node_id == system.node_id
-
-
-class TestSingletonUniqueness:
-    """Tests for singleton uniqueness guarantees."""
-
-    @pytest.mark.asyncio
-    async def test_same_singleton_returns_same_ref(self):
-        """Test that spawning same singleton twice returns same ref."""
-        async with ActorSystem.distributed(
-            "127.0.0.1", 0, raft_config=FAST_RAFT_CONFIG
-        ) as system:
-            await asyncio.sleep(0.3)
-
-            ref1 = await system.spawn(
-                SingletonCounter,
-                name="unique-counter",
-                singleton=True,
-            )
-
-            # Send increment
-            await ref1.send(Increment(5))
-            await asyncio.sleep(0.05)
-
-            # Try to spawn again - should get same instance
-            ref2 = await system.spawn(
-                SingletonCounter,
-                name="unique-counter",
-                singleton=True,
-            )
-
-            # Both refs should point to same actor with same state
-            state1 = await ref1.ask(GetState())
-            state2 = await ref2.ask(GetState())
-
-            assert state1["count"] == state2["count"] == 5
-
-
-class TestMultipleSingletons:
-    """Tests for multiple singleton actors."""
-
-    @pytest.mark.asyncio
-    async def test_multiple_different_singletons(self):
-        """Test that different singletons work independently."""
-        async with ActorSystem.distributed(
-            "127.0.0.1", 0, raft_config=FAST_RAFT_CONFIG
-        ) as system:
-            await asyncio.sleep(0.3)
-
-            # Create two different singletons
-            counter1 = await system.spawn(
-                SingletonCounter,
-                name="counter-a",
-                singleton=True,
-            )
-            counter2 = await system.spawn(
-                SingletonCounter,
-                name="counter-b",
-                singleton=True,
-            )
-
-            # Increment each differently
-            await counter1.send(Increment(10))
-            await counter2.send(Increment(20))
+            await counter.send(Increment())
+            await counter.send(Increment())
             await asyncio.sleep(0.1)
 
-            # Verify independence
-            state1 = await counter1.ask(GetState())
-            state2 = await counter2.ask(GetState())
-
-            assert state1["count"] == 10
-            assert state2["count"] == 20
+            count = await counter.ask(GetCount())
+            assert count == 2
 
     @pytest.mark.asyncio
-    async def test_singletons_tracked_separately(self):
-        """Test that singletons are tracked separately in state."""
-        async with ActorSystem.distributed(
-            "127.0.0.1", 0, raft_config=FAST_RAFT_CONFIG
-        ) as system:
+    async def test_singleton_ask(self):
+        """Should be able to ask singleton and get response."""
+        async with ActorSystem.clustered("127.0.0.1", 0) as system:
             await asyncio.sleep(0.3)
 
-            await system.spawn(
-                SingletonCounter,
-                name="tracked-a",
-                singleton=True,
-            )
-            await system.spawn(
-                SingletonCounter,
-                name="tracked-b",
-                singleton=True,
+            counter = await system.spawn(
+                SingletonCounter, name="counter", singleton=True
             )
 
-            await asyncio.sleep(0.2)
-
-            # Both should be lookupable
-            found_a = await system.lookup("tracked-a")
-            found_b = await system.lookup("tracked-b")
-
-            assert found_a is not None
-            assert found_b is not None
+            count = await counter.ask(GetCount())
+            assert count == 0
 
 
-class TestSingletonWithConstructorArgs:
-    """Tests for singletons with constructor arguments."""
+class TestSingletonMultiNode:
+    """Test singletons across multiple nodes."""
 
     @pytest.mark.asyncio
-    async def test_singleton_with_initial_value(self):
-        """Test singleton with constructor argument."""
+    async def test_singleton_only_one_instance(self):
+        """Only one singleton instance should exist across cluster."""
+        async with ActorSystem.clustered(
+            host="127.0.0.1", port=18100, node_id="node-1"
+        ) as system1:
+            await asyncio.sleep(0.5)
 
-        class CounterWithInitial(Actor[GetState | Increment]):
-            def __init__(self, initial: int = 0):
-                self.count = initial
+            async with ActorSystem.clustered(
+                host="127.0.0.1",
+                port=18101,
+                node_id="node-2",
+                seeds=["127.0.0.1:18100"],
+            ) as system2:
+                await asyncio.sleep(0.5)
 
-            async def receive(self, msg: GetState | Increment, ctx: Context) -> None:
-                match msg:
-                    case GetState():
-                        ctx.reply({"count": self.count})
-                    case Increment(amount):
-                        self.count += amount
+                # Both nodes spawn "same" singleton
+                counter1 = await system1.spawn(
+                    SingletonCounter, name="global-counter", singleton=True
+                )
+                await asyncio.sleep(0.2)
 
-        async with ActorSystem.distributed(
-            "127.0.0.1", 0, raft_config=FAST_RAFT_CONFIG
-        ) as system:
+                counter2 = await system2.spawn(
+                    SingletonCounter, name="global-counter", singleton=True
+                )
+                await asyncio.sleep(0.2)
+
+                # Increment from both nodes
+                await counter1.send(Increment())
+                await counter2.send(Increment())
+                await asyncio.sleep(0.3)
+
+                # Both should see same count (messages went to same actor)
+                count1 = await counter1.ask(GetCount())
+                count2 = await counter2.ask(GetCount())
+
+                assert count1 == 2
+                assert count2 == 2
+
+
+class TestSingletonRef:
+    """Test SingletonRef interface."""
+
+    @pytest.mark.asyncio
+    async def test_singleton_ref_repr(self):
+        """SingletonRef should have a nice repr."""
+        async with ActorSystem.clustered("127.0.0.1", 0) as system:
             await asyncio.sleep(0.3)
 
-            ref = await system.spawn(
-                CounterWithInitial,
-                name="initial-counter",
-                singleton=True,
-                initial=100,
+            counter = await system.spawn(
+                SingletonCounter, name="test-counter", singleton=True
             )
 
-            state = await ref.ask(GetState())
-            assert state["count"] == 100
+            assert "test-counter" in repr(counter)
 
-            await ref.send(Increment(50))
-            await asyncio.sleep(0.05)
+    @pytest.mark.asyncio
+    async def test_singleton_ref_name_property(self):
+        """SingletonRef should expose name property."""
+        async with ActorSystem.clustered("127.0.0.1", 0) as system:
+            await asyncio.sleep(0.3)
 
-            state = await ref.ask(GetState())
-            assert state["count"] == 150
+            counter = await system.spawn(
+                SingletonCounter, name="my-singleton", singleton=True
+            )
+
+            assert counter.name == "my-singleton"
+
+    @pytest.mark.asyncio
+    async def test_singleton_ref_equality(self):
+        """SingletonRefs with same name should be equal."""
+        async with ActorSystem.clustered("127.0.0.1", 0) as system:
+            await asyncio.sleep(0.3)
+
+            counter1 = await system.spawn(
+                SingletonCounter, name="equality-test", singleton=True
+            )
+            counter2 = await system.spawn(
+                SingletonCounter, name="equality-test", singleton=True
+            )
+
+            assert counter1 == counter2
+            assert hash(counter1) == hash(counter2)
+
+    @pytest.mark.asyncio
+    async def test_singleton_ref_operators(self):
+        """SingletonRef should support >> and << operators."""
+        async with ActorSystem.clustered("127.0.0.1", 0) as system:
+            await asyncio.sleep(0.3)
+
+            counter = await system.spawn(
+                SingletonCounter, name="op-test", singleton=True
+            )
+
+            # Use >> for send
+            await (counter >> Increment())
+            await (counter >> Increment())
+            await asyncio.sleep(0.1)
+
+            # Use << for ask
+            count = await (counter << GetCount())
+            assert count == 2

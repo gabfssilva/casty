@@ -8,7 +8,8 @@ from asyncio import Queue, Task
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from .actor import Actor, ActorId, ActorRef, Context, Envelope, ShardedRef
+from .actor import Actor, ActorId, LocalRef, Context, Envelope, ShardedRef, _extract_actor_message_types
+from .scheduler import Scheduler, Schedule
 from .supervision import (
     ActorStopSignal,
     MultiChildStrategy,
@@ -21,6 +22,9 @@ from .supervision import (
 
 if TYPE_CHECKING:
     from .persistence import ReplicationConfig
+    from .cluster import DistributedActorSystem
+    from .cluster.clustered_system import ClusteredActorSystem
+    from .cluster.config import ClusterConfig
 
 log = logging.getLogger(__name__)
 
@@ -46,43 +50,68 @@ class ActorSystem:
         self._mailboxes: dict[ActorId, Queue[Envelope[Any]]] = {}
         self._supervision_tree = SupervisionTreeManager()
         self._running = True
+        self._scheduler: LocalRef[Schedule] | None = None
 
     @staticmethod
-    def distributed(
-        host: str,
-        port: int,
+    def clustered(
+        host: str = "0.0.0.0",
+        port: int = 0,
         seeds: list[str] | None = None,
         *,
         node_id: str | None = None,
-        persistence_dir: str | None = None,
-        replication: "ReplicationConfig | None" = None,
-        **kwargs: Any,
-    ) -> "ActorSystem":
-        """Factory method to create a distributed actor system.
+    ) -> "ClusteredActorSystem":
+        """Factory method to create a clustered actor system.
+
+        Creates an ActorSystem where named actors are automatically
+        registered in the cluster for remote discovery.
 
         Args:
-            host: Host to bind the server to
-            port: Port to bind the server to
+            host: Host to bind the server to (default: 0.0.0.0)
+            port: Port to bind the server to (default: 0 = auto-assign)
             seeds: List of seed nodes in "host:port" format
-            node_id: Consistent node ID across restarts
-            persistence_dir: Directory for durable state
-            replication: Replication configuration
-            **kwargs: Additional configuration
+            node_id: Unique identifier for this node (auto-generated if None)
 
         Returns:
-            A DistributedActorSystem instance
-        """
-        from .cluster.distributed import DistributedActorSystem
+            A ClusteredActorSystem instance
 
-        return DistributedActorSystem(
-            host,
-            port,
-            seeds,
+        Example:
+            async with ActorSystem.clustered(
+                host="0.0.0.0",
+                port=7946,
+                seeds=["192.168.1.10:7946"],
+            ) as system:
+                # Named actor → automatically registered in cluster
+                worker = await system.spawn(Worker, name="worker-1")
+
+                # Get reference to remote actor
+                remote = await system.get_ref("worker-2")
+                result = await remote.ask(GetStatus())
+        """
+        from .cluster.clustered_system import ClusteredActorSystem
+        from .cluster.config import ClusterConfig
+
+        # Create base config
+        config = ClusterConfig(
+            bind_host=host,
+            bind_port=port,
             node_id=node_id,
-            persistence_dir=persistence_dir,
-            replication=replication,
-            **kwargs,
         )
+
+        # Add seeds if provided (this also updates SwimConfig with parsed seeds)
+        if seeds:
+            config = config.with_seeds(seeds)
+
+        return ClusteredActorSystem(config)
+
+    async def schedule[R](
+        self,
+        timeout: float,
+        listener: LocalRef[R],
+        message: R
+    ) -> None:
+        if self._scheduler is None:
+            self._scheduler = await self.spawn(Scheduler)
+        await (self._scheduler >> Schedule(timeout=timeout, listener=listener, message=message))
 
     async def spawn[M](
         self,
@@ -91,7 +120,7 @@ class ActorSystem:
         name: str | None = None,
         supervision: SupervisorConfig | None = None,
         **kwargs: Any,
-    ) -> ActorRef[M]:
+    ) -> LocalRef[M]:
         """Create and start a new root actor.
 
         Args:
@@ -119,7 +148,7 @@ class ActorSystem:
         name: str | None = None,
         supervision: SupervisorConfig | None = None,
         **kwargs: Any,
-    ) -> ActorRef[M]:
+    ) -> LocalRef[M]:
         """Spawn a child actor (called from Context.spawn).
 
         The child inherits supervision configuration from:
@@ -156,12 +185,16 @@ class ActorSystem:
         supervision: SupervisorConfig | None = None,
         parent_id: ActorId | None = None,
         **kwargs: Any,
-    ) -> ActorRef[M]:
+    ) -> LocalRef[M]:
         """Internal spawn logic with supervision registration."""
         actor = actor_cls(**kwargs)
         actor_id = ActorId(uid=uuid4(), name=name)
         mailbox: Queue[Envelope[M]] = Queue()
-        ref: ActorRef[M] = ActorRef(actor_id, mailbox, self)
+
+        # Extract accepted message types from actor class
+        accepted_types = _extract_actor_message_types(actor_cls)
+
+        ref: LocalRef[M] = LocalRef(actor_id, mailbox, self, accepted_types=accepted_types)
 
         config = supervision or SupervisorConfig()
 
@@ -179,6 +212,7 @@ class ActorSystem:
         ctx: Context[M] = Context(
             self_ref=ref,
             system=self,
+            parent=node.parent.actor_ref if node.parent else None,
             _supervision_node=node,
         )
         actor._ctx = ctx
@@ -218,7 +252,11 @@ class ActorSystem:
                 current_msg = envelope.payload
 
                 try:
-                    await actor.receive(envelope.payload, ctx)
+                    # Use behavior from stack if available, otherwise default receive
+                    if ctx._behavior_stack:
+                        await ctx._behavior_stack[-1](envelope.payload, ctx)
+                    else:
+                        await actor.receive(envelope.payload, ctx)
                     # Success - reset failure tracking
                     if node.restart_record:
                         node.restart_record.record_success()
@@ -410,7 +448,7 @@ class ActorSystem:
 
     async def _restart_child(
         self, ctx: Context[Any], child_id: ActorId
-    ) -> ActorRef[Any]:
+    ) -> LocalRef[Any]:
         """Manually restart a child actor."""
         node = self._supervision_tree.get_node(child_id)
         if not node:
@@ -445,6 +483,9 @@ class ActorSystem:
             task.cancel()
         if others:
             await asyncio.gather(*others, return_exceptions=True)
+
+    async def start(self) -> None:
+        pass
 
     async def __aenter__(self) -> "ActorSystem":
         """Enter async context manager."""

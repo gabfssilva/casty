@@ -73,7 +73,7 @@ def is_uvloop_enabled() -> bool:
 
 
 # Core actor primitives
-from .actor import Actor, ActorId, ActorRef, Context, Envelope, EntityRef, ShardedRef
+from .actor import Actor, ActorId, LocalRef, CompositeRef, Behavior, Context, Envelope, EntityRef, ShardedRef
 
 # Actor system
 from .system import ActorSystem
@@ -92,7 +92,9 @@ __all__ = [
     # Core
     "Actor",
     "ActorId",
-    "ActorRef",
+    "LocalRef",
+    "CompositeRef",
+    "Behavior",
     "Context",
     "Envelope",
     # Sharding

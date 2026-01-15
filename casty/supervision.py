@@ -13,7 +13,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 if TYPE_CHECKING:
-    from .actor import Actor, ActorId, ActorRef
+    from .actor import Actor, ActorId, LocalRef
 
 
 class SupervisionStrategy(Enum):
@@ -65,7 +65,7 @@ class SupervisionDecision:
     """
 
     action: SupervisionStrategy
-    apply_to: list["ActorRef[Any]"] | None = None
+    apply_to: list["LocalRef[Any]"] | None = None
 
 
 class SupervisorConfigPresets:
@@ -203,7 +203,7 @@ class SupervisionNode:
     """Node in the supervision tree."""
 
     actor_id: "ActorId"
-    actor_ref: "ActorRef[Any]"
+    actor_ref: "LocalRef[Any]"
     actor_instance: "Actor[Any]"
     actor_cls: type["Actor[Any]"]
     kwargs: dict[str, Any]
@@ -233,7 +233,7 @@ class SupervisionTreeManager:
     async def register(
         self,
         actor_id: "ActorId",
-        actor_ref: "ActorRef[Any]",
+        actor_ref: "LocalRef[Any]",
         actor_instance: "Actor[Any]",
         actor_cls: type["Actor[Any]"],
         kwargs: dict[str, Any],

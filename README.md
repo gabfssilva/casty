@@ -1,3 +1,15 @@
+<p align="center">
+  <img src="logo.png" alt="Casty" width="200">
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/casty/"><img src="https://img.shields.io/pypi/v/casty.svg" alt="PyPI"></a>
+  <a href="https://pypi.org/project/casty/"><img src="https://img.shields.io/pypi/pyversions/casty.svg" alt="Python"></a>
+  <a href="https://github.com/gabfssilva/casty/blob/main/LICENSE"><img src="https://img.shields.io/github/license/gabfssilva/casty.svg" alt="License"></a>
+  <a href="https://github.com/gabfssilva/casty"><img src="https://img.shields.io/github/stars/gabfssilva/casty.svg" alt="Stars"></a>
+  <a href="https://pypi.org/project/casty/"><img src="https://img.shields.io/pypi/dm/casty.svg" alt="Downloads"></a>
+</p>
+
 # Casty
 
 **A minimalist, type-safe actor framework for Python 3.12+ with built-in distributed clustering.**
@@ -13,13 +25,15 @@ Casty brings the battle-tested Actor Model to Python with modern type hints, aut
 3. [Quick Start](#quick-start)
 4. [Understanding Actors](#understanding-actors)
 5. [Message Patterns](#message-patterns)
-6. [Spawning and Hierarchies](#spawning-and-hierarchies)
-7. [Supervision and Fault Tolerance](#supervision-and-fault-tolerance)
-8. [Going Distributed](#going-distributed)
-9. [Sharded Actors](#sharded-actors)
-10. [Singleton Actors](#singleton-actors)
-11. [State Replication](#state-replication)
-12. [Configuration Reference](#configuration-reference)
+6. [Behavior Switching (State Machines)](#behavior-switching-state-machines)
+7. [Combining Actor References](#combining-actor-references)
+8. [Spawning and Hierarchies](#spawning-and-hierarchies)
+9. [Supervision and Fault Tolerance](#supervision-and-fault-tolerance)
+10. [Going Distributed](#going-distributed)
+11. [Sharded Actors](#sharded-actors)
+12. [Singleton Actors](#singleton-actors)
+13. [State Replication](#state-replication)
+14. [Configuration Reference](#configuration-reference)
 
 ---
 
@@ -210,6 +224,118 @@ class Calculator(Actor[Add | Multiply]):
 
 ---
 
+## Behavior Switching (State Machines)
+
+Actors can dynamically change how they handle messages using `become()` and `unbecome()`. This is useful for implementing state machines, protocol handlers, or any scenario where an actor's behavior depends on its current state.
+
+### Using `become()` and `unbecome()`
+
+```python
+@dataclass
+class Activate:
+    pass
+
+@dataclass
+class Deactivate:
+    pass
+
+@dataclass
+class Process:
+    data: str
+
+class StateMachine(Actor[Activate | Deactivate | Process]):
+    def __init__(self):
+        self.processed = []
+
+    async def receive(self, msg, ctx: Context) -> None:
+        # Default: inactive state - only respond to Activate
+        match msg:
+            case Activate():
+                print("Activating...")
+                ctx.become(self.active)  # Switch to active behavior
+            case Process(data):
+                print(f"Ignored (inactive): {data}")
+
+    async def active(self, msg, ctx: Context) -> None:
+        # Active state - process messages
+        match msg:
+            case Deactivate():
+                print("Deactivating...")
+                ctx.unbecome()  # Revert to receive()
+            case Process(data):
+                print(f"Processing: {data}")
+                self.processed.append(data)
+
+async def main():
+    async with ActorSystem() as system:
+        machine = await system.spawn(StateMachine)
+
+        await machine.send(Process("ignored"))  # Ignored (inactive)
+        await machine.send(Activate())          # Switch to active
+        await machine.send(Process("hello"))    # Processing: hello
+        await machine.send(Process("world"))    # Processing: world
+        await machine.send(Deactivate())        # Switch back to inactive
+        await machine.send(Process("ignored"))  # Ignored (inactive) again
+```
+
+### Behavior Stack
+
+By default, `become()` pushes behaviors onto a stack:
+
+```python
+ctx.become(behavior1)  # Stack: [behavior1]
+ctx.become(behavior2)  # Stack: [behavior1, behavior2]
+ctx.unbecome()         # Stack: [behavior1]
+ctx.unbecome()         # Stack: [] → back to receive()
+```
+
+Use `discard_old=True` to replace instead of stack:
+
+```python
+ctx.become(behavior1)                    # Stack: [behavior1]
+ctx.become(behavior2, discard_old=True)  # Stack: [behavior2] (replaced)
+```
+
+---
+
+## Combining Actor References
+
+When you have multiple actors that handle different message types, you can combine their references using the `|` operator:
+
+```python
+@dataclass
+class LogMessage:
+    text: str
+
+@dataclass
+class MetricEvent:
+    name: str
+    value: float
+
+class Logger(Actor[LogMessage]):
+    async def receive(self, msg: LogMessage, ctx: Context) -> None:
+        print(f"LOG: {msg.text}")
+
+class MetricsCollector(Actor[MetricEvent]):
+    async def receive(self, msg: MetricEvent, ctx: Context) -> None:
+        print(f"METRIC: {msg.name}={msg.value}")
+
+async def main():
+    async with ActorSystem() as system:
+        logger = await system.spawn(Logger)
+        metrics = await system.spawn(MetricsCollector)
+
+        # Combine refs - messages route automatically by type
+        combined = logger | metrics
+
+        await combined.send(LogMessage("Hello"))        # → Logger
+        await combined.send(MetricEvent("cpu", 0.75))   # → MetricsCollector
+```
+
+This is useful when you want a single reference that can handle multiple message types, routing each to the appropriate actor.
+
+---
+
 ## Spawning and Hierarchies
 
 Actors can spawn other actors, creating natural hierarchies:
@@ -308,6 +434,30 @@ class RetryingWorker(Actor[Task]):
     ...
 ```
 
+### Multi-Child Strategies
+
+When multiple children are supervised, you can control how failures affect siblings:
+
+- **ONE_FOR_ONE** (default): Only restart the failed child
+- **ONE_FOR_ALL**: Restart all children when one fails
+- **REST_FOR_ONE**: Restart the failed child and all children spawned after it
+
+```python
+from casty import SupervisorConfig, SupervisionStrategy, MultiChildStrategy
+
+config = SupervisorConfig(
+    strategy=SupervisionStrategy.RESTART,
+    multi_child=MultiChildStrategy.ONE_FOR_ALL,  # Restart all on failure
+)
+
+# Apply to a parent actor
+@supervised(multi_child=MultiChildStrategy.ONE_FOR_ALL)
+class Coordinator(Actor[Msg]):
+    async def receive(self, msg, ctx: Context) -> None:
+        # If any child fails, all children restart together
+        self.workers = [await ctx.spawn(Worker) for _ in range(5)]
+```
+
 ---
 
 ## Going Distributed
@@ -318,15 +468,28 @@ So far, everything runs in a single process. But what happens when you need:
 - **Fault tolerance** when machines fail?
 - **Data locality** for performance?
 
-Casty's distributed mode addresses all of these with a single API change:
+Casty provides two distributed APIs depending on your needs:
 
 ```python
-# Local system
+# Local system (single process)
 async with ActorSystem() as system:
     ...
 
-# Distributed system - same API!
-async with ActorSystem.distributed(
+# Clustered system - automatic actor registration in cluster
+async with ActorSystem.clustered(
+    host="0.0.0.0",
+    port=7946,
+    seeds=["node2:7946", "node3:7946"],
+) as system:
+    # Named actors are automatically registered for remote discovery
+    worker = await system.spawn(Worker, name="worker-1")
+
+    # Get reference to remote actor
+    remote = await system.lookup("worker-2")
+    ...
+
+# Distributed system - lower-level with explicit replication control
+async with ActorSystem.clustered(
     host="0.0.0.0",
     port=8001,
     seeds=["node2:8001", "node3:8001"],
@@ -336,21 +499,28 @@ async with ActorSystem.distributed(
 
 ### How It Works
 
-Casty's distributed architecture separates concerns into two planes:
+Casty's distributed architecture uses proven distributed systems protocols:
 
-**Control Plane (Raft Consensus)**
-- Manages cluster membership (which nodes are in the cluster)
-- Tracks singleton actor locations
-- Stores entity type configurations
-- Provides strong consistency for metadata
+**SWIM Protocol (Failure Detection)**
+- Scalable Weakly-consistent Infection-style Membership protocol
+- Periodic health probes between random node pairs
+- Indirect probes through other nodes when direct probes fail
+- Lifeguard suspicion mechanism for handling network delays
+- O(1) failure detection overhead per node
 
-**Data Plane (Consistent Hashing + Gossip)**
-- Routes messages to the correct node
-- Detects node failures via SWIM protocol
-- Handles automatic failover
-- Optimizes for low latency
+**Gossip Protocol (State Dissemination)**
+- Epidemic-style state propagation across the cluster
+- Vector clocks for causal ordering of updates
+- Eventually consistent actor registry for discovery
+- Pattern-based subscriptions for state changes
 
-This separation means most operations (sending messages, querying actors) don't need consensus, keeping latency low while still providing consistency where it matters.
+**Consistent Hashing (Entity Routing)**
+- Routes messages to the correct node deterministically
+- Minimal redistribution when nodes join/leave (~1/N keys move)
+- Virtual nodes for even load distribution
+- Preference lists for replica placement
+
+This architecture means all operations are fast and decentralized—no consensus bottleneck for message routing.
 
 ### Cluster Formation
 
@@ -358,13 +528,13 @@ Nodes discover each other through seed nodes:
 
 ```python
 # Node 1 (first node, no seeds needed)
-system1 = ActorSystem.distributed("0.0.0.0", 8001)
+system1 = ActorSystem.clustered("0.0.0.0", 8001)
 
 # Node 2 (joins via Node 1)
-system2 = ActorSystem.distributed("0.0.0.0", 8002, seeds=["node1:8001"])
+system2 = ActorSystem.clustered("0.0.0.0", 8002, seeds=["node1:8001"])
 
 # Node 3 (can use any existing node as seed)
-system3 = ActorSystem.distributed("0.0.0.0", 8003, seeds=["node1:8001"])
+system3 = ActorSystem.clustered("0.0.0.0", 8003, seeds=["node1:8001"])
 ```
 
 Once connected, nodes share membership information via gossip, so every node knows about every other node.
@@ -410,7 +580,7 @@ class Player(Actor[UpdateScore | GetScore]):
                 ctx.reply(self.score)
 
 async def main():
-    async with ActorSystem.distributed("0.0.0.0", 8001) as system:
+    async with ActorSystem.clustered("0.0.0.0", 8001) as system:
         # Create a sharded actor type
         players = await system.spawn(Player, name="players", sharded=True)
 
@@ -461,7 +631,7 @@ class JobScheduler(Actor[ScheduleJob | GetPendingJobs]):
                 ctx.reply(self.pending_jobs)
 
 async def main():
-    async with ActorSystem.distributed("0.0.0.0", 8001) as system:
+    async with ActorSystem.clustered("0.0.0.0", 8001) as system:
         # Spawn a singleton - only one exists cluster-wide
         scheduler = await system.spawn(
             JobScheduler,
@@ -474,12 +644,12 @@ async def main():
 
 ### How Singletons Work
 
-1. The cluster leader (via Raft consensus) assigns the singleton to a node
-2. All nodes know where the singleton lives via the replicated cluster state
+1. The cluster assigns the singleton to a node (tracked via gossip)
+2. All nodes discover where the singleton lives via the gossip protocol
 3. Messages are automatically routed to the owning node
-4. If the owner fails, the leader reassigns the singleton to another node
+4. If the owner fails (detected by SWIM), the singleton is reassigned to another node
 
-This provides strong consistency for singleton ownership while keeping message routing fast.
+This provides reliable singleton management with automatic failover.
 
 ---
 
@@ -567,13 +737,8 @@ config = ReplicationConfig(factor=3, sync_count=2)
 # Wait for ALL replicas (strongest consistency, highest latency)
 config = ReplicationConfig(factor=3, sync_count=-1)
 
-# Use when spawning
-accounts = await system.spawn(
-    Account,
-    name="accounts",
-    sharded=True,
-    replication=ReplicationConfig(factor=3, sync_count=1),
-)
+# ReplicationConfig can be used with sharded actors
+# for configuring state replication behavior
 ```
 
 **Choosing a Replication Mode:**
@@ -589,40 +754,43 @@ accounts = await system.spawn(
 
 ## Configuration Reference
 
-### ActorSystem.distributed()
+### ActorSystem.clustered()
+
+The API for distributed systems with automatic actor discovery:
 
 ```python
-system = ActorSystem.distributed(
+system = ActorSystem.clustered(
     host="0.0.0.0",           # Bind address
-    port=8001,                 # Bind port
-    seeds=["host:port", ...],  # Seed nodes for discovery
-    node_id="unique-id",       # Persistent node identifier
-    raft_config=RaftConfig(),  # Raft timing configuration
+    port=7946,                 # Bind port
+    seeds=["host:port", ...],  # Seed nodes for bootstrapping
+    node_id="unique-id",       # Optional persistent node identifier
 )
 ```
 
-### RaftConfig
+### ClusterConfig
 
-Fine-tune Raft consensus timing:
-
-```python
-from casty.cluster.control_plane import RaftConfig
-
-config = RaftConfig(
-    heartbeat_interval=0.3,     # Leader heartbeat frequency
-    election_timeout_min=1.0,   # Minimum election timeout
-    election_timeout_max=2.0,   # Maximum election timeout
-)
-```
-
-For testing, use faster timeouts:
+Fine-tune cluster behavior:
 
 ```python
-FAST_CONFIG = RaftConfig(
-    heartbeat_interval=0.05,
-    election_timeout_min=0.1,
-    election_timeout_max=0.2,
+from casty.cluster.config import ClusterConfig
+from casty.swim import SwimConfig
+
+# Use production presets
+config = ClusterConfig.production()
+
+# Or customize
+config = ClusterConfig(
+    bind_host="0.0.0.0",
+    bind_port=7946,
+    seeds=["node1:7946", "node2:7946"],
+    swim_config=SwimConfig.production(),
+    connect_timeout=5.0,       # Connection timeout
+    handshake_timeout=5.0,     # Handshake timeout
+    ask_timeout=30.0,          # Remote ask timeout
 )
+
+# For testing, use development presets
+dev_config = ClusterConfig.development()
 ```
 
 ### ReplicationConfig
@@ -656,41 +824,53 @@ config = SupervisorConfig(
 
 ## Architecture Deep Dive
 
-### Control Plane: Raft Consensus
+Casty's distributed architecture is built entirely on the actor model—even the cluster infrastructure is implemented as actors.
 
-The control plane uses the Raft consensus algorithm to maintain consistent cluster state across all nodes. This includes:
+### SWIM Protocol (Failure Detection)
 
-- **Cluster membership**: Which nodes are part of the cluster
-- **Singleton assignments**: Which node owns each singleton actor
-- **Entity type registry**: Configuration for sharded actor types
+SWIM (Scalable Weakly-consistent Infection-style Membership) provides efficient failure detection:
 
-Raft ensures that even if nodes fail or the network partitions, the cluster state remains consistent. A leader is elected, and all changes go through the leader to guarantee ordering.
+1. **Periodic probes**: Each node probes random peers at regular intervals
+2. **Indirect probes**: If direct probe fails, ask K other nodes to probe the target
+3. **Lifeguard suspicion**: Nodes enter SUSPECT state before being declared DEAD
+4. **Adaptive timing**: Protocol period adjusts based on network conditions
 
-### Data Plane: Consistent Hashing + SWIM
+The protocol scales O(1) per node—each node does constant work regardless of cluster size.
 
-The data plane handles the high-frequency operations: routing messages to actors and detecting failures.
+### Gossip Protocol (State Dissemination)
 
-**Consistent Hashing** maps entity IDs to nodes. When you send to `accounts["user-123"]`, the ID is hashed to determine the primary node and replicas. This provides:
+The gossip protocol provides eventually consistent state across the cluster:
 
-- Deterministic routing without central coordination
-- Minimal redistribution when nodes join/leave
-- Natural load balancing across nodes
+- **Actor registry**: Disseminates actor name → node mappings
+- **Vector clocks**: Track causality for conflict resolution
+- **Push-pull hybrid**: Combines epidemic (push) and anti-entropy (pull)
+- **Pattern subscriptions**: React to state changes matching patterns
 
-**SWIM (Scalable Weakly-consistent Infection-style Membership)** protocol detects node failures through:
+### Consistent Hashing (Entity Routing)
 
-1. Periodic health probes between random node pairs
-2. Indirect probes through other nodes when direct probes fail
-3. Suspicion mechanism to handle temporary network issues
-4. Protocol distributed failure detection scales O(1) per node
+**Consistent Hashing** maps entity IDs to nodes deterministically:
 
-### Why Two Planes?
+- When you send to `accounts["user-123"]`, the ID is hashed to find the primary node
+- Virtual nodes (default 150 per physical node) ensure even distribution
+- Preference lists determine replica placement
+- Only ~1/N entities move when nodes join/leave
 
-Separating control and data planes provides the best of both worlds:
+### Transport Layer
 
-- **Control plane** (Raft): Strong consistency for rare but critical operations
-- **Data plane** (Hashing + Gossip): Low latency for frequent operations
+All network communication uses TCP with:
 
-Most actor messages never touch the control plane—they're routed directly via consistent hashing. Only cluster membership changes and singleton assignments need consensus.
+- **Protocol multiplexing**: Single port handles SWIM, Actor messages, Gossip, and Handshakes
+- **Backpressure support**: Write acknowledgment prevents overwhelming receivers
+- **TLS support**: Optional encryption via `TLSConfig`
+
+### Why This Architecture?
+
+This design provides:
+
+- **No single point of failure**: Fully decentralized, no leader election needed
+- **Low latency**: Message routing is deterministic via consistent hashing
+- **Scalability**: O(1) overhead per node for failure detection
+- **Simplicity**: Everything is an actor, making the system composable and testable
 
 ---
 
@@ -735,12 +915,11 @@ class ChatRoom(Actor[Join | Leave | Message | GetMembers]):
                 ctx.reply(list(self.members))
 
 async def main():
-    async with ActorSystem.distributed("0.0.0.0", 8001) as system:
+    async with ActorSystem.clustered("0.0.0.0", 8001) as system:
         rooms = await system.spawn(
             ChatRoom,
             name="rooms",
             sharded=True,
-            replication=ReplicationConfig(factor=2, sync_count=1),
         )
 
         await rooms["general"].send(Join("alice"))
@@ -751,7 +930,7 @@ async def main():
         print(f"Members: {members}")  # ['alice', 'bob']
 ```
 
-### Distributed Counter with Consistency Guarantee
+### Distributed Counter
 
 ```python
 @dataclass
@@ -775,21 +954,17 @@ class Counter(Actor[Increment | GetCount]):
                 ctx.reply(self.count)
 
 async def main():
-    async with ActorSystem.distributed("0.0.0.0", 8001) as system:
-        # Strong consistency: wait for quorum
+    async with ActorSystem.clustered("0.0.0.0", 8001) as system:
         counters = await system.spawn(
             Counter,
             name="counters",
             sharded=True,
-            replication=ReplicationConfig(factor=3, sync_count=2),
         )
-
-        # These writes are confirmed by 2/3 replicas before returning
         for i in range(100):
             await counters["hits"].send(Increment())
 
         count = await counters["hits"].ask(GetCount())
-        print(f"Total hits: {count}")  # Guaranteed: 100
+        print(f"Total hits: {count}")  # 100
 ```
 
 ---
@@ -821,6 +996,6 @@ Casty is inspired by:
 
 The distributed systems components build on decades of research:
 
-- **Raft**: Diego Ongaro and John Ousterhout's consensus algorithm
 - **SWIM**: Scalable failure detection by Abhinandan Das et al.
+- **Gossip Protocols**: Epidemic algorithms for state dissemination
 - **Consistent Hashing**: David Karger et al.'s load balancing technique
