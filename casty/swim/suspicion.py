@@ -14,7 +14,6 @@ Key features:
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -88,14 +87,14 @@ class SuspicionActor(Actor[SuspicionMessage]):
         # Active suspicions: node_id -> SuspicionState
         self.suspicions: dict[str, SuspicionState] = {}
 
-        # Timeout tasks: node_id -> Task
-        self.timeout_tasks: dict[str, asyncio.Task] = {}
+        # Timeout task IDs: node_id -> task_id
+        self.timeout_task_ids: dict[str, str] = {}
 
     async def on_stop(self) -> None:
         """Cancel all pending timeout tasks."""
-        for task in self.timeout_tasks.values():
-            task.cancel()
-        self.timeout_tasks.clear()
+        for task_id in self.timeout_task_ids.values():
+            await self._ctx.cancel_schedule(task_id)
+        self.timeout_task_ids.clear()
 
     async def receive(self, msg: SuspicionMessage, ctx: Context) -> None:
         """Handle suspicion messages."""
@@ -170,9 +169,9 @@ class SuspicionActor(Actor[SuspicionMessage]):
         self.suspicions.pop(node_id, None)
 
         # Cancel timeout task
-        task = self.timeout_tasks.pop(node_id, None)
-        if task:
-            task.cancel()
+        task_id = self.timeout_task_ids.pop(node_id, None)
+        if task_id:
+            await self._ctx.cancel_schedule(task_id)
 
     async def _handle_refutation(
         self, node_id: str, incarnation: int, ctx: Context
@@ -197,7 +196,7 @@ class SuspicionActor(Actor[SuspicionMessage]):
         if state.is_expired():
             # Timeout expired - declare member dead
             self.suspicions.pop(node_id, None)
-            self.timeout_tasks.pop(node_id, None)
+            self.timeout_task_ids.pop(node_id, None)
 
             # Notify coordinator
             await self.coordinator.send(SuspicionTimeout(node_id))
@@ -207,17 +206,13 @@ class SuspicionActor(Actor[SuspicionMessage]):
     ) -> None:
         """Schedule a timeout check."""
         # Cancel existing task if any
-        existing_task = self.timeout_tasks.get(node_id)
-        if existing_task:
-            existing_task.cancel()
+        existing_task_id = self.timeout_task_ids.get(node_id)
+        if existing_task_id:
+            await ctx.cancel_schedule(existing_task_id)
 
-        # Create new task
-        async def timeout_checker():
-            await asyncio.sleep(delay)
-            await ctx.self_ref.send(_CheckTimeout(node_id))
-
-        task = asyncio.create_task(timeout_checker())
-        self.timeout_tasks[node_id] = task
+        # Schedule timeout
+        task_id = await ctx.schedule(delay, _CheckTimeout(node_id))
+        self.timeout_task_ids[node_id] = task_id
 
     async def _reschedule_timeout(
         self, node_id: str, new_delay: float, ctx: Context

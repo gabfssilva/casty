@@ -262,19 +262,7 @@ class GossipManager(Actor):
                 )
 
             # Forward queries to appropriate child
-            case GetDigest():
-                result = await self._state_store.ask(msg)
-                ctx.reply(result)
-
-            case GetEntries():
-                result = await self._state_store.ask(msg)
-                ctx.reply(result)
-
-            case GetPendingUpdates():
-                result = await self._state_store.ask(msg)
-                ctx.reply(result)
-
-            case ComputeDiff():
+            case GetDigest() | GetEntries() | GetPendingUpdates() | ComputeDiff():
                 result = await self._state_store.ask(msg)
                 ctx.reply(result)
 
@@ -518,14 +506,8 @@ class GossipManager(Actor):
                 pong = Pong(sender_id=self._node_id, sequence=sequence)
                 await self._send_via_transport(sender_id, GossipCodec.encode(pong))
 
-            case Pong():
-                pass
-
-            case GossipPushAck():
-                pass  # Acknowledgment received
-
-            case HandshakeAck():
-                pass  # Already handled
+            case Pong() | GossipPushAck() | HandshakeAck():
+                pass # Acknowledgment received, already handled
 
     async def _send_via_transport(self, to_node: str, data: bytes) -> None:
         """Send gossip data via TransportMux (embedded mode)."""

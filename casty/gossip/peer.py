@@ -401,9 +401,4 @@ class PeerActor(Actor):
 
     async def _schedule_reconnect(self, delay: float) -> None:
         """Schedule a reconnection attempt."""
-
-        async def reconnect_later():
-            await asyncio.sleep(delay)
-            await self._ctx.self_ref.send(Reconnect())
-
-        asyncio.create_task(reconnect_later())
+        await self._ctx.schedule(delay, Reconnect())

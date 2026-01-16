@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from asyncio import Future, Queue
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Union, get_args, get_origin, Coroutine
 from types import UnionType
-from uuid import UUID, uuid4
+from uuid import UUID
+
+from . import detach
 
 if TYPE_CHECKING:
     from .supervision import SupervisorConfig, SupervisionDecision
     from .system import ActorSystem
     from .cluster.remote_ref import RemoteRef
-
+    from .detach import Detached
 
 def on(msg_type: type):
     """Decorator to register a message handler by type.
@@ -406,6 +408,41 @@ class Context[M]:
             supervision=supervision,
             **kwargs,
         )
+
+    async def schedule(self, timeout: float, message: M) -> str:
+        """Schedule message to self after timeout. Returns task_id for cancellation."""
+        return await self.system.schedule(timeout, self.self_ref, message)
+
+    async def cancel_schedule(self, task_id: str) -> None:
+        """Cancel a scheduled message by task_id."""
+        await self.system.cancel_schedule(task_id)
+
+    async def tick(self, message: M, interval: float) -> str:
+        """Start periodic message delivery to self. Returns subscription_id for cancellation.
+
+        Args:
+            message: The message to send periodically
+            interval: Time between messages in seconds
+
+        Returns:
+            Subscription ID for use with cancel_tick()
+
+        Example:
+            async def on_start(self):
+                self.tick_id = await self._ctx.tick(Ping(), interval=1.0)
+
+            async def on_stop(self):
+                await self._ctx.cancel_tick(self.tick_id)
+        """
+        return await self.system.tick(message, interval, self.self_ref)
+
+    async def cancel_tick(self, subscription_id: str) -> None:
+        """Cancel periodic message delivery by subscription_id."""
+        await self.system.cancel_tick(subscription_id)
+
+    def detach[R](self, coro: Coroutine[Any, Any, R]) -> "Detached[R]":
+        from .detach import Detached
+        return Detached(coro).bind(self)
 
     def reply(self, response: Any) -> None:
         """Reply to the current message (used with ask pattern).

@@ -324,18 +324,10 @@ class PeerManager(Actor):
 
     def _schedule_gossip_round(self) -> None:
         """Schedule next gossip round."""
-
-        async def later():
-            await asyncio.sleep(self._config.gossip_interval)
-            await self._ctx.self_ref.send(GossipRound())
-
-        self._gossip_task = asyncio.create_task(later())
+        detached = self._ctx.detach(asyncio.sleep(self._config.gossip_interval)).then(lambda _: GossipRound())
+        self._gossip_task = detached.task
 
     def _schedule_anti_entropy(self) -> None:
         """Schedule next anti-entropy round."""
-
-        async def later():
-            await asyncio.sleep(self._config.anti_entropy_interval)
-            await self._ctx.self_ref.send(AntiEntropyRound())
-
-        self._anti_entropy_task = asyncio.create_task(later())
+        detached = self._ctx.detach(asyncio.sleep(self._config.anti_entropy_interval)).then(lambda _: AntiEntropyRound())
+        self._anti_entropy_task = detached.task

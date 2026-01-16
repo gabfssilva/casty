@@ -12,7 +12,6 @@ The actor terminates after completing the probe sequence.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -99,8 +98,8 @@ class ProbeActor(Actor[ProbeMessage]):
         self.my_incarnation = my_incarnation
 
         self.start_time = 0.0
-        self.direct_timeout_task: asyncio.Task | None = None
-        self.indirect_timeout_task: asyncio.Task | None = None
+        self.direct_timeout_id: str | None = None
+        self.indirect_timeout_id: str | None = None
         self.pending_indirect_acks = 0
         self.received_ack = False
         self.target_incarnation: int | None = None
@@ -112,10 +111,10 @@ class ProbeActor(Actor[ProbeMessage]):
 
     async def on_stop(self) -> None:
         """Cleanup timeouts."""
-        if self.direct_timeout_task:
-            self.direct_timeout_task.cancel()
-        if self.indirect_timeout_task:
-            self.indirect_timeout_task.cancel()
+        if self.direct_timeout_id:
+            await self._ctx.cancel_schedule(self.direct_timeout_id)
+        if self.indirect_timeout_id:
+            await self._ctx.cancel_schedule(self.indirect_timeout_id)
 
     async def receive(self, msg: ProbeMessage, ctx: Context) -> None:
         """Handle messages during direct probe phase."""
@@ -157,14 +156,7 @@ class ProbeActor(Actor[ProbeMessage]):
         await self.send_wire_message(self.target_node_id, ping)
 
         # Start timeout
-        self.direct_timeout_task = asyncio.create_task(
-            self._timeout_after(self.config.ping_timeout, _DirectTimeout())
-        )
-
-    async def _timeout_after(self, delay: float, msg: Any) -> None:
-        """Wait and send timeout message to self."""
-        await asyncio.sleep(delay)
-        await self._ctx.self_ref.send(msg)
+        self.direct_timeout_id = await self._ctx.schedule(self.config.ping_timeout, _DirectTimeout())
 
     async def _handle_incoming(
         self, from_node: str, message: Any, ctx: Context
@@ -225,10 +217,10 @@ class ProbeActor(Actor[ProbeMessage]):
         if self.received_ack:
             return
 
-        # Cancel direct timeout task
-        if self.direct_timeout_task:
-            self.direct_timeout_task.cancel()
-            self.direct_timeout_task = None
+        # Cancel direct timeout
+        if self.direct_timeout_id:
+            await ctx.cancel_schedule(self.direct_timeout_id)
+            self.direct_timeout_id = None
 
         # If no intermediaries, fail immediately
         if not self.intermediaries:
@@ -249,9 +241,7 @@ class ProbeActor(Actor[ProbeMessage]):
             await self.send_wire_message(intermediary_id, ping_req)
 
         # Start indirect timeout
-        self.indirect_timeout_task = asyncio.create_task(
-            self._timeout_after(self.config.ping_req_timeout, _IndirectTimeout())
-        )
+        self.indirect_timeout_id = await self._ctx.schedule(self.config.ping_req_timeout, _IndirectTimeout())
 
     async def _handle_indirect_timeout(self, ctx: Context) -> None:
         """Indirect probe timed out - report failure."""
@@ -293,10 +283,10 @@ class ProbeActor(Actor[ProbeMessage]):
     async def _stop(self, ctx: Context) -> None:
         """Stop this ephemeral actor."""
         # Cancel any pending timeouts
-        if self.direct_timeout_task:
-            self.direct_timeout_task.cancel()
-        if self.indirect_timeout_task:
-            self.indirect_timeout_task.cancel()
+        if self.direct_timeout_id:
+            await ctx.cancel_schedule(self.direct_timeout_id)
+        if self.indirect_timeout_id:
+            await ctx.cancel_schedule(self.indirect_timeout_id)
 
         # Request parent to stop us
         if ctx.parent:

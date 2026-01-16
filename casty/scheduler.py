@@ -7,39 +7,59 @@ from typing import Any
 from casty import Actor, LocalRef, Context
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class Schedule:
+    """Schedule a message to be sent after a timeout.
+
+    Use with ask() to get the task_id for cancellation:
+        task_id = await scheduler.ask(Schedule(1.0, ref, MyMsg()))
+        await scheduler.send(Cancel(task_id))  # Cancel if needed
+    """
     timeout: float
     listener: LocalRef
     message: Any
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
+class Cancel:
+    """Cancel a scheduled message by task_id."""
+    task_id: str
+
+
+@dataclass(slots=True, frozen=True)
 class _Wake:
     task_id: str
     listener: LocalRef
     message: Any
 
 
-class Scheduler(Actor[Schedule | _Wake]):
+type SchedulerMessage = Schedule | Cancel | _Wake
+
+class Scheduler(Actor[SchedulerMessage]):
     pending: dict[str, Task]
 
     def __init__(self):
         self.pending = {}
 
-    async def receive(self, msg: Schedule | _Wake, ctx: Context[Schedule | _Wake]) -> None:
+    async def receive(self, msg: SchedulerMessage, ctx: Context[SchedulerMessage]) -> None:
         match msg:
-            case _Wake():
-                await (msg.listener >> msg.message)
-                del self.pending[msg.task_id]
+            case _Wake() as wake:
+                await (wake.listener >> wake.message)
+                self.pending.pop(wake.task_id, None)
             case Schedule():
                 task_id = f"{uuid.uuid4()}"
-                self.pending[task_id] = asyncio.create_task(self._schedule_task(task_id, msg, ctx))
+                detached = ctx.detach(self._schedule_task(task_id, msg))
+                self.pending[task_id] = detached.task
+                ctx.reply(task_id)
+            case Cancel(task_id):
+                task = self.pending.pop(task_id, None)
+                if task and not task.done():
+                    task.cancel()
 
     @staticmethod
-    async def _schedule_task(task_id: str, msg: Schedule, ctx: Context[Schedule | _Wake]) -> None:
+    async def _schedule_task(task_id: str, msg: Schedule) -> _Wake:
         await asyncio.sleep(msg.timeout)
-        await (ctx.self_ref >> _Wake(task_id, msg.listener, msg.message))
+        return _Wake(task_id, msg.listener, msg.message)
 
     async def on_stop(self) -> None:
         for task in self.pending.values():

@@ -6,7 +6,7 @@ including timing, fanout, Lifeguard suspicion, and network settings.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass
@@ -143,38 +143,8 @@ class SwimConfig:
 
     def with_bind_address(self, host: str, port: int) -> SwimConfig:
         """Return a copy with updated bind address."""
-        return SwimConfig(
-            protocol_period=self.protocol_period,
-            ping_timeout=self.ping_timeout,
-            ping_req_timeout=self.ping_req_timeout,
-            min_protocol_period=self.min_protocol_period,
-            max_protocol_period=self.max_protocol_period,
-            adaptation_alpha=self.adaptation_alpha,
-            ping_req_fanout=self.ping_req_fanout,
-            suspicion_alpha=self.suspicion_alpha,
-            suspicion_beta=self.suspicion_beta,
-            confirmation_threshold=self.confirmation_threshold,
-            max_piggyback_entries=self.max_piggyback_entries,
-            gossip_lambda=self.gossip_lambda,
-            bind_address=(host, port),
-            seeds=self.seeds.copy(),
-        )
+        return replace(self, bind_address=(host, port))
 
     def with_seeds(self, seeds: list[tuple[str, int]]) -> SwimConfig:
         """Return a copy with updated seeds."""
-        return SwimConfig(
-            protocol_period=self.protocol_period,
-            ping_timeout=self.ping_timeout,
-            ping_req_timeout=self.ping_req_timeout,
-            min_protocol_period=self.min_protocol_period,
-            max_protocol_period=self.max_protocol_period,
-            adaptation_alpha=self.adaptation_alpha,
-            ping_req_fanout=self.ping_req_fanout,
-            suspicion_alpha=self.suspicion_alpha,
-            suspicion_beta=self.suspicion_beta,
-            confirmation_threshold=self.confirmation_threshold,
-            max_piggyback_entries=self.max_piggyback_entries,
-            gossip_lambda=self.gossip_lambda,
-            bind_address=self.bind_address,
-            seeds=seeds.copy(),
-        )
+        return replace(self, seeds=seeds.copy())

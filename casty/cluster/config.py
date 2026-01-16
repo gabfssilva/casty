@@ -6,7 +6,7 @@ including network settings, SWIM configuration, and timeouts.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from casty.swim import SwimConfig
 
@@ -94,19 +94,11 @@ class ClusterConfig:
 
     def with_bind_address(self, host: str, port: int) -> ClusterConfig:
         """Return a copy with updated bind address."""
-        return ClusterConfig(
+        return replace(
+            self,
             bind_host=host,
             bind_port=port,
-            advertise_host=self.advertise_host,
-            advertise_port=self.advertise_port,
-            node_id=self.node_id,
-            seeds=self.seeds.copy(),
             swim_config=self.swim_config.with_bind_address(host, port),
-            connect_timeout=self.connect_timeout,
-            handshake_timeout=self.handshake_timeout,
-            ask_timeout=self.ask_timeout,
-            max_pending_asks=self.max_pending_asks,
-            ask_cleanup_interval=self.ask_cleanup_interval,
         )
 
     def with_seeds(self, seeds: list[str]) -> ClusterConfig:
@@ -115,43 +107,16 @@ class ClusterConfig:
         Args:
             seeds: List of seed nodes in "host:port" format.
         """
-        # Parse seeds for SWIM config
-        swim_seeds = []
-        for seed in seeds:
-            host, port_str = seed.rsplit(":", 1)
-            swim_seeds.append((host, int(port_str)))
-
-        return ClusterConfig(
-            bind_host=self.bind_host,
-            bind_port=self.bind_port,
-            advertise_host=self.advertise_host,
-            advertise_port=self.advertise_port,
-            node_id=self.node_id,
+        swim_seeds = [(h, int(p)) for h, p in (s.rsplit(":", 1) for s in seeds)]
+        return replace(
+            self,
             seeds=seeds.copy(),
             swim_config=self.swim_config.with_seeds(swim_seeds),
-            connect_timeout=self.connect_timeout,
-            handshake_timeout=self.handshake_timeout,
-            ask_timeout=self.ask_timeout,
-            max_pending_asks=self.max_pending_asks,
-            ask_cleanup_interval=self.ask_cleanup_interval,
         )
 
     def with_node_id(self, node_id: str) -> ClusterConfig:
         """Return a copy with updated node ID."""
-        return ClusterConfig(
-            bind_host=self.bind_host,
-            bind_port=self.bind_port,
-            advertise_host=self.advertise_host,
-            advertise_port=self.advertise_port,
-            node_id=node_id,
-            seeds=self.seeds.copy(),
-            swim_config=self.swim_config,
-            connect_timeout=self.connect_timeout,
-            handshake_timeout=self.handshake_timeout,
-            ask_timeout=self.ask_timeout,
-            max_pending_asks=self.max_pending_asks,
-            ask_cleanup_interval=self.ask_cleanup_interval,
-        )
+        return replace(self, node_id=node_id)
 
     def with_advertise_address(self, host: str, port: int) -> ClusterConfig:
         """Return a copy with updated advertise address.
@@ -159,17 +124,4 @@ class ClusterConfig:
         The advertise address is announced to other nodes instead of the
         bind address. Useful for NAT traversal or proxy scenarios.
         """
-        return ClusterConfig(
-            bind_host=self.bind_host,
-            bind_port=self.bind_port,
-            advertise_host=host,
-            advertise_port=port,
-            node_id=self.node_id,
-            seeds=self.seeds.copy(),
-            swim_config=self.swim_config,
-            connect_timeout=self.connect_timeout,
-            handshake_timeout=self.handshake_timeout,
-            ask_timeout=self.ask_timeout,
-            max_pending_asks=self.max_pending_asks,
-            ask_cleanup_interval=self.ask_cleanup_interval,
-        )
+        return replace(self, advertise_host=host, advertise_port=port)

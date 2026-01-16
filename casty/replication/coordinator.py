@@ -184,13 +184,13 @@ class ReplicationCoordinator(Actor[Any]):
         log.info(f"[CoordinateWrite] Sending writes to {len(preference_list)} replicas: {preference_list}")
         for i, node_id in enumerate(preference_list):
             if node_id == self.node_id:
-                # Local write - deliver directly
+                # Local write - deliver directly (fire-and-forget)
                 log.info(f"[Coordinator] ({i+1}/{len(preference_list)}) Local replica write for {request_id} to local node {node_id}")
-                asyncio.create_task(
+                self._ctx.detach(
                     self._local_replicated_write(
                         request_id, entity_type, entity_id, payload, actor_cls_fqn
                     )
-                )
+                ).discard()
             else:
                 # Remote write - send via network
                 log.info(f"[Coordinator] ({i+1}/{len(preference_list)}) Sending ReplicateWrite for {request_id} to remote node {node_id}")

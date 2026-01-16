@@ -2,7 +2,7 @@
 Gossip state data structures.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 
 from .versioning import VectorClock
@@ -45,15 +45,7 @@ class StateEntry:
 
     def with_status(self, status: EntryStatus) -> "StateEntry":
         """Return copy with new status."""
-        return StateEntry(
-            key=self.key,
-            value=self.value,
-            version=self.version,
-            status=status,
-            ttl=self.ttl,
-            origin=self.origin,
-            timestamp=self.timestamp,
-        )
+        return replace(self, status=status)
 
 
 @dataclass(frozen=True, slots=True)

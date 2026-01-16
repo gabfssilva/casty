@@ -6,12 +6,24 @@ import asyncio
 import dataclasses
 import logging
 from asyncio import Queue, Task
-from contextlib import contextmanager, asynccontextmanager, AsyncExitStack
+from contextlib import asynccontextmanager, AsyncExitStack
+
+import msgpack
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from .actor import Actor, ActorId, LocalRef, Context, Envelope, ShardedRef, _extract_actor_message_types
-from .scheduler import Scheduler, Schedule
+from .scheduler import Scheduler, Schedule, Cancel
+from .ticker import Ticker, Subscribe as TickerSubscribe, Unsubscribe as TickerUnsubscribe
+from .persistence import WriteAheadLog, Recover, Append, Snapshot, Close
+
+
+class _StopSentinel:
+    """Sentinel message to signal actor loop termination."""
+    __slots__ = ()
+
+
+_STOP = _StopSentinel()
 from .supervision import (
     ActorStopSignal,
     MultiChildStrategy,
@@ -52,7 +64,8 @@ class ActorSystem:
         self._mailboxes: dict[ActorId, Queue[Envelope[Any]]] = {}
         self._supervision_tree = SupervisionTreeManager()
         self._running = True
-        self._scheduler: LocalRef[Schedule] | None = None
+        self._scheduler: LocalRef | None = None
+        self._ticker: LocalRef | None = None
 
     @classmethod
     @asynccontextmanager
@@ -125,10 +138,45 @@ class ActorSystem:
         timeout: float,
         listener: LocalRef[R],
         message: R
-    ) -> None:
+    ) -> str:
+        """Schedule a message to be sent after timeout. Returns task_id for cancellation."""
         if self._scheduler is None:
             self._scheduler = await self.spawn(Scheduler)
-        await (self._scheduler >> Schedule(timeout=timeout, listener=listener, message=message))
+        task_id = await self._scheduler.ask(Schedule(timeout=timeout, listener=listener, message=message))
+        return task_id
+
+    async def cancel_schedule(self, task_id: str) -> None:
+        """Cancel a scheduled message by task_id."""
+        if self._scheduler:
+            await self._scheduler.send(Cancel(task_id))
+
+    async def tick[R](
+        self,
+        message: R,
+        interval: float,
+        listener: LocalRef[R],
+    ) -> str:
+        """Start periodic message delivery. Returns subscription_id for cancellation.
+
+        Args:
+            message: The message to send periodically
+            interval: Time between messages in seconds
+            listener: The actor to receive the messages
+
+        Returns:
+            Subscription ID for use with cancel_tick()
+        """
+        if self._ticker is None:
+            self._ticker = await self.spawn(Ticker)
+        subscription_id = await self._ticker.ask(
+            TickerSubscribe(listener=listener, message=message, interval=interval)
+        )
+        return subscription_id
+
+    async def cancel_tick(self, subscription_id: str) -> None:
+        """Cancel periodic message delivery by subscription_id."""
+        if self._ticker:
+            await self._ticker.send(TickerUnsubscribe(subscription_id))
 
     async def spawn[M](
         self,
@@ -241,9 +289,6 @@ class ActorSystem:
         # Setup WAL if durable
         wal_ref: LocalRef | None = None
         if durable:
-            from .persistence import WriteAheadLog, Recover
-            import msgpack
-
             # Spawn WAL actor as child
             wal_ref = await self._spawn_child(
                 parent_ctx=ctx,
@@ -311,9 +356,6 @@ class ActorSystem:
             await counter.send(Increment(10))
             await system.snapshot_durable_actor(counter)  # Force snapshot now
         """
-        from .persistence import Snapshot
-        import msgpack
-
         # Get the supervision node for this actor
         actor_id = actor_ref.id
         node = self._supervision_tree.get_node(actor_id)
@@ -352,11 +394,12 @@ class ActorSystem:
         try:
             await actor.on_start()
 
-            while self._running:
-                try:
-                    envelope = await asyncio.wait_for(mailbox.get(), timeout=0.1)
-                except asyncio.TimeoutError:
-                    continue
+            while True:
+                envelope = await mailbox.get()
+
+                # Check for stop sentinel
+                if isinstance(envelope.payload, _StopSentinel):
+                    break
 
                 # Create immutable context for this message
                 # This allows async callbacks to safely use ctx.reply() after handler returns
@@ -368,12 +411,8 @@ class ActorSystem:
                 current_msg = envelope.payload
 
                 try:
-
                     # WAL: Log message BEFORE processing
                     if wal_ref:
-                        from .persistence import Append
-                        import msgpack
-
                         # Convert dataclass to dict for serialization
                         if dataclasses.is_dataclass(current_msg):
                             msg_dict = dataclasses.asdict(current_msg)
@@ -392,7 +431,6 @@ class ActorSystem:
                     if wal_ref:
                         snapshot_counter += 1
                         if snapshot_counter >= 1000:  # TODO: configurable
-                            from .persistence import Snapshot
                             state = self._get_state(actor)
                             state_bytes = msgpack.packb(state, use_bin_type=True)
                             await wal_ref.send(Snapshot(state_bytes))
@@ -419,7 +457,6 @@ class ActorSystem:
 
             # Close WAL
             if wal_ref:
-                from .persistence import Close
                 await wal_ref.send(Close())
 
             await self._supervision_tree.unregister(actor_id)
@@ -617,14 +654,18 @@ class ActorSystem:
     async def shutdown(self) -> None:
         """Stop all actors gracefully.
 
-        Sets _running to False and waits for actors to finish.
+        Sends stop sentinel to all mailboxes and waits for actors to finish.
         Safe to call from within an actor.
         """
         self._running = False
+
+        # Send stop sentinel to all mailboxes
+        for mailbox in self._mailboxes.values():
+            await mailbox.put(Envelope(_STOP))
+
+        # Wait for all actor tasks to complete
         current = asyncio.current_task()
         others = [t for t in self._actors.values() if t is not current]
-        for task in others:
-            task.cancel()
         if others:
             await asyncio.gather(*others, return_exceptions=True)
 
