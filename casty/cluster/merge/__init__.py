@@ -7,9 +7,8 @@ using a three-way merge algorithm (similar to git).
 
 Core Components:
     Mergeable: Protocol for actors that support merging
-    MergeableActor: Wrapper that adds version tracking to actors
-    MergeableState: State container for version/snapshot tracking
-    ActorVersion: Version tracking for conflict detection
+    VectorClock: Vector clock for causality tracking
+    WAL: Write-Ahead Log for state history
     is_mergeable: Check if an actor implements Mergeable
 
 Merge Helpers:
@@ -24,7 +23,7 @@ Merge Helpers:
     merge_dict_shallow: Dictionary merge at key level
 
 Example:
-    from casty.merge import Mergeable, merge_sum
+    from casty.cluster.merge import Mergeable, merge_sum
 
     class Account(Actor):
         def __init__(self):
@@ -37,15 +36,17 @@ Example:
                 case GetBalance():
                     ctx.reply(self.balance)
 
+        def get_state(self) -> dict:
+            return {"balance": self.balance}
+
+        def set_state(self, state: dict) -> None:
+            self.balance = state["balance"]
+
         def __casty_merge__(self, base: 'Account', other: 'Account'):
             # Concurrent deposits add up correctly
             self.balance = merge_sum(base.balance, self.balance, other.balance)
-
-    # The cluster detects Account implements Mergeable and wraps it:
-    # mergeable = MergeableActor(account_instance)
 """
 
-from .actor import MergeableActor, MergeableState, is_mergeable
 from .helpers import (
     merge_dict_shallow,
     merge_intersection,
@@ -58,17 +59,31 @@ from .helpers import (
     merge_union,
 )
 from .protocol import Mergeable
-from .version import ActorVersion
+from .replication import handle_replicate_state
+from .version import VectorClock
+from .wal import WAL, WALEntry
+
+
+def is_mergeable(actor: object) -> bool:
+    """Check if an actor implements the Mergeable protocol."""
+    return (
+        hasattr(actor, "__casty_merge__")
+        and hasattr(actor, "get_state")
+        and hasattr(actor, "set_state")
+    )
+
 
 __all__ = [
     # Protocol
     "Mergeable",
-    # Wrapper
-    "MergeableActor",
-    "MergeableState",
     "is_mergeable",
     # Versioning
-    "ActorVersion",
+    "VectorClock",
+    # WAL
+    "WAL",
+    "WALEntry",
+    # Replication
+    "handle_replicate_state",
     # Helpers
     "merge_sum",
     "merge_max",

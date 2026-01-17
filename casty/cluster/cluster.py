@@ -15,6 +15,7 @@ from casty import Actor, Context, LocalRef
 
 from .config import ClusterConfig
 from .hash_ring import HashRing
+from .merge import WAL, VectorClock, handle_replicate_state
 from .messages import (
     Send,
     Node,
@@ -46,6 +47,10 @@ from .messages import (
     ClusteredAsk,
     ClusteredAskResponse,
     ActorRegistered,
+    ReplicateState,
+    ReplicateAck,
+    RequestFullSync,
+    FullSyncResponse,
 )
 from .transport import Connect
 from .tcp import TcpTransport
@@ -146,6 +151,7 @@ class Cluster(Actor[ClusterMessage]):
         self._local_actors: dict[str, LocalRef[Any]] = {}
         self._pending_asks: dict[str, asyncio.Future[Any]] = {}
         self._pending_sends: dict[str, tuple[int, int, Context]] = {}
+        self._wals: dict[str, WAL] = {}
 
     @property
     def node_id(self) -> str:
@@ -268,6 +274,14 @@ class Cluster(Actor[ClusterMessage]):
                 await self._handle_remote_clustered_ask(node_id, payload)
             case ClusteredAskResponse():
                 await self._handle_clustered_ask_response(payload)
+            case ReplicateState():
+                await self._handle_replicate_state(node_id, payload)
+            case ReplicateAck():
+                pass
+            case RequestFullSync():
+                await self._handle_request_full_sync(node_id, payload)
+            case FullSyncResponse():
+                await self._handle_full_sync_response(payload)
             case _:
                 await self._broadcast_to_subscribers(payload)
 
@@ -565,6 +579,8 @@ class Cluster(Actor[ClusterMessage]):
         if self._node_id in preference_list:
             ref = await ctx.spawn(actor_cls)
             self._local_actors[actor_id] = ref
+            wal = WAL(actor_id=actor_id, node_id=self._node_id)
+            self._wals[actor_id] = wal
 
         await self._broadcast(ActorRegistered(
             actor_id=actor_id,
@@ -595,6 +611,13 @@ class Cluster(Actor[ClusterMessage]):
             if self._node_id in preference_list:
                 ref = await self._ctx.spawn(actor_cls)
                 self._local_actors[msg.actor_id] = ref
+                wal = WAL(actor_id=msg.actor_id, node_id=self._node_id)
+                self._wals[msg.actor_id] = wal
+                await self._request_full_sync(msg.actor_id, msg.owner_node)
+
+    async def _request_full_sync(self, actor_id: str, owner_node: str) -> None:
+        if owner_node != self._node_id and owner_node in self._members:
+            await self._send_to_node(owner_node, RequestFullSync(actor_id=actor_id))
 
     def _resolve_actor_class(self, fqn: str) -> type | None:
         try:
@@ -659,6 +682,7 @@ class Cluster(Actor[ClusterMessage]):
 
         info = self._clustered_actors.get(send.actor_id)
         node = self._ctx.system._supervision_tree.get_node(local_ref.id)
+        wal = self._wals.get(send.actor_id)
 
         state_before = None
         if info and node:
@@ -674,6 +698,27 @@ class Cluster(Actor[ClusterMessage]):
             state_after = actor.get_state()
             if state_before != state_after:
                 info.version += 1
+                delta = {k: v for k, v in state_after.items() if state_before.get(k) != v}
+                if wal and delta:
+                    new_version = wal.append(delta)
+                    await self._replicate_to_peers(send.actor_id, new_version, state_after)
+
+    async def _replicate_to_peers(
+        self,
+        actor_id: str,
+        version: VectorClock,
+        state: dict[str, Any],
+    ) -> None:
+        info = self._clustered_actors.get(actor_id)
+        if info is None:
+            return
+
+        preference_list = self._hash_ring.get_preference_list(actor_id, info.replication)
+        replicate_msg = ReplicateState(actor_id=actor_id, version=version, state=state)
+
+        for target_node in preference_list:
+            if target_node != self._node_id and target_node in self._members:
+                await self._send_to_node(target_node, replicate_msg)
 
     async def _handle_clustered_send_ack(self, ack: ClusteredSendAck) -> None:
         await self._record_send_ack(ack.request_id)
@@ -808,3 +853,50 @@ class Cluster(Actor[ClusterMessage]):
 
         data = msgpack.unpackb(payload, raw=False)
         return cls(**data)
+
+    async def _handle_replicate_state(self, from_node: str, msg: ReplicateState) -> None:
+        local_ref = self._local_actors.get(msg.actor_id)
+        wal = self._wals.get(msg.actor_id)
+        if local_ref is None or wal is None:
+            return
+
+        node = self._ctx.system._supervision_tree.get_node(local_ref.id)
+        if node is None:
+            return
+
+        actor = node.actor_instance
+        ack = await handle_replicate_state(msg, actor, wal, self._node_id)
+        await self._send_to_node(from_node, ack)
+
+    async def _handle_request_full_sync(self, from_node: str, msg: RequestFullSync) -> None:
+        local_ref = self._local_actors.get(msg.actor_id)
+        wal = self._wals.get(msg.actor_id)
+        if local_ref is None or wal is None:
+            return
+
+        node = self._ctx.system._supervision_tree.get_node(local_ref.id)
+        if node is None:
+            return
+
+        actor = node.actor_instance
+        state = actor.get_state()
+        version = wal.current_version
+
+        await self._send_to_node(
+            from_node,
+            FullSyncResponse(actor_id=msg.actor_id, version=version, state=state),
+        )
+
+    async def _handle_full_sync_response(self, msg: FullSyncResponse) -> None:
+        local_ref = self._local_actors.get(msg.actor_id)
+        wal = self._wals.get(msg.actor_id)
+        if local_ref is None or wal is None:
+            return
+
+        node = self._ctx.system._supervision_tree.get_node(local_ref.id)
+        if node is None:
+            return
+
+        actor = node.actor_instance
+        actor.set_state(msg.state)
+        wal.sync_to(msg.version, msg.state)

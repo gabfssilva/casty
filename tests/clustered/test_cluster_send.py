@@ -4,9 +4,8 @@ from dataclasses import dataclass
 
 import msgpack
 
-from casty import ActorSystem
+from casty import Actor, ActorSystem
 from casty.cluster import Cluster, ClusterConfig
-from casty.cluster.clustered_actor import ClusteredActor
 from casty.cluster.messages import RegisterClusteredActor, ClusteredSend, ClusteredAsk
 
 
@@ -20,7 +19,7 @@ class GetCount:
     pass
 
 
-class CounterActor(ClusteredActor[Increment | GetCount]):
+class CounterActor(Actor[Increment | GetCount]):
     def __init__(self):
         self.count = 0
 

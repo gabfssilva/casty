@@ -4,9 +4,8 @@ from dataclasses import dataclass
 
 import msgpack
 
-from casty import ActorSystem
+from casty import Actor, ActorSystem
 from casty.cluster import Cluster, ClusterConfig
-from casty.cluster.clustered_actor import ClusteredActor
 from casty.cluster.messages import (
     RegisterClusteredActor,
     ClusteredSend,
@@ -19,7 +18,7 @@ class SetValue:
     value: int
 
 
-class ValueActor(ClusteredActor[SetValue]):
+class ValueActor(Actor[SetValue]):
     def __init__(self):
         self.value = 0
 
@@ -79,7 +78,7 @@ class TestReplication:
             class ReadOnly:
                 pass
 
-            class ReadOnlyActor(ClusteredActor[ReadOnly]):
+            class ReadOnlyActor(Actor[ReadOnly]):
                 def __init__(self):
                     self.value = 42
 

@@ -6,6 +6,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from casty import LocalRef
 
+from .merge.version import VectorClock
 from .serializable import serializable
 
 
@@ -164,18 +165,35 @@ class HandshakeAck:
 @serializable
 @dataclass(frozen=True, slots=True)
 class ReplicateState:
+    """Sent after mutation to sync state between replicas."""
     actor_id: str
-    state: bytes
-    version: int
+    version: VectorClock
+    state: dict[str, Any]
 
 
 @serializable
 @dataclass(frozen=True, slots=True)
 class ReplicateAck:
+    """Acknowledgment of replication."""
     actor_id: str
-    node_id: str
-    version: int
+    version: VectorClock
     success: bool
+
+
+@serializable
+@dataclass(frozen=True, slots=True)
+class RequestFullSync:
+    """Request full state sync (for new nodes)."""
+    actor_id: str
+
+
+@serializable
+@dataclass(frozen=True, slots=True)
+class FullSyncResponse:
+    """Response with full state."""
+    actor_id: str
+    version: VectorClock
+    state: dict[str, Any]
 
 
 @serializable

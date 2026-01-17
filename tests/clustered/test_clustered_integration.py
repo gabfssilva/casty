@@ -4,11 +4,10 @@ from dataclasses import dataclass
 
 import msgpack
 
-from casty import ActorSystem
+from casty import Actor, ActorSystem
 from casty.cluster import (
     Cluster,
     ClusterConfig,
-    ClusteredActor,
     ClusteredRef,
     RegisterClusteredActor,
     ClusteredSend,
@@ -27,7 +26,7 @@ class GetCount:
     pass
 
 
-class Counter(ClusteredActor[Increment | GetCount]):
+class Counter(Actor[Increment | GetCount]):
     def __init__(self):
         self.count = 0
 
@@ -39,7 +38,7 @@ class Counter(ClusteredActor[Increment | GetCount]):
                 ctx.reply(self.count)
 
 
-class TestClusteredActorIntegration:
+class TestActorIntegration:
     @pytest.mark.asyncio
     async def test_full_flow_single_node(self):
         async with ActorSystem() as system:

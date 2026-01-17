@@ -1,7 +1,8 @@
 import pytest
 from dataclasses import dataclass
 
-from casty.cluster.clustered_actor import ClusteredActor
+from casty import Actor, ActorSystem, LocalRef
+from casty.cluster import ClusteredRef
 
 
 @dataclass
@@ -14,7 +15,7 @@ class GetCount:
     pass
 
 
-class Counter(ClusteredActor[Increment | GetCount]):
+class Counter(Actor[Increment | GetCount]):
     def __init__(self):
         self.count = 0
 
@@ -28,46 +29,33 @@ class Counter(ClusteredActor[Increment | GetCount]):
 
 class TestClusteredActorSystem:
     @pytest.mark.asyncio
-    async def test_inherits_from_actor_system(self):
-        from casty import ActorSystem
+    async def test_factory_returns_clustered_system(self):
         from casty.cluster.clustered_system import ClusteredActorSystem
 
-        assert issubclass(ClusteredActorSystem, ActorSystem)
+        system = ActorSystem.clustered(port=18000)
+        assert isinstance(system, ClusteredActorSystem)
 
     @pytest.mark.asyncio
     async def test_spawn_local_actor(self):
-        from casty.cluster.clustered_system import ClusteredActorSystem
-        from casty.cluster import ClusterConfig
-        from casty import LocalRef
-
-        async with ClusteredActorSystem(ClusterConfig(bind_port=18000)) as system:
+        async with ActorSystem.clustered(port=18000) as system:
             ref = await system.spawn(Counter)
             assert isinstance(ref, LocalRef)
 
     @pytest.mark.asyncio
     async def test_spawn_clustered_actor(self):
-        from casty.cluster.clustered_system import ClusteredActorSystem
-        from casty.cluster import ClusterConfig, ClusteredRef
-
-        async with ClusteredActorSystem(ClusterConfig(bind_port=18001)) as system:
+        async with ActorSystem.clustered(port=18001) as system:
             ref = await system.spawn(Counter, clustered=True)
             assert isinstance(ref, ClusteredRef)
 
     @pytest.mark.asyncio
     async def test_clustered_actor_has_local_ref(self):
-        from casty.cluster.clustered_system import ClusteredActorSystem
-        from casty.cluster import ClusterConfig
-
-        async with ClusteredActorSystem(ClusterConfig(bind_port=18002)) as system:
+        async with ActorSystem.clustered(port=18002) as system:
             ref = await system.spawn(Counter, clustered=True, replication=1)
             assert ref.local_ref is not None
 
     @pytest.mark.asyncio
     async def test_clustered_send_and_ask(self):
-        from casty.cluster.clustered_system import ClusteredActorSystem
-        from casty.cluster import ClusterConfig
-
-        async with ClusteredActorSystem(ClusterConfig(bind_port=18003)) as system:
+        async with ActorSystem.clustered(port=18003) as system:
             ref = await system.spawn(Counter, clustered=True)
 
             await ref.send(Increment(10))
@@ -78,9 +66,5 @@ class TestClusteredActorSystem:
 
     @pytest.mark.asyncio
     async def test_node_id_property(self):
-        from casty.cluster.clustered_system import ClusteredActorSystem
-        from casty.cluster import ClusterConfig
-
-        config = ClusterConfig(bind_port=18004, node_id="my-node")
-        async with ClusteredActorSystem(config) as system:
+        async with ActorSystem.clustered(port=18004, node_id="my-node") as system:
             assert system.node_id == "my-node"

@@ -6,7 +6,6 @@ from uuid import uuid4
 from casty import Actor, ActorSystem, LocalRef
 
 from .cluster import Cluster
-from .clustered_actor import ClusteredActor
 from .clustered_ref import ClusteredRef
 from .config import ClusterConfig
 from .consistency import Consistency, Replication

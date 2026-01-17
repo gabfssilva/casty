@@ -1,7 +1,8 @@
 import pytest
 from dataclasses import dataclass
 
-from casty.cluster import ClusteredActor, DevelopmentCluster
+from casty import Actor
+from casty.cluster import DevelopmentCluster
 
 
 @dataclass
@@ -19,7 +20,7 @@ class GetCount:
     pass
 
 
-class PingActor(ClusteredActor[Ping]):
+class PingActor(Actor[Ping]):
     def __init__(self):
         self.pings = 0
 
@@ -30,7 +31,7 @@ class PingActor(ClusteredActor[Ping]):
                 ctx.reply(self.pings)
 
 
-class Counter(ClusteredActor[Increment | GetCount]):
+class Counter(Actor[Increment | GetCount]):
     def __init__(self):
         self.count = 0
 

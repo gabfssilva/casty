@@ -81,28 +81,55 @@ class TestHandshake:
 class TestReplicationMessages:
     def test_replicate_state(self):
         from casty.cluster.messages import ReplicateState
+        from casty.cluster.merge.version import VectorClock
         from casty.cluster.serializable import deserialize
 
-        msg = ReplicateState(actor_id="user-123", state=b"serialized", version=5)
+        version = VectorClock({"node-1": 5})
+        msg = ReplicateState(actor_id="user-123", version=version, state={"key": "value"})
         data = msg.Codec.serialize(msg)
         restored = deserialize(data)
 
         assert restored.actor_id == "user-123"
-        assert restored.state == b"serialized"
-        assert restored.version == 5
+        assert restored.state == {"key": "value"}
+        assert restored.version == version
 
     def test_replicate_ack(self):
         from casty.cluster.messages import ReplicateAck
+        from casty.cluster.merge.version import VectorClock
         from casty.cluster.serializable import deserialize
 
-        msg = ReplicateAck(actor_id="user-123", node_id="node-1", version=5, success=True)
+        version = VectorClock({"node-1": 5})
+        msg = ReplicateAck(actor_id="user-123", version=version, success=True)
         data = msg.Codec.serialize(msg)
         restored = deserialize(data)
 
         assert restored.actor_id == "user-123"
-        assert restored.node_id == "node-1"
-        assert restored.version == 5
+        assert restored.version == version
         assert restored.success is True
+
+    def test_request_full_sync(self):
+        from casty.cluster.messages import RequestFullSync
+        from casty.cluster.serializable import deserialize
+
+        msg = RequestFullSync(actor_id="user-123")
+        data = msg.Codec.serialize(msg)
+        restored = deserialize(data)
+
+        assert restored.actor_id == "user-123"
+
+    def test_full_sync_response(self):
+        from casty.cluster.messages import FullSyncResponse
+        from casty.cluster.merge.version import VectorClock
+        from casty.cluster.serializable import deserialize
+
+        version = VectorClock({"node-1": 3, "node-2": 5})
+        msg = FullSyncResponse(actor_id="user-123", version=version, state={"count": 42})
+        data = msg.Codec.serialize(msg)
+        restored = deserialize(data)
+
+        assert restored.actor_id == "user-123"
+        assert restored.version == version
+        assert restored.state == {"count": 42}
 
     def test_clustered_spawn(self):
         from casty.cluster.messages import ClusteredSpawn

@@ -1,7 +1,7 @@
 import pytest
 from dataclasses import dataclass
 
-from casty.cluster.clustered_actor import ClusteredActor
+from casty import Actor
 
 
 @dataclass
@@ -9,7 +9,7 @@ class Ping:
     pass
 
 
-class PingActor(ClusteredActor[Ping]):
+class PingActor(Actor[Ping]):
     def __init__(self):
         self.pings = 0
 
