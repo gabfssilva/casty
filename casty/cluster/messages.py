@@ -6,7 +6,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from casty import LocalRef
 
-from .merge.version import VectorClock
+from casty.wal import VectorClock
 from .serializable import serializable
 
 

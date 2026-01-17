@@ -6,14 +6,10 @@ from casty import Actor, ActorSystem, Context
 
 
 @dataclass
-class Inc:
-    n: int = 1
-
+class Inc: n: int = 1
 
 @dataclass
-class Get:
-    pass
-
+class Get: pass
 
 class Counter(Actor[Inc | Get]):
     def __init__(self):
@@ -24,19 +20,19 @@ class Counter(Actor[Inc | Get]):
             case Inc(n):
                 self.count += n
             case Get():
-                ctx.reply(self.count)
+                await ctx.reply(self.count)
 
 
 async def main():
     async with ActorSystem() as system:
         counter = await system.spawn(Counter)
 
-        await (counter >> Inc(5))
-        await (counter >> Inc(3))
+        for i in range(1, 101):
+            await (counter >> Inc(i))
 
         result: int = await (counter << Get())
+
         print(f'Result: {result}')
-        assert result == 8, f'Expected 8, got {result}'
 
 
 if __name__ == '__main__':

@@ -71,14 +71,14 @@ class RateLimiter(Actor[CheckToken | GetStatus | Reset]):
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     self.requests_allowed += 1
-                    ctx.reply(True)
+                    await ctx.reply(True)
                 else:
                     self.requests_denied += 1
-                    ctx.reply(False)
+                    await ctx.reply(False)
 
             case GetStatus():
                 self._refill()
-                ctx.reply({
+                await ctx.reply({
                     "tokens": round(self.tokens, 2),
                     "rate": self.rate,
                     "capacity": self.capacity,

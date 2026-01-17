@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Union, get_args, get
 from types import UnionType
 from uuid import UUID
 
-from . import detach
 from .stateful import Stateful
 
 if TYPE_CHECKING:
@@ -29,7 +28,7 @@ def on(msg_type: type):
 
             @on(GetCount)
             async def handle_query(self, msg: GetCount, ctx: Context):
-                ctx.reply(self.count)
+                await ctx.reply(self.count)
     """
     def decorator(fn):
         fn._handler_for = msg_type
@@ -119,7 +118,6 @@ class Envelope[M]:
     """Internal wrapper for messages (supports ask pattern and sender tracking)."""
 
     payload: M
-    reply_to: Future[Any] | None = None
     sender: "LocalRef[Any] | None" = None
 
 
@@ -195,7 +193,7 @@ class LocalRef[M]:
         Args:
             msg: The message to send
             timeout: Maximum time to wait for response in seconds
-            sender: Optional sender reference
+            sender: Optional sender reference (overrides _ReplyActor if provided)
 
         Returns:
             The response from the actor
@@ -207,14 +205,25 @@ class LocalRef[M]:
 
         loop = asyncio.get_running_loop()
         future: Future[R] = loop.create_future()
-        envelope = Envelope(msg, reply_to=future, sender=sender)
+
+        # Spawn a temporary _ReplyActor to receive the response
+        reply_ref = await self._system.spawn(_ReplyActor, future=future)
+
+        # Use the provided sender or the reply_ref
+        actual_sender = sender if sender is not None else reply_ref
+        envelope = Envelope(msg, sender=actual_sender)
 
         if self._send_impl:
             await self._send_impl(envelope)
         else:
             await self._mailbox.put(envelope)
 
-        return await asyncio.wait_for(future, timeout=timeout)
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            # Clean up the reply actor - it may have already stopped itself,
+            # but we ensure it's stopped in case of timeout or other issues
+            await self._system.stop(reply_ref)
 
     def __rshift__(self, msg: M) -> Awaitable[None]:
         """Operator >> for send (tell pattern).
@@ -445,15 +454,14 @@ class Context[M]:
         from .detach import Detached
         return Detached(coro).bind(self)
 
-    def reply(self, response: Any) -> None:
+    async def reply(self, response: Any) -> None:
         """Reply to the current message (used with ask pattern).
 
         Args:
             response: The response to send back to the caller
         """
-        if self._current_envelope and self._current_envelope.reply_to:
-            if not self._current_envelope.reply_to.done():
-                self._current_envelope.reply_to.set_result(response)
+        if self.sender:
+            await self.sender.send(response)
 
     @property
     def children(self) -> dict[ActorId, LocalRef[Any]]:
@@ -675,6 +683,21 @@ class Actor[M](ABC, Stateful):
         # If no handler found and receive was overridden, it will be called
         # If not overridden and no handler, raise NotImplementedError
         raise NotImplementedError(f"No handler for {type(msg).__name__}")
+
+
+class _ReplyActor[R](Actor[R]):
+    """Internal actor for ask() pattern.
+
+    Receives a single response and resolves the Future.
+    The actor is cleaned up by ask() in its finally block.
+    """
+
+    def __init__(self, future: Future[R]) -> None:
+        self._future = future
+
+    async def receive(self, msg: R, ctx: Context) -> None:
+        if not self._future.done():
+            self._future.set_result(msg)
 
 
 # Sharded actor types

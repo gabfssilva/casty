@@ -49,6 +49,8 @@ dev = [
     "pytest-cov>=7.0.0",
     "vulture>=2.14",
     "dead>=2.1.0",
+    "aiohttp>=3.13.3",
+    "watchdog>=6.0.0",
 ]
 
 [tool.pytest.ini_options]

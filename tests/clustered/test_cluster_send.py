@@ -28,7 +28,7 @@ class CounterActor(Actor[Increment | GetCount]):
             case Increment(amount=amount):
                 self.count += amount
             case GetCount():
-                ctx.reply(self.count)
+                await ctx.reply(self.count)
 
 
 class TestClusterSend:

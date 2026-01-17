@@ -41,9 +41,9 @@ class TickCollector(Actor[Any]):
                 self.tick_count += 1
                 self.received_tick = True
             case GetCount():
-                ctx.reply(self.tick_count)
+                await ctx.reply(self.tick_count)
             case GetReceived():
-                ctx.reply(self.received_tick)
+                await ctx.reply(self.received_tick)
 
 
 class TestSchedulerBasic:
@@ -206,7 +206,7 @@ class TestSchedulerCustomMessages:
                     case CustomAlert():
                         self.alerts.append(msg)
                     case GetAlerts():
-                        ctx.reply(self.alerts)
+                        await ctx.reply(self.alerts)
 
         scheduler = await system.spawn(Scheduler)
         collector = await system.spawn(AlertCollector)
@@ -251,7 +251,7 @@ class TestSchedulerCustomMessages:
                     case MsgB():
                         self.b_count += 1
                     case GetMessages():
-                        ctx.reply((self.a_count, self.b_count))
+                        await ctx.reply((self.a_count, self.b_count))
 
         scheduler = await system.spawn(Scheduler)
         collector = await system.spawn(MultiCollector)
@@ -355,7 +355,7 @@ class TestActorRefSchedule:
                     case Reminder(text):
                         self.reminders.append(text)
                     case GetReminders():
-                        ctx.reply(self.reminders)
+                        await ctx.reply(self.reminders)
 
         actor = await system.spawn(ReminderActor)
 

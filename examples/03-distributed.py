@@ -57,7 +57,7 @@ class CacheManager(Actor[CacheGet | CacheSet]):
             case CacheGet(key):
                 value = self.cache.get(key)
                 print(f"[CacheManager] GET {key} -> {value}")
-                ctx.reply(value)
+                await ctx.reply(value)
             case CacheSet(key, value):
                 self.cache[key] = value
                 print(f"[CacheManager] SET {key} = {value}")
@@ -88,13 +88,13 @@ class Account(Actor[Deposit | Withdraw | GetBalance]):
                 if amount <= self.balance:
                     self.balance -= amount
                     print(f"[Account:{self.entity_id}] Withdrew ${amount:.2f}, balance: ${self.balance:.2f}")
-                    ctx.reply(True)
+                    await ctx.reply(True)
                 else:
                     print(f"[Account:{self.entity_id}] Insufficient funds for ${amount:.2f}")
-                    ctx.reply(False)
+                    await ctx.reply(False)
 
             case GetBalance():
-                ctx.reply(self.balance)
+                await ctx.reply(self.balance)
 
 
 async def main():

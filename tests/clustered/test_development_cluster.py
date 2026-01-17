@@ -17,7 +17,7 @@ class PingActor(Actor[Ping]):
         match msg:
             case Ping():
                 self.pings += 1
-                ctx.reply(self.pings)
+                await ctx.reply(self.pings)
 
 
 class TestDevelopmentCluster:

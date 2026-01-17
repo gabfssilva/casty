@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import logging
 from asyncio import Queue, Task
@@ -198,6 +199,10 @@ class ActorSystem:
         Returns:
             Reference to the spawned actor
         """
+        # Check class-level supervision config if not explicitly provided
+        if supervision is None:
+            supervision = getattr(actor_cls, "supervision_config", None)
+
         return await self._spawn_internal(
             actor_cls=actor_cls,
             name=name,
@@ -206,6 +211,27 @@ class ActorSystem:
             durable=durable,
             **kwargs,
         )
+
+    async def stop(self, ref: LocalRef[Any]) -> bool:
+        """Stop an actor by its reference.
+
+        Args:
+            ref: Reference to the actor to stop
+
+        Returns:
+            True if actor was found and stopped, False otherwise
+        """
+        actor_id = ref.id
+        task = self._actors.get(actor_id)
+        if task:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            return True
+        return False
 
     async def _spawn_child[M](
         self,
@@ -589,6 +615,14 @@ class ActorSystem:
 
         # Create new actor instance
         new_actor = node.actor_cls(**node.kwargs)
+
+        # Deep copy state from old to new instance
+        for key, value in actor.__dict__.items():
+            if key != '_ctx':
+                try:
+                    setattr(new_actor, key, copy.deepcopy(value))
+                except TypeError:
+                    setattr(new_actor, key, value)
 
         # Update node with new instance
         node.actor_instance = new_actor

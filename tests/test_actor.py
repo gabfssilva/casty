@@ -136,7 +136,7 @@ class TestActorAsk:
         class SlowActor(Actor[Ping]):
             async def receive(self, msg: Ping, ctx: Context) -> None:
                 await asyncio.sleep(10)  # Very slow
-                ctx.reply("done")
+                await ctx.reply("done")
 
         slow = await system.spawn(SlowActor)
 
@@ -176,7 +176,7 @@ class TestActorContext:
 
         class SelfAwareActor(Actor[GetSelfId]):
             async def receive(self, msg: GetSelfId, ctx: Context) -> None:
-                ctx.reply(ctx.self_ref.id)
+                await ctx.reply(ctx.self_ref.id)
 
         actor = await system.spawn(SelfAwareActor, name="self-aware")
 
@@ -203,9 +203,9 @@ class TestActorContext:
                     case SpawnAndCount():
                         await ctx.spawn(Counter, name=f"child-{self.children_spawned}")
                         self.children_spawned += 1
-                        ctx.reply(self.children_spawned)
+                        await ctx.reply(self.children_spawned)
                     case GetValue():
-                        ctx.reply(len(ctx.children))
+                        await ctx.reply(len(ctx.children))
 
         parent = await system.spawn(ParentActor)
 
@@ -230,9 +230,9 @@ class TestActorContext:
 
         class MultiReplyActor(Actor[MultiReply]):
             async def receive(self, msg: MultiReply, ctx: Context) -> None:
-                ctx.reply("first")
-                ctx.reply("second")  # Should be ignored
-                ctx.reply("third")  # Should be ignored
+                await ctx.reply("first")
+                await ctx.reply("second")  # Should be ignored
+                await ctx.reply("third")  # Should be ignored
 
         actor = await system.spawn(MultiReplyActor)
 

@@ -11,6 +11,8 @@ from casty.cluster.messages import (
     ClusteredSend,
     GetClusteredActor,
 )
+from casty.persistent_actor import GetCurrentVersion
+from casty.wal import VectorClock
 
 
 @dataclass
@@ -26,6 +28,19 @@ class ValueActor(Actor[SetValue]):
         match msg:
             case SetValue(value=value):
                 self.value = value
+
+
+@dataclass
+class ReadOnly:
+    pass
+
+
+class ReadOnlyActor(Actor[ReadOnly]):
+    def __init__(self):
+        self.value = 42
+
+    async def receive(self, msg, ctx):
+        pass
 
 
 class TestReplication:
@@ -64,7 +79,12 @@ class TestReplication:
 
             info = await cluster.ask(GetClusteredActor(actor_id="value-actor"))
             assert info is not None
-            assert info.version == 1
+
+            cluster_node = system._supervision_tree.get_node(cluster.id)
+            cluster_instance = cluster_node.actor_instance
+            local_ref = cluster_instance._local_actors.get("value-actor")
+            version = await local_ref.ask(GetCurrentVersion())
+            assert version != VectorClock()
 
     @pytest.mark.asyncio
     async def test_no_version_increment_if_state_unchanged(self):
@@ -74,17 +94,6 @@ class TestReplication:
                 config=ClusterConfig(bind_port=17961),
             )
 
-            @dataclass
-            class ReadOnly:
-                pass
-
-            class ReadOnlyActor(Actor[ReadOnly]):
-                def __init__(self):
-                    self.value = 42
-
-                async def receive(self, msg, ctx):
-                    pass
-
             await cluster.send(
                 RegisterClusteredActor(
                     actor_id="readonly-actor",
@@ -93,6 +102,13 @@ class TestReplication:
                     singleton=False,
                 )
             )
+
+            await asyncio.sleep(0.1)
+
+            cluster_node = system._supervision_tree.get_node(cluster.id)
+            cluster_instance = cluster_node.actor_instance
+            local_ref = cluster_instance._local_actors.get("readonly-actor")
+            version_before = await local_ref.ask(GetCurrentVersion())
 
             payload = ReadOnly()
             payload_type = f"{type(payload).__module__}.{type(payload).__qualname__}"
@@ -112,7 +128,9 @@ class TestReplication:
 
             info = await cluster.ask(GetClusteredActor(actor_id="readonly-actor"))
             assert info is not None
-            assert info.version == 0
+
+            version_after = await local_ref.ask(GetCurrentVersion())
+            assert version_before == version_after
 
     @pytest.mark.asyncio
     async def test_multiple_state_changes_increment_version(self):
@@ -150,4 +168,10 @@ class TestReplication:
 
             info = await cluster.ask(GetClusteredActor(actor_id="counter"))
             assert info is not None
-            assert info.version == 5
+
+            cluster_node = system._supervision_tree.get_node(cluster.id)
+            cluster_instance = cluster_node.actor_instance
+            local_ref = cluster_instance._local_actors.get("counter")
+            version = await local_ref.ask(GetCurrentVersion())
+            node_id = cluster_instance._node_id
+            assert version.clock.get(node_id, 0) == 5

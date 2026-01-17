@@ -7,8 +7,7 @@ using a three-way merge algorithm (similar to git).
 
 Core Components:
     Mergeable: Protocol for actors that support merging
-    VectorClock: Vector clock for causality tracking
-    WAL: Write-Ahead Log for state history
+    VectorClock: Vector clock for causality tracking (re-exported from casty.wal)
     is_mergeable: Check if an actor implements Mergeable
 
 Merge Helpers:
@@ -34,7 +33,7 @@ Example:
                 case Deposit(amount):
                     self.balance += amount
                 case GetBalance():
-                    ctx.reply(self.balance)
+                    await ctx.reply(self.balance)
 
         def get_state(self) -> dict:
             return {"balance": self.balance}
@@ -59,9 +58,8 @@ from .helpers import (
     merge_union,
 )
 from .protocol import Mergeable
-from .replication import handle_replicate_state
-from .version import VectorClock
-from .wal import WAL, WALEntry
+
+from casty.wal import VectorClock
 
 
 def is_mergeable(actor: object) -> bool:
@@ -77,13 +75,8 @@ __all__ = [
     # Protocol
     "Mergeable",
     "is_mergeable",
-    # Versioning
+    # Versioning (re-exported from casty.wal)
     "VectorClock",
-    # WAL
-    "WAL",
-    "WALEntry",
-    # Replication
-    "handle_replicate_state",
     # Helpers
     "merge_sum",
     "merge_max",

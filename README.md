@@ -98,7 +98,7 @@ class Greeter(Actor[Greet | GetGreetingCount]):
                 print(f"Hello, {name}!")
                 self.count += 1
             case GetGreetingCount():
-                ctx.reply(self.count)
+                await ctx.reply(self.count)
 
 async def main():
     async with ActorSystem() as system:
@@ -142,7 +142,7 @@ class DatabaseActor(Actor[Query]):
 
     async def receive(self, msg: Query, ctx: Context) -> None:
         result = await self.connection.execute(msg.sql)
-        ctx.reply(result)
+        await ctx.reply(result)
 ```
 
 ### Type-Safe References
@@ -169,7 +169,7 @@ async def receive(self, msg: CreateChild, ctx: Context) -> None:
     child = await ctx.spawn(WorkerActor)
 
     # Reply to ask() calls
-    ctx.reply(some_result)
+    await ctx.reply(some_result)
 
     # Access the actor system
     another_actor = await ctx.system.lookup("some-name")
@@ -201,18 +201,18 @@ When you need a response, use the ask pattern:
 result = await actor.ask(GetStatus(), timeout=5.0)
 ```
 
-Under the hood, `ask()` creates a `Future`, sends the message with a reference to that future, and awaits the result. The actor responds by calling `ctx.reply()`.
+Under the hood, `ask()` creates a `Future`, sends the message with a reference to that future, and awaits the result. The actor responds by calling `await ctx.reply()`.
 
-**Important:** Every `ask()` should have a corresponding `ctx.reply()` in the actor, or the caller will timeout.
+**Important:** Every `ask()` should have a corresponding `await ctx.reply()` in the actor, or the caller will timeout.
 
 ```python
 class Calculator(Actor[Add | Multiply]):
     async def receive(self, msg: Add | Multiply, ctx: Context) -> None:
         match msg:
             case Add(a, b):
-                ctx.reply(a + b)  # Always reply to ask() calls
+                await ctx.reply(a + b)  # Always reply to ask() calls
             case Multiply(a, b):
-                ctx.reply(a * b)
+                await ctx.reply(a * b)
 ```
 
 ### Choosing Between Patterns
@@ -577,7 +577,7 @@ class Player(Actor[UpdateScore | GetScore]):
             case UpdateScore(delta):
                 self.score += delta
             case GetScore():
-                ctx.reply(self.score)
+                await ctx.reply(self.score)
 
 async def main():
     async with ActorSystem.clustered("0.0.0.0", 8001) as system:
@@ -628,7 +628,7 @@ class JobScheduler(Actor[ScheduleJob | GetPendingJobs]):
             case ScheduleJob(job):
                 self.pending_jobs.append(job)
             case GetPendingJobs():
-                ctx.reply(self.pending_jobs)
+                await ctx.reply(self.pending_jobs)
 
 async def main():
     async with ActorSystem.clustered("0.0.0.0", 8001) as system:
@@ -677,7 +677,7 @@ class Account(Actor[Deposit | Withdraw | GetBalance]):
             case Withdraw(amount):
                 self.balance -= amount
             case GetBalance():
-                ctx.reply(self.balance)
+                await ctx.reply(self.balance)
 ```
 
 After each message, `{entity_id: "...", balance: ...}` is sent to replica nodes.
@@ -912,7 +912,7 @@ class ChatRoom(Actor[Join | Leave | Message | GetMembers]):
                 self.history.append((user_id, text))
                 # In real app: broadcast to connected clients
             case GetMembers():
-                ctx.reply(list(self.members))
+                await ctx.reply(list(self.members))
 
 async def main():
     async with ActorSystem.clustered("0.0.0.0", 8001) as system:
@@ -951,7 +951,7 @@ class Counter(Actor[Increment | GetCount]):
             case Increment(amount):
                 self.count += amount
             case GetCount():
-                ctx.reply(self.count)
+                await ctx.reply(self.count)
 
 async def main():
     async with ActorSystem.clustered("0.0.0.0", 8001) as system:

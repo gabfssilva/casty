@@ -81,7 +81,7 @@ class TestHandshake:
 class TestReplicationMessages:
     def test_replicate_state(self):
         from casty.cluster.messages import ReplicateState
-        from casty.cluster.merge.version import VectorClock
+        from casty.wal import VectorClock
         from casty.cluster.serializable import deserialize
 
         version = VectorClock({"node-1": 5})
@@ -95,7 +95,7 @@ class TestReplicationMessages:
 
     def test_replicate_ack(self):
         from casty.cluster.messages import ReplicateAck
-        from casty.cluster.merge.version import VectorClock
+        from casty.wal import VectorClock
         from casty.cluster.serializable import deserialize
 
         version = VectorClock({"node-1": 5})
@@ -119,7 +119,7 @@ class TestReplicationMessages:
 
     def test_full_sync_response(self):
         from casty.cluster.messages import FullSyncResponse
-        from casty.cluster.merge.version import VectorClock
+        from casty.wal import VectorClock
         from casty.cluster.serializable import deserialize
 
         version = VectorClock({"node-1": 3, "node-2": 5})

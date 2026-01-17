@@ -37,7 +37,7 @@ class SimpleCounter(Actor[Increment | GetCount]):
 
     @on(GetCount)
     async def handle_query(self, msg: GetCount, ctx: Context):
-        ctx.reply(self.count)
+        await ctx.reply(self.count)
 
 
 class MultiHandlerCounter(Actor[Increment | Decrement | GetCount | Reset]):
@@ -56,7 +56,7 @@ class MultiHandlerCounter(Actor[Increment | Decrement | GetCount | Reset]):
 
     @on(GetCount)
     async def handle_query(self, msg: GetCount, ctx: Context):
-        ctx.reply(self.count)
+        await ctx.reply(self.count)
 
     @on(Reset)
     async def handle_reset(self, msg: Reset, ctx: Context):
@@ -91,7 +91,7 @@ class QueryMixin:
 
     @on(GetCount)
     async def handle_query(self, msg: GetCount, ctx: Context):
-        ctx.reply(self.count)
+        await ctx.reply(self.count)
 
 
 class ComposedCounter(MixinCounter, IncrementMixin, DecrementMixin, QueryMixin):
@@ -111,7 +111,7 @@ class OverrideReceiveCounter(Actor[Increment | GetCount]):
             case Increment(amount):
                 self.count += amount
             case GetCount():
-                ctx.reply(self.count)
+                await ctx.reply(self.count)
 
 
 class TestOnDecorator:

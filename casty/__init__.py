@@ -28,7 +28,7 @@ Basic usage with @on decorator:
 
         @on(GetCount)
         async def handle_query(self, msg: GetCount, ctx: Context):
-            ctx.reply(self.count)
+            await ctx.reply(self.count)
 
     async def main():
         async with ActorSystem() as system:
@@ -44,7 +44,7 @@ Or use traditional match statements in receive():
                 case Increment(amount):
                     self.count += amount
                 case GetCount():
-                    ctx.reply(self.count)
+                    await ctx.reply(self.count)
 """
 
 import asyncio
@@ -110,8 +110,8 @@ from .persistence import (
     PersistentActor,
 )
 
-# Declarative codec
-from .codec import serializable, ProtocolCodec, encode, decode
+# Serialization
+from .cluster.serializable import serializable, deserialize
 
 __all__ = [
     # Core
@@ -144,11 +144,9 @@ __all__ = [
     "Recover",
     "Close",
     "PersistentActor",
-    # Codec
+    # Serialization
     "serializable",
-    "ProtocolCodec",
-    "encode",
-    "decode",
+    "deserialize",
     # Utilities
     "is_uvloop_enabled",
 ]

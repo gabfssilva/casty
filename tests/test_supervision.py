@@ -107,7 +107,7 @@ class TestActorRestart:
                             raise RuntimeError("First failure")
                         # After restart, don't fail
                     case GetValue():
-                        ctx.reply(self.message_count)
+                        await ctx.reply(self.message_count)
                     case _:
                         self.message_count += 1
 
@@ -280,7 +280,7 @@ class TestChildSupervision:
                 match msg:
                     case SpawnFailingChild():
                         self.child = await ctx.spawn(FailingChild, name="failing-child")
-                        ctx.reply(self.child)
+                        await ctx.reply(self.child)
                     case str() as s:
                         if self.child:
                             await self.child.send(s)
@@ -320,7 +320,7 @@ class TestChildSupervision:
                             raise ValueError("Child error")
 
                     self.child = await ctx.spawn(ChildActor, name="my-child")
-                    ctx.reply(self.child)
+                    await ctx.reply(self.child)
                 elif msg == "fail" and self.child:
                     await self.child.send("trigger")
 
@@ -358,9 +358,9 @@ class TestContextChildManagement:
                     case SpawnChildren(count):
                         for i in range(count):
                             await ctx.spawn(Counter, name=f"child-{i}")
-                        ctx.reply(len(ctx.children))
+                        await ctx.reply(len(ctx.children))
                     case GetChildCount():
-                        ctx.reply(len(ctx.children))
+                        await ctx.reply(len(ctx.children))
 
         parent = await system.spawn(ParentActor)
 
@@ -392,15 +392,15 @@ class TestContextChildManagement:
                     case SpawnChild(name):
                         child = await ctx.spawn(Counter, name=name)
                         children[name] = child
-                        ctx.reply(child)
+                        await ctx.reply(child)
                     case StopChild(name):
                         if name in children:
                             result = await ctx.stop_child(children[name])
-                            ctx.reply(result)
+                            await ctx.reply(result)
                         else:
-                            ctx.reply(False)
+                            await ctx.reply(False)
                     case GetValue():
-                        ctx.reply(len(ctx.children))
+                        await ctx.reply(len(ctx.children))
 
         parent = await system.spawn(ParentActor)
 
@@ -439,12 +439,12 @@ class TestContextChildManagement:
                     case SpawnMany(count):
                         for i in range(count):
                             await ctx.spawn(Counter, name=f"child-{i}")
-                        ctx.reply(len(ctx.children))
+                        await ctx.reply(len(ctx.children))
                     case StopAll():
                         await ctx.stop_all_children()
-                        ctx.reply(len(ctx.children))
+                        await ctx.reply(len(ctx.children))
                     case GetValue():
-                        ctx.reply(len(ctx.children))
+                        await ctx.reply(len(ctx.children))
 
         parent = await system.spawn(ParentActor)
 

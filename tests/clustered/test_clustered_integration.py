@@ -14,6 +14,7 @@ from casty.cluster import (
     ClusteredAsk,
     GetClusteredActor,
 )
+from casty.persistent_actor import GetCurrentVersion
 
 
 @dataclass
@@ -35,7 +36,7 @@ class Counter(Actor[Increment | GetCount]):
             case Increment(amount=amount):
                 self.count += amount
             case GetCount():
-                ctx.reply(self.count)
+                await ctx.reply(self.count)
 
 
 class TestActorIntegration:
@@ -146,7 +147,13 @@ class TestActorIntegration:
 
             info = await cluster.ask(GetClusteredActor(actor_id="tracked-counter"))
             assert info is not None
-            assert info.version == 3
+
+            cluster_node = system._supervision_tree.get_node(cluster.id)
+            cluster_instance = cluster_node.actor_instance
+            local_ref = cluster_instance._local_actors.get("tracked-counter")
+            version = await local_ref.ask(GetCurrentVersion())
+            node_id = cluster_instance._node_id
+            assert version.clock.get(node_id, 0) == 3
 
             get_payload = GetCount()
             get_type = f"{type(get_payload).__module__}.{type(get_payload).__qualname__}"

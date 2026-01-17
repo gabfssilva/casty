@@ -116,7 +116,7 @@ class Counter(Actor[Increment | Decrement | GetValue | SetValue | Reset]):
             case Decrement(amount):
                 self.count -= amount
             case GetValue():
-                ctx.reply(self.count)
+                await ctx.reply(self.count)
             case SetValue(value):
                 self.count = value
             case Reset():
@@ -127,7 +127,7 @@ class EchoActor(Actor[Any]):
     """Actor that echoes back any message."""
 
     async def receive(self, msg: Any, ctx: Context) -> None:
-        ctx.reply(msg)
+        await ctx.reply(msg)
 
 
 class ForwarderActor(Actor[ForwardTo | Any]):
@@ -138,7 +138,7 @@ class ForwarderActor(Actor[ForwardTo | Any]):
             case ForwardTo(target, message):
                 await target.send(message)
             case _:
-                ctx.reply(msg)
+                await ctx.reply(msg)
 
 
 class FailingActor(Actor[FailNow | GetValue]):
@@ -155,7 +155,7 @@ class FailingActor(Actor[FailNow | GetValue]):
                 raise RuntimeError(error_message)
             case GetValue():
                 self.success_count += 1
-                ctx.reply(self.failure_count)
+                await ctx.reply(self.failure_count)
 
 
 @supervised(strategy=SupervisionStrategy.RESTART, max_restarts=5)
@@ -184,11 +184,11 @@ class ParentActor(Actor[SpawnChild | GetChildren | GetValue]):
             case SpawnChild(name):
                 child = await ctx.spawn(Counter, name=name)
                 self.spawn_count += 1
-                ctx.reply(child)
+                await ctx.reply(child)
             case GetChildren():
-                ctx.reply(list(ctx.children.keys()))
+                await ctx.reply(list(ctx.children.keys()))
             case GetValue():
-                ctx.reply(self.spawn_count)
+                await ctx.reply(self.spawn_count)
 
 
 # Fixtures

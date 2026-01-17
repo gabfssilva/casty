@@ -46,7 +46,7 @@ class BankAccount(Actor[Deposit | Withdraw | GetBalance]):
 
     @on(GetBalance)
     async def handle_query(self, msg: GetBalance, ctx: Context):
-        ctx.reply(self.balance)
+        await ctx.reply(self.balance)
 
 
 # Example 2: Composition via mixins
@@ -65,7 +65,7 @@ class WithdrawMixin:
 class QueryMixin:
     @on(GetBalance)
     async def handle_query(self, msg: GetBalance, ctx: Context):
-        ctx.reply(self.balance)
+        await ctx.reply(self.balance)
 
 
 class ComposedBankAccount(
@@ -114,7 +114,7 @@ async def main():
                         self.balance -= amount
                         print(f"Withdrew {amount}, new balance: {self.balance}")
                     case GetBalance():
-                        ctx.reply(self.balance)
+                        await ctx.reply(self.balance)
 
         account3 = await system.spawn(TraditionalAccount, initial_balance=150.0)
         await account3.send(Deposit(60.0))

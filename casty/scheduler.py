@@ -50,7 +50,7 @@ class Scheduler(Actor[SchedulerMessage]):
                 task_id = f"{uuid.uuid4()}"
                 detached = ctx.detach(self._schedule_task(task_id, msg))
                 self.pending[task_id] = detached.task
-                ctx.reply(task_id)
+                await ctx.reply(task_id)
             case Cancel(task_id):
                 task = self.pending.pop(task_id, None)
                 if task and not task.done():

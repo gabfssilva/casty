@@ -29,7 +29,7 @@ class ActorA(Actor[MsgA]):
 
     async def receive(self, msg: MsgA, ctx: Context[MsgA]) -> None:
         self.received.append(msg)
-        ctx.reply(f"A received: {msg.value}")
+        await ctx.reply(f"A received: {msg.value}")
 
 
 class ActorB(Actor[MsgB]):
@@ -40,7 +40,7 @@ class ActorB(Actor[MsgB]):
 
     async def receive(self, msg: MsgB, ctx: Context[MsgB]) -> None:
         self.received.append(msg)
-        ctx.reply(f"B received: {msg.text}")
+        await ctx.reply(f"B received: {msg.text}")
 
 
 class ActorC(Actor[MsgC]):
@@ -51,7 +51,7 @@ class ActorC(Actor[MsgC]):
 
     async def receive(self, msg: MsgC, ctx: Context[MsgC]) -> None:
         self.received.append(msg)
-        ctx.reply(f"C received: {msg.data}")
+        await ctx.reply(f"C received: {msg.data}")
 
 
 class ActorAB(Actor[MsgA | MsgB]):
@@ -64,9 +64,9 @@ class ActorAB(Actor[MsgA | MsgB]):
         self.received.append(msg)
         match msg:
             case MsgA(value):
-                ctx.reply(f"AB received A: {value}")
+                await ctx.reply(f"AB received A: {value}")
             case MsgB(text):
-                ctx.reply(f"AB received B: {text}")
+                await ctx.reply(f"AB received B: {text}")
 
 
 @pytest.mark.asyncio

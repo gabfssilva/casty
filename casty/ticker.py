@@ -96,7 +96,7 @@ class Ticker(Actor[TickerMessage]):
                 task_id = await ctx.schedule(interval, _ScheduledTick(subscription_id))
                 self.subscriptions[subscription_id].task_id = task_id
 
-                ctx.reply(subscription_id)
+                await ctx.reply(subscription_id)
 
             case Unsubscribe(subscription_id):
                 sub = self.subscriptions.pop(subscription_id, None)

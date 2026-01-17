@@ -32,7 +32,7 @@ class GetProcessed:
 # Supervised actor with automatic restart
 @supervised(
     strategy=SupervisionStrategy.RESTART,
-    max_restarts=5,
+    max_restarts=1,
     within_seconds=60.0,
 )
 class UnreliableWorker(Actor[Process | GetProcessed]):
@@ -58,7 +58,7 @@ class UnreliableWorker(Actor[Process | GetProcessed]):
                 self.processed.append(item)
 
             case GetProcessed():
-                ctx.reply(self.processed.copy())
+                await ctx.reply(self.processed.copy())
 
     async def pre_restart(self, exc: Exception, msg: Process | GetProcessed | None) -> None:
         """Called before restart - save state."""

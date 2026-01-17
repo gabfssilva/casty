@@ -73,7 +73,7 @@ class StateMachineActor(Actor[GetState | Activate | Deactivate | Process]):
     async def receive(self, msg: GetState | Activate | Deactivate | Process, ctx: Context):
         match msg:
             case GetState():
-                ctx.reply(self.mode)
+                await ctx.reply(self.mode)
             case Activate():
                 self.mode = "active"
                 ctx.become(self.active_behavior)
@@ -87,7 +87,7 @@ class StateMachineActor(Actor[GetState | Activate | Deactivate | Process]):
     ):
         match msg:
             case GetState():
-                ctx.reply(self.mode)
+                await ctx.reply(self.mode)
             case Deactivate():
                 self.mode = "initial"
                 ctx.unbecome()
@@ -106,7 +106,7 @@ class StackedBehaviorActor(Actor[PushBehavior | PopBehavior | GetLevel]):
     async def receive(self, msg: PushBehavior | PopBehavior | GetLevel, ctx: Context):
         match msg:
             case GetLevel():
-                ctx.reply(self.level)
+                await ctx.reply(self.level)
             case PushBehavior(level):
                 self.level = level
                 ctx.become(self._make_level_behavior(level))
@@ -117,7 +117,7 @@ class StackedBehaviorActor(Actor[PushBehavior | PopBehavior | GetLevel]):
         async def behavior(msg: PushBehavior | PopBehavior | GetLevel, ctx: Context):
             match msg:
                 case GetLevel():
-                    ctx.reply(level)
+                    await ctx.reply(level)
                 case PushBehavior(new_level):
                     self.level = new_level
                     ctx.become(self._make_level_behavior(new_level))
@@ -137,7 +137,7 @@ class DiscardBehaviorActor(Actor[Activate | Deactivate | GetState]):
     async def receive(self, msg: Activate | Deactivate | GetState, ctx: Context):
         match msg:
             case GetState():
-                ctx.reply(f"state={self.state}, handler=receive")
+                await ctx.reply(f"state={self.state}, handler=receive")
             case Activate():
                 self.state = "B"
                 ctx.become(self.behavior_b, discard_old=True)
@@ -147,7 +147,7 @@ class DiscardBehaviorActor(Actor[Activate | Deactivate | GetState]):
     async def behavior_b(self, msg: Activate | Deactivate | GetState, ctx: Context):
         match msg:
             case GetState():
-                ctx.reply(f"state={self.state}, handler=behavior_b")
+                await ctx.reply(f"state={self.state}, handler=behavior_b")
             case Activate():
                 self.state = "C"
                 ctx.become(self.behavior_c, discard_old=True)
@@ -159,7 +159,7 @@ class DiscardBehaviorActor(Actor[Activate | Deactivate | GetState]):
     async def behavior_c(self, msg: Activate | Deactivate | GetState, ctx: Context):
         match msg:
             case GetState():
-                ctx.reply(f"state={self.state}, handler=behavior_c")
+                await ctx.reply(f"state={self.state}, handler=behavior_c")
             case Deactivate():
                 self.state = "B"
                 ctx.unbecome()  # Goes back to receive (discard_old=True doesn't stack)

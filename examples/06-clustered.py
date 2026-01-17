@@ -26,7 +26,7 @@ class Counter(Actor[Increment | GetCount]):
             case Increment(amount):
                 self.count += amount
             case GetCount():
-                ctx.reply(self.count)
+                await ctx.reply(self.count)
 
 
 async def main():

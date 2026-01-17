@@ -85,11 +85,11 @@ class ShoppingCart(PersistentActor[AddItem | RemoveItem | GetCart | GetTotal]):
                     print(f"[Cart:{self.cart_id}] Item {item} not found")
 
             case GetCart():
-                ctx.reply(self.items.copy())
+                await ctx.reply(self.items.copy())
 
             case GetTotal():
                 total = sum(self.items.values())
-                ctx.reply(total)
+                await ctx.reply(total)
 
 
 async def main():

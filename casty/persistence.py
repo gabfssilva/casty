@@ -330,7 +330,7 @@ class WriteAheadLog(Actor[Append | Snapshot | Recover | Close]):
 
             case Recover():
                 result = await self._recover()
-                ctx.reply(result)
+                await ctx.reply(result)
 
             case Close():
                 await self._close()

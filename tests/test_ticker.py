@@ -41,9 +41,9 @@ class PingCollector(Actor[Ping | GetCount | GetPings]):
             case Ping():
                 self.count += 1
             case GetCount():
-                ctx.reply(self.count)
+                await ctx.reply(self.count)
             case GetPings():
-                ctx.reply(self.count)
+                await ctx.reply(self.count)
 
 
 class TestTickerDirect:
@@ -148,7 +148,7 @@ class TestContextTick:
                     case Ping():
                         self.count += 1
                     case GetCount():
-                        ctx.reply(self.count)
+                        await ctx.reply(self.count)
 
         actor = await system.spawn(TickingActor)
         await actor.send(Start())
@@ -185,7 +185,7 @@ class TestContextTick:
                     case Ping():
                         self.count += 1
                     case GetCount():
-                        ctx.reply(self.count)
+                        await ctx.reply(self.count)
 
         actor = await system.spawn(TickingActor)
         await actor.send(Start())
@@ -225,7 +225,7 @@ class TestTickerCustomMessages:
                     case Heartbeat():
                         self.count += 1
                     case GetHeartbeats():
-                        ctx.reply(self.count)
+                        await ctx.reply(self.count)
 
         ticker = await system.spawn(Ticker)
         collector = await system.spawn(HeartbeatCollector)
