@@ -47,6 +47,8 @@ dev = [
     "pytest-rerunfailures>=16.1",
     "pyinstrument>=5.1.2",
     "pytest-cov>=7.0.0",
+    "vulture>=2.14",
+    "dead>=2.1.0",
 ]
 
 [tool.pytest.ini_options]

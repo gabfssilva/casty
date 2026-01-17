@@ -36,7 +36,6 @@ from .supervision import (
 
 if TYPE_CHECKING:
     from .persistence import ReplicationConfig
-    from .cluster import DistributedActorSystem
     from .cluster.clustered_system import ClusteredActorSystem
     from .cluster.config import ClusterConfig
 

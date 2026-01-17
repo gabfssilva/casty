@@ -10,11 +10,12 @@ from types import UnionType
 from uuid import UUID
 
 from . import detach
+from .stateful import Stateful
 
 if TYPE_CHECKING:
     from .supervision import SupervisorConfig, SupervisionDecision
     from .system import ActorSystem
-    from .cluster.remote_ref import RemoteRef
+    from .cluster.clustered_ref import ClusteredRef
     from .detach import Detached
 
 def on(msg_type: type):
@@ -241,7 +242,7 @@ class LocalRef[M]:
         return hash(self._id)
 
     def __or__[T](
-        self, other: "LocalRef[T] | RemoteRef[T] | CompositeRef[T]"
+        self, other: "LocalRef[T] | ClusteredRef[T] | CompositeRef[T]"
     ) -> "CompositeRef[M | T]":
         """Combine refs with type-based routing.
 
@@ -253,13 +254,13 @@ class LocalRef[M]:
 
 
 # Type alias for any ref that can be combined
-type AnyRef = "LocalRef[Any] | RemoteRef[Any] | CompositeRef[Any]"
+type AnyRef = "LocalRef[Any] | ClusteredRef[Any] | CompositeRef[Any]"
 
 
 class CompositeRef[M]:
     """Reference that routes messages to different actors based on message type.
 
-    Created using the | operator on LocalRef/RemoteRef instances:
+    Created using the | operator on LocalRef/ClusteredRef instances:
         combined = ref1 | ref2  # ref1 accepts Msg1, ref2 accepts Msg2
         await combined.send(some_msg)  # Routes based on isinstance check
 
@@ -270,8 +271,8 @@ class CompositeRef[M]:
 
     def __init__(
         self,
-        refs: tuple["LocalRef[Any] | RemoteRef[Any]", ...],
-        type_to_ref: dict[type, "LocalRef[Any] | RemoteRef[Any]"],
+        refs: tuple["LocalRef[Any] | ClusteredRef[Any]", ...],
+        type_to_ref: dict[type, "LocalRef[Any] | ClusteredRef[Any]"],
     ) -> None:
         self._refs = refs
         self._type_to_ref = type_to_ref
@@ -279,11 +280,11 @@ class CompositeRef[M]:
     @classmethod
     def from_refs(
         cls,
-        *refs: "LocalRef[Any] | RemoteRef[Any] | CompositeRef[Any]",
+        *refs: "LocalRef[Any] | ClusteredRef[Any] | CompositeRef[Any]",
     ) -> "CompositeRef[Any]":
         """Create a CompositeRef from multiple refs."""
-        all_refs: list[LocalRef[Any] | RemoteRef[Any]] = []
-        type_to_ref: dict[type, LocalRef[Any] | RemoteRef[Any]] = {}
+        all_refs: list[LocalRef[Any] | ClusteredRef[Any]] = []
+        type_to_ref: dict[type, LocalRef[Any] | ClusteredRef[Any]] = {}
 
         for ref in refs:
             if isinstance(ref, CompositeRef):
@@ -300,7 +301,7 @@ class CompositeRef[M]:
 
         return cls(tuple(all_refs), type_to_ref)
 
-    def _find_ref(self, msg: Any) -> "LocalRef[Any] | RemoteRef[Any]":
+    def _find_ref(self, msg: Any) -> "LocalRef[Any] | ClusteredRef[Any]":
         """Find the appropriate ref for a message."""
         msg_type = type(msg)
 
@@ -348,7 +349,7 @@ class CompositeRef[M]:
         return self.ask(msg)
 
     def __or__[T](
-        self, other: "LocalRef[T] | RemoteRef[T] | CompositeRef[T]"
+        self, other: "LocalRef[T] | ClusteredRef[T] | CompositeRef[T]"
     ) -> "CompositeRef[M | T]":
         """Chain with another ref."""
         return CompositeRef.from_refs(self, other)
@@ -527,7 +528,7 @@ class Context[M]:
             self._behavior_stack.pop()
 
 
-class Actor[M](ABC):
+class Actor[M](ABC, Stateful):
     """Base class for all actors.
 
     Actors are the fundamental unit of computation in Casty.

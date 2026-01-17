@@ -103,3 +103,19 @@ class Detached[R]:
         self.task.add_done_callback(cb)
         self._bound = True
         return self
+
+    def cancel(self) -> bool:
+        """Cancel the detached task.
+
+        Returns:
+            True if the task was successfully cancelled, False otherwise.
+        """
+        return self.task.cancel()
+
+    def done(self) -> bool:
+        """Check if the detached task is done.
+
+        Returns:
+            True if the task completed (success, failure, or cancelled).
+        """
+        return self.task.done()

@@ -1,121 +1,70 @@
-"""
-Casty Cluster - 100% Actor-based cluster coordination.
-
-This module provides a Cluster actor that manages:
-- TCP server for single-port communication
-- SWIM membership protocol for failure detection
-- Gossip-based actor registry for distributed naming
-- Remote actor messaging (send/ask)
-
-Example:
-    from casty import ActorSystem
-    from casty.cluster import Cluster, ClusterConfig, LocalRegister, GetRemoteRef
-
-    async with ActorSystem() as system:
-        # Create cluster node
-        cluster = await system.spawn(
-            Cluster,
-            config=ClusterConfig.development().with_seeds(["192.168.1.10:7946"]),
-        )
-
-        # Register a local actor
-        worker = await system.spawn(Worker, name="worker-1")
-        await cluster.send(LocalRegister("worker-1", worker))
-
-        # Get reference to remote actor
-        remote_ref = await cluster.ask(GetRemoteRef("worker-2", "node-2"))
-        await remote_ref.send(DoWork())
-        result = await remote_ref.ask(GetStatus())
-"""
-
-# Configuration
-from .config import ClusterConfig
-
-# Main actor
-from .cluster import Cluster
-
-# Clustered ActorSystem
-from .clustered_system import ClusteredActorSystem
-
-# Remote reference
-from .remote_ref import RemoteRef, RemoteActorError
-
-# Messages
+from .serializable import serializable, deserialize
 from .messages import (
-    # Internal API
-    RemoteSend,
-    RemoteAsk,
-    LocalRegister,
-    LocalUnregister,
-    GetRemoteRef,
-    GetMembers,
-    GetLocalActors,
-    Subscribe,
-    Unsubscribe,
-    # Events
-    NodeJoined,
-    NodeLeft,
-    NodeFailed,
-    ActorRegistered,
-    ActorUnregistered,
-    ClusterEvent,
+    Route, Node, Shard, All,
+    Send, GetMembers, GetNodeForKey,
+    Subscribe, Unsubscribe,
+    ClusterEvent, NodeJoined, NodeLeft, NodeFailed,
+    TransportSend, TransportReceived, TransportConnected, TransportDisconnected, TransportEvent,
+    ReplicateState, ReplicateAck,
+    ClusteredSpawn, ClusteredSend, ClusteredSendAck, ClusteredAsk, ClusteredAskResponse,
+    RegisterClusteredActor, GetClusteredActor, ActorRegistered,
 )
-
-# Consistent hashing
+from .config import ClusterConfig
+from .cluster import Cluster, MemberInfo, MemberState
 from .hash_ring import HashRing
-
-# Consistency levels
-from .consistency import (
-    ShardConsistency,
-    Strong,
-    Eventual,
-    Quorum,
-    AtLeast,
-)
-
-# Replication configuration
-from .replication_config import Replication
-
-# Development utilities
+from .transport import Transport, Connect, Disconnect
+from .tcp import TcpTransport
+from .consistency import Replication, Consistency, resolve_replication, resolve_consistency
+from .clustered_actor import ClusteredActor
+from .clustered_ref import ClusteredRef
+from .clustered_system import ClusteredActorSystem
 from .development import DevelopmentCluster
 
 __all__ = [
-    # Configuration
-    "ClusterConfig",
-    # Main actor
-    "Cluster",
-    # Clustered ActorSystem
-    "ClusteredActorSystem",
-    # Remote reference
-    "RemoteRef",
-    "RemoteActorError",
-    # API Messages
-    "RemoteSend",
-    "RemoteAsk",
-    "LocalRegister",
-    "LocalUnregister",
-    "GetRemoteRef",
+    "serializable",
+    "deserialize",
+    "Route",
+    "Node",
+    "Shard",
+    "All",
+    "Send",
     "GetMembers",
-    "GetLocalActors",
+    "GetNodeForKey",
     "Subscribe",
     "Unsubscribe",
-    # Events
+    "ClusterEvent",
     "NodeJoined",
     "NodeLeft",
     "NodeFailed",
-    "ActorRegistered",
-    "ActorUnregistered",
-    "ClusterEvent",
-    # Consistent hashing
+    "TransportSend",
+    "TransportReceived",
+    "TransportConnected",
+    "TransportDisconnected",
+    "TransportEvent",
+    "ReplicateState",
+    "ReplicateAck",
+    "ClusteredSpawn",
+    "ClusteredSend",
+    "ClusteredAsk",
+    "ClusteredAskResponse",
+    "ClusteredSendAck",
+    "RegisterClusteredActor",
+    "GetClusteredActor",
+    "ClusterConfig",
+    "Cluster",
+    "MemberInfo",
+    "MemberState",
     "HashRing",
-    # Consistency levels
-    "ShardConsistency",
-    "Strong",
-    "Eventual",
-    "Quorum",
-    "AtLeast",
-    # Replication configuration
+    "Transport",
+    "Connect",
+    "Disconnect",
+    "TcpTransport",
     "Replication",
-    # Development utilities
+    "Consistency",
+    "resolve_replication",
+    "resolve_consistency",
+    "ClusteredActor",
+    "ClusteredRef",
+    "ClusteredActorSystem",
     "DevelopmentCluster",
 ]
