@@ -120,7 +120,7 @@ class TestOnDecorator:
     @pytest.mark.asyncio
     async def test_simple_handlers(self):
         """Test simple message handlers with @on."""
-        async with ActorSystem() as system:
+        async with ActorSystem.local() as system:
             counter = await system.spawn(SimpleCounter)
 
             # Test send
@@ -134,7 +134,7 @@ class TestOnDecorator:
     @pytest.mark.asyncio
     async def test_multiple_handlers(self):
         """Test multiple handlers in same actor."""
-        async with ActorSystem() as system:
+        async with ActorSystem.local() as system:
             counter = await system.spawn(MultiHandlerCounter)
 
             await counter.send(Increment(10))
@@ -151,7 +151,7 @@ class TestOnDecorator:
     @pytest.mark.asyncio
     async def test_mixin_composition(self):
         """Test handler composition via mixins."""
-        async with ActorSystem() as system:
+        async with ActorSystem.local() as system:
             counter = await system.spawn(ComposedCounter)
 
             await counter.send(Increment(5))
@@ -164,7 +164,7 @@ class TestOnDecorator:
     @pytest.mark.asyncio
     async def test_override_receive_fallback(self):
         """Test that overriding receive still works when no @on decorators."""
-        async with ActorSystem() as system:
+        async with ActorSystem.local() as system:
             counter = await system.spawn(OverrideReceiveCounter)
 
             await counter.send(Increment(7))
@@ -202,7 +202,7 @@ class TestMultipleActorInstances:
     @pytest.mark.asyncio
     async def test_independent_actor_states(self):
         """Test that multiple instances maintain independent state."""
-        async with ActorSystem() as system:
+        async with ActorSystem.local() as system:
             counter1 = await system.spawn(SimpleCounter)
             counter2 = await system.spawn(SimpleCounter)
 

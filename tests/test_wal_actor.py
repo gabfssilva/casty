@@ -13,7 +13,7 @@ from casty.wal import (
 
 @pytest.mark.asyncio
 async def test_wal_actor_append():
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         wal = await system.spawn(
             WriteAheadLog,
             node_id="node-a",
@@ -28,7 +28,7 @@ async def test_wal_actor_append():
 
 @pytest.mark.asyncio
 async def test_wal_actor_multiple_appends():
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         wal = await system.spawn(
             WriteAheadLog,
             node_id="node-a",
@@ -46,7 +46,7 @@ async def test_wal_actor_multiple_appends():
 
 @pytest.mark.asyncio
 async def test_wal_actor_get_current_state():
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         wal = await system.spawn(
             WriteAheadLog,
             node_id="node-a",
@@ -64,7 +64,7 @@ async def test_wal_actor_get_current_state():
 
 @pytest.mark.asyncio
 async def test_wal_actor_get_current_version():
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         wal = await system.spawn(
             WriteAheadLog,
             node_id="node-a",

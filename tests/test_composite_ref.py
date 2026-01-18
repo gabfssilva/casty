@@ -72,7 +72,7 @@ class ActorAB(Actor[MsgA | MsgB]):
 @pytest.mark.asyncio
 async def test_composite_ref_basic_routing() -> None:
     """Test that messages are routed to the correct actor based on type."""
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         ref_a = await system.spawn(ActorA)
         ref_b = await system.spawn(ActorB)
 
@@ -91,7 +91,7 @@ async def test_composite_ref_basic_routing() -> None:
 @pytest.mark.asyncio
 async def test_composite_ref_three_actors() -> None:
     """Test combining three actors."""
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         ref_a = await system.spawn(ActorA)
         ref_b = await system.spawn(ActorB)
         ref_c = await system.spawn(ActorC)
@@ -108,7 +108,7 @@ async def test_composite_ref_three_actors() -> None:
 @pytest.mark.asyncio
 async def test_composite_ref_send() -> None:
     """Test send (fire-and-forget) with composite ref."""
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         ref_a = await system.spawn(ActorA)
         ref_b = await system.spawn(ActorB)
 
@@ -129,7 +129,7 @@ async def test_composite_ref_send() -> None:
 @pytest.mark.asyncio
 async def test_composite_ref_operators() -> None:
     """Test >> and << operators."""
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         ref_a = await system.spawn(ActorA)
         ref_b = await system.spawn(ActorB)
 
@@ -146,7 +146,7 @@ async def test_composite_ref_operators() -> None:
 @pytest.mark.asyncio
 async def test_composite_ref_unknown_type_raises() -> None:
     """Test that sending an unknown message type raises TypeError."""
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         ref_a = await system.spawn(ActorA)
         ref_b = await system.spawn(ActorB)
 
@@ -160,7 +160,7 @@ async def test_composite_ref_unknown_type_raises() -> None:
 @pytest.mark.asyncio
 async def test_composite_ref_first_match_wins() -> None:
     """Test that when multiple refs accept a type, the first one wins."""
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         ref_ab = await system.spawn(ActorAB)
         ref_a = await system.spawn(ActorA)
 
@@ -174,7 +174,7 @@ async def test_composite_ref_first_match_wins() -> None:
 @pytest.mark.asyncio
 async def test_composite_ref_accepted_types() -> None:
     """Test that accepted_types are correctly extracted."""
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         ref_a = await system.spawn(ActorA)
         ref_b = await system.spawn(ActorB)
 
@@ -186,7 +186,7 @@ async def test_composite_ref_accepted_types() -> None:
 @pytest.mark.asyncio
 async def test_composite_ref_repr() -> None:
     """Test CompositeRef string representation."""
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         ref_a = await system.spawn(ActorA)
         ref_b = await system.spawn(ActorB)
 

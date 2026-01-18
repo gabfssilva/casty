@@ -11,7 +11,7 @@ class EchoActor(Actor[str]):
 
 @pytest.mark.asyncio
 async def test_ask_with_reply_actor():
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         echo = await system.spawn(EchoActor)
 
         result = await echo.ask("hello")
@@ -27,7 +27,7 @@ async def test_ask_timeout():
             if ctx.sender:
                 await ctx.sender.send("done")
 
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         slow = await system.spawn(SlowActor)
 
         with pytest.raises(asyncio.TimeoutError):
@@ -45,7 +45,7 @@ async def test_ask_multiple_sequential():
             if ctx.sender:
                 await ctx.sender.send(self.count)
 
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         counter = await system.spawn(CounterActor)
 
         r1 = await counter.ask("ping")
@@ -70,7 +70,7 @@ async def test_ctx_reply_uses_sender():
         async def receive(self, msg: GetValue, ctx: Context) -> None:
             await ctx.reply(42)
 
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         actor = await system.spawn(ValueActor)
         result = await actor.ask(GetValue())
         assert result == 42
@@ -79,13 +79,13 @@ async def test_ctx_reply_uses_sender():
 @pytest.mark.asyncio
 async def test_reply_actor_cleanup_on_timeout():
     """Verify that _ReplyActor is cleaned up on timeout."""
-    from casty.system import ActorSystem
+    from casty.system import LocalSystem
 
     class NeverReplyActor(Actor[str]):
         async def receive(self, msg: str, ctx: Context) -> None:
             pass  # Never replies
 
-    async with ActorSystem() as system:
+    async with LocalSystem() as system:
         actor = await system.spawn(NeverReplyActor)
 
         initial_count = len(system._supervision_tree._nodes)
@@ -104,13 +104,13 @@ async def test_reply_actor_cleanup_on_timeout():
 @pytest.mark.asyncio
 async def test_reply_actor_stops_after_response():
     """Verify that _ReplyActor stops itself after receiving a response."""
-    from casty.system import ActorSystem
+    from casty.system import LocalSystem
 
     class QuickReplyActor(Actor[str]):
         async def receive(self, msg: str, ctx: Context) -> None:
             await ctx.reply("done")
 
-    async with ActorSystem() as system:
+    async with LocalSystem() as system:
         actor = await system.spawn(QuickReplyActor)
 
         initial_count = len(system._supervision_tree._nodes)

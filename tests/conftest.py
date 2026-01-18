@@ -205,5 +205,5 @@ def event_loop():
 @pytest.fixture
 async def system():
     """Create and cleanup an ActorSystem."""
-    async with ActorSystem() as sys:
+    async with ActorSystem.local() as sys:
         yield sys

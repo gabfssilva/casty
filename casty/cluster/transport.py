@@ -4,7 +4,7 @@ from abc import ABC
 from dataclasses import dataclass
 from typing import Any
 
-from casty import Actor, LocalRef
+from casty import Actor, LocalActorRef
 
 from .messages import (
     TransportConnected,
@@ -31,7 +31,7 @@ type TransportMessage = TransportSend | Connect | Disconnect
 
 class Transport[M](Actor[TransportMessage | M], ABC):
 
-    def __init__(self, cluster: LocalRef[TransportEvent]):
+    def __init__(self, cluster: LocalActorRef[TransportEvent]):
         self._cluster = cluster
 
     async def _notify_received(self, node_id: str, payload: Any) -> None:

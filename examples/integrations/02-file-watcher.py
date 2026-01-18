@@ -34,7 +34,7 @@ EventType = Literal["created", "modified", "deleted", "moved"]
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from watchdog.observers import Observer
 
-from casty import Actor, ActorSystem, Context, LocalRef, on
+from casty import Actor, ActorSystem, Context, LocalActorRef, on
 
 
 # --- Messages ---
@@ -78,7 +78,7 @@ class ActorEventHandler(FileSystemEventHandler):
 
     def __init__(
         self,
-        actor: LocalRef,
+        actor: LocalActorRef,
         loop: asyncio.AbstractEventLoop,
         extensions: set[str] | None = None
     ):
@@ -135,7 +135,7 @@ class FileDebouncer(Actor[FileEvent | _DebounceTimeout]):
     window, only the last event is forwarded to the processor.
     """
 
-    def __init__(self, processor: LocalRef, debounce_seconds: float = 0.5):
+    def __init__(self, processor: LocalActorRef, debounce_seconds: float = 0.5):
         self.processor = processor
         self.debounce_seconds = debounce_seconds
         self.pending: dict[str, str] = {}  # path -> scheduled task id

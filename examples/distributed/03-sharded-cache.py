@@ -17,7 +17,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any
 
-from casty import Actor, Context, LocalRef
+from casty import Actor, Context, LocalActorRef
 from casty.cluster import DevelopmentCluster, HashRing
 
 
@@ -155,13 +155,13 @@ class CacheRouter(Actor[RouteGet | RouteSet | RouteDelete | GetAllStats]):
     responsible shard based on the key's hash value.
     """
 
-    def __init__(self, shards: dict[str, LocalRef[Any]]):
+    def __init__(self, shards: dict[str, LocalActorRef[Any]]):
         self.shards = shards
         self.ring = HashRing(virtual_nodes=100)
         for shard_id in shards.keys():
             self.ring.add_node(shard_id)
 
-    def _get_shard(self, key: str) -> LocalRef[Any]:
+    def _get_shard(self, key: str) -> LocalActorRef[Any]:
         """Get the shard responsible for a key."""
         shard_id = self.ring.get_node(key)
         return self.shards[shard_id]
@@ -193,19 +193,19 @@ class CacheRouter(Actor[RouteGet | RouteSet | RouteDelete | GetAllStats]):
 
 # --- Client Helper Functions ---
 
-async def cache_get(router: LocalRef[Any], key: str) -> tuple[bool, Any]:
+async def cache_get(router: LocalActorRef[Any], key: str) -> tuple[bool, Any]:
     """Get a value from the distributed cache."""
     status, value = await router.ask(RouteGet(key))
     return status == "found", value
 
 
-async def cache_set(router: LocalRef[Any], key: str, value: Any, ttl: float | None = None) -> bool:
+async def cache_set(router: LocalActorRef[Any], key: str, value: Any, ttl: float | None = None) -> bool:
     """Set a value in the distributed cache."""
     result = await router.ask(RouteSet(key, value, ttl))
     return result == "ok"
 
 
-async def cache_delete(router: LocalRef[Any], key: str) -> bool:
+async def cache_delete(router: LocalActorRef[Any], key: str) -> bool:
     """Delete a key from the distributed cache."""
     return await router.ask(RouteDelete(key))
 
@@ -213,7 +213,9 @@ async def cache_delete(router: LocalRef[Any], key: str) -> bool:
 async def main():
     print("=== Distributed Cache with Consistent Hashing ===\n")
 
-    async with DevelopmentCluster(3) as (node0, node1, node2):  # type: ignore[misc]
+    async with DevelopmentCluster(3) as cluster:
+        node0, node1, node2 = cluster[0], cluster[1], cluster[2]
+
         print(f"Started 3-node cluster")
         await asyncio.sleep(0.5)
 

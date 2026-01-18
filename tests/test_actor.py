@@ -278,7 +278,8 @@ class TestActorShutdown:
     @pytest.mark.asyncio
     async def test_shutdown_stops_actors(self):
         """Test that shutdown stops all actors."""
-        system = ActorSystem()
+        from casty.system import LocalSystem
+        system = LocalSystem()
 
         counter1 = await system.spawn(Counter)
         counter2 = await system.spawn(Counter)
@@ -295,7 +296,8 @@ class TestActorShutdown:
     @pytest.mark.asyncio
     async def test_context_manager_shutdown(self):
         """Test that context manager performs shutdown."""
-        async with ActorSystem() as system:
+        from casty.system import LocalSystem
+        async with LocalSystem() as system:
             counter = await system.spawn(Counter)
             await counter.send(Increment(5))
             await asyncio.sleep(0.05)

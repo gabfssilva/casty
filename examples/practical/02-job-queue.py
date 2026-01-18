@@ -19,7 +19,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from casty import Actor, ActorSystem, Context, LocalRef, on
+from casty import Actor, ActorSystem, Context, LocalActorRef, on
 
 
 # --- Messages ---
@@ -56,7 +56,7 @@ class Enqueue:
 @dataclass
 class RequestWork:
     """Worker requests work from the queue."""
-    worker_ref: LocalRef
+    worker_ref: LocalActorRef
 
 
 @dataclass
@@ -99,7 +99,7 @@ class QueueStats:
 class ProcessJob:
     """Internal message to process a job."""
     job: Job
-    queue_ref: LocalRef
+    queue_ref: LocalActorRef
 
 
 # --- Job Queue Actor ---
@@ -123,7 +123,7 @@ class JobQueue(Actor[JobQueueMessage]):
         self.processing: dict[str, Job] = {}
         self.completed: list[Job] = []
         self.dead_letter: list[Job] = []
-        self.waiting_workers: list[LocalRef] = []
+        self.waiting_workers: list[LocalActorRef] = []
 
     @on(Enqueue)
     async def handle_enqueue(self, msg: Enqueue, ctx: Context) -> None:
@@ -184,7 +184,7 @@ class JobQueue(Actor[JobQueueMessage]):
             worker = self.waiting_workers.pop(0)
             await self._assign_job(worker)
 
-    async def _assign_job(self, worker: LocalRef) -> None:
+    async def _assign_job(self, worker: LocalActorRef) -> None:
         """Assign a pending job to a worker."""
         if not self.pending:
             return
@@ -206,7 +206,7 @@ class Worker(Actor[WorkerMessage]):
     Simulates random failures to demonstrate retry logic.
     """
 
-    def __init__(self, worker_id: int, queue_ref: LocalRef, fail_rate: float = 0.3):
+    def __init__(self, worker_id: int, queue_ref: LocalActorRef, fail_rate: float = 0.3):
         self.worker_id = worker_id
         self.queue_ref = queue_ref
         self.fail_rate = fail_rate

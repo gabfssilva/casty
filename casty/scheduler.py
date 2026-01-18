@@ -4,7 +4,7 @@ from asyncio import Task
 from dataclasses import dataclass
 from typing import Any
 
-from casty import Actor, LocalRef, Context
+from casty import Actor, LocalActorRef, Context
 
 
 @dataclass(slots=True, frozen=True)
@@ -16,7 +16,7 @@ class Schedule:
         await scheduler.send(Cancel(task_id))  # Cancel if needed
     """
     timeout: float
-    listener: LocalRef
+    listener: LocalActorRef
     message: Any
 
 
@@ -29,7 +29,7 @@ class Cancel:
 @dataclass(slots=True, frozen=True)
 class _Wake:
     task_id: str
-    listener: LocalRef
+    listener: LocalActorRef
     message: Any
 
 

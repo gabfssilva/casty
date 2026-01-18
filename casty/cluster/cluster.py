@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import msgpack
 
-from casty import Actor, Context, LocalRef
+from casty import Actor, Context, LocalActorRef
 from casty.persistent_actor import (
     PersistentActor,
     StateChanged,
@@ -112,6 +112,7 @@ class _ClusteredActorInfo:
     replication: int
     singleton: bool
     owner_node: str
+    actor_kwargs: dict[str, Any] | None = None
 
 
 type ClusterMessage = (
@@ -145,8 +146,8 @@ class Cluster(Actor[ClusterMessage]):
         self._node_id = self._config.node_id or f"node-{uuid4().hex[:8]}"
         self._members: dict[str, MemberInfo] = {}
         self._hash_ring = HashRing(self._config.virtual_nodes)
-        self._subscribers: set[LocalRef[ClusterEvent]] = set()
-        self._transport: LocalRef[TransportSend | Connect] | None = None
+        self._subscribers: set[LocalActorRef[ClusterEvent]] = set()
+        self._transport: LocalActorRef[TransportSend | Connect] | None = None
         self._incarnation = 0
         self._sequence = 0
         self._pending_probes: dict[int, PendingProbe] = {}
@@ -155,7 +156,7 @@ class Cluster(Actor[ClusterMessage]):
         self._suspicion_timers: dict[str, str] = {}
         self._tick_id: str | None = None
         self._clustered_actors: dict[str, _ClusteredActorInfo] = {}
-        self._local_actors: dict[str, LocalRef[Any]] = {}
+        self._local_actors: dict[str, LocalActorRef[Any]] = {}
         self._pending_asks: dict[str, asyncio.Future[Any]] = {}
         self._pending_sends: dict[str, tuple[int, int, Context]] = {}
 
@@ -237,8 +238,8 @@ class Cluster(Actor[ClusterMessage]):
                 await self._handle_probe_timeout(sequence, target)
             case _SuspicionTimeout(node_id=node_id):
                 await self._handle_suspicion_timeout(node_id)
-            case RegisterClusteredActor(actor_id=actor_id, actor_cls=actor_cls, replication=replication, singleton=singleton):
-                await self._handle_register_clustered_actor(actor_id, actor_cls, replication, singleton, ctx)
+            case RegisterClusteredActor(actor_id=actor_id, actor_cls=actor_cls, replication=replication, singleton=singleton, actor_kwargs=actor_kwargs):
+                await self._handle_register_clustered_actor(actor_id, actor_cls, replication, singleton, actor_kwargs, ctx)
             case GetClusteredActor(actor_id=actor_id):
                 await ctx.reply(self._clustered_actors.get(actor_id))
             case ClusteredSend():
@@ -566,6 +567,7 @@ class Cluster(Actor[ClusterMessage]):
         actor_cls: type,
         replication: int,
         singleton: bool,
+        actor_kwargs: dict[str, Any] | None,
         ctx: Context,
     ) -> None:
         from .consistency import resolve_replication
@@ -582,18 +584,20 @@ class Cluster(Actor[ClusterMessage]):
             replication=effective_replication,
             singleton=singleton,
             owner_node=self._node_id,
+            actor_kwargs=actor_kwargs,
         )
         self._clustered_actors[actor_id] = info
 
         preference_list = self._hash_ring.get_preference_list(actor_id, effective_replication)
 
         if self._node_id in preference_list:
+            backend = (actor_kwargs or {}).get("backend", InMemoryStoreBackend())
             ref = await ctx.spawn(
                 PersistentActor,
                 wrapped_actor_cls=actor_cls,
                 actor_id=actor_id,
                 node_id=self._node_id,
-                backend=InMemoryStoreBackend(),
+                backend=backend,
                 on_state_change=self._ctx.self_ref,
             )
             self._local_actors[actor_id] = ref

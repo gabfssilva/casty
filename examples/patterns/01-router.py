@@ -13,7 +13,7 @@ Run with:
 import asyncio
 from dataclasses import dataclass
 
-from casty import Actor, ActorSystem, Context, LocalRef
+from casty import Actor, ActorSystem, Context, LocalActorRef
 
 
 @dataclass
@@ -48,7 +48,7 @@ class RouterStats:
 class Worker(Actor[Job]):
     """Worker that processes jobs and reports back to the router."""
 
-    def __init__(self, worker_id: int, router: LocalRef):
+    def __init__(self, worker_id: int, router: LocalActorRef):
         self.worker_id = worker_id
         self.router = router
 
@@ -66,7 +66,7 @@ class Router(Actor[Job | JobResult | GetStats]):
 
     def __init__(self, num_workers: int = 3):
         self.num_workers = num_workers
-        self.workers: list[LocalRef[Job]] = []
+        self.workers: list[LocalActorRef[Job]] = []
         self.current_index = 0
         self.jobs_dispatched = 0
         self.jobs_completed = 0

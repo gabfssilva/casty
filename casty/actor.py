@@ -9,12 +9,13 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Union, get_args, get
 from types import UnionType
 from uuid import UUID
 
+from . import ActorRef
 from .stateful import Stateful
 
 if TYPE_CHECKING:
     from .supervision import SupervisorConfig, SupervisionDecision
     from .system import ActorSystem
-    from .cluster.clustered_ref import ClusteredRef
+    from .cluster.clustered_ref import ClusteredActorRef
     from .detach import Detached
 
 def on(msg_type: type):
@@ -118,30 +119,28 @@ class Envelope[M]:
     """Internal wrapper for messages (supports ask pattern and sender tracking)."""
 
     payload: M
-    sender: "LocalRef[Any] | None" = None
+    sender: "LocalActorRef[Any] | None" = None
 
 
-class LocalRef[M]:
+class LocalActorRef[M](ActorRef[M]):
     """Opaque reference to send messages to an actor.
 
     Type-safe reference that allows sending messages to an actor
     without exposing its internal implementation.
     """
 
-    __slots__ = ("_id", "_mailbox", "_system", "_send_impl", "_accepted_types")
+    __slots__ = ("_id", "_mailbox", "_system", "_accepted_types")
 
     def __init__(
         self,
         actor_id: ActorId,
         mailbox: Queue[Envelope[M]],
         system: "ActorSystem",
-        send_impl: Callable[[Envelope[M]], Awaitable[None]] | None = None,
         accepted_types: tuple[type, ...] = (),
     ) -> None:
         self._id = actor_id
         self._mailbox = mailbox
         self._system = system
-        self._send_impl = send_impl
         self._accepted_types = accepted_types
 
     @property
@@ -164,11 +163,11 @@ class LocalRef[M]:
         self,
         timeout: float,
         message: R,
-        listener: LocalRef[R] | None = None,
+        listener: LocalActorRef[R] | None = None,
     ) -> None:
         await self._system.schedule(timeout=timeout, listener=listener or self, message=message)
 
-    async def send(self, msg: M, *, sender: "LocalRef[Any] | None" = None) -> None:
+    async def send(self, msg: M, *, sender: "LocalActorRef[Any] | None" = None) -> None:
         """Send message (fire-and-forget).
 
         Args:
@@ -176,17 +175,14 @@ class LocalRef[M]:
             sender: Optional sender reference for reply routing
         """
         envelope = Envelope(msg, sender=sender)
-        if self._send_impl:
-            await self._send_impl(envelope)
-        else:
-            await self._mailbox.put(envelope)
+        await self._mailbox.put(envelope)
 
     async def ask[R](
         self,
         msg: M,
         *,
         timeout: float = 5.0,
-        sender: "LocalRef[Any] | None" = None,
+        sender: "LocalActorRef[Any] | None" = None,
     ) -> R:
         """Send message and await response.
 
@@ -200,8 +196,12 @@ class LocalRef[M]:
 
         Raises:
             asyncio.TimeoutError: If no response received within timeout
+            asyncio.CancelledError: If system is shutting down
         """
         import asyncio
+
+        if not getattr(self._system, '_running', True):
+            raise asyncio.CancelledError("System is shutting down")
 
         loop = asyncio.get_running_loop()
         future: Future[R] = loop.create_future()
@@ -212,11 +212,7 @@ class LocalRef[M]:
         # Use the provided sender or the reply_ref
         actual_sender = sender if sender is not None else reply_ref
         envelope = Envelope(msg, sender=actual_sender)
-
-        if self._send_impl:
-            await self._send_impl(envelope)
-        else:
-            await self._mailbox.put(envelope)
+        await self._mailbox.put(envelope)
 
         try:
             return await asyncio.wait_for(future, timeout=timeout)
@@ -243,7 +239,7 @@ class LocalRef[M]:
         return f"ActorRef({self._id})"
 
     def __eq__(self, other: object) -> bool:
-        if isinstance(other, LocalRef):
+        if isinstance(other, LocalActorRef):
             return self._id == other._id
         return False
 
@@ -251,7 +247,7 @@ class LocalRef[M]:
         return hash(self._id)
 
     def __or__[T](
-        self, other: "LocalRef[T] | ClusteredRef[T] | CompositeRef[T]"
+        self, other: "LocalActorRef[T] | ClusteredActorRef[T] | CompositeRef[T]"
     ) -> "CompositeRef[M | T]":
         """Combine refs with type-based routing.
 
@@ -280,8 +276,8 @@ class CompositeRef[M]:
 
     def __init__(
         self,
-        refs: tuple["LocalRef[Any] | ClusteredRef[Any]", ...],
-        type_to_ref: dict[type, "LocalRef[Any] | ClusteredRef[Any]"],
+        refs: tuple["LocalActorRef[Any] | ClusteredActorRef[Any]", ...],
+        type_to_ref: dict[type, "LocalActorRef[Any] | ClusteredActorRef[Any]"],
     ) -> None:
         self._refs = refs
         self._type_to_ref = type_to_ref
@@ -289,11 +285,11 @@ class CompositeRef[M]:
     @classmethod
     def from_refs(
         cls,
-        *refs: "LocalRef[Any] | ClusteredRef[Any] | CompositeRef[Any]",
+        *refs: "LocalActorRef[Any] | ClusteredActorRef[Any] | CompositeRef[Any]",
     ) -> "CompositeRef[Any]":
         """Create a CompositeRef from multiple refs."""
-        all_refs: list[LocalRef[Any] | ClusteredRef[Any]] = []
-        type_to_ref: dict[type, LocalRef[Any] | ClusteredRef[Any]] = {}
+        all_refs: list[LocalActorRef[Any] | ClusteredActorRef[Any]] = []
+        type_to_ref: dict[type, LocalActorRef[Any] | ClusteredActorRef[Any]] = {}
 
         for ref in refs:
             if isinstance(ref, CompositeRef):
@@ -310,7 +306,7 @@ class CompositeRef[M]:
 
         return cls(tuple(all_refs), type_to_ref)
 
-    def _find_ref(self, msg: Any) -> "LocalRef[Any] | ClusteredRef[Any]":
+    def _find_ref(self, msg: Any) -> "LocalActorRef[Any] | ClusteredActorRef[Any]":
         """Find the appropriate ref for a message."""
         msg_type = type(msg)
 
@@ -333,7 +329,7 @@ class CompositeRef[M]:
             f"Known types: {list(self._type_to_ref.keys())}"
         )
 
-    async def send(self, msg: M, *, sender: "LocalRef[Any] | None" = None) -> None:
+    async def send(self, msg: M, *, sender: "LocalActorRef[Any] | None" = None) -> None:
         """Send message to the appropriate actor based on message type."""
         ref = self._find_ref(msg)
         await ref.send(msg, sender=sender)
@@ -343,7 +339,7 @@ class CompositeRef[M]:
         msg: M,
         *,
         timeout: float = 5.0,
-        sender: "LocalRef[Any] | None" = None,
+        sender: "LocalActorRef[Any] | None" = None,
     ) -> R:
         """Send message and await response from the appropriate actor."""
         ref = self._find_ref(msg)
@@ -358,7 +354,7 @@ class CompositeRef[M]:
         return self.ask(msg)
 
     def __or__[T](
-        self, other: "LocalRef[T] | ClusteredRef[T] | CompositeRef[T]"
+        self, other: "LocalActorRef[T] | ClusteredActorRef[T] | CompositeRef[T]"
     ) -> "CompositeRef[M | T]":
         """Chain with another ref."""
         return CompositeRef.from_refs(self, other)
@@ -383,10 +379,10 @@ class Context[M]:
     child management, and message reply functionality.
     """
 
-    self_ref: LocalRef[M]
+    self_ref: LocalActorRef[M]
     system: "ActorSystem"
-    parent: LocalRef[Any] | None = None
-    sender: LocalRef[Any] | None = None
+    parent: LocalActorRef[Any] | None = None
+    sender: LocalActorRef[Any] | None = None
     _current_envelope: Envelope[M] | None = field(default=None, repr=False)
     # These are shared references - the objects they point to may be mutated
     _supervision_node: Any = field(default=None, repr=False)
@@ -399,7 +395,7 @@ class Context[M]:
         name: str | None = None,
         supervision: "SupervisorConfig | None" = None,
         **kwargs: Any,
-    ) -> LocalRef[T]:
+    ) -> LocalActorRef[T]:
         """Spawn a new actor as a child of this actor.
 
         Args:
@@ -464,7 +460,7 @@ class Context[M]:
             await self.sender.send(response)
 
     @property
-    def children(self) -> dict[ActorId, LocalRef[Any]]:
+    def children(self) -> dict[ActorId, LocalActorRef[Any]]:
         """Get all child actors spawned by this actor."""
         if self._supervision_node is None:
             return {}
@@ -473,7 +469,7 @@ class Context[M]:
             for child_id, node in self._supervision_node.children.items()
         }
 
-    async def stop_child(self, child: LocalRef[Any]) -> bool:
+    async def stop_child(self, child: LocalActorRef[Any]) -> bool:
         """Stop a specific child actor.
 
         Args:
@@ -484,7 +480,7 @@ class Context[M]:
         """
         return await self.system._stop_child(self, child.id)
 
-    async def restart_child(self, child: LocalRef[Any]) -> LocalRef[Any]:
+    async def restart_child(self, child: LocalActorRef[Any]) -> LocalActorRef[Any]:
         """Manually restart a child actor.
 
         Args:
@@ -610,7 +606,7 @@ class Actor[M](ABC, Stateful):
 
     async def on_child_failure(
         self,
-        child: LocalRef[Any],
+        child: LocalActorRef[Any],
         exc: Exception,
     ) -> "SupervisionDecision | None":
         """Called when a child actor fails.

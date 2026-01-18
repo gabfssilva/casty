@@ -14,7 +14,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from casty import Actor, ActorSystem, Context, LocalRef, on
+from casty import Actor, ActorSystem, Context, LocalActorRef, on
 
 
 # --- Messages ---
@@ -23,7 +23,7 @@ from casty import Actor, ActorSystem, Context, LocalRef, on
 class Join:
     """A user joins the chat room."""
     username: str
-    user_ref: LocalRef
+    user_ref: LocalActorRef
 
 
 @dataclass
@@ -74,7 +74,7 @@ class ChatRoom(Actor[ChatRoomMessage]):
 
     def __init__(self, room_name: str = "general"):
         self.room_name = room_name
-        self.participants: dict[str, LocalRef] = {}
+        self.participants: dict[str, LocalActorRef] = {}
 
     @on(Join)
     async def handle_join(self, msg: Join, ctx: Context) -> None:

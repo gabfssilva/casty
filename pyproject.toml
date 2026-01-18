@@ -64,5 +64,5 @@ markers = [
     "benchmark: marks tests as benchmarks (excluded by default)",
 ]
 # Retry flaky tests (OSError, address in use, etc.)
-reruns = 2
+reruns = 1
 reruns_delay = 1

@@ -77,7 +77,9 @@ class GCounter(Actor[Increment | GetCount | GetState | MergeState]):
 async def main():
     print("=== Distributed Counter (G-Counter CRDT) ===\n")
 
-    async with DevelopmentCluster(3) as (node0, node1, node2):  # type: ignore[misc]
+    async with DevelopmentCluster(3) as cluster:
+        node0, node1, node2 = cluster[0], cluster[1], cluster[2]
+
         print(f"Started 3-node cluster:")
         print(f"  - Node 0: {node0.node_id}")
         print(f"  - Node 1: {node1.node_id}")

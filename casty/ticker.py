@@ -26,14 +26,14 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from casty import Actor, Context, LocalRef
+from casty import Actor, Context, LocalActorRef
 
 
 @dataclass(frozen=True, slots=True)
 class Subscribe:
     """Subscribe a listener to receive a message at the specified interval."""
 
-    listener: LocalRef[Any]
+    listener: LocalActorRef[Any]
     message: Any
     interval: float
 
@@ -56,7 +56,7 @@ class _ScheduledTick:
 class _Subscription:
     """Internal subscription state."""
 
-    listener: LocalRef[Any]
+    listener: LocalActorRef[Any]
     message: Any
     interval: float
     task_id: str | None

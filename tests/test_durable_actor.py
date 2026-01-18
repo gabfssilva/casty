@@ -31,7 +31,7 @@ def cleanup_wal_data():
 @pytest.mark.asyncio
 async def test_durable_counter_increments():
     """Test that durable counter increments and processes messages."""
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         counter = await system.spawn(Counter, durable=True)
 
         # Send increments
@@ -62,8 +62,10 @@ async def test_durable_counter_full_recovery():
     automatically serialize/restore all public attributes. You only need
     to override them if you have custom serialization needs.
     """
+    from casty.system import LocalSystem
+
     # Step 1: Create system, actor, mutate state
-    async with ActorSystem() as system:
+    async with LocalSystem() as system:
         counter = await system.spawn(Counter, name="recovery-test", durable=True)
 
         # Send messages to modify state
@@ -85,7 +87,7 @@ async def test_durable_counter_full_recovery():
     assert Path("data/wal/recovery-test").exists(), "WAL directory should exist"
 
     # Step 4: Create NEW system, spawn actor with SAME NAME
-    async with ActorSystem() as system2:
+    async with LocalSystem() as system2:
         counter2 = await system2.spawn(Counter, name="recovery-test", durable=True)
 
         # Step 5: VALIDATE state was AUTOMATICALLY recovered
@@ -107,7 +109,7 @@ async def test_durable_counter_recovery_simple():
     requires explicit get_state/set_state on Counter.
     """
     # First run
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         counter = await system.spawn(Counter, name="counter", durable=True)
         await counter.send(Increment(5))
         await counter.send(Increment(3))
@@ -116,7 +118,7 @@ async def test_durable_counter_recovery_simple():
         assert value == 8
 
     # Second run - WAL infrastructure is in place
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         counter = await system.spawn(Counter, name="counter", durable=True)
         # WAL recovery mechanism works, but state recovery depends on
         # actor implementation of get_state/set_state
@@ -136,7 +138,7 @@ async def test_write_ahead_log_append():
         wal = WriteAheadLog(actor_id=actor_id, backend=backend)
 
         # Spawn and initialize
-        async with ActorSystem() as system:
+        async with ActorSystem.local() as system:
             ref = await system.spawn(
                 WriteAheadLog,
                 actor_id=actor_id,
@@ -168,7 +170,7 @@ async def test_write_ahead_log_recover():
         # First, create and populate a WAL
         backend1 = FileStoreBackend(log_dir)
 
-        async with ActorSystem() as system1:
+        async with ActorSystem.local() as system1:
             ref1 = await system1.spawn(
                 WriteAheadLog,
                 actor_id=actor_id,
@@ -187,7 +189,7 @@ async def test_write_ahead_log_recover():
         # Second, recover from the same WAL
         backend2 = FileStoreBackend(log_dir)
 
-        async with ActorSystem() as system2:
+        async with ActorSystem.local() as system2:
             ref2 = await system2.spawn(
                 WriteAheadLog,
                 actor_id=actor_id,

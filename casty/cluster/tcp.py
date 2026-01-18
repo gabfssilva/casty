@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import struct
 from dataclasses import dataclass
 
 from typing import Any
 
-from casty import Context, LocalRef
+from casty import Context, LocalActorRef
 
 from .messages import (
     Handshake,
@@ -43,7 +44,7 @@ class TcpTransport(Transport[_TcpInternal]):
 
     def __init__(
         self,
-        cluster: LocalRef[TransportEvent],
+        cluster: LocalActorRef[TransportEvent],
         bind_address: tuple[str, int],
         node_id: str,
     ):
@@ -122,6 +123,10 @@ class TcpTransport(Transport[_TcpInternal]):
             host, port = address
             reader, writer = await asyncio.open_connection(host, port)
 
+            sock = writer.get_extra_info("socket")
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
             remote_node_id = await self._do_handshake(reader, writer)
             if remote_node_id is None:
                 writer.close()
@@ -179,6 +184,10 @@ class TcpTransport(Transport[_TcpInternal]):
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        sock = writer.get_extra_info("socket")
+        if sock is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
         remote_node_id = await self._handle_incoming_handshake(reader, writer)
         if remote_node_id is None:
             writer.close()

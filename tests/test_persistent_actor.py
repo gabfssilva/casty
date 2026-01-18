@@ -35,7 +35,7 @@ class Counter(Actor[Increment | GetCount]):
 
 @pytest.mark.asyncio
 async def test_persistent_actor_forwards_messages():
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         persistent = await system.spawn(
             PersistentActor,
             wrapped_actor_cls=Counter,
@@ -54,7 +54,7 @@ async def test_persistent_actor_forwards_messages():
 
 @pytest.mark.asyncio
 async def test_persistent_actor_get_state():
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         persistent = await system.spawn(
             PersistentActor,
             wrapped_actor_cls=Counter,
@@ -71,7 +71,7 @@ async def test_persistent_actor_get_state():
 
 @pytest.mark.asyncio
 async def test_persistent_actor_get_version():
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         persistent = await system.spawn(
             PersistentActor,
             wrapped_actor_cls=Counter,
@@ -91,7 +91,7 @@ async def test_persistent_actor_get_version():
 
 @pytest.mark.asyncio
 async def test_persistent_actor_state_change_notification():
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         notifications = []
 
         class NotificationCollector(Actor[StateChanged]):
@@ -123,7 +123,7 @@ async def test_persistent_actor_state_change_notification():
 async def test_persistent_actor_recovery():
     backend = InMemoryStoreBackend()
 
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         persistent = await system.spawn(
             PersistentActor,
             wrapped_actor_cls=Counter,
@@ -138,7 +138,7 @@ async def test_persistent_actor_recovery():
         state = await persistent.ask(GetState())
         assert state == {"count": 15}
 
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         persistent = await system.spawn(
             PersistentActor,
             wrapped_actor_cls=Counter,
@@ -156,7 +156,7 @@ async def test_persistent_actor_recovery():
 
 @pytest.mark.asyncio
 async def test_persistent_actor_no_state_change_no_notification():
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         notifications = []
 
         class NotificationCollector(Actor[StateChanged]):

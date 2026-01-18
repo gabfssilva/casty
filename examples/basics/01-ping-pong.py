@@ -13,7 +13,7 @@ Run with:
 import asyncio
 from dataclasses import dataclass
 
-from casty import Actor, ActorSystem, Context, LocalRef
+from casty import Actor, ActorSystem, Context, ActorRef
 
 
 @dataclass
@@ -31,7 +31,7 @@ class Pong:
 @dataclass
 class Start:
     """Message to start the ping-pong exchange."""
-    target: LocalRef[Ping]
+    target: ActorRef[Ping]
     max_exchanges: int
 
 
@@ -79,7 +79,7 @@ async def main():
     print("=" * 50)
     print()
 
-    async with ActorSystem() as system:
+    async with ActorSystem.local() as system:
         # Spawn both actors
         ping_actor = await system.spawn(PingActor)
         pong_actor = await system.spawn(PongActor)

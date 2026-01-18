@@ -31,7 +31,7 @@ class CounterActor(Actor[Increment | GetCount]):
 class TestClusterActorRegistry:
     @pytest.mark.asyncio
     async def test_register_clustered_actor(self):
-        async with ActorSystem() as system:
+        async with ActorSystem.local() as system:
             cluster = await system.spawn(
                 Cluster,
                 config=ClusterConfig(bind_port=17946),
@@ -51,7 +51,7 @@ class TestClusterActorRegistry:
 
     @pytest.mark.asyncio
     async def test_spawn_creates_local_actor(self):
-        async with ActorSystem() as system:
+        async with ActorSystem.local() as system:
             cluster = await system.spawn(
                 Cluster,
                 config=ClusterConfig(bind_port=17947),

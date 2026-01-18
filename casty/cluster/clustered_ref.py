@@ -8,10 +8,10 @@ import msgpack
 
 from .consistency import Consistency
 from .messages import ClusteredSend, ClusteredAsk
+from ..protocols import ActorRef
 
 if TYPE_CHECKING:
-    from casty import LocalRef
-
+    from casty import LocalActorRef
 
 _counter: int = 0
 
@@ -23,10 +23,10 @@ def _next_request_id() -> str:
 
 
 @dataclass
-class ClusteredRef[M]:
+class ClusteredActorRef[M](ActorRef[M]):
     actor_id: str
-    cluster: LocalRef[Any]
-    local_ref: LocalRef[M] | None
+    cluster: LocalActorRef[Any]
+    local_ref: LocalActorRef[M] | None
     write_consistency: Consistency
 
     async def send(self, msg: M, *, consistency: Consistency | None = None) -> None:

@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from casty import Actor, ActorSystem, Context, LocalRef, on
+from casty import Actor, ActorSystem, Context, LocalActorRef, on
 
 
 # --- Messages ---
@@ -104,7 +104,7 @@ class Session(Actor[SessionMessage]):
         self,
         session_id: str,
         user_id: str,
-        manager_ref: LocalRef,
+        manager_ref: LocalActorRef,
         timeout: float = 5.0,
         initial_data: dict[str, Any] | None = None,
     ):
@@ -178,7 +178,7 @@ class _SessionState:
     user_id: str
     created_at: datetime
     data: dict[str, Any]
-    actor_ref: LocalRef | None = None
+    actor_ref: LocalActorRef | None = None
 
 
 type SessionManagerMessage = CreateSession | GetSession | TouchSession | EndSession | ListSessions | _Passivate
@@ -298,8 +298,8 @@ async def main():
 
         # Create sessions
         print("--- Creating sessions ---")
-        session1: LocalRef = await manager.ask(CreateSession("alice"))
-        session2: LocalRef = await manager.ask(CreateSession("bob"))
+        session1: LocalActorRef = await manager.ask(CreateSession("alice"))
+        session2: LocalActorRef = await manager.ask(CreateSession("bob"))
         await asyncio.sleep(0.1)
         print()
 
@@ -334,7 +334,7 @@ async def main():
 
         # Reactivate session1 and verify data was preserved
         print("--- Reactivating session1 ---")
-        session1_reactivated: LocalRef = await manager.ask(GetSession(sessions[0].session_id))
+        session1_reactivated: LocalActorRef = await manager.ask(GetSession(sessions[0].session_id))
         data = await session1_reactivated.ask(GetAllData())
         print(f"  Session data preserved: {data}")
         print()

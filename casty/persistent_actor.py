@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
-from .actor import Actor, Context, LocalRef
+from .actor import Actor, Context, LocalActorRef
 from .wal import (
     WriteAheadLog,
     StoreBackend,
@@ -59,7 +59,7 @@ class PersistentActor[M](Actor[M | GetCurrentVersion | GetState | MergeState | S
         actor_id: str,
         node_id: str,
         backend: StoreBackend | None = None,
-        on_state_change: LocalRef[StateChanged] | None = None,
+        on_state_change: LocalActorRef[StateChanged] | None = None,
         **kwargs: Any,
     ) -> None:
         self._actor_cls = wrapped_actor_cls
@@ -70,8 +70,8 @@ class PersistentActor[M](Actor[M | GetCurrentVersion | GetState | MergeState | S
         self._backend = backend or InMemoryStoreBackend()
         self._on_state_change = on_state_change
 
-        self._wal: LocalRef[Any] | None = None
-        self._actor: LocalRef[M] | None = None
+        self._wal: LocalActorRef[Any] | None = None
+        self._actor: LocalActorRef[M] | None = None
 
     async def on_start(self) -> None:
         self._wal = await self._ctx.spawn(

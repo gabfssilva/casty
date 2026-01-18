@@ -14,7 +14,7 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 
-from casty import Actor, ActorSystem, Context, LocalRef
+from casty import Actor, ActorSystem, Context, LocalActorRef
 
 
 class BookingStatus(Enum):
@@ -237,7 +237,7 @@ SagaResponse = (
 class SagaState:
     """Tracks the state of a saga execution."""
     booking: BookTrip
-    sender: LocalRef | None
+    sender: LocalActorRef | None
     hotel_confirmation: str | None = None
     flight_confirmation: str | None = None
     payment_transaction: str | None = None
@@ -250,9 +250,9 @@ class SagaOrchestrator(Actor[BookTrip | SagaResponse]):
 
     def __init__(
         self,
-        hotel_service: LocalRef,
-        flight_service: LocalRef,
-        payment_service: LocalRef,
+        hotel_service: LocalActorRef,
+        flight_service: LocalActorRef,
+        payment_service: LocalActorRef,
     ):
         self.hotel_service = hotel_service
         self.flight_service = flight_service

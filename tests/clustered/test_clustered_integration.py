@@ -4,11 +4,11 @@ from dataclasses import dataclass
 
 import msgpack
 
-from casty import Actor, ActorSystem
+from casty import Actor, LocalSystem
 from casty.cluster import (
     Cluster,
     ClusterConfig,
-    ClusteredRef,
+    ClusteredActorRef,
     RegisterClusteredActor,
     ClusteredSend,
     ClusteredAsk,
@@ -42,7 +42,7 @@ class Counter(Actor[Increment | GetCount]):
 class TestActorIntegration:
     @pytest.mark.asyncio
     async def test_full_flow_single_node(self):
-        async with ActorSystem() as system:
+        async with LocalSystem() as system:
             cluster = await system.spawn(
                 Cluster,
                 config=ClusterConfig(bind_port=17970),
@@ -92,7 +92,7 @@ class TestActorIntegration:
 
     @pytest.mark.asyncio
     async def test_singleton_flag_preserved(self):
-        async with ActorSystem() as system:
+        async with LocalSystem() as system:
             cluster = await system.spawn(
                 Cluster,
                 config=ClusterConfig(bind_port=17971),
@@ -113,7 +113,7 @@ class TestActorIntegration:
 
     @pytest.mark.asyncio
     async def test_version_tracked_across_operations(self):
-        async with ActorSystem() as system:
+        async with LocalSystem() as system:
             cluster = await system.spawn(
                 Cluster,
                 config=ClusterConfig(bind_port=17972),

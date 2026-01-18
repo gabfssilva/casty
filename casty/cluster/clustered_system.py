@@ -3,21 +3,22 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
-from casty import Actor, ActorSystem, LocalRef
+from casty import Actor, LocalActorRef
+from casty.system import LocalSystem
 
 from .cluster import Cluster
-from .clustered_ref import ClusteredRef
+from .clustered_ref import ClusteredActorRef
 from .config import ClusterConfig
 from .consistency import Consistency, Replication
 from .messages import RegisterClusteredActor, GetClusteredActor
 
 
-class ClusteredActorSystem(ActorSystem):
+class ClusteredSystem(LocalSystem):
 
     def __init__(self, config: ClusterConfig | None = None):
         super().__init__()
         self._config = config or ClusterConfig.development()
-        self._cluster: LocalRef[Any] | None = None
+        self._cluster: LocalActorRef[Any] | None = None
 
     @property
     def node_id(self) -> str:
@@ -40,7 +41,7 @@ class ClusteredActorSystem(ActorSystem):
         singleton: bool = False,
         write_consistency: Consistency = 'one',
         **kwargs: Any,
-    ) -> LocalRef[M] | ClusteredRef[M]:
+    ) -> LocalActorRef[M] | ClusteredActorRef[M]:
         if not clustered:
             return await super().spawn(actor_cls, name=name, **kwargs)
 
@@ -54,20 +55,21 @@ class ClusteredActorSystem(ActorSystem):
                     actor_cls=actor_cls,
                     replication=replication if isinstance(replication, int) else 1,
                     singleton=singleton,
+                    actor_kwargs=kwargs if kwargs else None,
                 )
             )
             info = await self._cluster.ask(GetClusteredActor(actor_id=actor_id))
 
         local_ref = self._get_local_actor(actor_id) if info else None
 
-        return ClusteredRef(
+        return ClusteredActorRef(
             actor_id=actor_id,
             cluster=self._cluster,
             local_ref=local_ref,
             write_consistency=write_consistency,
         )
 
-    def _get_local_actor(self, actor_id: str) -> LocalRef[Any] | None:
+    def _get_local_actor(self, actor_id: str) -> LocalActorRef[Any] | None:
         if self._cluster is None:
             return None
         node = self._supervision_tree.get_node(self._cluster.id)
@@ -77,6 +79,6 @@ class ClusteredActorSystem(ActorSystem):
         local_actors = getattr(cluster_actor, '_local_actors', {})
         return local_actors.get(actor_id)
 
-    async def __aenter__(self) -> "ClusteredActorSystem":
+    async def __aenter__(self) -> "ClusteredSystem":
         await self.start()
         return self

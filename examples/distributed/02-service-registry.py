@@ -14,11 +14,11 @@ Run with: uv run python examples/distributed/02-service-registry.py
 """
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from casty import Actor, Context, LocalRef
+from casty import Actor, Context, LocalActorRef
 from casty.cluster import DevelopmentCluster
 
 
@@ -31,7 +31,7 @@ class Register:
     service_type: str
     tags: list[str]
     metadata: dict[str, Any]
-    ref: LocalRef[Any]
+    ref: LocalActorRef[Any]
 
 
 @dataclass
@@ -56,7 +56,7 @@ class Discover:
 @dataclass
 class Subscribe:
     """Subscribe to service up/down notifications."""
-    listener: LocalRef[Any]
+    listener: LocalActorRef[Any]
 
 
 @dataclass
@@ -92,7 +92,7 @@ class ServiceInfo:
     service_type: str
     tags: list[str]
     metadata: dict[str, Any]
-    ref: LocalRef[Any]
+    ref: LocalActorRef[Any]
     last_heartbeat: float
 
 
@@ -108,7 +108,7 @@ class ServiceRegistry(Actor[Register | Deregister | Heartbeat | Discover | Subsc
 
     def __init__(self, heartbeat_timeout: float = 3.0):
         self.services: dict[str, ServiceInfo] = {}
-        self.subscribers: list[LocalRef[Any]] = []
+        self.subscribers: list[LocalActorRef[Any]] = []
         self.heartbeat_timeout = heartbeat_timeout
         self._check_task_id: str | None = None
 
@@ -213,7 +213,7 @@ class Service(Actor[Ping | _SendHeartbeat]):
         self,
         service_id: str,
         service_type: str,
-        registry: LocalRef[Any],
+        registry: LocalActorRef[Any],
         tags: list[str] | None = None,
     ):
         self.service_id = service_id
@@ -261,31 +261,31 @@ class ServiceMonitor(Actor[ServiceUp | ServiceDown]):
 
     async def receive(self, msg, ctx: Context):
         match msg:
-            case ServiceUp(service_id, service_type, metadata):
+            case ServiceUp(service_id, service_type, _):
                 print(f"[Monitor:{self.monitor_name}] SERVICE UP: {service_id} (type={service_type})")
 
-            case ServiceDown(service_id, service_type, reason):
+            case ServiceDown(service_id, _, reason):
                 print(f"[Monitor:{self.monitor_name}] SERVICE DOWN: {service_id} (reason={reason})")
 
 
 async def main():
     print("=== Service Registry with Health Checks ===\n")
 
-    async with DevelopmentCluster(1) as (system,):
+    # Using cluster directly - operations go to random nodes
+    async with DevelopmentCluster(1) as cluster:
         await asyncio.sleep(0.3)
 
-        # Create registry
-        registry = await system.spawn(ServiceRegistry, heartbeat_timeout=2.5)
+        # All spawns go through cluster (random node selection)
+        registry = await cluster.spawn(ServiceRegistry, heartbeat_timeout=2.5)
 
-        # Create a monitor that subscribes to events
-        monitor = await system.spawn(ServiceMonitor, monitor_name="ops")
+        monitor = await cluster.spawn(ServiceMonitor, monitor_name="ops")
         await registry.send(Subscribe(monitor))
 
         print("\nPhase 1: Starting services")
         print("-" * 50)
 
-        # Start multiple services
-        api_service = await system.spawn(
+        # Services spawned via cluster
+        api_service = await cluster.spawn(
             Service,
             service_id="api-1",
             service_type="api-gateway",
@@ -293,7 +293,7 @@ async def main():
             tags=["http", "public"],
         )
 
-        db_service = await system.spawn(
+        db_service = await cluster.spawn(
             Service,
             service_id="db-1",
             service_type="database",
@@ -301,7 +301,7 @@ async def main():
             tags=["postgres", "primary"],
         )
 
-        cache_service = await system.spawn(
+        cache_service = await cluster.spawn(
             Service,
             service_id="cache-1",
             service_type="cache",
@@ -335,15 +335,14 @@ async def main():
         if all_services:
             api = all_services[0]
             print(f"Pinging {api['service_id']}...")
-            # In a real scenario, we'd have the ref from the service info
             response = await api_service.ask(Ping())
             print(f"Response: {response}")
 
         print("\nPhase 4: Graceful shutdown")
         print("-" * 50)
 
-        # Stop one service gracefully
-        await system.stop(cache_service)
+        # Stop via cluster
+        await cluster.stop(cache_service)
         await asyncio.sleep(0.5)
 
         # Check remaining services
@@ -353,13 +352,8 @@ async def main():
         print("\nPhase 5: Simulating service failure")
         print("-" * 50)
 
-        # Stop db_service's heartbeats by stopping the actor without deregistering
-        # We simulate this by just stopping - the registry will detect missed heartbeats
         print("Stopping db-1 abruptly (without deregistration)...")
-
-        # Cancel heartbeat but don't send deregister - simulate crash
-        # For this demo, we just wait for the health check to detect it
-        await system.stop(db_service)
+        await cluster.stop(db_service)
 
         # Wait for health check to detect the dead service
         print("Waiting for health check to detect failure...")

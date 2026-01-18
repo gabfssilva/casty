@@ -6,8 +6,8 @@ Casty provides a type-safe actor model implementation with:
 - Sharded actors with consistent hashing
 - Event sourcing for persistence
 
-Basic usage with @on decorator:
-    from casty import Actor, ActorSystem, Context, on
+Basic usage:
+    from casty import Actor, ActorSystem, Context
     from dataclasses import dataclass
 
     @dataclass
@@ -18,26 +18,6 @@ Basic usage with @on decorator:
     class GetCount:
         pass
 
-    class Counter(Actor[Increment | GetCount]):
-        def __init__(self):
-            self.count = 0
-
-        @on(Increment)
-        async def handle_increment(self, msg: Increment, ctx: Context):
-            self.count += msg.amount
-
-        @on(GetCount)
-        async def handle_query(self, msg: GetCount, ctx: Context):
-            await ctx.reply(self.count)
-
-    async def main():
-        async with ActorSystem() as system:
-            counter = await system.spawn(Counter)
-            await counter.send(Increment(5))
-            result = await counter.ask(GetCount())
-            print(result)  # 5
-
-Or use traditional match statements in receive():
     class Counter(Actor[Increment | GetCount]):
         async def receive(self, msg: Increment | GetCount, ctx: Context):
             match msg:
@@ -81,12 +61,19 @@ def is_uvloop_enabled() -> bool:
     """Check if uvloop is being used as the event loop."""
     return _UVLOOP_INSTALLED
 
+# Protocols
+from .protocols import System, ActorRef
 
 # Core actor primitives
-from .actor import Actor, ActorId, LocalRef, CompositeRef, Behavior, Context, Envelope, EntityRef, ShardedRef, on
+from .actor import Actor, ActorId, LocalActorRef, CompositeRef, Behavior, Context, Envelope, EntityRef, ShardedRef, on
 
-# Actor system
-from .system import ActorSystem
+# Decorator/Factory (the new ActorSystem)
+from .actor_system import ActorSystem
+
+# Implementations
+from .system import LocalSystem
+from .cluster.clustered_system import ClusteredSystem
+from .cluster.clustered_ref import ClusteredActorRef
 
 # Supervision
 from .supervision import (
@@ -114,10 +101,13 @@ from .persistence import (
 from .cluster.serializable import serializable, deserialize
 
 __all__ = [
+    # Protocols
+    "System",
+    "ActorRef",
     # Core
     "Actor",
     "ActorId",
-    "LocalRef",
+    "LocalActorRef",
     "CompositeRef",
     "Behavior",
     "Context",
@@ -126,8 +116,12 @@ __all__ = [
     # Sharding
     "EntityRef",
     "ShardedRef",
-    # System
+    # System (decorator/factory)
     "ActorSystem",
+    # Implementations
+    "LocalSystem",
+    "ClusteredSystem",
+    "ClusteredActorRef",
     # Supervision
     "MultiChildStrategy",
     "SupervisionDecision",

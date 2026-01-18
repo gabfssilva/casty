@@ -46,7 +46,8 @@ class Counter(Actor[Increment | GetCount]):
 class TestMultiNodeCluster:
     @pytest.mark.asyncio
     async def test_single_node_clustered_actor(self):
-        async with DevelopmentCluster(1) as (node,):
+        async with DevelopmentCluster(1) as cluster:
+            node = cluster.node(0)
             ref = await node.spawn(PingActor, clustered=True)
 
             result = await ref.ask(Ping())
@@ -57,7 +58,8 @@ class TestMultiNodeCluster:
 
     @pytest.mark.asyncio
     async def test_single_node_local_ref_optimization(self):
-        async with DevelopmentCluster(1) as (node,):
+        async with DevelopmentCluster(1) as cluster:
+            node = cluster.node(0)
             ref = await node.spawn(Counter, clustered=True)
 
             assert ref.local_ref is not None
@@ -68,7 +70,8 @@ class TestMultiNodeCluster:
 
     @pytest.mark.asyncio
     async def test_single_node_multiple_actors(self):
-        async with DevelopmentCluster(1) as (node,):
+        async with DevelopmentCluster(1) as cluster:
+            node = cluster.node(0)
             counter1 = await node.spawn(Counter, clustered=True)
             counter2 = await node.spawn(Counter, clustered=True)
 
@@ -83,5 +86,5 @@ class TestMultiNodeCluster:
 
     @pytest.mark.asyncio
     async def test_custom_node_prefix(self):
-        async with DevelopmentCluster(1, node_id_prefix="worker") as (w,):
-            assert w.node_id == "worker-0"
+        async with DevelopmentCluster(1, node_id_prefix="worker") as cluster:
+            assert cluster[0].node_id == "worker-0"

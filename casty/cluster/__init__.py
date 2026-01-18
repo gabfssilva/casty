@@ -15,9 +15,9 @@ from .hash_ring import HashRing
 from .transport import Transport, Connect, Disconnect
 from .tcp import TcpTransport
 from .consistency import Replication, Consistency, resolve_replication, resolve_consistency
-from .clustered_ref import ClusteredRef
-from .clustered_system import ClusteredActorSystem
-from .development import DevelopmentCluster
+from .clustered_ref import ClusteredActorRef
+from .clustered_system import ClusteredSystem
+from .development import DevelopmentCluster, DistributionStrategy
 
 __all__ = [
     "serializable",
@@ -64,7 +64,8 @@ __all__ = [
     "Consistency",
     "resolve_replication",
     "resolve_consistency",
-    "ClusteredRef",
-    "ClusteredActorSystem",
+    "ClusteredActorRef",
+    "ClusteredSystem",
     "DevelopmentCluster",
+    "DistributionStrategy",
 ]

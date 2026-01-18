@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import msgpack
 
-from casty import Actor, ActorSystem
+from casty import Actor, LocalSystem
 from casty.cluster import Cluster, ClusterConfig
 from casty.cluster.messages import (
     RegisterClusteredActor,
@@ -46,7 +46,7 @@ class ReadOnlyActor(Actor[ReadOnly]):
 class TestReplication:
     @pytest.mark.asyncio
     async def test_state_change_triggers_version_increment(self):
-        async with ActorSystem() as system:
+        async with LocalSystem() as system:
             cluster = await system.spawn(
                 Cluster,
                 config=ClusterConfig(bind_port=17960),
@@ -88,7 +88,7 @@ class TestReplication:
 
     @pytest.mark.asyncio
     async def test_no_version_increment_if_state_unchanged(self):
-        async with ActorSystem() as system:
+        async with LocalSystem() as system:
             cluster = await system.spawn(
                 Cluster,
                 config=ClusterConfig(bind_port=17961),
@@ -134,7 +134,7 @@ class TestReplication:
 
     @pytest.mark.asyncio
     async def test_multiple_state_changes_increment_version(self):
-        async with ActorSystem() as system:
+        async with LocalSystem() as system:
             cluster = await system.spawn(
                 Cluster,
                 config=ClusterConfig(bind_port=17962),

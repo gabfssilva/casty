@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from casty import LocalRef
+    from casty import LocalActorRef
 
 from casty.wal import VectorClock
 from .serializable import serializable
@@ -74,12 +74,12 @@ type ClusterEvent = NodeJoined | NodeLeft | NodeFailed
 
 @dataclass(frozen=True, slots=True)
 class Subscribe:
-    subscriber: LocalRef[ClusterEvent]
+    subscriber: LocalActorRef[ClusterEvent]
 
 
 @dataclass(frozen=True, slots=True)
 class Unsubscribe:
-    subscriber: LocalRef[ClusterEvent]
+    subscriber: LocalActorRef[ClusterEvent]
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +247,7 @@ class RegisterClusteredActor:
     actor_cls: type
     replication: int
     singleton: bool
+    actor_kwargs: dict[str, Any] | None = None
 
 
 @serializable

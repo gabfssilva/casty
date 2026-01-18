@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from casty import Actor, ActorSystem, Context, LocalRef, on
+from casty import Actor, ActorSystem, Context, LocalActorRef, on
 
 
 # --- Domain Events ---
@@ -148,7 +148,7 @@ class WriteModel(Actor[WriteModelMessage]):
     - Publishes events to read models
     """
 
-    def __init__(self, read_models: list[LocalRef]):
+    def __init__(self, read_models: list[LocalActorRef]):
         self.read_models = read_models
         self.products: dict[str, _Product] = {}
 

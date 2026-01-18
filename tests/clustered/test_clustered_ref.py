@@ -5,10 +5,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 class TestClusteredRef:
     def test_creation(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
 
         cluster = MagicMock()
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="user-123",
             cluster=cluster,
             local_ref=None,
@@ -19,7 +19,7 @@ class TestClusteredRef:
 
     @pytest.mark.asyncio
     async def test_send_delegates_to_cluster(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
         from dataclasses import dataclass
 
         @dataclass
@@ -29,7 +29,7 @@ class TestClusteredRef:
         cluster = MagicMock()
         cluster.send = AsyncMock()
 
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="counter-1",
             cluster=cluster,
             local_ref=None,
@@ -42,7 +42,7 @@ class TestClusteredRef:
 
     @pytest.mark.asyncio
     async def test_ask_delegates_to_cluster(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
         from dataclasses import dataclass
 
         @dataclass
@@ -52,7 +52,7 @@ class TestClusteredRef:
         cluster = MagicMock()
         cluster.ask = AsyncMock(return_value=42)
 
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="counter-1",
             cluster=cluster,
             local_ref=None,
@@ -66,7 +66,7 @@ class TestClusteredRef:
 
     @pytest.mark.asyncio
     async def test_send_with_custom_consistency(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
         from dataclasses import dataclass
 
         @dataclass
@@ -76,7 +76,7 @@ class TestClusteredRef:
         cluster = MagicMock()
         cluster.send = AsyncMock()
 
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="test",
             cluster=cluster,
             local_ref=None,
@@ -90,7 +90,7 @@ class TestClusteredRef:
 
     @pytest.mark.asyncio
     async def test_rshift_operator_calls_send(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
         from dataclasses import dataclass
 
         @dataclass
@@ -100,7 +100,7 @@ class TestClusteredRef:
         cluster = MagicMock()
         cluster.send = AsyncMock()
 
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="test",
             cluster=cluster,
             local_ref=None,
@@ -113,7 +113,7 @@ class TestClusteredRef:
 
     @pytest.mark.asyncio
     async def test_lshift_operator_calls_ask(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
         from dataclasses import dataclass
 
         @dataclass
@@ -123,7 +123,7 @@ class TestClusteredRef:
         cluster = MagicMock()
         cluster.ask = AsyncMock(return_value=100)
 
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="test",
             cluster=cluster,
             local_ref=None,
@@ -136,10 +136,10 @@ class TestClusteredRef:
         cluster.ask.assert_called_once()
 
     def test_repr(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
 
         cluster = MagicMock()
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="user-456",
             cluster=cluster,
             local_ref=None,
@@ -150,7 +150,7 @@ class TestClusteredRef:
 
     @pytest.mark.asyncio
     async def test_send_uses_write_consistency_by_default(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
         from casty.cluster.messages import ClusteredSend
         from dataclasses import dataclass
 
@@ -161,7 +161,7 @@ class TestClusteredRef:
         cluster = MagicMock()
         cluster.send = AsyncMock()
 
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="test",
             cluster=cluster,
             local_ref=None,
@@ -179,7 +179,7 @@ class TestClusteredRef:
 class TestClusteredRefLocal:
     @pytest.mark.asyncio
     async def test_send_uses_local_ref_when_available(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
         from dataclasses import dataclass
 
         @dataclass
@@ -192,7 +192,7 @@ class TestClusteredRefLocal:
         local_ref = MagicMock()
         local_ref.send = AsyncMock()
 
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="test",
             cluster=cluster,
             local_ref=local_ref,
@@ -206,7 +206,7 @@ class TestClusteredRefLocal:
 
     @pytest.mark.asyncio
     async def test_ask_uses_local_ref_when_available(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
         from dataclasses import dataclass
 
         @dataclass
@@ -219,7 +219,7 @@ class TestClusteredRefLocal:
         local_ref = MagicMock()
         local_ref.ask = AsyncMock(return_value=42)
 
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="test",
             cluster=cluster,
             local_ref=local_ref,
@@ -234,7 +234,7 @@ class TestClusteredRefLocal:
 
     @pytest.mark.asyncio
     async def test_send_uses_cluster_when_no_local_ref(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
         from dataclasses import dataclass
 
         @dataclass
@@ -244,7 +244,7 @@ class TestClusteredRefLocal:
         cluster = MagicMock()
         cluster.send = AsyncMock()
 
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="test",
             cluster=cluster,
             local_ref=None,
@@ -257,7 +257,7 @@ class TestClusteredRefLocal:
 
     @pytest.mark.asyncio
     async def test_ask_uses_cluster_when_no_local_ref(self):
-        from casty.cluster.clustered_ref import ClusteredRef
+        from casty.cluster.clustered_ref import ClusteredActorRef
         from dataclasses import dataclass
 
         @dataclass
@@ -267,7 +267,7 @@ class TestClusteredRefLocal:
         cluster = MagicMock()
         cluster.ask = AsyncMock(return_value=99)
 
-        ref = ClusteredRef(
+        ref = ClusteredActorRef(
             actor_id="test",
             cluster=cluster,
             local_ref=None,

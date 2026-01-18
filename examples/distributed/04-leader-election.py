@@ -17,7 +17,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any
 
-from casty import Actor, Context, LocalRef
+from casty import Actor, Context, LocalActorRef
 from casty.cluster import DevelopmentCluster
 
 
@@ -27,7 +27,7 @@ from casty.cluster import DevelopmentCluster
 class RequestVote:
     """Candidate requests a vote in an election."""
     candidate_id: str
-    candidate_ref: LocalRef[Any]
+    candidate_ref: LocalActorRef[Any]
     term: int
 
 
@@ -43,7 +43,7 @@ class Vote:
 class Heartbeat:
     """Leader heartbeat to maintain authority."""
     leader_id: str
-    leader_ref: LocalRef[Any]
+    leader_ref: LocalActorRef[Any]
     term: int
 
 
@@ -57,7 +57,7 @@ class HeartbeatAck:
 @dataclass
 class SetPeers:
     """Set the peer references for an elector node."""
-    peers: list[LocalRef[Any]]
+    peers: list[LocalActorRef[Any]]
 
 
 @dataclass
@@ -113,7 +113,7 @@ class ElectorNode(Actor[ElectorMessage]):
         heartbeat_interval: float = 0.5,
     ):
         self.node_id = node_id
-        self.peers: list[LocalRef[Any]] = []
+        self.peers: list[LocalActorRef[Any]] = []
         self.election_timeout_range = election_timeout_range
         self.heartbeat_interval = heartbeat_interval
 
@@ -291,7 +291,9 @@ class ElectorNode(Actor[ElectorMessage]):
 async def main():
     print("=== Leader Election ===\n")
 
-    async with DevelopmentCluster(3) as (node0, node1, node2):  # type: ignore[misc]
+    async with DevelopmentCluster(3) as cluster:
+        node0, node1, node2 = cluster[0], cluster[1], cluster[2]
+
         print(f"Started 3-node cluster")
         await asyncio.sleep(0.3)
 

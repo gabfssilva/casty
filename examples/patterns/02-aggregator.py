@@ -14,7 +14,7 @@ import asyncio
 import random
 from dataclasses import dataclass
 
-from casty import Actor, ActorSystem, Context, LocalRef
+from casty import Actor, ActorSystem, Context, LocalActorRef
 
 
 @dataclass
@@ -81,7 +81,7 @@ class _Timeout:
 class Aggregator(Actor[FindBestPrice | _SupplierResponse | _Timeout]):
     """Aggregates price quotes from multiple suppliers."""
 
-    def __init__(self, suppliers: list[LocalRef[GetPrice]]):
+    def __init__(self, suppliers: list[LocalActorRef[GetPrice]]):
         self.suppliers = suppliers
         self.pending_requests: dict[int, dict] = {}
         self.request_counter = 0
@@ -128,7 +128,7 @@ class Aggregator(Actor[FindBestPrice | _SupplierResponse | _Timeout]):
 
     async def _request_quote(
         self,
-        supplier: LocalRef[GetPrice],
+        supplier: LocalActorRef[GetPrice],
         item: str,
     ) -> PriceQuote:
         """Request a quote from a single supplier."""
