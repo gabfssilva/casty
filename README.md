@@ -105,7 +105,7 @@ When a customer adds an item to their cart, you don't need to wait for confirmat
 
 ```python
 async with ActorSystem() as system:
-    cart = await system.spawn(ShoppingCart)
+    cart = await system.actor(ShoppingCart, name="cart")
 
     await cart.send(AddItem("SKU-123", 29.99))
     await cart.send(AddItem("SKU-456", 49.99))
@@ -188,9 +188,6 @@ async def receive(self, msg, ctx: Context):
         case AddItem(sku, price):
             self.items[sku] = price
 
-            # Access the actor system
-            logger = await ctx.system.lookup("logger")
-
             # Get a reference to yourself
             my_ref = ctx.self_ref
 
@@ -271,7 +268,7 @@ You need persistence. Casty provides a write-ahead log (WAL) that records state 
 from casty import ActorSystem
 
 async with ActorSystem() as system:
-    cart = await system.spawn(
+    cart = await system.actor(
         ShoppingCart,
         name="cart-user-123",
         durable=True,
@@ -340,13 +337,13 @@ async with ActorSystem.clustered(
 ) as system:
 
     # This cart lives on this node only
-    local_cart = await system.spawn(ShoppingCart, name="cart-123")
+    local_cart = await system.actor(ShoppingCart, name="cart-123")
 
     # This cart is registered in the cluster
-    clustered_cart = await system.spawn(
+    clustered_cart = await system.actor(
         ShoppingCart,
         name="cart-456",
-        clustered=True,
+        scope="cluster",
     )
 ```
 
@@ -436,12 +433,12 @@ The `HashRing` ensures that the same user ID always routes to the same shard. Wh
 ```python
 async with DevelopmentCluster(3) as (node0, node1, node2):
     # Create one shard per node
-    shard0 = await node0.spawn(CartShard, shard_id="shard-0")
-    shard1 = await node1.spawn(CartShard, shard_id="shard-1")
-    shard2 = await node2.spawn(CartShard, shard_id="shard-2")
+    shard0 = await node0.actor(CartShard, name="shard-0", shard_id="shard-0")
+    shard1 = await node1.actor(CartShard, name="shard-1", shard_id="shard-1")
+    shard2 = await node2.actor(CartShard, name="shard-2", shard_id="shard-2")
 
     shards = {"shard-0": shard0, "shard-1": shard1, "shard-2": shard2}
-    router = await node0.spawn(CartRouter, shards=shards)
+    router = await node0.actor(CartRouter, name="router", shards=shards)
 
     # Use the router — it handles distribution
     await router.send(AddItem("user-alice", "SKU-1", 29.99))
@@ -458,21 +455,24 @@ async with DevelopmentCluster(3) as (node0, node1, node2):
 
 Your sharded carts are distributed, but what happens when a node crashes? The carts on that node are gone. You need replicas.
 
-When you spawn a clustered actor, you can configure how many copies exist and how writes are acknowledged:
+When you create a clustered actor, you can configure how many copies exist and how writes are acknowledged using `ClusterScope`:
 
 ```python
+from casty.cluster import ClusterScope
+
 async with ActorSystem.clustered(
     host="0.0.0.0",
     port=8001,
     seeds=["node2:8001", "node3:8001"],
 ) as system:
 
-    cart = await system.spawn(
+    cart = await system.actor(
         ShoppingCart,
         name="cart-123",
-        clustered=True,
-        replication=3,              # Keep 3 copies across nodes
-        write_consistency='quorum', # Wait for majority to confirm
+        scope=ClusterScope(
+            replication=3,        # Keep 3 copies across nodes
+            consistency='quorum', # Wait for majority to confirm
+        ),
     )
 ```
 
@@ -583,7 +583,7 @@ class ShoppingCart(Actor[AddItem | ItemValid | ItemInvalid]):
         self.validator: LocalRef | None = None
 
     async def on_start(self):
-        self.validator = await self._ctx.spawn(InventoryValidator)
+        self.validator = await self._ctx.actor(InventoryValidator, name="validator")
 
     async def receive(self, msg, ctx: Context):
         match msg:
@@ -595,7 +595,7 @@ class ShoppingCart(Actor[AddItem | ItemValid | ItemInvalid]):
                 print(f"Cannot add {sku}: {reason}")
 ```
 
-Children spawned via `ctx.spawn()` are supervised by their parent. When the parent stops, all children stop automatically.
+Children created via `ctx.actor()` are supervised by their parent. When the parent stops, all children stop automatically.
 
 <details>
 <summary><b>Child supervision</b></summary>
@@ -604,8 +604,9 @@ When a child crashes, the parent decides what happens based on its supervision s
 
 ```python
 async def on_start(self):
-    self.validator = await self._ctx.spawn(
+    self.validator = await self._ctx.actor(
         InventoryValidator,
+        name="validator",
         supervision=SupervisorConfig(
             strategy=SupervisionStrategy.RESTART,
             max_restarts=5,
@@ -655,8 +656,8 @@ class Metrics(Actor[MetricEvent]):
         print(f"[METRIC] {msg.name}={msg.value}")
 
 async with ActorSystem() as system:
-    logger = await system.spawn(Logger)
-    metrics = await system.spawn(Metrics)
+    logger = await system.actor(Logger, name="logger")
+    metrics = await system.actor(Metrics, name="metrics")
 
     # Combine with | operator
     observer = logger | metrics
@@ -838,25 +839,26 @@ owner = ring.get_node("user-alice")  # Deterministic
 
 ```python
 async with ActorSystem() as system:
-    ref = await system.spawn(MyActor)                    # Spawn actor
-    ref = await system.spawn(MyActor, name="my-actor")   # Named actor
-    ref = await system.spawn(MyActor, durable=True)      # With persistence
+    ref = await system.actor(MyActor, name="my-actor")             # Create actor
+    ref = await system.actor(MyActor, name="my-actor")             # Get-or-create (same name = same actor)
+    ref = await system.actor(MyActor, name="my-actor", durable=True)  # With persistence
 
-    ref = await system.lookup("my-actor")                # Find by name
-    await system.shutdown()                               # Graceful stop
+    await system.shutdown()                                         # Graceful stop
 ```
 
 ### ActorSystem.clustered()
 
 ```python
+from casty.cluster import ClusterScope
+
 async with ActorSystem.clustered(
     host="0.0.0.0",
     port=8001,
     seeds=["node2:8001"],
 ) as system:
-    ref = await system.spawn(MyActor, clustered=True)
-    ref = await system.spawn(MyActor, clustered=True, replication=3)
-    ref = await system.spawn(MyActor, clustered=True, write_consistency='quorum')
+    ref = await system.actor(MyActor, name="actor", scope="cluster")
+    ref = await system.actor(MyActor, name="actor", scope=ClusterScope(replication=3))
+    ref = await system.actor(MyActor, name="actor", scope=ClusterScope(replication=3, consistency='quorum'))
 ```
 
 ### LocalRef
@@ -875,7 +877,7 @@ combined = ref1 | ref2                 # Combine by type
 async def receive(self, msg, ctx: Context):
     await ctx.reply(result)            # Respond to ask()
 
-    child = await ctx.spawn(ChildActor)
+    child = await ctx.actor(ChildActor, name="child")  # Create child actor
     await ctx.stop_child(child)
 
     ctx.become(self.other_behavior)
@@ -964,7 +966,7 @@ from casty.cluster import DevelopmentCluster
 
 async def test_distributed_cart():
     async with DevelopmentCluster(3) as (node0, node1, node2):
-        cart = await node0.spawn(ShoppingCart, name="cart", clustered=True)
+        cart = await node0.actor(ShoppingCart, name="cart", scope="cluster")
         await cart.send(AddItem("SKU-1", 29.99))
 
         # Actor is accessible from any node
