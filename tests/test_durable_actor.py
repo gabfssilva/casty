@@ -32,7 +32,7 @@ def cleanup_wal_data():
 async def test_durable_counter_increments():
     """Test that durable counter increments and processes messages."""
     async with ActorSystem.local() as system:
-        counter = await system.spawn(Counter, durable=True)
+        counter = await system.actor(Counter, name="durable-counter", durable=True)
 
         # Send increments
         await counter.send(Increment(5))
@@ -66,7 +66,7 @@ async def test_durable_counter_full_recovery():
 
     # Step 1: Create system, actor, mutate state
     async with LocalSystem() as system:
-        counter = await system.spawn(Counter, name="recovery-test", durable=True)
+        counter = await system.actor(Counter, name="recovery-test", durable=True)
 
         # Send messages to modify state
         await counter.send(Increment(5))
@@ -83,12 +83,13 @@ async def test_durable_counter_full_recovery():
         await asyncio.sleep(0.05)  # Let snapshot write to disk
 
     # Step 3: System closed, WAL + snapshot persisted to disk
-    # Verify WAL file was created
-    assert Path("data/wal/recovery-test").exists(), "WAL directory should exist"
+    # Verify WAL file was created (path includes class name prefix)
+    wal_path = Path("data/wal/Counter/recovery-test")
+    assert wal_path.exists(), f"WAL directory should exist at {wal_path}"
 
-    # Step 4: Create NEW system, spawn actor with SAME NAME
+    # Step 4: Create NEW system, create actor with SAME NAME
     async with LocalSystem() as system2:
-        counter2 = await system2.spawn(Counter, name="recovery-test", durable=True)
+        counter2 = await system2.actor(Counter, name="recovery-test", durable=True)
 
         # Step 5: VALIDATE state was AUTOMATICALLY recovered
         # This works because:
@@ -104,13 +105,13 @@ async def test_durable_counter_full_recovery():
 async def test_durable_counter_recovery_simple():
     """Simpler test: validates WAL infrastructure is in place.
 
-    This test demonstrates that durable actors spawn successfully
+    This test demonstrates that durable actors create successfully
     and the WAL actor infrastructure works. Full state recovery
     requires explicit get_state/set_state on Counter.
     """
     # First run
     async with ActorSystem.local() as system:
-        counter = await system.spawn(Counter, name="counter", durable=True)
+        counter = await system.actor(Counter, name="counter", durable=True)
         await counter.send(Increment(5))
         await counter.send(Increment(3))
 
@@ -119,7 +120,7 @@ async def test_durable_counter_recovery_simple():
 
     # Second run - WAL infrastructure is in place
     async with ActorSystem.local() as system:
-        counter = await system.spawn(Counter, name="counter", durable=True)
+        counter = await system.actor(Counter, name="counter", durable=True)
         # WAL recovery mechanism works, but state recovery depends on
         # actor implementation of get_state/set_state
 
@@ -137,13 +138,13 @@ async def test_write_ahead_log_append():
         backend = FileStoreBackend(log_dir)
         wal = WriteAheadLog(actor_id=actor_id, backend=backend)
 
-        # Spawn and initialize
+        # Create and initialize
         async with ActorSystem.local() as system:
-            ref = await system.spawn(
+            ref = await system.actor(
                 WriteAheadLog,
+                name="wal-test",
                 actor_id=actor_id,
                 backend=backend,
-                name="wal-test",
             )
 
             # Send append
@@ -171,11 +172,11 @@ async def test_write_ahead_log_recover():
         backend1 = FileStoreBackend(log_dir)
 
         async with ActorSystem.local() as system1:
-            ref1 = await system1.spawn(
+            ref1 = await system1.actor(
                 WriteAheadLog,
+                name="wal-first",
                 actor_id=actor_id,
                 backend=backend1,
-                name="wal-first",
             )
 
             # Log a snapshot with state
@@ -190,11 +191,11 @@ async def test_write_ahead_log_recover():
         backend2 = FileStoreBackend(log_dir)
 
         async with ActorSystem.local() as system2:
-            ref2 = await system2.spawn(
+            ref2 = await system2.actor(
                 WriteAheadLog,
+                name="wal-second",
                 actor_id=actor_id,
                 backend=backend2,
-                name="wal-second",
             )
 
             # Recover

@@ -374,12 +374,13 @@ async def main():
         print("Scenario 1: Successful booking")
         print("-" * 40)
 
-        hotel1 = await system.spawn(HotelService, should_fail=False)
-        flight1 = await system.spawn(FlightService, should_fail=False)
-        payment1 = await system.spawn(PaymentService, should_fail=False)
+        hotel1 = await system.actor(HotelService, name="hotel-service-1", should_fail=False)
+        flight1 = await system.actor(FlightService, name="flight-service-1", should_fail=False)
+        payment1 = await system.actor(PaymentService, name="payment-service-1", should_fail=False)
 
-        saga1 = await system.spawn(
+        saga1 = await system.actor(
             SagaOrchestrator,
+            name="saga-orchestrator-1",
             hotel_service=hotel1,
             flight_service=flight1,
             payment_service=payment1,
@@ -408,12 +409,13 @@ async def main():
         print("Scenario 2: Payment fails -> rollback hotel and flight")
         print("-" * 40)
 
-        hotel2 = await system.spawn(HotelService, should_fail=False)
-        flight2 = await system.spawn(FlightService, should_fail=False)
-        payment2 = await system.spawn(PaymentService, should_fail=True)
+        hotel2 = await system.actor(HotelService, name="hotel-service-2", should_fail=False)
+        flight2 = await system.actor(FlightService, name="flight-service-2", should_fail=False)
+        payment2 = await system.actor(PaymentService, name="payment-service-2", should_fail=True)
 
-        saga2 = await system.spawn(
+        saga2 = await system.actor(
             SagaOrchestrator,
+            name="saga-orchestrator-2",
             hotel_service=hotel2,
             flight_service=flight2,
             payment_service=payment2,
@@ -438,12 +440,13 @@ async def main():
         print("Scenario 3: Flight fails -> rollback hotel only")
         print("-" * 40)
 
-        hotel3 = await system.spawn(HotelService, should_fail=False)
-        flight3 = await system.spawn(FlightService, should_fail=True)
-        payment3 = await system.spawn(PaymentService, should_fail=False)
+        hotel3 = await system.actor(HotelService, name="hotel-service-3", should_fail=False)
+        flight3 = await system.actor(FlightService, name="flight-service-3", should_fail=True)
+        payment3 = await system.actor(PaymentService, name="payment-service-3", should_fail=False)
 
-        saga3 = await system.spawn(
+        saga3 = await system.actor(
             SagaOrchestrator,
+            name="saga-orchestrator-3",
             hotel_service=hotel3,
             flight_service=flight3,
             payment_service=payment3,

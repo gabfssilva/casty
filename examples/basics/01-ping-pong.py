@@ -80,9 +80,9 @@ async def main():
     print()
 
     async with ActorSystem.local() as system:
-        # Spawn both actors
-        ping_actor = await system.spawn(PingActor)
-        pong_actor = await system.spawn(PongActor)
+        # Create both actors
+        ping_actor = await system.actor(PingActor, name="ping")
+        pong_actor = await system.actor(PongActor, name="pong")
 
         # Start the exchange: 5 ping-pong rounds
         await ping_actor.send(Start(target=pong_actor, max_exchanges=5))

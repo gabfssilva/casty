@@ -48,7 +48,7 @@ class TestMultiNodeCluster:
     async def test_single_node_clustered_actor(self):
         async with DevelopmentCluster(1) as cluster:
             node = cluster.node(0)
-            ref = await node.spawn(PingActor, clustered=True)
+            ref = await node.actor(PingActor, name="ping-actor", scope="cluster")
 
             result = await ref.ask(Ping())
             assert result == 1
@@ -60,7 +60,7 @@ class TestMultiNodeCluster:
     async def test_single_node_local_ref_optimization(self):
         async with DevelopmentCluster(1) as cluster:
             node = cluster.node(0)
-            ref = await node.spawn(Counter, clustered=True)
+            ref = await node.actor(Counter, name="counter-local-ref", scope="cluster")
 
             assert ref.local_ref is not None
 
@@ -72,8 +72,8 @@ class TestMultiNodeCluster:
     async def test_single_node_multiple_actors(self):
         async with DevelopmentCluster(1) as cluster:
             node = cluster.node(0)
-            counter1 = await node.spawn(Counter, clustered=True)
-            counter2 = await node.spawn(Counter, clustered=True)
+            counter1 = await node.actor(Counter, name="counter-1", scope="cluster")
+            counter2 = await node.actor(Counter, name="counter-2", scope="cluster")
 
             await counter1.send(Increment(10))
             await counter2.send(Increment(20))

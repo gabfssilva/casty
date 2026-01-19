@@ -6,6 +6,8 @@ from typing import Any, Awaitable, Protocol, runtime_checkable, TYPE_CHECKING, S
 
 if TYPE_CHECKING:
     from .actor import Actor
+    from .cluster.scope import Scope
+    from .supervision import SupervisorConfig
 
 
 @runtime_checkable
@@ -60,6 +62,31 @@ class System(Protocol):
     Both ActorSystem (local) and ClusteredActorSystem implement this protocol.
     """
 
+    async def actor[M](
+        self,
+        actor_cls: type["Actor[M]"],
+        *,
+        name: str,
+        scope: "Scope" = 'local',
+        supervision: "SupervisorConfig | None" = None,
+        durable: bool = False,
+        **kwargs: Any,
+    ) -> ActorRef[M]:
+        """Get or create an actor by name.
+
+        Args:
+            actor_cls: The actor class to instantiate
+            name: Required name for the actor (part of identity)
+            scope: 'local', 'cluster', or ClusterScope for distributed actors
+            supervision: Override supervision configuration
+            durable: If True, persist actor state with WAL
+            **kwargs: Constructor arguments for the actor
+
+        Returns:
+            Reference to the actor (existing or newly created)
+        """
+        ...
+
     async def spawn[M](
         self,
         actor_cls: type["Actor[M]"],
@@ -67,15 +94,18 @@ class System(Protocol):
         name: str | None = None,
         **kwargs: Any,
     ) -> ActorRef[M]:
-        """Create and start a new actor.
+        """Internal spawn method for ephemeral actors.
+
+        Generates a unique name automatically if not provided.
+        Used by LocalActorRef.ask(). For named actors, use actor() instead.
 
         Args:
             actor_cls: The actor class to instantiate
-            name: Optional name for the actor
+            name: Optional name for the actor (auto-generated if not provided)
             **kwargs: Constructor arguments for the actor
 
         Returns:
-            Reference to the spawned actor
+            Reference to the created actor
         """
         ...
 

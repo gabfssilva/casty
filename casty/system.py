@@ -18,6 +18,7 @@ from .actor import Actor, ActorId, LocalActorRef, Context, Envelope, _extract_ac
 from .scheduler import Scheduler, Schedule, Cancel
 from .ticker import Ticker, Subscribe as TickerSubscribe, Unsubscribe as TickerUnsubscribe
 from .persistence import WriteAheadLog, Recover, Append, Snapshot, Close
+from .cluster.scope import Scope, ClusterScope
 
 
 class _StopSentinel:
@@ -52,7 +53,7 @@ class LocalSystem(System):
 
     Usage:
         async with LocalSystem() as system:
-            counter = await system.spawn(Counter)
+            counter = await system.actor(Counter, name="counter")
             await counter.send(Increment(5))
             result = await counter.ask(GetCount())
     """
@@ -60,10 +61,31 @@ class LocalSystem(System):
     def __init__(self) -> None:
         self._actors: dict[ActorId, Task[None]] = {}
         self._mailboxes: dict[ActorId, Queue[Envelope[Any]]] = {}
+        self._registry: dict[str, LocalActorRef[Any]] = {}
         self._supervision_tree = SupervisionTreeManager()
         self._running = True
         self._scheduler: LocalActorRef | None = None
         self._ticker: LocalActorRef | None = None
+
+    @staticmethod
+    def _build_actor_name(
+        cls: type[Actor[Any]],
+        name: str,
+        parent_path: str | None = None
+    ) -> str:
+        """Build the internal full name for an actor."""
+        type_name = cls.__name__
+        if parent_path:
+            return f"{parent_path}/{type_name}/{name}"
+        return f"{type_name}/{name}"
+
+    @staticmethod
+    def _validate_name(name: str, internal: bool = False) -> None:
+        """Validate that name doesn't use reserved prefix."""
+        if name.startswith("__") and not internal:
+            raise ValueError(
+                f"Names starting with '__' are reserved for internal use: {name}"
+            )
 
     @classmethod
     @asynccontextmanager
@@ -84,7 +106,7 @@ class LocalSystem(System):
         if not self._running:
             return None
         if self._scheduler is None:
-            self._scheduler = await self.spawn(Scheduler)
+            self._scheduler = await self._actor_internal(Scheduler, name="__scheduler__")
         task_id = await self._scheduler.ask(Schedule(timeout=timeout, listener=listener, message=message))
         return task_id
 
@@ -112,7 +134,7 @@ class LocalSystem(System):
         if not self._running:
             return None
         if self._ticker is None:
-            self._ticker = await self.spawn(Ticker)
+            self._ticker = await self._actor_internal(Ticker, name="__ticker__")
         subscription_id = await self._ticker.ask(
             TickerSubscribe(listener=listener, message=message, interval=interval)
         )
@@ -123,39 +145,103 @@ class LocalSystem(System):
         if self._ticker:
             await self._ticker.send(TickerUnsubscribe(subscription_id))
 
-    async def spawn[M](
+    async def actor[M](
         self,
         actor_cls: type[Actor[M]],
         *,
-        name: str | None = None,
+        name: str,
+        scope: Scope = 'local',
         supervision: SupervisorConfig | None = None,
         durable: bool = False,
         **kwargs: Any,
     ) -> LocalActorRef[M]:
-        """Create and start a new root actor.
+        """Get or create an actor by name.
 
         Args:
             actor_cls: The actor class to instantiate
-            name: Optional name for the actor
+            name: Required name for the actor (part of identity)
+            scope: 'local', 'cluster', or ClusterScope (logs warning on LocalSystem)
             supervision: Override supervision configuration
             durable: If True, persist actor state with WAL
             **kwargs: Constructor arguments for the actor
 
         Returns:
-            Reference to the spawned actor
+            Reference to the actor (existing or newly created)
         """
+        self._validate_name(name)
+
+        if scope != 'local' and not isinstance(scope, str):
+            log.warning(
+                "LocalSystem does not support cluster scope, treating as 'local'"
+            )
+        elif scope == 'cluster':
+            log.warning(
+                "LocalSystem does not support scope='cluster', treating as 'local'"
+            )
+
+        full_name = self._build_actor_name(actor_cls, name)
+
+        # Get or create
+        if full_name in self._registry:
+            return self._registry[full_name]
+
+        return await self._actor_internal(
+            actor_cls=actor_cls,
+            name=name,
+            supervision=supervision,
+            durable=durable,
+            **kwargs,
+        )
+
+    async def _actor_internal[M](
+        self,
+        actor_cls: type[Actor[M]],
+        *,
+        name: str,
+        supervision: SupervisorConfig | None = None,
+        parent_path: str | None = None,
+        parent_id: ActorId | None = None,
+        durable: bool = False,
+        **kwargs: Any,
+    ) -> LocalActorRef[M]:
+        """Internal actor creation (bypasses name validation for reserved names)."""
+        full_name = self._build_actor_name(actor_cls, name, parent_path)
+
+        # Get or create
+        if full_name in self._registry:
+            return self._registry[full_name]
+
         # Check class-level supervision config if not explicitly provided
         if supervision is None:
             supervision = getattr(actor_cls, "supervision_config", None)
 
-        return await self._spawn_internal(
+        ref = await self._create_actor(
             actor_cls=actor_cls,
             name=name,
+            full_name=full_name,
             supervision=supervision,
-            parent_id=None,
+            parent_id=parent_id,
             durable=durable,
             **kwargs,
         )
+
+        self._registry[full_name] = ref
+        return ref
+
+    async def spawn[M](
+        self,
+        actor_cls: type[Actor[M]],
+        *,
+        name: str | None = None,
+        **kwargs: Any,
+    ) -> LocalActorRef[M]:
+        """Internal spawn method for ephemeral actors (e.g., reply actors).
+
+        Generates a unique name automatically if not provided.
+        Used by LocalActorRef.ask(). For named actors, use actor() instead.
+        """
+        actual_name = name if name else f"__{actor_cls.__name__}_{uuid4().hex[:8]}__"
+        return await self._actor_internal(actor_cls, name=actual_name, **kwargs)
 
     async def stop(self, ref: LocalActorRef[Any]) -> bool:
         """Stop an actor by its reference.
@@ -178,16 +264,17 @@ class LocalSystem(System):
             return True
         return False
 
-    async def _spawn_child[M](
+    async def _actor_child[M](
         self,
         parent_ctx: Context[Any],
         actor_cls: type[Actor[M]],
         *,
-        name: str | None = None,
+        name: str,
+        root: bool = False,
         supervision: SupervisorConfig | None = None,
         **kwargs: Any,
     ) -> LocalActorRef[M]:
-        """Spawn a child actor (called from Context.spawn).
+        """Get or create a child actor (called from Context.actor).
 
         The child inherits supervision configuration from:
         1. Explicit supervision parameter
@@ -195,8 +282,23 @@ class LocalSystem(System):
         3. Parent's default_child_supervision (if defined)
         4. System default
         """
+        self._validate_name(name)
+
         parent_node = parent_ctx._supervision_node
-        parent_id = parent_node.actor_id if parent_node else None
+
+        # Determine parent path for naming
+        if root:
+            parent_path = None
+            parent_id = None
+        else:
+            parent_path = parent_ctx.self_ref.id.name if parent_ctx.self_ref.id.name else None
+            parent_id = parent_node.actor_id if parent_node else None
+
+        full_name = self._build_actor_name(actor_cls, name, parent_path)
+
+        # Get or create
+        if full_name in self._registry:
+            return self._registry[full_name]
 
         # Determine supervision config
         if supervision is None:
@@ -207,27 +309,32 @@ class LocalSystem(System):
         if supervision is None:
             supervision = SupervisorConfig()
 
-        return await self._spawn_internal(
+        ref = await self._create_actor(
             actor_cls=actor_cls,
             name=name,
+            full_name=full_name,
             supervision=supervision,
             parent_id=parent_id,
             **kwargs,
         )
 
-    async def _spawn_internal[M](
+        self._registry[full_name] = ref
+        return ref
+
+    async def _create_actor[M](
         self,
         actor_cls: type[Actor[M]],
         *,
-        name: str | None = None,
+        name: str,
+        full_name: str,
         supervision: SupervisorConfig | None = None,
         parent_id: ActorId | None = None,
         durable: bool = False,
         **kwargs: Any,
     ) -> LocalActorRef[M]:
-        """Internal spawn logic with supervision registration."""
+        """Internal actor creation with supervision registration."""
         actor = actor_cls(**kwargs)
-        actor_id = ActorId(uid=uuid4(), name=name)
+        actor_id = ActorId(uid=uuid4(), name=full_name)
         mailbox: Queue[Envelope[M]] = Queue()
 
         # Extract accepted message types from actor class
@@ -259,11 +366,12 @@ class LocalSystem(System):
         # Setup WAL if durable
         wal_ref: LocalActorRef | None = None
         if durable:
-            # Spawn WAL actor as child
-            wal_ref = await self._spawn_child(
-                parent_ctx=ctx,
+            # Create WAL actor as child of durable actor
+            wal_ref = await self._actor_internal(
                 actor_cls=WriteAheadLog,
-                name=f"wal-{actor_id.name or actor_id.uid.hex[:8]}",
+                name=f"__wal_{name}__",
+                parent_path=full_name,
+                parent_id=actor_id,
                 actor_id=actor_id,
             )
 
@@ -322,7 +430,7 @@ class LocalSystem(System):
             actor_ref: Reference to the durable actor
 
         Example:
-            counter = await system.spawn(Counter, durable=True)
+            counter = await system.actor(Counter, name="counter", durable=True)
             await counter.send(Increment(10))
             await system.snapshot_durable_actor(counter)  # Force snapshot now
         """
@@ -432,6 +540,9 @@ class LocalSystem(System):
             await self._supervision_tree.unregister(actor_id)
             self._actors.pop(actor_id, None)
             self._mailboxes.pop(actor_id, None)
+            # Clean up registry (actor_id.name is the full_name)
+            if actor_id.name:
+                self._registry.pop(actor_id.name, None)
 
     async def _handle_failure(
         self,

@@ -270,10 +270,10 @@ async def main():
 
     async with ActorSystem() as system:
         # Create the actor pipeline: events -> debouncer -> processor
-        processor = await system.spawn(FileProcessor)
-        debouncer = await system.spawn(FileDebouncer, processor=processor, debounce_seconds=0.3)
+        processor = await system.actor(FileProcessor, name="file-processor")
+        debouncer = await system.actor(FileDebouncer, name="file-debouncer", processor=processor, debounce_seconds=0.3)
 
-        print("[System] Actors spawned: FileProcessor, FileDebouncer")
+        print("[System] Actors created: FileProcessor, FileDebouncer")
 
         # Setup watchdog observer
         loop = asyncio.get_running_loop()

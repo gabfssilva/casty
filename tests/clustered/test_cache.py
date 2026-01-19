@@ -19,7 +19,7 @@ class TestCacheActor:
     @pytest.mark.asyncio
     async def test_get_empty_cache_returns_miss(self):
         async with ActorSystem.local() as system:
-            cache = await system.spawn(CacheActor)
+            cache = await system.actor(CacheActor, name="cache-get-empty")
 
             result = await cache.ask(Get("nonexistent"))
 
@@ -28,7 +28,7 @@ class TestCacheActor:
     @pytest.mark.asyncio
     async def test_set_then_get_returns_value(self):
         async with ActorSystem.local() as system:
-            cache = await system.spawn(CacheActor)
+            cache = await system.actor(CacheActor, name="cache-set-get")
 
             await cache.ask(Set("key1", b"value1", None))
             result = await cache.ask(Get("key1"))
@@ -39,7 +39,7 @@ class TestCacheActor:
     @pytest.mark.asyncio
     async def test_set_returns_ok(self):
         async with ActorSystem.local() as system:
-            cache = await system.spawn(CacheActor)
+            cache = await system.actor(CacheActor, name="cache-set-ok")
 
             result = await cache.ask(Set("key1", b"value1", None))
 
@@ -48,7 +48,7 @@ class TestCacheActor:
     @pytest.mark.asyncio
     async def test_delete_removes_key(self):
         async with ActorSystem.local() as system:
-            cache = await system.spawn(CacheActor)
+            cache = await system.actor(CacheActor, name="cache-delete")
 
             await cache.ask(Set("key1", b"value1", None))
             delete_result = await cache.ask(Delete("key1"))
@@ -60,7 +60,7 @@ class TestCacheActor:
     @pytest.mark.asyncio
     async def test_delete_nonexistent_key_returns_ok(self):
         async with ActorSystem.local() as system:
-            cache = await system.spawn(CacheActor)
+            cache = await system.actor(CacheActor, name="cache-delete-nonexistent")
 
             result = await cache.ask(Delete("nonexistent"))
 
@@ -69,7 +69,7 @@ class TestCacheActor:
     @pytest.mark.asyncio
     async def test_overwrite_key(self):
         async with ActorSystem.local() as system:
-            cache = await system.spawn(CacheActor)
+            cache = await system.actor(CacheActor, name="cache-overwrite")
 
             await cache.ask(Set("key1", b"value1", None))
             await cache.ask(Set("key1", b"value2", None))
@@ -81,7 +81,7 @@ class TestCacheActor:
     @pytest.mark.asyncio
     async def test_multiple_keys(self):
         async with ActorSystem.local() as system:
-            cache = await system.spawn(CacheActor)
+            cache = await system.actor(CacheActor, name="cache-multiple-keys")
 
             await cache.ask(Set("key1", b"value1", None))
             await cache.ask(Set("key2", b"value2", None))
@@ -98,7 +98,7 @@ class TestCacheActor:
     @pytest.mark.asyncio
     async def test_ttl_expires_key(self):
         async with ActorSystem.local() as system:
-            cache = await system.spawn(CacheActor)
+            cache = await system.actor(CacheActor, name="cache-ttl-expires")
 
             await cache.ask(Set("key1", b"value1", 0.1))
 
@@ -113,7 +113,7 @@ class TestCacheActor:
     @pytest.mark.asyncio
     async def test_overwrite_cancels_old_ttl(self):
         async with ActorSystem.local() as system:
-            cache = await system.spawn(CacheActor)
+            cache = await system.actor(CacheActor, name="cache-overwrite-ttl")
 
             await cache.ask(Set("key1", b"value1", 0.1))
             await cache.ask(Set("key1", b"value2", None))
@@ -127,7 +127,7 @@ class TestCacheActor:
     @pytest.mark.asyncio
     async def test_delete_cancels_ttl(self):
         async with ActorSystem.local() as system:
-            cache = await system.spawn(CacheActor)
+            cache = await system.actor(CacheActor, name="cache-delete-ttl")
 
             await cache.ask(Set("key1", b"value1", 0.5))
             await cache.ask(Delete("key1"))

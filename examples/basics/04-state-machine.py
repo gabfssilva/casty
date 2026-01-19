@@ -127,7 +127,7 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        traffic_light = await system.spawn(TrafficLight)
+        traffic_light = await system.actor(TrafficLight, name="traffic-light")
 
         # Check initial state
         state = await traffic_light.ask(GetState())

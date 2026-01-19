@@ -370,11 +370,11 @@ async def main():
 
     async with ActorSystem() as system:
         # Create read model first
-        read_model = await system.spawn(ReadModel)
+        read_model = await system.actor(ReadModel, name="read-model")
         print("Read model created")
 
         # Create write model with reference to read model
-        write_model = await system.spawn(WriteModel, read_models=[read_model])
+        write_model = await system.actor(WriteModel, name="write-model", read_models=[read_model])
         print("Write model created")
         print()
 

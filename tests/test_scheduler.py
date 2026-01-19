@@ -52,8 +52,8 @@ class TestSchedulerBasic:
     @pytest.mark.asyncio
     async def test_schedule_timeout(self, system: ActorSystem):
         """Test that a scheduled message is delivered."""
-        scheduler = await system.spawn(Scheduler)
-        collector = await system.spawn(TickCollector)
+        scheduler = await system.actor(Scheduler, name="scheduler")
+        collector = await system.actor(TickCollector, name="tick-collector")
 
         await scheduler.send(Schedule(timeout=0, listener=collector, message=Tick()))
         await asyncio.sleep(0.1)
@@ -64,8 +64,8 @@ class TestSchedulerBasic:
     @pytest.mark.asyncio
     async def test_schedule_timeout_with_delay(self, system: ActorSystem):
         """Test that scheduled message respects the delay."""
-        scheduler = await system.spawn(Scheduler)
-        collector = await system.spawn(TickCollector)
+        scheduler = await system.actor(Scheduler, name="scheduler")
+        collector = await system.actor(TickCollector, name="tick-collector")
 
         await scheduler.send(Schedule(timeout=0.2, listener=collector, message=Tick()))
 
@@ -82,8 +82,8 @@ class TestSchedulerBasic:
     @pytest.mark.asyncio
     async def test_multiple_schedules(self, system: ActorSystem):
         """Test multiple schedules to same listener."""
-        scheduler = await system.spawn(Scheduler)
-        collector = await system.spawn(TickCollector)
+        scheduler = await system.actor(Scheduler, name="scheduler")
+        collector = await system.actor(TickCollector, name="tick-collector")
 
         await scheduler.send(Schedule(timeout=0, listener=collector, message=Tick()))
         await scheduler.send(Schedule(timeout=0, listener=collector, message=Tick()))
@@ -96,10 +96,10 @@ class TestSchedulerBasic:
     @pytest.mark.asyncio
     async def test_multiple_listeners(self, system: ActorSystem):
         """Test scheduling to multiple different listeners."""
-        scheduler = await system.spawn(Scheduler)
-        collector1 = await system.spawn(TickCollector)
-        collector2 = await system.spawn(TickCollector)
-        collector3 = await system.spawn(TickCollector)
+        scheduler = await system.actor(Scheduler, name="scheduler")
+        collector1 = await system.actor(TickCollector, name="tick-collector-1")
+        collector2 = await system.actor(TickCollector, name="tick-collector-2")
+        collector3 = await system.actor(TickCollector, name="tick-collector-3")
 
         await scheduler.send(Schedule(timeout=0, listener=collector1, message=Tick()))
         await scheduler.send(Schedule(timeout=0, listener=collector2, message=Tick()))
@@ -121,8 +121,8 @@ class TestSchedulerConcurrency:
     @pytest.mark.asyncio
     async def test_concurrent_short_timeouts(self, system: ActorSystem):
         """Test many concurrent short timeouts."""
-        scheduler = await system.spawn(Scheduler)
-        collector = await system.spawn(TickCollector)
+        scheduler = await system.actor(Scheduler, name="scheduler")
+        collector = await system.actor(TickCollector, name="tick-collector")
 
         # Schedule many timeouts concurrently
         for _ in range(10):
@@ -137,8 +137,8 @@ class TestSchedulerConcurrency:
     @pytest.mark.asyncio
     async def test_concurrent_varied_timeouts(self, system: ActorSystem):
         """Test concurrent timeouts with varied delays."""
-        scheduler = await system.spawn(Scheduler)
-        collector = await system.spawn(TickCollector)
+        scheduler = await system.actor(Scheduler, name="scheduler")
+        collector = await system.actor(TickCollector, name="tick-collector")
 
         # Schedule with different delays
         await scheduler.send(Schedule(timeout=0.1, listener=collector, message=Tick()))
@@ -158,8 +158,8 @@ class TestSchedulerStaggeredTimeouts:
     @pytest.mark.asyncio
     async def test_staggered_delivery(self, system: ActorSystem):
         """Test that timeouts are delivered at correct times."""
-        scheduler = await system.spawn(Scheduler)
-        collector = await system.spawn(TickCollector)
+        scheduler = await system.actor(Scheduler, name="scheduler")
+        collector = await system.actor(TickCollector, name="tick-collector")
 
         await scheduler.send(Schedule(timeout=0.05, listener=collector, message=Tick()))
         await scheduler.send(Schedule(timeout=0.15, listener=collector, message=Tick()))
@@ -208,8 +208,8 @@ class TestSchedulerCustomMessages:
                     case GetAlerts():
                         await ctx.reply(self.alerts)
 
-        scheduler = await system.spawn(Scheduler)
-        collector = await system.spawn(AlertCollector)
+        scheduler = await system.actor(Scheduler, name="scheduler")
+        collector = await system.actor(AlertCollector, name="alert-collector")
 
         await scheduler.send(Schedule(
             timeout=0,
@@ -253,8 +253,8 @@ class TestSchedulerCustomMessages:
                     case GetMessages():
                         await ctx.reply((self.a_count, self.b_count))
 
-        scheduler = await system.spawn(Scheduler)
-        collector = await system.spawn(MultiCollector)
+        scheduler = await system.actor(Scheduler, name="scheduler")
+        collector = await system.actor(MultiCollector, name="multi-collector")
 
         await scheduler.send(Schedule(timeout=0, listener=collector, message=MsgA()))
         await scheduler.send(Schedule(timeout=0, listener=collector, message=MsgB()))
@@ -272,8 +272,8 @@ class TestSchedulerOperatorSyntax:
     @pytest.mark.asyncio
     async def test_schedule_with_operator(self, system: ActorSystem):
         """Test scheduling using >> operator."""
-        scheduler = await system.spawn(Scheduler)
-        collector = await system.spawn(TickCollector)
+        scheduler = await system.actor(Scheduler, name="scheduler")
+        collector = await system.actor(TickCollector, name="tick-collector")
 
         await (scheduler >> Schedule(timeout=0, listener=collector, message=Tick()))
         await asyncio.sleep(0.1)
@@ -288,7 +288,7 @@ class TestActorRefSchedule:
     @pytest.mark.asyncio
     async def test_schedule_to_self(self, system: ActorSystem):
         """Test scheduling a message to self (default listener)."""
-        collector = await system.spawn(TickCollector)
+        collector = await system.actor(TickCollector, name="tick-collector")
 
         # Schedule to self (no listener specified)
         await collector.schedule(timeout=0.05, message=Tick())
@@ -306,8 +306,8 @@ class TestActorRefSchedule:
     @pytest.mark.asyncio
     async def test_schedule_to_other_listener(self, system: ActorSystem):
         """Test scheduling a message to another actor."""
-        source = await system.spawn(TickCollector)
-        target = await system.spawn(TickCollector)
+        source = await system.actor(TickCollector, name="source-collector")
+        target = await system.actor(TickCollector, name="target-collector")
 
         # Schedule from source but deliver to target
         await source.schedule(timeout=0.05, message=Tick(), listener=target)
@@ -324,7 +324,7 @@ class TestActorRefSchedule:
     @pytest.mark.asyncio
     async def test_schedule_multiple_to_self(self, system: ActorSystem):
         """Test scheduling multiple messages to self."""
-        collector = await system.spawn(TickCollector)
+        collector = await system.actor(TickCollector, name="tick-collector")
 
         await collector.schedule(timeout=0.01, message=Tick())
         await collector.schedule(timeout=0.02, message=Tick())
@@ -357,7 +357,7 @@ class TestActorRefSchedule:
                     case GetReminders():
                         await ctx.reply(self.reminders)
 
-        actor = await system.spawn(ReminderActor)
+        actor = await system.actor(ReminderActor, name="reminder-actor")
 
         await actor.schedule(timeout=0, message=Reminder("wake up"))
         await actor.schedule(timeout=0, message=Reminder("meeting"))

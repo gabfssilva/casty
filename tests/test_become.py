@@ -173,7 +173,7 @@ class TestBecome:
     @pytest.mark.asyncio
     async def test_become_switches_behavior(self, system: ActorSystem):
         """Test that become() switches to a new message handler."""
-        actor = await system.spawn(StateMachineActor)
+        actor = await system.actor(StateMachineActor, name="state-machine")
 
         # Initial state
         state = await actor.ask(GetState())
@@ -189,7 +189,7 @@ class TestBecome:
     @pytest.mark.asyncio
     async def test_become_processes_with_new_behavior(self, system: ActorSystem):
         """Test that messages are processed by the new behavior."""
-        actor = await system.spawn(StateMachineActor)
+        actor = await system.actor(StateMachineActor, name="state-machine")
 
         # Process in initial mode
         await actor.send(Process(1))
@@ -218,7 +218,7 @@ class TestUnbecome:
     @pytest.mark.asyncio
     async def test_unbecome_reverts_behavior(self, system: ActorSystem):
         """Test that unbecome() reverts to previous behavior."""
-        actor = await system.spawn(StateMachineActor)
+        actor = await system.actor(StateMachineActor, name="state-machine")
 
         # Switch to active
         await actor.send(Activate())
@@ -233,7 +233,7 @@ class TestUnbecome:
     @pytest.mark.asyncio
     async def test_unbecome_on_empty_stack_is_safe(self, system: ActorSystem):
         """Test that unbecome() on empty stack doesn't crash."""
-        actor = await system.spawn(StateMachineActor)
+        actor = await system.actor(StateMachineActor, name="state-machine")
 
         # Try to deactivate when already in initial (calls unbecome on empty stack)
         await actor.send(Deactivate())
@@ -250,7 +250,7 @@ class TestBehaviorStack:
     @pytest.mark.asyncio
     async def test_multiple_become_stacks_behaviors(self, system: ActorSystem):
         """Test that multiple become() calls stack behaviors."""
-        actor = await system.spawn(StackedBehaviorActor)
+        actor = await system.actor(StackedBehaviorActor, name="stacked-behavior")
 
         # Base level
         assert await actor.ask(GetLevel()) == 0
@@ -273,7 +273,7 @@ class TestBehaviorStack:
     @pytest.mark.asyncio
     async def test_unbecome_pops_behavior_stack(self, system: ActorSystem):
         """Test that unbecome() pops behaviors in LIFO order."""
-        actor = await system.spawn(StackedBehaviorActor)
+        actor = await system.actor(StackedBehaviorActor, name="stacked-behavior")
 
         # Push multiple levels
         await actor.send(PushBehavior(1))
@@ -302,7 +302,7 @@ class TestDiscardOld:
     @pytest.mark.asyncio
     async def test_discard_old_replaces_behavior(self, system: ActorSystem):
         """Test that discard_old=True replaces instead of stacking."""
-        actor = await system.spawn(DiscardBehaviorActor)
+        actor = await system.actor(DiscardBehaviorActor, name="discard-behavior")
 
         # Initial state
         result = await actor.ask(GetState())

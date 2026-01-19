@@ -52,8 +52,8 @@ class TestTickerDirect:
     @pytest.mark.asyncio
     async def test_subscribe_receives_messages(self, system: ActorSystem):
         """Test that a subscribed listener receives messages."""
-        ticker = await system.spawn(Ticker)
-        collector = await system.spawn(PingCollector)
+        ticker = await system.actor(Ticker, name="ticker")
+        collector = await system.actor(PingCollector, name="ping-collector")
 
         sub_id = await ticker.ask(Subscribe(collector, Ping(), interval=0.05))
         await asyncio.sleep(0.2)
@@ -65,8 +65,8 @@ class TestTickerDirect:
     @pytest.mark.asyncio
     async def test_unsubscribe_stops_messages(self, system: ActorSystem):
         """Test that unsubscribing stops message delivery."""
-        ticker = await system.spawn(Ticker)
-        collector = await system.spawn(PingCollector)
+        ticker = await system.actor(Ticker, name="ticker")
+        collector = await system.actor(PingCollector, name="ping-collector")
 
         sub_id = await ticker.ask(Subscribe(collector, Ping(), interval=0.05))
         await asyncio.sleep(0.15)
@@ -87,9 +87,9 @@ class TestTickerMultipleListeners:
     @pytest.mark.asyncio
     async def test_multiple_listeners_different_intervals(self, system: ActorSystem):
         """Test multiple listeners with different intervals."""
-        ticker = await system.spawn(Ticker)
-        fast_collector = await system.spawn(PingCollector)
-        slow_collector = await system.spawn(PingCollector)
+        ticker = await system.actor(Ticker, name="ticker")
+        fast_collector = await system.actor(PingCollector, name="fast-ping-collector")
+        slow_collector = await system.actor(PingCollector, name="slow-ping-collector")
 
         await ticker.ask(Subscribe(fast_collector, Ping(), interval=0.05))
         await ticker.ask(Subscribe(slow_collector, Ping(), interval=0.15))
@@ -105,9 +105,9 @@ class TestTickerMultipleListeners:
     @pytest.mark.asyncio
     async def test_unsubscribe_one_keeps_other(self, system: ActorSystem):
         """Test that unsubscribing one listener doesn't affect others."""
-        ticker = await system.spawn(Ticker)
-        collector1 = await system.spawn(PingCollector)
-        collector2 = await system.spawn(PingCollector)
+        ticker = await system.actor(Ticker, name="ticker")
+        collector1 = await system.actor(PingCollector, name="ping-collector-1")
+        collector2 = await system.actor(PingCollector, name="ping-collector-2")
 
         sub_id1 = await ticker.ask(Subscribe(collector1, Ping(), interval=0.05))
         await ticker.ask(Subscribe(collector2, Ping(), interval=0.05))
@@ -150,7 +150,7 @@ class TestContextTick:
                     case GetCount():
                         await ctx.reply(self.count)
 
-        actor = await system.spawn(TickingActor)
+        actor = await system.actor(TickingActor, name="ticking-actor")
         await actor.send(Start())
         await asyncio.sleep(0.2)
 
@@ -187,7 +187,7 @@ class TestContextTick:
                     case GetCount():
                         await ctx.reply(self.count)
 
-        actor = await system.spawn(TickingActor)
+        actor = await system.actor(TickingActor, name="ticking-actor")
         await actor.send(Start())
         await asyncio.sleep(0.15)
 
@@ -227,8 +227,8 @@ class TestTickerCustomMessages:
                     case GetHeartbeats():
                         await ctx.reply(self.count)
 
-        ticker = await system.spawn(Ticker)
-        collector = await system.spawn(HeartbeatCollector)
+        ticker = await system.actor(Ticker, name="ticker")
+        collector = await system.actor(HeartbeatCollector, name="heartbeat-collector")
 
         await ticker.ask(Subscribe(collector, Heartbeat(), interval=0.05))
         await asyncio.sleep(0.2)

@@ -85,8 +85,9 @@ class TestMergeIntegrationSingleNode:
     @pytest.mark.asyncio
     async def test_state_replication_two_nodes(self):
         async with DevelopmentCluster(2) as cluster:
+            from casty.cluster.scope import ClusterScope
             node1 = cluster.node(0)
-            ref = await node1.spawn(MergeableAccount, clustered=True, replication=2)
+            ref = await node1.actor(MergeableAccount, name="account-replication-2n", scope=ClusterScope(replication=2))
             await asyncio.sleep(0.2)
 
             await ref.send(Deposit(amount=100))
@@ -98,8 +99,9 @@ class TestMergeIntegrationSingleNode:
     @pytest.mark.asyncio
     async def test_multiple_deposits_replicated(self):
         async with DevelopmentCluster(2) as cluster:
+            from casty.cluster.scope import ClusterScope
             node1 = cluster.node(0)
-            ref = await node1.spawn(MergeableAccount, clustered=True, replication=2)
+            ref = await node1.actor(MergeableAccount, name="account-multi-deposits", scope=ClusterScope(replication=2))
             await asyncio.sleep(0.2)
 
             await ref.send(Deposit(amount=50))
@@ -113,8 +115,9 @@ class TestMergeIntegrationSingleNode:
     @pytest.mark.asyncio
     async def test_set_union_merge(self):
         async with DevelopmentCluster(2) as cluster:
+            from casty.cluster.scope import ClusterScope
             node1 = cluster.node(0)
-            ref = await node1.spawn(MergeableSet, clustered=True, replication=2)
+            ref = await node1.actor(MergeableSet, name="set-union-merge", scope=ClusterScope(replication=2))
             await asyncio.sleep(0.2)
 
             await ref.send(Add(item="apple"))
@@ -130,8 +133,9 @@ class TestMergeIntegrationThreeNodes:
     @pytest.mark.asyncio
     async def test_replication_across_three_nodes(self):
         async with DevelopmentCluster(3) as cluster:
+            from casty.cluster.scope import ClusterScope
             node1 = cluster.node(0)
-            ref = await node1.spawn(MergeableAccount, clustered=True, replication=3)
+            ref = await node1.actor(MergeableAccount, name="account-replication-3n", scope=ClusterScope(replication=3))
             await asyncio.sleep(0.3)
 
             await ref.send(Deposit(amount=1000))
@@ -143,8 +147,9 @@ class TestMergeIntegrationThreeNodes:
     @pytest.mark.asyncio
     async def test_sequential_operations_three_nodes(self):
         async with DevelopmentCluster(3) as cluster:
+            from casty.cluster.scope import ClusterScope
             node1 = cluster.node(0)
-            ref = await node1.spawn(MergeableAccount, clustered=True, replication=3)
+            ref = await node1.actor(MergeableAccount, name="account-sequential-3n", scope=ClusterScope(replication=3))
             await asyncio.sleep(0.3)
 
             for i in range(5):
@@ -161,7 +166,7 @@ class TestMergeableBehavior:
     async def test_mergeable_actor_get_set_state(self):
         async with DevelopmentCluster(1) as cluster:
             system = cluster.node(0)
-            ref = await system.spawn(MergeableAccount, clustered=True)
+            ref = await system.actor(MergeableAccount, name="account-get-set-state", scope="cluster")
             await asyncio.sleep(0.1)
 
             await ref.send(Deposit(amount=500))
@@ -174,7 +179,7 @@ class TestMergeableBehavior:
     async def test_withdraw_operation(self):
         async with DevelopmentCluster(1) as cluster:
             system = cluster.node(0)
-            ref = await system.spawn(MergeableAccount, clustered=True)
+            ref = await system.actor(MergeableAccount, name="account-withdraw", scope="cluster")
             await asyncio.sleep(0.1)
 
             await ref.send(Deposit(amount=100))
@@ -190,8 +195,9 @@ class TestVectorClockTracking:
     @pytest.mark.asyncio
     async def test_version_increments_on_mutation(self):
         async with DevelopmentCluster(2) as cluster:
+            from casty.cluster.scope import ClusterScope
             node1 = cluster.node(0)
-            ref = await node1.spawn(MergeableAccount, clustered=True, replication=2)
+            ref = await node1.actor(MergeableAccount, name="account-version-increment", scope=ClusterScope(replication=2))
             await asyncio.sleep(0.2)
 
             for _ in range(3):
@@ -205,7 +211,7 @@ class TestVectorClockTracking:
     async def test_wal_tracks_deltas(self):
         async with DevelopmentCluster(1) as cluster:
             system = cluster.node(0)
-            ref = await system.spawn(MergeableAccount, clustered=True)
+            ref = await system.actor(MergeableAccount, name="account-wal-deltas", scope="cluster")
             await asyncio.sleep(0.1)
 
             await ref.send(Deposit(amount=100))
@@ -257,16 +263,15 @@ class TestConcurrentModificationMerge:
     @pytest.mark.asyncio
     async def test_concurrent_deposits_merge_correctly(self):
         async with DevelopmentCluster(2) as cluster:
+            from casty.cluster.scope import ClusterScope
             node1, node2 = cluster[0], cluster[1]
             connected = await self._wait_for_cluster_membership([node1, node2])
             assert connected, "Nodes not connected"
 
-            ref = await node1.spawn(
+            ref = await node1.actor(
                 MergeableAccount,
                 name="shared-account",
-                clustered=True,
-                replication=2,
-                write_consistency='all',
+                scope=ClusterScope(replication=2, consistency='all'),
             )
 
             replicated = await self._wait_for_replication([node1, node2], "shared-account")
@@ -284,16 +289,15 @@ class TestConcurrentModificationMerge:
     @pytest.mark.asyncio
     async def test_set_concurrent_adds_merge_with_union(self):
         async with DevelopmentCluster(2) as cluster:
+            from casty.cluster.scope import ClusterScope
             node1, node2 = cluster[0], cluster[1]
             connected = await self._wait_for_cluster_membership([node1, node2])
             assert connected, "Nodes not connected"
 
-            ref = await node1.spawn(
+            ref = await node1.actor(
                 MergeableSet,
                 name="shared-set",
-                clustered=True,
-                replication=2,
-                write_consistency='all',
+                scope=ClusterScope(replication=2, consistency='all'),
             )
 
             replicated = await self._wait_for_replication([node1, node2], "shared-set")
@@ -314,16 +318,15 @@ class TestConcurrentModificationMerge:
     @pytest.mark.asyncio
     async def test_dominated_version_accepts_state(self):
         async with DevelopmentCluster(2) as cluster:
+            from casty.cluster.scope import ClusterScope
             node1, node2 = cluster[0], cluster[1]
             connected = await self._wait_for_cluster_membership([node1, node2])
             assert connected, "Nodes not connected"
 
-            ref = await node1.spawn(
+            ref = await node1.actor(
                 MergeableAccount,
                 name="sync-account",
-                clustered=True,
-                replication=2,
-                write_consistency='all',
+                scope=ClusterScope(replication=2, consistency='all'),
             )
 
             replicated = await self._wait_for_replication([node1, node2], "sync-account")
@@ -346,16 +349,15 @@ class TestConcurrentModificationMerge:
     @pytest.mark.asyncio
     async def test_my_version_dominates_ignores_state(self):
         async with DevelopmentCluster(2) as cluster:
+            from casty.cluster.scope import ClusterScope
             node1, node2 = cluster[0], cluster[1]
             connected = await self._wait_for_cluster_membership([node1, node2])
             assert connected, "Nodes not connected"
 
-            ref = await node1.spawn(
+            ref = await node1.actor(
                 MergeableAccount,
                 name="ignore-account",
-                clustered=True,
-                replication=2,
-                write_consistency='all',
+                scope=ClusterScope(replication=2, consistency='all'),
             )
 
             replicated = await self._wait_for_replication([node1, node2], "ignore-account")

@@ -174,14 +174,14 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        supplier1 = await system.spawn(Supplier, supplier_name="FastMart", base_price=100.0, delay=0.1)
-        supplier2 = await system.spawn(Supplier, supplier_name="BudgetStore", base_price=85.0, delay=0.2)
-        supplier3 = await system.spawn(Supplier, supplier_name="SlowShop", base_price=80.0, delay=2.0)
-        supplier4 = await system.spawn(Supplier, supplier_name="QuickDeal", base_price=95.0, delay=0.15)
+        supplier1 = await system.actor(Supplier, name="supplier-fastmart", supplier_name="FastMart", base_price=100.0, delay=0.1)
+        supplier2 = await system.actor(Supplier, name="supplier-budgetstore", supplier_name="BudgetStore", base_price=85.0, delay=0.2)
+        supplier3 = await system.actor(Supplier, name="supplier-slowshop", supplier_name="SlowShop", base_price=80.0, delay=2.0)
+        supplier4 = await system.actor(Supplier, name="supplier-quickdeal", supplier_name="QuickDeal", base_price=95.0, delay=0.15)
 
         suppliers = [supplier1, supplier2, supplier3, supplier4]
 
-        aggregator = await system.spawn(Aggregator, suppliers=suppliers)
+        aggregator = await system.actor(Aggregator, name="aggregator", suppliers=suppliers)
 
         print("[Main] Requesting best price for 'laptop' (1s timeout)...")
         print("       Note: SlowShop (2s delay) will likely timeout")

@@ -5,12 +5,13 @@ from uuid import uuid4
 
 from casty import Actor, LocalActorRef
 from casty.system import LocalSystem
+from casty.supervision import SupervisorConfig
 
 from .cluster import Cluster
 from .clustered_ref import ClusteredActorRef
 from .config import ClusterConfig
-from .consistency import Consistency, Replication
 from .messages import RegisterClusteredActor, GetClusteredActor
+from .scope import Scope, ClusterScope
 
 
 class ClusteredSystem(LocalSystem):
@@ -26,26 +27,40 @@ class ClusteredSystem(LocalSystem):
 
     async def start(self) -> None:
         await super().start()
-        self._cluster = await super().spawn(
+        self._cluster = await self._actor_internal(
             Cluster,
+            name="__cluster__",
             config=self._config,
         )
 
-    async def spawn[M](
+    async def actor[M](
         self,
         actor_cls: type[Actor[M]],
         *,
-        name: str | None = None,
-        clustered: bool = False,
-        replication: Replication = 1,
-        singleton: bool = False,
-        write_consistency: Consistency = 'one',
+        name: str,
+        scope: Scope = 'local',
+        supervision: SupervisorConfig | None = None,
+        durable: bool = False,
         **kwargs: Any,
     ) -> LocalActorRef[M] | ClusteredActorRef[M]:
-        if not clustered:
-            return await super().spawn(actor_cls, name=name, **kwargs)
+        if scope == 'local':
+            return await super().actor(
+                actor_cls,
+                name=name,
+                scope=scope,
+                supervision=supervision,
+                durable=durable,
+                **kwargs,
+            )
 
-        actor_id = name or f"{actor_cls.__name__}-{uuid4().hex[:8]}"
+        if isinstance(scope, ClusterScope):
+            replication = scope.replication
+            consistency = scope.consistency
+        else:
+            replication = 1
+            consistency = 'one'
+
+        actor_id = name
 
         info = await self._cluster.ask(GetClusteredActor(actor_id=actor_id))
         if info is None:
@@ -54,7 +69,7 @@ class ClusteredSystem(LocalSystem):
                     actor_id=actor_id,
                     actor_cls=actor_cls,
                     replication=replication if isinstance(replication, int) else 1,
-                    singleton=singleton,
+                    singleton=False,
                     actor_kwargs=kwargs if kwargs else None,
                 )
             )
@@ -66,7 +81,7 @@ class ClusteredSystem(LocalSystem):
             actor_id=actor_id,
             cluster=self._cluster,
             local_ref=local_ref,
-            write_consistency=write_consistency,
+            write_consistency=consistency,
         )
 
     def _get_local_actor(self, actor_id: str) -> LocalActorRef[Any] | None:

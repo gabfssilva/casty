@@ -111,7 +111,7 @@ class TestActorRestart:
                     case _:
                         self.message_count += 1
 
-        actor = await system.spawn(FailOnceActor)
+        actor = await system.actor(FailOnceActor, name="fail-once-actor")
 
         # Send a message that causes failure
         await actor.send("fail")
@@ -142,7 +142,7 @@ class TestActorRestart:
                 if msg == "fail":
                     raise RuntimeError("Failure")
 
-        actor = await system.spawn(QuickFailActor)
+        actor = await system.actor(QuickFailActor, name="quick-fail-actor")
 
         # Cause a failure
         await actor.send("fail")
@@ -171,7 +171,7 @@ class TestActorRestart:
                 if msg == "fail":
                     raise ValueError("Test failure")
 
-        actor = await system.spawn(HookTrackingActor)
+        actor = await system.actor(HookTrackingActor, name="hook-tracking-actor")
 
         await actor.send("fail")
         await asyncio.sleep(0.3)
@@ -201,7 +201,7 @@ class TestSupervisionStrategies:
                 if msg == "fail":
                     raise RuntimeError("Stop me")
 
-        actor = await system.spawn(StopOnFailActor)
+        actor = await system.actor(StopOnFailActor, name="stop-on-fail-actor")
 
         await actor.send("fail")
         await asyncio.sleep(0.2)
@@ -230,7 +230,7 @@ class TestSupervisionStrategies:
             async def receive(self, msg: str, ctx: Context) -> None:
                 raise RuntimeError("Always fail")
 
-        actor = await system.spawn(AlwaysFailActor)
+        actor = await system.actor(AlwaysFailActor, name="always-fail-actor")
 
         # Send multiple failure-causing messages
         await actor.send("fail1")
@@ -249,7 +249,7 @@ class TestChildSupervision:
 
     @pytest.mark.asyncio
     async def test_parent_supervises_child(self, system: ActorSystem):
-        """Test that parent can spawn and supervise children."""
+        """Test that parent can create and supervise children."""
 
         @dataclass
         class SpawnFailingChild:
@@ -279,13 +279,13 @@ class TestChildSupervision:
             ) -> None:
                 match msg:
                     case SpawnFailingChild():
-                        self.child = await ctx.spawn(FailingChild, name="failing-child")
+                        self.child = await ctx.actor(FailingChild, name="failing-child")
                         await ctx.reply(self.child)
                     case str() as s:
                         if self.child:
                             await self.child.send(s)
 
-        parent = await system.spawn(ParentActor, name="parent")
+        parent = await system.actor(ParentActor, name="parent")
 
         # Spawn a child
         child = await parent.ask(SpawnFailingChild())
@@ -319,19 +319,19 @@ class TestChildSupervision:
                         async def receive(self, msg: str, ctx: Context) -> None:
                             raise ValueError("Child error")
 
-                    self.child = await ctx.spawn(ChildActor, name="my-child")
+                    self.child = await ctx.actor(ChildActor, name="my-child")
                     await ctx.reply(self.child)
                 elif msg == "fail" and self.child:
                     await self.child.send("trigger")
 
-        parent = await system.spawn(CustomSupervisor)
+        parent = await system.actor(CustomSupervisor, name="custom-supervisor")
 
         child = await parent.ask("spawn")
         await parent.send("fail")
         await asyncio.sleep(0.2)
 
         assert len(override_called) >= 1
-        assert override_called[0][0] == "my-child"
+        assert "my-child" in override_called[0][0]
         assert override_called[0][1] == "ValueError"
 
 
@@ -357,12 +357,12 @@ class TestContextChildManagement:
                 match msg:
                     case SpawnChildren(count):
                         for i in range(count):
-                            await ctx.spawn(Counter, name=f"child-{i}")
+                            await ctx.actor(Counter, name=f"child-{i}")
                         await ctx.reply(len(ctx.children))
                     case GetChildCount():
                         await ctx.reply(len(ctx.children))
 
-        parent = await system.spawn(ParentActor)
+        parent = await system.actor(ParentActor, name="children-parent")
 
         result = await parent.ask(SpawnChildren(3))
         assert result == 3
@@ -390,7 +390,7 @@ class TestContextChildManagement:
             ) -> None:
                 match msg:
                     case SpawnChild(name):
-                        child = await ctx.spawn(Counter, name=name)
+                        child = await ctx.actor(Counter, name=name)
                         children[name] = child
                         await ctx.reply(child)
                     case StopChild(name):
@@ -402,7 +402,7 @@ class TestContextChildManagement:
                     case GetValue():
                         await ctx.reply(len(ctx.children))
 
-        parent = await system.spawn(ParentActor)
+        parent = await system.actor(ParentActor, name="stop-child-parent")
 
         # Spawn children
         await parent.ask(SpawnChild("child-1"))
@@ -438,7 +438,7 @@ class TestContextChildManagement:
                 match msg:
                     case SpawnMany(count):
                         for i in range(count):
-                            await ctx.spawn(Counter, name=f"child-{i}")
+                            await ctx.actor(Counter, name=f"child-{i}")
                         await ctx.reply(len(ctx.children))
                     case StopAll():
                         await ctx.stop_all_children()
@@ -446,7 +446,7 @@ class TestContextChildManagement:
                     case GetValue():
                         await ctx.reply(len(ctx.children))
 
-        parent = await system.spawn(ParentActor)
+        parent = await system.actor(ParentActor, name="stop-all-parent")
 
         await parent.ask(SpawnMany(5))
         count = await parent.ask(GetValue())

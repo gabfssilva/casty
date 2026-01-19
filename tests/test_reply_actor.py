@@ -12,7 +12,7 @@ class EchoActor(Actor[str]):
 @pytest.mark.asyncio
 async def test_ask_with_reply_actor():
     async with ActorSystem.local() as system:
-        echo = await system.spawn(EchoActor)
+        echo = await system.actor(EchoActor, name="echo-actor")
 
         result = await echo.ask("hello")
 
@@ -28,7 +28,7 @@ async def test_ask_timeout():
                 await ctx.sender.send("done")
 
     async with ActorSystem.local() as system:
-        slow = await system.spawn(SlowActor)
+        slow = await system.actor(SlowActor, name="slow-actor")
 
         with pytest.raises(asyncio.TimeoutError):
             await slow.ask("hello", timeout=0.1)
@@ -46,7 +46,7 @@ async def test_ask_multiple_sequential():
                 await ctx.sender.send(self.count)
 
     async with ActorSystem.local() as system:
-        counter = await system.spawn(CounterActor)
+        counter = await system.actor(CounterActor, name="counter-actor")
 
         r1 = await counter.ask("ping")
         r2 = await counter.ask("ping")
@@ -71,7 +71,7 @@ async def test_ctx_reply_uses_sender():
             await ctx.reply(42)
 
     async with ActorSystem.local() as system:
-        actor = await system.spawn(ValueActor)
+        actor = await system.actor(ValueActor, name="value-actor")
         result = await actor.ask(GetValue())
         assert result == 42
 
@@ -86,7 +86,7 @@ async def test_reply_actor_cleanup_on_timeout():
             pass  # Never replies
 
     async with LocalSystem() as system:
-        actor = await system.spawn(NeverReplyActor)
+        actor = await system.actor(NeverReplyActor, name="never-reply-actor")
 
         initial_count = len(system._supervision_tree._nodes)
 
@@ -111,7 +111,7 @@ async def test_reply_actor_stops_after_response():
             await ctx.reply("done")
 
     async with LocalSystem() as system:
-        actor = await system.spawn(QuickReplyActor)
+        actor = await system.actor(QuickReplyActor, name="quick-reply-actor")
 
         initial_count = len(system._supervision_tree._nodes)
 

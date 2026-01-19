@@ -35,8 +35,9 @@ class TestClusterSend:
     @pytest.mark.asyncio
     async def test_send_to_local_actor(self):
         async with ActorSystem.local() as system:
-            cluster = await system.spawn(
+            cluster = await system.actor(
                 Cluster,
+                name="cluster-send-local",
                 config=ClusterConfig(bind_port=17950),
             )
 
@@ -84,8 +85,9 @@ class TestClusterSend:
     @pytest.mark.asyncio
     async def test_ask_returns_value(self):
         async with ActorSystem.local() as system:
-            cluster = await system.spawn(
+            cluster = await system.actor(
                 Cluster,
+                name="cluster-ask-value",
                 config=ClusterConfig(bind_port=17951),
             )
 

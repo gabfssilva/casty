@@ -9,6 +9,7 @@ from casty.actor import LocalActorRef
 from casty.wal import FileStoreBackend, InMemoryStoreBackend, StoreBackend
 
 from ..clustered_ref import ClusteredActorRef
+from ..scope import ClusterScope
 
 from .messages import Get, Set, Delete, CacheHit, CacheMiss
 from .actor import CacheActor
@@ -48,11 +49,10 @@ class DistributedCache:
         else:
             backend = InMemoryStoreBackend()
 
-        ref = await system.spawn(
+        ref = await system.actor(
             CacheActor,
             name=name,
-            clustered=True,
-            replication=replication,
+            scope=ClusterScope(replication=replication),
             backend=backend,
         )
 

@@ -25,23 +25,23 @@ class TestActorSystem:
     """Tests for ActorSystem basic operations."""
 
     @pytest.mark.asyncio
-    async def test_spawn_actor(self, system: ActorSystem):
-        """Test spawning an actor."""
-        counter = await system.spawn(Counter)
+    async def test_actor_creation(self, system: ActorSystem):
+        """Test creating an actor."""
+        counter = await system.actor(Counter, name="test-counter")
         assert counter is not None
         assert counter.id is not None
 
     @pytest.mark.asyncio
-    async def test_spawn_with_name(self, system: ActorSystem):
-        """Test spawning an actor with a name."""
-        counter = await system.spawn(Counter, name="my-counter")
-        assert counter.id.name == "my-counter"
+    async def test_actor_with_name(self, system: ActorSystem):
+        """Test creating an actor with a name."""
+        counter = await system.actor(Counter, name="my-counter")
+        assert "my-counter" in counter.id.name
         assert "my-counter" in str(counter.id)
 
     @pytest.mark.asyncio
-    async def test_spawn_with_kwargs(self, system: ActorSystem):
-        """Test spawning an actor with constructor arguments."""
-        counter = await system.spawn(Counter, initial=42)
+    async def test_actor_with_kwargs(self, system: ActorSystem):
+        """Test creating an actor with constructor arguments."""
+        counter = await system.actor(Counter, name="counter-with-initial", initial=42)
 
         result = await counter.ask(GetValue())
         assert result == 42
@@ -49,7 +49,7 @@ class TestActorSystem:
     @pytest.mark.asyncio
     async def test_actor_lifecycle_start(self, system: ActorSystem):
         """Test that on_start is called."""
-        counter = await system.spawn(Counter)
+        counter = await system.actor(Counter, name="lifecycle-counter")
 
         # Give the actor a moment to start
         await asyncio.sleep(0.05)
@@ -65,7 +65,7 @@ class TestActorSend:
     @pytest.mark.asyncio
     async def test_send_single_message(self, system: ActorSystem):
         """Test sending a single message."""
-        counter = await system.spawn(Counter)
+        counter = await system.actor(Counter, name="send-single-counter")
 
         await counter.send(Increment(5))
         await asyncio.sleep(0.05)  # Allow message to be processed
@@ -76,7 +76,7 @@ class TestActorSend:
     @pytest.mark.asyncio
     async def test_send_multiple_messages(self, system: ActorSystem):
         """Test sending multiple messages in sequence."""
-        counter = await system.spawn(Counter)
+        counter = await system.actor(Counter, name="send-multiple-counter")
 
         await counter.send(Increment(1))
         await counter.send(Increment(2))
@@ -89,7 +89,7 @@ class TestActorSend:
     @pytest.mark.asyncio
     async def test_send_different_message_types(self, system: ActorSystem):
         """Test sending different message types."""
-        counter = await system.spawn(Counter, initial=10)
+        counter = await system.actor(Counter, name="send-different-types-counter", initial=10)
 
         await counter.send(Increment(5))
         await counter.send(Decrement(3))
@@ -101,7 +101,7 @@ class TestActorSend:
     @pytest.mark.asyncio
     async def test_send_operator(self, system: ActorSystem):
         """Test >> operator for send."""
-        counter = await system.spawn(Counter)
+        counter = await system.actor(Counter, name="send-operator-counter")
 
         await (counter >> Increment(10))
         await asyncio.sleep(0.05)
@@ -116,7 +116,7 @@ class TestActorAsk:
     @pytest.mark.asyncio
     async def test_ask_simple(self, system: ActorSystem):
         """Test simple ask pattern."""
-        counter = await system.spawn(Counter, initial=42)
+        counter = await system.actor(Counter, name="ask-simple-counter", initial=42)
 
         result = await counter.ask(GetValue())
         assert result == 42
@@ -124,7 +124,7 @@ class TestActorAsk:
     @pytest.mark.asyncio
     async def test_ask_with_timeout(self, system: ActorSystem):
         """Test ask with custom timeout."""
-        counter = await system.spawn(Counter, initial=100)
+        counter = await system.actor(Counter, name="ask-timeout-counter", initial=100)
 
         result = await counter.ask(GetValue(), timeout=1.0)
         assert result == 100
@@ -138,7 +138,7 @@ class TestActorAsk:
                 await asyncio.sleep(10)  # Very slow
                 await ctx.reply("done")
 
-        slow = await system.spawn(SlowActor)
+        slow = await system.actor(SlowActor, name="slow-actor")
 
         with pytest.raises(asyncio.TimeoutError):
             await slow.ask(Ping(), timeout=0.1)
@@ -146,7 +146,7 @@ class TestActorAsk:
     @pytest.mark.asyncio
     async def test_ask_operator(self, system: ActorSystem):
         """Test << operator for ask."""
-        counter = await system.spawn(Counter, initial=77)
+        counter = await system.actor(Counter, name="ask-operator-counter", initial=77)
 
         result = await (counter << GetValue())
         assert result == 77
@@ -154,7 +154,7 @@ class TestActorAsk:
     @pytest.mark.asyncio
     async def test_echo_actor(self, system: ActorSystem):
         """Test actor that echoes messages."""
-        echo = await system.spawn(EchoActor)
+        echo = await system.actor(EchoActor, name="echo-actor")
 
         result = await echo.ask("hello")
         assert result == "hello"
@@ -178,15 +178,15 @@ class TestActorContext:
             async def receive(self, msg: GetSelfId, ctx: Context) -> None:
                 await ctx.reply(ctx.self_ref.id)
 
-        actor = await system.spawn(SelfAwareActor, name="self-aware")
+        actor = await system.actor(SelfAwareActor, name="self-aware")
 
         result = await actor.ask(GetSelfId())
         assert result == actor.id
-        assert result.name == "self-aware"
+        assert "self-aware" in result.name
 
     @pytest.mark.asyncio
-    async def test_context_spawn_child(self, system: ActorSystem):
-        """Test spawning child actors from context."""
+    async def test_context_actor_child(self, system: ActorSystem):
+        """Test creating child actors from context."""
 
         @dataclass
         class SpawnAndCount:
@@ -201,13 +201,13 @@ class TestActorContext:
             ) -> None:
                 match msg:
                     case SpawnAndCount():
-                        await ctx.spawn(Counter, name=f"child-{self.children_spawned}")
+                        await ctx.actor(Counter, name=f"child-{self.children_spawned}")
                         self.children_spawned += 1
                         await ctx.reply(self.children_spawned)
                     case GetValue():
                         await ctx.reply(len(ctx.children))
 
-        parent = await system.spawn(ParentActor)
+        parent = await system.actor(ParentActor, name="parent-actor")
 
         # Spawn some children
         result = await parent.ask(SpawnAndCount())
@@ -234,7 +234,7 @@ class TestActorContext:
                 await ctx.reply("second")  # Should be ignored
                 await ctx.reply("third")  # Should be ignored
 
-        actor = await system.spawn(MultiReplyActor)
+        actor = await system.actor(MultiReplyActor, name="multi-reply-actor")
 
         result = await actor.ask(MultiReply())
         assert result == "first"
@@ -246,8 +246,8 @@ class TestActorCommunication:
     @pytest.mark.asyncio
     async def test_actor_to_actor_send(self, system: ActorSystem):
         """Test one actor sending to another."""
-        counter = await system.spawn(Counter)
-        forwarder = await system.spawn(ForwarderActor)
+        counter = await system.actor(Counter, name="comm-counter")
+        forwarder = await system.actor(ForwarderActor, name="comm-forwarder")
 
         # Forward an increment to the counter
         await forwarder.send(ForwardTo(counter, Increment(7)))
@@ -259,7 +259,7 @@ class TestActorCommunication:
     @pytest.mark.asyncio
     async def test_message_ordering(self, system: ActorSystem):
         """Test that messages are processed in order."""
-        counter = await system.spawn(Counter)
+        counter = await system.actor(Counter, name="ordering-counter")
 
         # Send messages that depend on order
         await counter.send(SetValue(100))
@@ -281,8 +281,8 @@ class TestActorShutdown:
         from casty.system import LocalSystem
         system = LocalSystem()
 
-        counter1 = await system.spawn(Counter)
-        counter2 = await system.spawn(Counter)
+        counter1 = await system.actor(Counter, name="shutdown-counter-1")
+        counter2 = await system.actor(Counter, name="shutdown-counter-2")
 
         await counter1.send(Increment(1))
         await counter2.send(Increment(2))
@@ -298,7 +298,7 @@ class TestActorShutdown:
         """Test that context manager performs shutdown."""
         from casty.system import LocalSystem
         async with LocalSystem() as system:
-            counter = await system.spawn(Counter)
+            counter = await system.actor(Counter, name="context-manager-counter")
             await counter.send(Increment(5))
             await asyncio.sleep(0.05)
             result = await counter.ask(GetValue())
@@ -314,21 +314,21 @@ class TestActorEquality:
     @pytest.mark.asyncio
     async def test_same_ref_equals(self, system: ActorSystem):
         """Test that same ref equals itself."""
-        counter = await system.spawn(Counter)
+        counter = await system.actor(Counter, name="equality-counter")
         assert counter == counter
 
     @pytest.mark.asyncio
     async def test_different_refs_not_equal(self, system: ActorSystem):
         """Test that different refs are not equal."""
-        counter1 = await system.spawn(Counter)
-        counter2 = await system.spawn(Counter)
+        counter1 = await system.actor(Counter, name="equality-counter-1")
+        counter2 = await system.actor(Counter, name="equality-counter-2")
         assert counter1 != counter2
 
     @pytest.mark.asyncio
     async def test_ref_hashable(self, system: ActorSystem):
         """Test that refs can be used in sets/dicts."""
-        counter1 = await system.spawn(Counter)
-        counter2 = await system.spawn(Counter)
+        counter1 = await system.actor(Counter, name="hashable-counter-1")
+        counter2 = await system.actor(Counter, name="hashable-counter-2")
 
         actors = {counter1, counter2}
         assert len(actors) == 2

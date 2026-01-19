@@ -155,14 +155,14 @@ async def main():
 
     async with ActorSystem() as system:
         # Create chat room
-        room = await system.spawn(ChatRoom, room_name="python-devs")
+        room = await system.actor(ChatRoom, name="chat-room-python-devs", room_name="python-devs")
         print("Chat room 'python-devs' created")
         print()
 
         # Create users
-        alice_ref = await system.spawn(User, username="alice")
-        bob_ref = await system.spawn(User, username="bob")
-        charlie_ref = await system.spawn(User, username="charlie")
+        alice_ref = await system.actor(User, name="user-alice", username="alice")
+        bob_ref = await system.actor(User, name="user-bob", username="bob")
+        charlie_ref = await system.actor(User, name="user-charlie", username="charlie")
 
         # Users join the room
         print("--- Users joining ---")

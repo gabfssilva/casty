@@ -180,8 +180,9 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        circuit = await system.spawn(
+        circuit = await system.actor(
             CircuitBreaker,
+            name="circuit-breaker",
             failure_threshold=3,
             reset_timeout=2.0,
             success_threshold=2,

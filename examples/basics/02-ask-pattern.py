@@ -67,7 +67,7 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        counter = await system.spawn(Counter)
+        counter = await system.actor(Counter, name="counter")
 
         # --- 1. Fire-and-forget with send() ---
         print("--- 1. Fire-and-forget with send() ---")

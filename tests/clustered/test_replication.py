@@ -47,8 +47,9 @@ class TestReplication:
     @pytest.mark.asyncio
     async def test_state_change_triggers_version_increment(self):
         async with LocalSystem() as system:
-            cluster = await system.spawn(
+            cluster = await system.actor(
                 Cluster,
+                name="cluster-state-version",
                 config=ClusterConfig(bind_port=17960),
             )
 
@@ -89,8 +90,9 @@ class TestReplication:
     @pytest.mark.asyncio
     async def test_no_version_increment_if_state_unchanged(self):
         async with LocalSystem() as system:
-            cluster = await system.spawn(
+            cluster = await system.actor(
                 Cluster,
+                name="cluster-no-version-increment",
                 config=ClusterConfig(bind_port=17961),
             )
 
@@ -135,8 +137,9 @@ class TestReplication:
     @pytest.mark.asyncio
     async def test_multiple_state_changes_increment_version(self):
         async with LocalSystem() as system:
-            cluster = await system.spawn(
+            cluster = await system.actor(
                 Cluster,
+                name="cluster-multiple-state-changes",
                 config=ClusterConfig(bind_port=17962),
             )
 

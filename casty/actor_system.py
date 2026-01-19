@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
+from .cluster.scope import Scope
 from .protocols import ActorRef, System
 
 if TYPE_CHECKING:
     from .actor import Actor
+    from .supervision import SupervisorConfig
 
 
 class ActorSystem(System):
@@ -19,10 +21,10 @@ class ActorSystem(System):
 
     Usage:
         async with ActorSystem.local() as system:
-            ref = await system.spawn(MyActor)
+            ref = await system.actor(MyActor, name='my-actor')
 
         async with ActorSystem.clustered(port=8001) as system:
-            ref = await system.spawn(MyActor, clustered=True)
+            ref = await system.actor(MyActor, name='my-actor', scope='cluster')
     """
 
     def __init__(self, inner: System | None = None) -> None:
@@ -62,6 +64,26 @@ class ActorSystem(System):
 
     # Delegation methods
 
+    async def actor[M](
+        self,
+        actor_cls: type["Actor[M]"],
+        *,
+        name: str,
+        scope: Scope = 'local',
+        supervision: "SupervisorConfig | None" = None,
+        durable: bool = False,
+        **kwargs: Any,
+    ) -> ActorRef[M]:
+        """Create and start a new actor."""
+        return await self._inner.actor(
+            actor_cls,
+            name=name,
+            scope=scope,
+            supervision=supervision,
+            durable=durable,
+            **kwargs,
+        )
+
     async def spawn[M](
         self,
         actor_cls: type["Actor[M]"],
@@ -69,7 +91,11 @@ class ActorSystem(System):
         name: str | None = None,
         **kwargs: Any,
     ) -> ActorRef[M]:
-        """Create and start a new actor."""
+        """Internal spawn method for ephemeral actors.
+
+        Delegates to the inner system's spawn method.
+        For named actors, use actor() instead.
+        """
         return await self._inner.spawn(actor_cls, name=name, **kwargs)
 
     async def stop(self, ref: ActorRef[Any]) -> bool:
@@ -81,7 +107,7 @@ class ActorSystem(System):
         timeout: float,
         listener: ActorRef[R],
         message: R,
-    ) -> str:
+    ) -> str | None:
         """Schedule a message to be sent after timeout."""
         return await self._inner.schedule(timeout, listener, message)
 
@@ -94,7 +120,7 @@ class ActorSystem(System):
         message: R,
         interval: float,
         listener: ActorRef[R],
-    ) -> str:
+    ) -> str | None:
         """Start periodic message delivery."""
         return await self._inner.tick(message, interval, listener)
 

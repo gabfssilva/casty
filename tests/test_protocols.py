@@ -135,7 +135,7 @@ class TestProtocolIntegration:
                 await ctx.reply("pong")
 
         async with ActorSystem.local() as system:
-            ref = await system.spawn(PingActor)
+            ref = await system.actor(PingActor, name="protocol-ping-actor")
             # runtime_checkable protocols can be used with isinstance
             assert isinstance(ref, ActorRef)
 
@@ -213,7 +213,7 @@ class TestActorSystemDecorator:
                 await ctx.reply("pong")
 
         async with ActorSystemDecorator.local() as system:
-            ref = await system.spawn(PingActor)
+            ref = await system.actor(PingActor, name="decorator-ping-actor")
             assert ref is not None
             assert isinstance(ref, ActorRef)
             result = await ref.ask(Ping())
@@ -235,7 +235,7 @@ class TestActorSystemDecorator:
                 pass
 
         async with ActorSystemDecorator.local() as system:
-            ref = await system.spawn(SimpleActor)
+            ref = await system.actor(SimpleActor, name="decorator-simple-actor")
             result = await system.stop(ref)
             assert result is True
 
@@ -291,7 +291,7 @@ class TestActorSystemIntegration:
                 await ctx.reply(Pong())
 
         async with ActorSystem.local() as system:
-            ref = await system.spawn(PingActor)
+            ref = await system.actor(PingActor, name="integration-local-ping")
             result = await ref.ask(Ping())
             assert isinstance(result, Pong)
 
@@ -315,7 +315,7 @@ class TestActorSystemIntegration:
                 await ctx.reply(Pong())
 
         async with ActorSystem.clustered(port=0) as system:
-            ref = await system.spawn(SimpleActor)
+            ref = await system.actor(SimpleActor, name="integration-clustered-ping")
             result = await ref.ask(Ping())
             assert isinstance(result, Pong)
 

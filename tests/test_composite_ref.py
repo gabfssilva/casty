@@ -73,8 +73,8 @@ class ActorAB(Actor[MsgA | MsgB]):
 async def test_composite_ref_basic_routing() -> None:
     """Test that messages are routed to the correct actor based on type."""
     async with ActorSystem.local() as system:
-        ref_a = await system.spawn(ActorA)
-        ref_b = await system.spawn(ActorB)
+        ref_a = await system.actor(ActorA, name="basic-actor-a")
+        ref_b = await system.actor(ActorB, name="basic-actor-b")
 
         # Combine refs
         combined = ref_a | ref_b
@@ -92,9 +92,9 @@ async def test_composite_ref_basic_routing() -> None:
 async def test_composite_ref_three_actors() -> None:
     """Test combining three actors."""
     async with ActorSystem.local() as system:
-        ref_a = await system.spawn(ActorA)
-        ref_b = await system.spawn(ActorB)
-        ref_c = await system.spawn(ActorC)
+        ref_a = await system.actor(ActorA, name="three-actor-a")
+        ref_b = await system.actor(ActorB, name="three-actor-b")
+        ref_c = await system.actor(ActorC, name="three-actor-c")
 
         # Combine all three
         combined = ref_a | ref_b | ref_c
@@ -109,8 +109,8 @@ async def test_composite_ref_three_actors() -> None:
 async def test_composite_ref_send() -> None:
     """Test send (fire-and-forget) with composite ref."""
     async with ActorSystem.local() as system:
-        ref_a = await system.spawn(ActorA)
-        ref_b = await system.spawn(ActorB)
+        ref_a = await system.actor(ActorA, name="send-actor-a")
+        ref_b = await system.actor(ActorB, name="send-actor-b")
 
         combined = ref_a | ref_b
 
@@ -130,8 +130,8 @@ async def test_composite_ref_send() -> None:
 async def test_composite_ref_operators() -> None:
     """Test >> and << operators."""
     async with ActorSystem.local() as system:
-        ref_a = await system.spawn(ActorA)
-        ref_b = await system.spawn(ActorB)
+        ref_a = await system.actor(ActorA, name="operators-actor-a")
+        ref_b = await system.actor(ActorB, name="operators-actor-b")
 
         combined = ref_a | ref_b
 
@@ -147,8 +147,8 @@ async def test_composite_ref_operators() -> None:
 async def test_composite_ref_unknown_type_raises() -> None:
     """Test that sending an unknown message type raises TypeError."""
     async with ActorSystem.local() as system:
-        ref_a = await system.spawn(ActorA)
-        ref_b = await system.spawn(ActorB)
+        ref_a = await system.actor(ActorA, name="unknown-actor-a")
+        ref_b = await system.actor(ActorB, name="unknown-actor-b")
 
         combined = ref_a | ref_b
 
@@ -161,8 +161,8 @@ async def test_composite_ref_unknown_type_raises() -> None:
 async def test_composite_ref_first_match_wins() -> None:
     """Test that when multiple refs accept a type, the first one wins."""
     async with ActorSystem.local() as system:
-        ref_ab = await system.spawn(ActorAB)
-        ref_a = await system.spawn(ActorA)
+        ref_ab = await system.actor(ActorAB, name="first-match-actor-ab")
+        ref_a = await system.actor(ActorA, name="first-match-actor-a")
 
         # ref_ab comes first, so it should handle MsgA
         combined = ref_ab | ref_a
@@ -175,8 +175,8 @@ async def test_composite_ref_first_match_wins() -> None:
 async def test_composite_ref_accepted_types() -> None:
     """Test that accepted_types are correctly extracted."""
     async with ActorSystem.local() as system:
-        ref_a = await system.spawn(ActorA)
-        ref_b = await system.spawn(ActorB)
+        ref_a = await system.actor(ActorA, name="accepted-types-actor-a")
+        ref_b = await system.actor(ActorB, name="accepted-types-actor-b")
 
         # Verify types were extracted
         assert MsgA in ref_a.accepted_types
@@ -187,8 +187,8 @@ async def test_composite_ref_accepted_types() -> None:
 async def test_composite_ref_repr() -> None:
     """Test CompositeRef string representation."""
     async with ActorSystem.local() as system:
-        ref_a = await system.spawn(ActorA)
-        ref_b = await system.spawn(ActorB)
+        ref_a = await system.actor(ActorA, name="repr-actor-a")
+        ref_b = await system.actor(ActorB, name="repr-actor-b")
 
         combined = ref_a | ref_b
 

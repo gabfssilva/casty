@@ -75,8 +75,9 @@ class Router(Actor[Job | JobResult | GetStats]):
     async def on_start(self) -> None:
         print(f"[Router] Starting with {self.num_workers} workers")
         for i in range(self.num_workers):
-            worker = await self._ctx.spawn(
+            worker = await self._ctx.actor(
                 Worker,
+                name=f"worker-{i}",
                 worker_id=i,
                 router=self._ctx.self_ref,
             )
@@ -113,7 +114,7 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        router = await system.spawn(Router, num_workers=3)
+        router = await system.actor(Router, name="router", num_workers=3)
 
         await asyncio.sleep(0.1)
 

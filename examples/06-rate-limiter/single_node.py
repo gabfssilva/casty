@@ -21,10 +21,10 @@ async def main():
     async with ActorSystem.clustered("127.0.0.1", 0) as system:
         # Spawn sharded rate limiters
         # Each user gets their own limiter (10 req/sec, burst 20)
-        limiters = await system.spawn(
+        limiters = await system.actor(
             RateLimiter,
             name="rate-limiters",
-            sharded=True,
+            scope="cluster",
         )
 
         print("=" * 60)

@@ -182,7 +182,7 @@ class ParentActor(Actor[SpawnChild | GetChildren | GetValue]):
     ) -> None:
         match msg:
             case SpawnChild(name):
-                child = await ctx.spawn(Counter, name=name)
+                child = await ctx.actor(Counter, name=name or f"child-{self.spawn_count}")
                 self.spawn_count += 1
                 await ctx.reply(child)
             case GetChildren():

@@ -6,10 +6,12 @@ from typing import Any, TYPE_CHECKING
 
 from .clustered_system import ClusteredSystem
 from .config import ClusterConfig
+from .scope import Scope
 
 if TYPE_CHECKING:
     from casty import Actor
     from casty.protocols import ActorRef
+    from casty.supervision import SupervisorConfig
 
 
 def _next_free_port() -> int:
@@ -33,13 +35,13 @@ class DevelopmentCluster:
     Examples:
         # Basic usage - operations on random nodes
         async with DevelopmentCluster(3) as cluster:
-            ref = await cluster.spawn(Counter, clustered=True)
+            ref = await cluster.actor(Counter, name="counter", scope="cluster")
             await ref.send(Increment(10))
 
         # Specific node operations
         async with DevelopmentCluster(3) as cluster:
-            ref = await cluster.node(0).spawn(Counter, clustered=True)
-            await cluster.node(1).spawn(Counter, name=ref.actor_id, clustered=True)
+            ref = await cluster.node(0).actor(Counter, name="counter", scope="cluster")
+            await cluster.node(1).actor(Counter, name="counter", scope="cluster")
     """
 
     def __init__(
@@ -65,14 +67,24 @@ class DevelopmentCluster:
                 self._round_robin_index = (self._round_robin_index + 1) % len(self._nodes)
                 return node
 
-    async def spawn[M](
+    async def actor[M](
         self,
         actor_cls: type["Actor[M]"],
         *,
-        name: str | None = None,
+        name: str,
+        scope: Scope = 'local',
+        supervision: "SupervisorConfig | None" = None,
+        durable: bool = False,
         **kwargs: Any,
     ) -> "ActorRef[M]":
-        return await self._next_node().spawn(actor_cls, name=name, **kwargs)
+        return await self._next_node().actor(
+            actor_cls,
+            name=name,
+            scope=scope,
+            supervision=supervision,
+            durable=durable,
+            **kwargs,
+        )
 
     async def stop(self, ref: "ActorRef[Any]") -> bool:
         return await self._next_node().stop(ref)

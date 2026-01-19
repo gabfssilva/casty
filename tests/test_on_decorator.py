@@ -121,7 +121,7 @@ class TestOnDecorator:
     async def test_simple_handlers(self):
         """Test simple message handlers with @on."""
         async with ActorSystem.local() as system:
-            counter = await system.spawn(SimpleCounter)
+            counter = await system.actor(SimpleCounter, name="simple-counter")
 
             # Test send
             await counter.send(Increment(5))
@@ -135,7 +135,7 @@ class TestOnDecorator:
     async def test_multiple_handlers(self):
         """Test multiple handlers in same actor."""
         async with ActorSystem.local() as system:
-            counter = await system.spawn(MultiHandlerCounter)
+            counter = await system.actor(MultiHandlerCounter, name="multi-handler-counter")
 
             await counter.send(Increment(10))
             await counter.send(Decrement(3))
@@ -152,7 +152,7 @@ class TestOnDecorator:
     async def test_mixin_composition(self):
         """Test handler composition via mixins."""
         async with ActorSystem.local() as system:
-            counter = await system.spawn(ComposedCounter)
+            counter = await system.actor(ComposedCounter, name="composed-counter")
 
             await counter.send(Increment(5))
             await counter.send(Decrement(2))
@@ -165,7 +165,7 @@ class TestOnDecorator:
     async def test_override_receive_fallback(self):
         """Test that overriding receive still works when no @on decorators."""
         async with ActorSystem.local() as system:
-            counter = await system.spawn(OverrideReceiveCounter)
+            counter = await system.actor(OverrideReceiveCounter, name="override-receive-counter")
 
             await counter.send(Increment(7))
             result = await counter.ask(GetCount())
@@ -203,8 +203,8 @@ class TestMultipleActorInstances:
     async def test_independent_actor_states(self):
         """Test that multiple instances maintain independent state."""
         async with ActorSystem.local() as system:
-            counter1 = await system.spawn(SimpleCounter)
-            counter2 = await system.spawn(SimpleCounter)
+            counter1 = await system.actor(SimpleCounter, name="instance-counter-1")
+            counter2 = await system.actor(SimpleCounter, name="instance-counter-2")
 
             await counter1.send(Increment(10))
             await counter2.send(Increment(5))

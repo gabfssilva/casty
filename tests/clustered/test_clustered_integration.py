@@ -43,8 +43,9 @@ class TestActorIntegration:
     @pytest.mark.asyncio
     async def test_full_flow_single_node(self):
         async with LocalSystem() as system:
-            cluster = await system.spawn(
+            cluster = await system.actor(
                 Cluster,
+                name="cluster-full-flow",
                 config=ClusterConfig(bind_port=17970),
             )
 
@@ -93,8 +94,9 @@ class TestActorIntegration:
     @pytest.mark.asyncio
     async def test_singleton_flag_preserved(self):
         async with LocalSystem() as system:
-            cluster = await system.spawn(
+            cluster = await system.actor(
                 Cluster,
+                name="cluster-singleton-flag",
                 config=ClusterConfig(bind_port=17971),
             )
 
@@ -114,8 +116,9 @@ class TestActorIntegration:
     @pytest.mark.asyncio
     async def test_version_tracked_across_operations(self):
         async with LocalSystem() as system:
-            cluster = await system.spawn(
+            cluster = await system.actor(
                 Cluster,
+                name="cluster-version-tracked",
                 config=ClusterConfig(bind_port=17972),
             )
 

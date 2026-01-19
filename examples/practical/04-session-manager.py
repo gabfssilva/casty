@@ -200,8 +200,9 @@ class SessionManager(Actor[SessionManagerMessage]):
         session_id = str(uuid4())[:8]
 
         # Create session actor
-        session_ref = await ctx.spawn(
+        session_ref = await ctx.actor(
             Session,
+            name=f"session-{session_id}",
             session_id=session_id,
             user_id=msg.user_id,
             manager_ref=ctx.self_ref,
@@ -230,8 +231,9 @@ class SessionManager(Actor[SessionManagerMessage]):
         # Reactivate if passivated
         if state.actor_ref is None:
             print(f"[SessionManager] Reactivating session {msg.session_id}")
-            session_ref = await ctx.spawn(
+            session_ref = await ctx.actor(
                 Session,
+                name=f"session-{msg.session_id}",
                 session_id=msg.session_id,
                 user_id=state.user_id,
                 manager_ref=ctx.self_ref,
@@ -292,7 +294,7 @@ async def main():
 
     async with ActorSystem() as system:
         # Create session manager with 2-second timeout for demo
-        manager = await system.spawn(SessionManager, session_timeout=2.0)
+        manager = await system.actor(SessionManager, name="session-manager", session_timeout=2.0)
         print("Session manager created (timeout: 2s)")
         print()
 

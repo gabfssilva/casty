@@ -36,8 +36,9 @@ class Counter(Actor[Increment | GetCount]):
 @pytest.mark.asyncio
 async def test_persistent_actor_forwards_messages():
     async with ActorSystem.local() as system:
-        persistent = await system.spawn(
+        persistent = await system.actor(
             PersistentActor,
+            name="persistent-forwards",
             wrapped_actor_cls=Counter,
             actor_id="counter-1",
             node_id="node-a",
@@ -55,8 +56,9 @@ async def test_persistent_actor_forwards_messages():
 @pytest.mark.asyncio
 async def test_persistent_actor_get_state():
     async with ActorSystem.local() as system:
-        persistent = await system.spawn(
+        persistent = await system.actor(
             PersistentActor,
+            name="persistent-get-state",
             wrapped_actor_cls=Counter,
             actor_id="counter-1",
             node_id="node-a",
@@ -72,8 +74,9 @@ async def test_persistent_actor_get_state():
 @pytest.mark.asyncio
 async def test_persistent_actor_get_version():
     async with ActorSystem.local() as system:
-        persistent = await system.spawn(
+        persistent = await system.actor(
             PersistentActor,
+            name="persistent-get-version",
             wrapped_actor_cls=Counter,
             actor_id="counter-1",
             node_id="node-a",
@@ -98,10 +101,11 @@ async def test_persistent_actor_state_change_notification():
             async def receive(self, msg: StateChanged, ctx: Context) -> None:
                 notifications.append(msg)
 
-        collector = await system.spawn(NotificationCollector)
+        collector = await system.actor(NotificationCollector, name="notification-collector")
 
-        persistent = await system.spawn(
+        persistent = await system.actor(
             PersistentActor,
+            name="persistent-state-change",
             wrapped_actor_cls=Counter,
             actor_id="counter-1",
             node_id="node-a",
@@ -124,8 +128,9 @@ async def test_persistent_actor_recovery():
     backend = InMemoryStoreBackend()
 
     async with ActorSystem.local() as system:
-        persistent = await system.spawn(
+        persistent = await system.actor(
             PersistentActor,
+            name="persistent-recovery-1",
             wrapped_actor_cls=Counter,
             actor_id="counter-1",
             node_id="node-a",
@@ -139,8 +144,9 @@ async def test_persistent_actor_recovery():
         assert state == {"count": 15}
 
     async with ActorSystem.local() as system:
-        persistent = await system.spawn(
+        persistent = await system.actor(
             PersistentActor,
+            name="persistent-recovery-2",
             wrapped_actor_cls=Counter,
             actor_id="counter-1",
             node_id="node-a",
@@ -163,7 +169,7 @@ async def test_persistent_actor_no_state_change_no_notification():
             async def receive(self, msg: StateChanged, ctx: Context) -> None:
                 notifications.append(msg)
 
-        collector = await system.spawn(NotificationCollector)
+        collector = await system.actor(NotificationCollector, name="noop-collector")
 
         @dataclass
         class NoOp:
@@ -176,8 +182,9 @@ async def test_persistent_actor_no_state_change_no_notification():
             async def receive(self, msg: NoOp, ctx: Context) -> None:
                 pass
 
-        persistent = await system.spawn(
+        persistent = await system.actor(
             PersistentActor,
+            name="persistent-noop",
             wrapped_actor_cls=NoOpActor,
             actor_id="noop-1",
             node_id="node-a",

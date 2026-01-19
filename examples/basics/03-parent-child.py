@@ -86,10 +86,10 @@ class Coordinator(Actor[ProcessBatch | SquareResult | GetResults | GetChildCount
                 print(f"[Coordinator] Processing batch of {len(values)} values")
                 print(f"[Coordinator] Spawning {len(values)} worker children...")
 
-                # Spawn a child worker for each value
+                # Create a child worker for each value
                 for i, value in enumerate(values):
-                    # ctx.spawn() creates a child actor with this actor as parent
-                    worker = await ctx.spawn(Worker, worker_id=i, name=f"worker-{i}")
+                    # ctx.actor() creates a child actor with this actor as parent
+                    worker = await ctx.actor(Worker, name=f"worker-{i}", worker_id=i)
                     self.workers_spawned += 1
                     # Delegate work to the child
                     await worker.send(ComputeSquare(value))
@@ -116,8 +116,8 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        # Spawn the coordinator (parent)
-        coordinator = await system.spawn(Coordinator)
+        # Create the coordinator (parent)
+        coordinator = await system.actor(Coordinator, name="coordinator")
 
         # Ask coordinator to process a batch of numbers
         values = [2, 3, 5, 7, 11]

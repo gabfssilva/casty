@@ -117,8 +117,8 @@ class JobQueue(Actor[JobQueueMessage]):
     - Dead-letter queue for jobs exceeding max retries
     """
 
-    def __init__(self, name: str = "default"):
-        self.name = name
+    def __init__(self, queue_name: str = "default"):
+        self.queue_name = queue_name
         self.pending: list[Job] = []
         self.processing: dict[str, Job] = {}
         self.completed: list[Job] = []
@@ -128,7 +128,7 @@ class JobQueue(Actor[JobQueueMessage]):
     @on(Enqueue)
     async def handle_enqueue(self, msg: Enqueue, ctx: Context) -> None:
         job = msg.job
-        print(f"[Queue:{self.name}] Job {job.id} enqueued (payload: {job.payload})")
+        print(f"[Queue:{self.queue_name}] Job {job.id} enqueued (payload: {job.payload})")
         self.pending.append(job)
         await self._dispatch_work(ctx)
 
@@ -145,7 +145,7 @@ class JobQueue(Actor[JobQueueMessage]):
         if job:
             job.status = JobStatus.COMPLETED
             self.completed.append(job)
-            print(f"[Queue:{self.name}] Job {msg.job_id} completed (result: {msg.result})")
+            print(f"[Queue:{self.queue_name}] Job {msg.job_id} completed (result: {msg.result})")
 
     @on(JobFailed)
     async def handle_failed(self, msg: JobFailed, ctx: Context) -> None:
@@ -154,16 +154,16 @@ class JobQueue(Actor[JobQueueMessage]):
             return
 
         job.attempt += 1
-        print(f"[Queue:{self.name}] Job {msg.job_id} failed (attempt {job.attempt}/{job.max_retries}): {msg.error}")
+        print(f"[Queue:{self.queue_name}] Job {msg.job_id} failed (attempt {job.attempt}/{job.max_retries}): {msg.error}")
 
         if job.attempt >= job.max_retries:
             job.status = JobStatus.DEAD
             self.dead_letter.append(job)
-            print(f"[Queue:{self.name}] Job {msg.job_id} moved to dead-letter queue")
+            print(f"[Queue:{self.queue_name}] Job {msg.job_id} moved to dead-letter queue")
         else:
             # Retry with exponential backoff
             backoff = 0.1 * (2 ** job.attempt)
-            print(f"[Queue:{self.name}] Job {msg.job_id} will retry in {backoff:.1f}s")
+            print(f"[Queue:{self.queue_name}] Job {msg.job_id} will retry in {backoff:.1f}s")
             job.status = JobStatus.PENDING
             await ctx.schedule(backoff, Enqueue(job))
 
@@ -246,7 +246,7 @@ async def main():
 
     async with ActorSystem() as system:
         # Create job queue
-        queue = await system.spawn(JobQueue, name="tasks")
+        queue = await system.actor(JobQueue, name="job-queue-tasks", queue_name="tasks")
         print("Job queue 'tasks' created")
         print()
 
@@ -254,8 +254,9 @@ async def main():
         print("Spawning 3 workers...")
         workers = []
         for i in range(3):
-            worker = await system.spawn(
+            worker = await system.actor(
                 Worker,
+                name=f"worker-{i}",
                 worker_id=i,
                 queue_ref=queue,
                 fail_rate=0.3,  # 30% failure rate

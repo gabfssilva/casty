@@ -77,10 +77,10 @@ async def main():
 
     # Spawn sharded rate limiters (same config as nodes)
     # This gives us references that route through the cluster
-    limiters = await system.spawn(
+    limiters = await system.actor(
         RateLimiter,
         name="rate-limiters",
-        sharded=True,
+        scope="cluster",
     )
     print("✓ Got reference to rate limiters")
     print()

@@ -123,8 +123,8 @@ class EventLog(Actor[EventLogMessage]):
     - Creating and retrieving snapshots
     """
 
-    def __init__(self, name: str = "default"):
-        self.name = name
+    def __init__(self, log_name: str = "default"):
+        self.log_name = log_name
         self.events: list[_StoredEvent] = []
         self.snapshots: dict[str, _Snapshot] = {}  # aggregate_id -> latest snapshot
         self.next_seq = 1
@@ -134,7 +134,7 @@ class EventLog(Actor[EventLogMessage]):
         stored = _StoredEvent(seq=self.next_seq, event=msg.event)
         self.events.append(stored)
         self.next_seq += 1
-        print(f"[EventLog:{self.name}] #{stored.seq} {type(msg.event).__name__}")
+        print(f"[EventLog:{self.log_name}] #{stored.seq} {type(msg.event).__name__}")
         await ctx.reply(stored.seq)
 
     @on(GetEvents)
@@ -162,7 +162,7 @@ class EventLog(Actor[EventLogMessage]):
             state=msg.state,
         )
         self.snapshots[msg.aggregate_id] = snapshot
-        print(f"[EventLog:{self.name}] Snapshot created for {msg.aggregate_id} at seq {snapshot.seq}")
+        print(f"[EventLog:{self.log_name}] Snapshot created for {msg.aggregate_id} at seq {snapshot.seq}")
 
     @on(GetSnapshot)
     async def handle_get_snapshot(self, msg: GetSnapshot, ctx: Context) -> None:
@@ -236,7 +236,7 @@ async def main():
 
     async with ActorSystem() as system:
         # Create event log
-        event_log = await system.spawn(EventLog, name="bank")
+        event_log = await system.actor(EventLog, name="event-log-bank", log_name="bank")
         print("Event log 'bank' created")
         print()
 

@@ -179,8 +179,8 @@ async def main():
 
     # Create the actor system and counter actor
     async with ActorSystem() as system:
-        counter = await system.spawn(CounterActor)
-        print("[System] Counter actor spawned")
+        counter = await system.actor(CounterActor, name="counter")
+        print("[System] Counter actor created")
 
         # Create HTTP gateway
         gateway = HttpGateway(counter)

@@ -388,29 +388,66 @@ class Context[M]:
     _supervision_node: Any = field(default=None, repr=False)
     _behavior_stack: list[Behavior[M]] = field(default_factory=list, repr=False, hash=False)
 
+    async def actor[T](
+        self,
+        actor_cls: type["Actor[T]"],
+        *,
+        name: str,
+        root: bool = False,
+        supervision: "SupervisorConfig | None" = None,
+        **kwargs: Any,
+    ) -> LocalActorRef[T]:
+        """Create a new actor as a child of this actor.
+
+        Args:
+            actor_cls: The actor class to instantiate
+            name: Name for the actor (required)
+            root: If True, creates actor at system root level instead of as child
+            supervision: Override supervision config for this child
+            **kwargs: Constructor arguments for the actor
+
+        Returns:
+            Reference to the created child actor
+        """
+        return await self.system._actor_child(
+            parent_ctx=self,
+            actor_cls=actor_cls,
+            name=name,
+            root=root,
+            supervision=supervision,
+            **kwargs,
+        )
+
     async def spawn[T](
         self,
         actor_cls: type["Actor[T]"],
         *,
         name: str | None = None,
+        root: bool = False,
         supervision: "SupervisorConfig | None" = None,
         **kwargs: Any,
     ) -> LocalActorRef[T]:
-        """Spawn a new actor as a child of this actor.
+        """Create a new actor as a child of this actor (alias for actor()).
+
+        This is an alias for ctx.actor() that auto-generates a name if not provided.
+        Prefer using actor() with explicit names for better debuggability.
 
         Args:
             actor_cls: The actor class to instantiate
-            name: Optional name for the actor
+            name: Optional name for the actor (auto-generated if not provided)
+            root: If True, creates actor at system root level instead of as child
             supervision: Override supervision config for this child
             **kwargs: Constructor arguments for the actor
 
         Returns:
-            Reference to the spawned child actor
+            Reference to the created child actor
         """
-        return await self.system._spawn_child(
-            parent_ctx=self,
-            actor_cls=actor_cls,
-            name=name,
+        from uuid import uuid4
+        actual_name = name if name else f"{actor_cls.__name__}_{uuid4().hex[:8]}"
+        return await self.actor(
+            actor_cls,
+            name=actual_name,
+            root=root,
             supervision=supervision,
             **kwargs,
         )

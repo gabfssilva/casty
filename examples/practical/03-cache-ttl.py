@@ -93,8 +93,8 @@ class Cache(Actor[CacheMessage]):
     - Uses ctx.schedule() for expiration timers
     """
 
-    def __init__(self, name: str = "default", default_ttl: float | None = None):
-        self.name = name
+    def __init__(self, cache_name: str = "default", default_ttl: float | None = None):
+        self.cache_name = cache_name
         self.default_ttl = default_ttl
         self.entries: dict[str, CacheEntry] = {}
         self.hits = 0
@@ -127,7 +127,7 @@ class Cache(Actor[CacheMessage]):
 
         self.entries[key] = entry
         ttl_str = f" (TTL: {ttl}s)" if ttl else ""
-        print(f"[Cache:{self.name}] SET {key} = {msg.value}{ttl_str}")
+        print(f"[Cache:{self.cache_name}] SET {key} = {msg.value}{ttl_str}")
 
     @on(Get)
     async def handle_get(self, msg: Get, ctx: Context) -> None:
@@ -136,7 +136,7 @@ class Cache(Actor[CacheMessage]):
 
         if entry is None:
             self.misses += 1
-            print(f"[Cache:{self.name}] GET {key} -> MISS")
+            print(f"[Cache:{self.cache_name}] GET {key} -> MISS")
             await ctx.reply(None)
             return
 
@@ -145,12 +145,12 @@ class Cache(Actor[CacheMessage]):
             del self.entries[key]
             self.misses += 1
             self.evictions += 1
-            print(f"[Cache:{self.name}] GET {key} -> EXPIRED")
+            print(f"[Cache:{self.cache_name}] GET {key} -> EXPIRED")
             await ctx.reply(None)
             return
 
         self.hits += 1
-        print(f"[Cache:{self.name}] GET {key} -> HIT ({entry.value})")
+        print(f"[Cache:{self.cache_name}] GET {key} -> HIT ({entry.value})")
         await ctx.reply(entry.value)
 
     @on(Delete)
@@ -161,9 +161,9 @@ class Cache(Actor[CacheMessage]):
         if entry:
             if entry.ttl_task_id:
                 await ctx.cancel_schedule(entry.ttl_task_id)
-            print(f"[Cache:{self.name}] DELETE {key}")
+            print(f"[Cache:{self.cache_name}] DELETE {key}")
         else:
-            print(f"[Cache:{self.name}] DELETE {key} -> NOT FOUND")
+            print(f"[Cache:{self.cache_name}] DELETE {key} -> NOT FOUND")
 
     @on(_Expire)
     async def handle_expire(self, msg: _Expire, ctx: Context) -> None:
@@ -173,7 +173,7 @@ class Cache(Actor[CacheMessage]):
         if entry and entry.set_at == msg.set_at:
             del self.entries[msg.key]
             self.evictions += 1
-            print(f"[Cache:{self.name}] EXPIRED {msg.key}")
+            print(f"[Cache:{self.cache_name}] EXPIRED {msg.key}")
 
     @on(GetStats)
     async def handle_stats(self, msg: GetStats, ctx: Context) -> None:
@@ -197,7 +197,7 @@ class Cache(Actor[CacheMessage]):
 
         count = len(self.entries)
         self.entries.clear()
-        print(f"[Cache:{self.name}] CLEARED {count} entries")
+        print(f"[Cache:{self.cache_name}] CLEARED {count} entries")
 
 
 # --- Main ---
@@ -210,7 +210,7 @@ async def main():
 
     async with ActorSystem() as system:
         # Create cache with 5-second default TTL
-        cache = await system.spawn(Cache, name="user-cache", default_ttl=5.0)
+        cache = await system.actor(Cache, name="cache-user-cache", cache_name="user-cache", default_ttl=5.0)
         print("Cache 'user-cache' created (default TTL: 5s)")
         print()
 

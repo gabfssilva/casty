@@ -53,10 +53,10 @@ async def main():
 
     # Spawn sharded rate limiters
     # Each user gets their own actor (10 req/sec, burst 20)
-    limiters = await system.spawn(
+    limiters = await system.actor(
         RateLimiter,
         name="rate-limiters",
-        sharded=True,
+        scope="cluster",
     )
 
     print(f"[{args.node_id}] Rate limiters spawned")

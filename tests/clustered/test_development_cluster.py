@@ -49,11 +49,11 @@ class TestDevelopmentCluster:
             assert cluster[1].node_id == "worker-1"
 
     @pytest.mark.asyncio
-    async def test_spawn_clustered_actor(self):
+    async def test_actor_clustered(self):
         from casty.cluster.development import DevelopmentCluster
 
         async with DevelopmentCluster(1) as cluster:
-            ref = await cluster.spawn(PingActor, clustered=True)
+            ref = await cluster.actor(PingActor, name="ping", scope="cluster")
             result = await ref.ask(Ping())
             assert result == 1
 
