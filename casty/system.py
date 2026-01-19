@@ -256,6 +256,8 @@ class LocalSystem(System):
         task = self._actors.get(actor_id)
         if task:
             if not task.done():
+                # Yield to let task reach an await point for proper cancellation
+                await asyncio.sleep(0)
                 task.cancel()
                 try:
                     await task
@@ -517,6 +519,8 @@ class LocalSystem(System):
                     # Success - reset failure tracking
                     if node.restart_record:
                         node.restart_record.record_success()
+                except ActorStopSignal:
+                    raise
                 except Exception as exc:
                     log.exception(f"Actor {actor_id} failed processing message")
                     await self._handle_failure(node, exc, current_msg)
@@ -543,6 +547,8 @@ class LocalSystem(System):
             # Clean up registry (actor_id.name is the full_name)
             if actor_id.name:
                 self._registry.pop(actor_id.name, None)
+            # Notify subclasses (e.g., ClusteredSystem)
+            await self._on_actor_stopped(actor_id)
 
     async def _handle_failure(
         self,
@@ -739,6 +745,10 @@ class LocalSystem(System):
 
         for child_id in list(ctx._supervision_node.children.keys()):
             await self._stop_child(ctx, child_id)
+
+    async def _on_actor_stopped(self, actor_id: ActorId) -> None:
+        """Called when an actor is stopped. Override in subclasses for notifications."""
+        pass
 
     async def shutdown(self) -> None:
         """Stop all actors gracefully.

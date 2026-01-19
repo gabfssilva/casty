@@ -60,7 +60,7 @@ class TestClusterSend:
                     request_id="req-1",
                     payload_type=payload_type,
                     payload=payload_bytes,
-                    consistency=1,
+                    routing="leader",
                 )
             )
 
@@ -76,7 +76,7 @@ class TestClusterSend:
                     request_id="req-1",
                     payload_type=get_type,
                     payload=get_bytes,
-                    consistency=1,
+                    routing="leader",
                 )
             )
 
@@ -110,7 +110,7 @@ class TestClusterSend:
                     request_id="req-1",
                     payload_type=get_type,
                     payload=get_bytes,
-                    consistency=1,
+                    routing="leader",
                 )
             )
 

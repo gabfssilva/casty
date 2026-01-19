@@ -12,9 +12,7 @@ from .wal import (
     Recover,
     GetCurrentVersion as WALGetCurrentVersion,
     GetCurrentState as WALGetCurrentState,
-    Merge as WALMerge,
     SyncTo as WALSyncTo,
-    MergeResult,
     VectorClock,
 )
 
@@ -40,24 +38,18 @@ class GetState:
 
 
 @dataclass(frozen=True)
-class MergeState:
-    their_version: VectorClock
-    their_state: dict[str, Any]
-
-
-@dataclass(frozen=True)
 class SyncState:
     version: VectorClock
     state: dict[str, Any]
 
 
-class PersistentActor[M](Actor[M | GetCurrentVersion | GetState | MergeState | SyncState]):
+class PersistentActor[M](Actor[M | GetCurrentVersion | GetState | SyncState]):
     def __init__(
         self,
         wrapped_actor_cls: type[Actor[M]],
         *args: Any,
         actor_id: str,
-        node_id: str,
+        cluster_node_id: str,
         backend: StoreBackend | None = None,
         on_state_change: LocalActorRef[StateChanged] | None = None,
         **kwargs: Any,
@@ -66,25 +58,25 @@ class PersistentActor[M](Actor[M | GetCurrentVersion | GetState | MergeState | S
         self._actor_args = args
         self._actor_kwargs = kwargs
         self._actor_id = actor_id
-        self._node_id = node_id
+        self._cluster_node_id = cluster_node_id
         self._backend = backend or InMemoryStoreBackend()
         self._on_state_change = on_state_change
 
         self._wal: LocalActorRef[Any] | None = None
-        self._actor: LocalActorRef[M] | None = None
+        self._wrapped_instance: Actor[M] | None = None
 
     async def on_start(self) -> None:
         self._wal = await self._ctx.spawn(
             WriteAheadLog,
-            node_id=self._node_id,
+            node_id=self._cluster_node_id,
             backend=self._backend,
         )
 
-        self._actor = await self._ctx.spawn(
-            self._actor_cls,
+        self._wrapped_instance = self._actor_cls(
             *self._actor_args,
             **self._actor_kwargs,
         )
+        self._wrapped_instance._ctx = self._ctx
 
         snapshot, deltas = await self._wal.ask(Recover())
         if snapshot or deltas:
@@ -92,7 +84,7 @@ class PersistentActor[M](Actor[M | GetCurrentVersion | GetState | MergeState | S
 
     async def receive(
         self,
-        msg: M | GetCurrentVersion | GetState | MergeState | SyncState,
+        msg: M | GetCurrentVersion | GetState | SyncState,
         ctx: Context,
     ) -> None:
         match msg:
@@ -104,10 +96,6 @@ class PersistentActor[M](Actor[M | GetCurrentVersion | GetState | MergeState | S
                 state = self._get_actor_state()
                 await ctx.reply(state)
 
-            case MergeState(their_version, their_state):
-                result = await self._handle_merge(their_version, their_state)
-                await ctx.reply(result)
-
             case SyncState(version, state):
                 await self._handle_sync(version, state)
                 await ctx.reply(True)
@@ -118,17 +106,7 @@ class PersistentActor[M](Actor[M | GetCurrentVersion | GetState | MergeState | S
     async def _forward_with_persistence(self, msg: M, ctx: Context) -> None:
         state_before = self._get_actor_state()
 
-        node = self._ctx.system._supervision_tree.get_node(self._actor.id)
-        actor_instance = node.actor_instance
-
-        child_ctx = Context(
-            self_ref=self._actor,
-            system=self._ctx.system,
-            parent=self._ctx.self_ref,
-            sender=ctx.sender,
-            _supervision_node=node,
-        )
-        await actor_instance.receive(msg, child_ctx)
+        await self._wrapped_instance.receive(msg, ctx)
 
         state_after = self._get_actor_state()
         if state_before != state_after:
@@ -143,12 +121,10 @@ class PersistentActor[M](Actor[M | GetCurrentVersion | GetState | MergeState | S
                 ))
 
     def _get_actor_state(self) -> dict[str, Any]:
-        node = self._ctx.system._supervision_tree.get_node(self._actor.id)
-        return node.actor_instance.get_state()
+        return self._wrapped_instance.get_state()
 
     def _set_actor_state(self, state: dict[str, Any]) -> None:
-        node = self._ctx.system._supervision_tree.get_node(self._actor.id)
-        node.actor_instance.set_state(state)
+        self._wrapped_instance.set_state(state)
 
     def _compute_delta(self, before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         delta: dict[str, Any] = {}
@@ -179,30 +155,6 @@ class PersistentActor[M](Actor[M | GetCurrentVersion | GetState | MergeState | S
 
         if state:
             self._set_actor_state(state)
-
-    async def _handle_merge(
-        self,
-        their_version: VectorClock,
-        their_state: dict[str, Any],
-    ) -> MergeResult:
-        my_state = self._get_actor_state()
-
-        node = self._ctx.system._supervision_tree.get_node(self._actor.id)
-        actor_instance = node.actor_instance
-
-        result: MergeResult = await self._wal.ask(WALMerge(
-            their_version=their_version,
-            their_state=their_state,
-            my_state=my_state,
-            actor=actor_instance,
-        ))
-
-        self._set_actor_state(result.merged_state)
-
-        if result.merged_state != my_state:
-            await self._wal.send(WALSyncTo(version=result.version, state=result.merged_state))
-
-        return result
 
     async def _handle_sync(self, version: VectorClock, state: dict[str, Any]) -> None:
         self._set_actor_state(state)

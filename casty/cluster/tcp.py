@@ -37,7 +37,15 @@ class _DataReceived:
     data: bytes
 
 
-type _TcpInternal = _ConnectionClosed | _DataReceived
+@dataclass(slots=True)
+class _IncomingConnection:
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+    remote_node_id: str
+    remote_address: tuple[str, int]
+
+
+type _TcpInternal = _ConnectionClosed | _DataReceived | _IncomingConnection
 
 
 class TcpTransport(Transport[_TcpInternal]):
@@ -100,6 +108,8 @@ class TcpTransport(Transport[_TcpInternal]):
                 await self._handle_data_received(node_id, data)
             case _ConnectionClosed(node_id=node_id):
                 await self._handle_connection_closed(node_id)
+            case _IncomingConnection(reader=reader, writer=writer, remote_node_id=remote_node_id, remote_address=remote_address):
+                await self._process_incoming_connection(reader, writer, remote_node_id, remote_address, ctx)
 
     async def _handle_send(self, node_id: str, payload: object) -> None:
         conn = self._connections.get(node_id)
@@ -129,6 +139,12 @@ class TcpTransport(Transport[_TcpInternal]):
 
             remote_node_id = await self._do_handshake(reader, writer)
             if remote_node_id is None:
+                writer.close()
+                await writer.wait_closed()
+                return
+
+            # Check again after handshake - another connection may have been established
+            if remote_node_id in self._connections:
                 writer.close()
                 await writer.wait_closed()
                 return
@@ -184,27 +200,44 @@ class TcpTransport(Transport[_TcpInternal]):
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        # Do handshake synchronously (so connecting side gets response)
         sock = writer.get_extra_info("socket")
         if sock is not None:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-        remote_node_id = await self._handle_incoming_handshake(reader, writer)
-        if remote_node_id is None:
+        result = await self._handle_incoming_handshake(reader, writer)
+        if result is None:
             writer.close()
             await writer.wait_closed()
             return
 
+        remote_node_id, remote_address = result
+
+        # Route connection storage through actor mailbox to serialize with _handle_connect
+        await self._ctx.self_ref.send(_IncomingConnection(
+            reader=reader,
+            writer=writer,
+            remote_node_id=remote_node_id,
+            remote_address=remote_address,
+        ))
+
+    async def _process_incoming_connection(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        remote_node_id: str,
+        remote_address: tuple[str, int],
+        ctx: Context,
+    ) -> None:
+        # Check if we already have a connection
         if remote_node_id in self._connections:
             writer.close()
             await writer.wait_closed()
             return
 
-        peername = writer.get_extra_info("peername")
-        address = (peername[0], peername[1]) if peername else ("unknown", 0)
-
         self._connections[remote_node_id] = (reader, writer)
-        await self._notify_connected(remote_node_id, address)
-        self._read_detached[remote_node_id] = self._ctx.detach(self._read_loop(remote_node_id, reader))
+        await self._notify_connected(remote_node_id, remote_address)
+        self._read_detached[remote_node_id] = ctx.detach(self._read_loop(remote_node_id, reader))
 
     async def _read_loop(self, node_id: str, reader: asyncio.StreamReader) -> None:
         try:
@@ -256,7 +289,7 @@ class TcpTransport(Transport[_TcpInternal]):
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
-    ) -> str | None:
+    ) -> tuple[str, tuple[str, int]] | None:
         try:
             length_bytes = await asyncio.wait_for(reader.readexactly(4), timeout=5.0)
             length = struct.unpack(">I", length_bytes)[0]
@@ -276,6 +309,6 @@ class TcpTransport(Transport[_TcpInternal]):
             writer.write(frame)
             await writer.drain()
 
-            return msg.node_id
+            return (msg.node_id, msg.address)
         except Exception:
             return None

@@ -158,10 +158,10 @@ class TestReplicationMessages:
             request_id="req-1",
             payload_type="myapp.messages.Increment",
             payload=b"msgpack",
-            consistency=2,
+            routing="leader",
         )
         data = msg.Codec.serialize(msg)
         restored = deserialize(data)
 
         assert restored.actor_id == "user-123"
-        assert restored.consistency == 2
+        assert restored.routing == "leader"

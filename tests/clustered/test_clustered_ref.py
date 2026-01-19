@@ -12,7 +12,6 @@ class TestClusteredRef:
             actor_id="user-123",
             cluster=cluster,
             local_ref=None,
-            write_consistency='one',
         )
 
         assert ref.actor_id == "user-123"
@@ -33,7 +32,6 @@ class TestClusteredRef:
             actor_id="counter-1",
             cluster=cluster,
             local_ref=None,
-            write_consistency='one',
         )
 
         await ref.send(Increment(5))
@@ -56,7 +54,6 @@ class TestClusteredRef:
             actor_id="counter-1",
             cluster=cluster,
             local_ref=None,
-            write_consistency='one',
         )
 
         result = await ref.ask(GetValue())
@@ -65,8 +62,9 @@ class TestClusteredRef:
         cluster.ask.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_send_with_custom_consistency(self):
+    async def test_send_with_custom_routing(self):
         from casty.cluster.clustered_ref import ClusteredActorRef
+        from casty.cluster.messages import ClusteredSend
         from dataclasses import dataclass
 
         @dataclass
@@ -80,13 +78,14 @@ class TestClusteredRef:
             actor_id="test",
             cluster=cluster,
             local_ref=None,
-            write_consistency='one',
         )
 
-        await ref.send(Msg(), consistency='all')
+        await ref.send(Msg(), routing='node-1')
 
         call_args = cluster.send.call_args
-        assert call_args is not None
+        sent_msg = call_args[0][0]
+        assert isinstance(sent_msg, ClusteredSend)
+        assert sent_msg.routing == 'node-1'
 
     @pytest.mark.asyncio
     async def test_rshift_operator_calls_send(self):
@@ -104,7 +103,6 @@ class TestClusteredRef:
             actor_id="test",
             cluster=cluster,
             local_ref=None,
-            write_consistency='one',
         )
 
         await (ref >> Msg(42))
@@ -127,7 +125,6 @@ class TestClusteredRef:
             actor_id="test",
             cluster=cluster,
             local_ref=None,
-            write_consistency='one',
         )
 
         result = await (ref << Query())
@@ -143,13 +140,12 @@ class TestClusteredRef:
             actor_id="user-456",
             cluster=cluster,
             local_ref=None,
-            write_consistency='one',
         )
 
         assert repr(ref) == "ClusteredRef(user-456)"
 
     @pytest.mark.asyncio
-    async def test_send_uses_write_consistency_by_default(self):
+    async def test_send_default_routing_is_leader(self):
         from casty.cluster.clustered_ref import ClusteredActorRef
         from casty.cluster.messages import ClusteredSend
         from dataclasses import dataclass
@@ -165,7 +161,6 @@ class TestClusteredRef:
             actor_id="test",
             cluster=cluster,
             local_ref=None,
-            write_consistency='quorum',
         )
 
         await ref.send(Msg())
@@ -173,12 +168,12 @@ class TestClusteredRef:
         call_args = cluster.send.call_args
         sent_message = call_args[0][0]
         assert isinstance(sent_message, ClusteredSend)
-        assert sent_message.actor_id == "test"
+        assert sent_message.routing == "leader"
 
 
 class TestClusteredRefLocal:
     @pytest.mark.asyncio
-    async def test_send_uses_local_ref_when_available(self):
+    async def test_send_uses_local_ref_when_routing_local(self):
         from casty.cluster.clustered_ref import ClusteredActorRef
         from dataclasses import dataclass
 
@@ -196,16 +191,15 @@ class TestClusteredRefLocal:
             actor_id="test",
             cluster=cluster,
             local_ref=local_ref,
-            write_consistency='one',
         )
 
-        await ref.send(Msg(42))
+        await ref.send(Msg(42), routing='local')
 
         local_ref.send.assert_called_once()
         cluster.send.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_ask_uses_local_ref_when_available(self):
+    async def test_ask_uses_local_ref_when_routing_local(self):
         from casty.cluster.clustered_ref import ClusteredActorRef
         from dataclasses import dataclass
 
@@ -223,10 +217,9 @@ class TestClusteredRefLocal:
             actor_id="test",
             cluster=cluster,
             local_ref=local_ref,
-            write_consistency='one',
         )
 
-        result = await ref.ask(Query())
+        result = await ref.ask(Query(), routing='local')
 
         assert result == 42
         local_ref.ask.assert_called_once()
@@ -248,7 +241,6 @@ class TestClusteredRefLocal:
             actor_id="test",
             cluster=cluster,
             local_ref=None,
-            write_consistency='one',
         )
 
         await ref.send(Msg(42))
@@ -271,10 +263,67 @@ class TestClusteredRefLocal:
             actor_id="test",
             cluster=cluster,
             local_ref=None,
-            write_consistency='one',
         )
 
         result = await ref.ask(Query())
 
         assert result == 99
         cluster.ask.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_send_routing_fastest_uses_local_if_available(self):
+        from casty.cluster.clustered_ref import ClusteredActorRef
+        from dataclasses import dataclass
+
+        @dataclass
+        class Msg:
+            value: int
+
+        cluster = MagicMock()
+        cluster.send = AsyncMock()
+
+        local_ref = MagicMock()
+        local_ref.send = AsyncMock()
+
+        ref = ClusteredActorRef(
+            actor_id="test",
+            cluster=cluster,
+            local_ref=local_ref,
+        )
+
+        await ref.send(Msg(42), routing='fastest')
+
+        local_ref.send.assert_called_once()
+        cluster.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_routing_leader_uses_cluster(self):
+        from casty.cluster.clustered_ref import ClusteredActorRef
+        from casty.cluster.messages import ClusteredSend
+        from dataclasses import dataclass
+
+        @dataclass
+        class Msg:
+            value: int
+
+        cluster = MagicMock()
+        cluster.send = AsyncMock()
+
+        local_ref = MagicMock()
+        local_ref.send = AsyncMock()
+
+        ref = ClusteredActorRef(
+            actor_id="test",
+            cluster=cluster,
+            local_ref=local_ref,
+        )
+
+        await ref.send(Msg(42), routing='leader')
+
+        cluster.send.assert_called_once()
+        local_ref.send.assert_not_called()
+
+        call_args = cluster.send.call_args
+        sent_msg = call_args[0][0]
+        assert isinstance(sent_msg, ClusteredSend)
+        assert sent_msg.routing == "leader"

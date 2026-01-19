@@ -483,6 +483,11 @@ class Context[M]:
         """Cancel periodic message delivery by subscription_id."""
         await self.system.cancel_tick(subscription_id)
 
+    async def stop(self) -> None:
+        """Stop this actor."""
+        from .supervision import ActorStopSignal
+        raise ActorStopSignal()
+
     def detach[R](self, coro: Coroutine[Any, Any, R]) -> "Detached[R]":
         from .detach import Detached
         return Detached(coro).bind(self)

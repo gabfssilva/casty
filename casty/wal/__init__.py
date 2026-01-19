@@ -12,8 +12,6 @@ from .messages import (
     GetCurrentState,
     GetStateAt,
     FindBase,
-    Merge,
-    MergeResult,
 )
 from .actor import WriteAheadLog, WALMessage
 
@@ -34,8 +32,6 @@ __all__ = [
     "GetCurrentState",
     "GetStateAt",
     "FindBase",
-    "Merge",
-    "MergeResult",
     "WriteAheadLog",
     "WALMessage",
 ]

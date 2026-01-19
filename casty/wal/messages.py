@@ -57,18 +57,3 @@ class GetStateAt:
 @dataclass(frozen=True)
 class FindBase:
     their_version: "VectorClock"
-
-
-@dataclass(frozen=True)
-class Merge:
-    their_version: "VectorClock"
-    their_state: dict[str, Any]
-    my_state: dict[str, Any]
-    actor: Any
-
-
-@dataclass(frozen=True)
-class MergeResult:
-    version: "VectorClock"
-    merged_state: dict[str, Any]
-    success: bool

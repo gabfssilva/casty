@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import importlib
 from dataclasses import dataclass, field
 from enum import Enum
@@ -16,10 +17,9 @@ from casty.persistent_actor import (
     StateChanged,
     GetCurrentVersion as PersistentGetCurrentVersion,
     GetState as PersistentGetState,
-    MergeState,
     SyncState,
 )
-from casty.wal import InMemoryStoreBackend, MergeResult, VectorClock
+from casty.wal import InMemoryStoreBackend, VectorClock
 
 from .config import ClusterConfig
 from .hash_ring import HashRing
@@ -54,10 +54,12 @@ from .messages import (
     ClusteredAsk,
     ClusteredAskResponse,
     ActorRegistered,
+    ActorUnregistered,
     ReplicateState,
     ReplicateAck,
     RequestFullSync,
     FullSyncResponse,
+    MembershipSync,
 )
 from .transport import Connect
 from .tcp import TcpTransport
@@ -136,6 +138,7 @@ type ClusterMessage = (
     | ClusteredSend
     | ClusteredAsk
     | StateChanged
+    | ActorUnregistered
 )
 
 
@@ -159,6 +162,7 @@ class Cluster(Actor[ClusterMessage]):
         self._local_actors: dict[str, LocalActorRef[Any]] = {}
         self._pending_asks: dict[str, asyncio.Future[Any]] = {}
         self._pending_sends: dict[str, tuple[int, int, Context]] = {}
+        self._pending_ask_contexts: dict[str, Context] = {}
 
     @property
     def node_id(self) -> str:
@@ -244,10 +248,12 @@ class Cluster(Actor[ClusterMessage]):
                 await ctx.reply(self._clustered_actors.get(actor_id))
             case ClusteredSend():
                 await self._handle_clustered_send(msg, ctx)
-            case ClusteredAsk(actor_id=actor_id, request_id=request_id, payload_type=payload_type, payload=payload, consistency=consistency):
-                await self._handle_clustered_ask(actor_id, request_id, payload_type, payload, consistency, ctx)
+            case ClusteredAsk(actor_id=actor_id, request_id=request_id, payload_type=payload_type, payload=payload, routing=routing):
+                await self._handle_clustered_ask(actor_id, request_id, payload_type, payload, routing, ctx)
             case StateChanged(actor_id=actor_id, version=version, state=state):
                 await self._replicate_to_peers(actor_id, version, state)
+            case ActorUnregistered(actor_id=actor_id):
+                await self._broadcast(msg)
             case Ping() | Ack() | PingReq() | Suspect() | Alive() | Dead():
                 pass
 
@@ -278,6 +284,8 @@ class Cluster(Actor[ClusterMessage]):
                 await self._handle_dead(payload)
             case ActorRegistered():
                 await self._handle_actor_registered(payload)
+            case ActorUnregistered():
+                await self._handle_actor_unregistered(payload)
             case ClusteredSend():
                 await self._handle_remote_clustered_send(node_id, payload)
             case ClusteredSendAck():
@@ -294,6 +302,8 @@ class Cluster(Actor[ClusterMessage]):
                 await self._handle_request_full_sync(node_id, payload)
             case FullSyncResponse():
                 await self._handle_full_sync_response(payload)
+            case MembershipSync():
+                await self._handle_membership_sync(payload)
             case _:
                 await self._broadcast_to_subscribers(payload)
 
@@ -317,6 +327,31 @@ class Cluster(Actor[ClusterMessage]):
         self._member_order.append(node_id)
 
         await self._broadcast_event(NodeJoined(node_id=node_id, address=address))
+
+        # Broadcast current membership to ALL nodes (including the new one)
+        # This ensures all nodes have consistent view of the cluster
+        members_list = [
+            (m.node_id, m.address)
+            for m in self._members.values()
+            if m.state == MemberState.ALIVE
+        ]
+        membership_msg = MembershipSync(members=members_list)
+        for member_id in self._members:
+            if member_id != self._node_id:
+                await self._send_to_node(member_id, membership_msg)
+
+    async def _handle_membership_sync(self, msg: MembershipSync) -> None:
+        if self._transport is None:
+            return
+        for member_id, address in msg.members:
+            if member_id == self._node_id:
+                continue
+            if member_id in self._members:
+                continue
+            # Unknown member - only lower node_id initiates connection
+            # This avoids the race condition where both sides try to connect
+            if self._node_id < member_id:
+                await self._transport.send(Connect(node_id=member_id, address=address))
 
     async def _handle_transport_disconnected(self, node_id: str) -> None:
         if node_id not in self._members:
@@ -591,14 +626,16 @@ class Cluster(Actor[ClusterMessage]):
         preference_list = self._hash_ring.get_preference_list(actor_id, effective_replication)
 
         if self._node_id in preference_list:
-            backend = (actor_kwargs or {}).get("backend", InMemoryStoreBackend())
+            kwargs_copy = dict(actor_kwargs) if actor_kwargs else {}
+            backend = kwargs_copy.pop("backend", InMemoryStoreBackend())
             ref = await ctx.spawn(
                 PersistentActor,
                 wrapped_actor_cls=actor_cls,
                 actor_id=actor_id,
-                node_id=self._node_id,
+                cluster_node_id=self._node_id,
                 backend=backend,
                 on_state_change=self._ctx.self_ref,
+                **kwargs_copy,
             )
             self._local_actors[actor_id] = ref
 
@@ -633,12 +670,18 @@ class Cluster(Actor[ClusterMessage]):
                     PersistentActor,
                     wrapped_actor_cls=actor_cls,
                     actor_id=msg.actor_id,
-                    node_id=self._node_id,
+                    cluster_node_id=self._node_id,
                     backend=InMemoryStoreBackend(),
                     on_state_change=self._ctx.self_ref,
                 )
                 self._local_actors[msg.actor_id] = ref
                 await self._request_full_sync(msg.actor_id, msg.owner_node)
+
+    async def _handle_actor_unregistered(self, msg: ActorUnregistered) -> None:
+        self._clustered_actors.pop(msg.actor_id, None)
+        local_ref = self._local_actors.pop(msg.actor_id, None)
+        if local_ref:
+            await self._ctx.system.stop(local_ref)
 
     async def _request_full_sync(self, actor_id: str, owner_node: str) -> None:
         if owner_node != self._node_id and owner_node in self._members:
@@ -665,36 +708,24 @@ class Cluster(Actor[ClusterMessage]):
             await ctx.reply(None)
             return
 
-        replication = info.replication
-        preference_list = self._hash_ring.get_preference_list(send.actor_id, replication)
+        routing = send.routing
 
-        required_acks = send.consistency
-        if required_acks == -1:
-            required_acks = len(preference_list)
-        elif required_acks == -2:
-            required_acks = len(preference_list) // 2 + 1
-
-        if required_acks <= 1:
-            for target_node in preference_list:
-                if target_node == self._node_id:
-                    await self._process_local_send(send)
-                else:
-                    await self._send_to_node(target_node, send)
-            await ctx.reply(None)
-            return
-
-        self._pending_sends[send.request_id] = (required_acks, 0, ctx)
-
-        local_processed = False
-        for target_node in preference_list:
+        if routing == 'leader':
+            target_node = self._hash_ring.get_node(send.actor_id)
             if target_node == self._node_id:
                 await self._process_local_send(send)
-                local_processed = True
-            else:
+            elif target_node and target_node in self._members:
                 await self._send_to_node(target_node, send)
-
-        if local_processed:
-            await self._record_send_ack(send.request_id)
+            await ctx.reply(None)
+        elif routing != 'leader' and routing != 'local' and routing != 'fastest':
+            if routing == self._node_id:
+                await self._process_local_send(send)
+            elif routing in self._members:
+                await self._send_to_node(routing, send)
+            await ctx.reply(None)
+        else:
+            await self._process_local_send(send)
+            await ctx.reply(None)
 
     async def _handle_remote_clustered_send(self, from_node: str, send: ClusteredSend) -> None:
         await self._process_local_send(send)
@@ -748,7 +779,7 @@ class Cluster(Actor[ClusterMessage]):
         request_id: str,
         payload_type: str,
         payload: bytes,
-        consistency: int,
+        routing: str,
         ctx: Context,
     ) -> None:
         info = self._clustered_actors.get(actor_id)
@@ -756,28 +787,61 @@ class Cluster(Actor[ClusterMessage]):
             await ctx.reply(None)
             return
 
-        local_ref = self._local_actors.get(actor_id)
-        if local_ref is None:
+        if routing == 'leader':
             target_node = self._hash_ring.get_node(actor_id)
-            if target_node and target_node != self._node_id and target_node in self._members:
-                result = await self._forward_ask_to_node(
+            if target_node == self._node_id:
+                local_ref = self._local_actors.get(actor_id)
+                if local_ref:
+                    msg = self._deserialize_payload(payload_type, payload)
+                    result = await local_ref.ask(msg)
+                    await ctx.reply(result)
+                else:
+                    await ctx.reply(None)
+            elif target_node and target_node in self._members:
+                await self._forward_ask_non_blocking(
                     target_node,
                     ClusteredAsk(
                         actor_id=actor_id,
                         request_id=request_id,
                         payload_type=payload_type,
                         payload=payload,
-                        consistency=consistency,
+                        routing=routing,
                     ),
+                    ctx,
                 )
+            else:
+                await ctx.reply(None)
+        elif routing != 'leader' and routing != 'local' and routing != 'fastest':
+            if routing == self._node_id:
+                local_ref = self._local_actors.get(actor_id)
+                if local_ref:
+                    msg = self._deserialize_payload(payload_type, payload)
+                    result = await local_ref.ask(msg)
+                    await ctx.reply(result)
+                else:
+                    await ctx.reply(None)
+            elif routing in self._members:
+                await self._forward_ask_non_blocking(
+                    routing,
+                    ClusteredAsk(
+                        actor_id=actor_id,
+                        request_id=request_id,
+                        payload_type=payload_type,
+                        payload=payload,
+                        routing=routing,
+                    ),
+                    ctx,
+                )
+            else:
+                await ctx.reply(None)
+        else:
+            local_ref = self._local_actors.get(actor_id)
+            if local_ref:
+                msg = self._deserialize_payload(payload_type, payload)
+                result = await local_ref.ask(msg)
                 await ctx.reply(result)
             else:
                 await ctx.reply(None)
-            return
-
-        msg = self._deserialize_payload(payload_type, payload)
-        result = await local_ref.ask(msg)
-        await ctx.reply(result)
 
     async def _handle_remote_clustered_ask(self, from_node: str, ask: ClusteredAsk) -> None:
         local_ref = self._local_actors.get(ask.actor_id)
@@ -797,7 +861,17 @@ class Cluster(Actor[ClusterMessage]):
         result = await local_ref.ask(msg)
 
         result_type = f"{type(result).__module__}.{type(result).__qualname__}"
-        result_bytes = msgpack.packb(result if isinstance(result, (int, float, str, bool, type(None))) else result.__dict__, use_bin_type=True)
+        if isinstance(result, (int, float, str, bool, bytes, type(None))):
+            result_bytes = msgpack.packb(result, use_bin_type=True)
+        elif isinstance(result, set):
+            # msgpack doesn't support sets, convert to list
+            result_bytes = msgpack.packb(list(result), use_bin_type=True)
+        elif isinstance(result, (list, dict)):
+            result_bytes = msgpack.packb(result, use_bin_type=True)
+        elif dataclasses.is_dataclass(result):
+            result_bytes = msgpack.packb(dataclasses.asdict(result), use_bin_type=True)
+        else:
+            result_bytes = msgpack.packb(result.__dict__, use_bin_type=True)
 
         await self._send_to_node(
             from_node,
@@ -816,7 +890,7 @@ class Cluster(Actor[ClusterMessage]):
             request_id=request_id,
             payload_type=ask.payload_type,
             payload=ask.payload,
-            consistency=ask.consistency,
+            routing=ask.routing,
         )
 
         future: asyncio.Future[Any] = asyncio.Future()
@@ -831,7 +905,37 @@ class Cluster(Actor[ClusterMessage]):
         finally:
             self._pending_asks.pop(request_id, None)
 
+    async def _forward_ask_non_blocking(self, target_node: str, ask: ClusteredAsk, ctx: Context) -> None:
+        request_id = f"{self._node_id}-{uuid4().hex[:8]}"
+        ask_with_id = ClusteredAsk(
+            actor_id=ask.actor_id,
+            request_id=request_id,
+            payload_type=ask.payload_type,
+            payload=ask.payload,
+            routing=ask.routing,
+        )
+
+        self._pending_ask_contexts[request_id] = ctx
+        await self._send_to_node(target_node, ask_with_id)
+
     async def _handle_clustered_ask_response(self, response: ClusteredAskResponse) -> None:
+        ctx = self._pending_ask_contexts.pop(response.request_id, None)
+        if ctx is not None:
+            if not response.success:
+                await ctx.reply(None)
+                return
+
+            if response.payload_type in ("builtins.int", "builtins.float", "builtins.str", "builtins.bool", "builtins.NoneType", "builtins.list", "builtins.dict"):
+                result = msgpack.unpackb(response.payload, raw=False)
+            elif response.payload_type == "builtins.set":
+                # msgpack doesn't support sets, convert list back to set
+                result = set(msgpack.unpackb(response.payload, raw=False))
+            else:
+                result = self._deserialize_payload(response.payload_type, response.payload)
+
+            await ctx.reply(result)
+            return
+
         future = self._pending_asks.get(response.request_id)
         if future is None:
             return
@@ -840,8 +944,11 @@ class Cluster(Actor[ClusterMessage]):
             future.set_result(None)
             return
 
-        if response.payload_type in ("builtins.int", "builtins.float", "builtins.str", "builtins.bool", "builtins.NoneType"):
+        if response.payload_type in ("builtins.int", "builtins.float", "builtins.str", "builtins.bool", "builtins.NoneType", "builtins.list", "builtins.dict"):
             result = msgpack.unpackb(response.payload, raw=False)
+        elif response.payload_type == "builtins.set":
+            # msgpack doesn't support sets, convert list back to set
+            result = set(msgpack.unpackb(response.payload, raw=False))
         else:
             result = self._deserialize_payload(response.payload_type, response.payload)
 
@@ -864,15 +971,12 @@ class Cluster(Actor[ClusterMessage]):
         if local_ref is None:
             return
 
-        result: MergeResult = await local_ref.ask(MergeState(
-            their_version=msg.version,
-            their_state=msg.state,
-        ))
+        await local_ref.send(SyncState(version=msg.version, state=msg.state))
 
         ack = ReplicateAck(
             actor_id=msg.actor_id,
-            version=result.version,
-            success=result.success,
+            version=msg.version,
+            success=True,
         )
         await self._send_to_node(from_node, ack)
 

@@ -18,15 +18,12 @@ from .messages import (
     GetCurrentState,
     GetStateAt,
     FindBase,
-    Merge,
-    MergeResult,
 )
 
 
 type WALMessage = (
     Append | Snapshot | SyncTo | AppendMerged | Close |
-    Recover | GetCurrentVersion | GetCurrentState | GetStateAt | FindBase |
-    Merge
+    Recover | GetCurrentVersion | GetCurrentState | GetStateAt | FindBase
 )
 
 
@@ -88,10 +85,6 @@ class WriteAheadLog(Actor[WALMessage]):
 
             case AppendMerged(version, state):
                 await self._append_merged(version, state)
-
-            case Merge(their_version, their_state, my_state, actor):
-                result = self._merge(their_version, their_state, my_state, actor)
-                await ctx.reply(result)
 
             case Close():
                 await self._backend.close()
@@ -181,56 +174,6 @@ class WriteAheadLog(Actor[WALMessage]):
 
         if len(self._entries) > self._max_entries:
             await self._compact()
-
-    def _merge(
-        self,
-        their_version: VectorClock,
-        their_state: dict[str, Any],
-        my_state: dict[str, Any],
-        actor: Any,
-    ) -> MergeResult:
-        my_version = self.current_version
-
-        if their_version.dominates(my_version):
-            return MergeResult(
-                version=their_version,
-                merged_state=their_state,
-                success=True,
-            )
-
-        if my_version.dominates(their_version):
-            return MergeResult(
-                version=my_version,
-                merged_state=my_state,
-                success=True,
-            )
-
-        if their_version.concurrent(my_version):
-            base_result = self._find_base(their_version)
-
-            if base_result and hasattr(actor, "__casty_merge__"):
-                base_version, base_state = base_result
-                actor.__casty_merge__(base_state, their_state)
-                merged_version = my_version.merge(their_version).increment(self._node_id)
-                merged_state = actor.get_state()
-
-                return MergeResult(
-                    version=merged_version,
-                    merged_state=merged_state,
-                    success=True,
-                )
-
-            return MergeResult(
-                version=their_version,
-                merged_state=their_state,
-                success=True,
-            )
-
-        return MergeResult(
-            version=my_version,
-            merged_state=my_state,
-            success=True,
-        )
 
     async def _recover(self) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         last_snapshot: dict[str, Any] | None = None

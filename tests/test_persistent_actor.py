@@ -1,14 +1,9 @@
 import asyncio
 import pytest
 from dataclasses import dataclass
-from casty import ActorSystem, Actor, Context
-from casty.persistent_actor import (
-    PersistentActor,
-    GetState,
-    GetCurrentVersion,
-    StateChanged,
-)
-from casty.wal import InMemoryStoreBackend, VectorClock
+from casty import Actor, Context
+from casty.cluster import DevelopmentCluster
+from casty.persistent_actor import GetState, GetCurrentVersion
 
 
 @dataclass
@@ -19,6 +14,29 @@ class Increment:
 @dataclass
 class GetCount:
     pass
+
+
+@dataclass
+class NoOp:
+    pass
+
+
+class NoOpActor(Actor[NoOp | GetCount]):
+    def __init__(self):
+        self.value = 0
+
+    async def receive(self, msg, ctx: Context) -> None:
+        match msg:
+            case GetCount():
+                await ctx.reply(self.value)
+            case NoOp():
+                pass
+
+    def get_state(self) -> dict:
+        return {"value": self.value}
+
+    def set_state(self, state: dict) -> None:
+        self.value = state.get("value", 0)
 
 
 class Counter(Actor[Increment | GetCount]):
@@ -32,167 +50,95 @@ class Counter(Actor[Increment | GetCount]):
             case GetCount():
                 await ctx.reply(self.count)
 
+    def get_state(self) -> dict:
+        return {"count": self.count}
+
+    def set_state(self, state: dict) -> None:
+        self.count = state.get("count", 0)
+
 
 @pytest.mark.asyncio
 async def test_persistent_actor_forwards_messages():
-    async with ActorSystem.local() as system:
-        persistent = await system.actor(
-            PersistentActor,
-            name="persistent-forwards",
-            wrapped_actor_cls=Counter,
-            actor_id="counter-1",
-            node_id="node-a",
-            backend=InMemoryStoreBackend(),
-        )
+    async with DevelopmentCluster(1) as cluster:
+        node = cluster[0]
 
-        await persistent.send(Increment(5))
-        await persistent.send(Increment(3))
+        ref = await node.actor(Counter, name="counter-forwards", scope="cluster")
+        await asyncio.sleep(0.1)
 
-        count = await persistent.ask(GetCount())
+        await ref.send(Increment(5))
+        await ref.send(Increment(3))
+        await asyncio.sleep(0.1)
 
+        count = await ref.ask(GetCount())
         assert count == 8
 
 
 @pytest.mark.asyncio
 async def test_persistent_actor_get_state():
-    async with ActorSystem.local() as system:
-        persistent = await system.actor(
-            PersistentActor,
-            name="persistent-get-state",
-            wrapped_actor_cls=Counter,
-            actor_id="counter-1",
-            node_id="node-a",
-            backend=InMemoryStoreBackend(),
-        )
+    async with DevelopmentCluster(1) as cluster:
+        node = cluster[0]
 
-        await persistent.send(Increment(10))
+        ref = await node.actor(Counter, name="counter-state", scope="cluster")
+        await asyncio.sleep(0.1)
 
-        state = await persistent.ask(GetState())
+        await ref.send(Increment(10))
+        await asyncio.sleep(0.1)
+
+        state = await ref.ask(GetState())
         assert state == {"count": 10}
 
 
 @pytest.mark.asyncio
 async def test_persistent_actor_get_version():
-    async with ActorSystem.local() as system:
-        persistent = await system.actor(
-            PersistentActor,
-            name="persistent-get-version",
-            wrapped_actor_cls=Counter,
-            actor_id="counter-1",
-            node_id="node-a",
-            backend=InMemoryStoreBackend(),
-        )
+    async with DevelopmentCluster(1) as cluster:
+        node = cluster[0]
 
-        v0 = await persistent.ask(GetCurrentVersion())
+        ref = await node.actor(Counter, name="counter-version", scope="cluster")
+        await asyncio.sleep(0.1)
+
+        v0 = await ref.ask(GetCurrentVersion())
         assert v0.clock == {}
 
-        await persistent.send(Increment(5))
-
-        v1 = await persistent.ask(GetCurrentVersion())
-        assert v1.clock == {"node-a": 1}
-
-
-@pytest.mark.asyncio
-async def test_persistent_actor_state_change_notification():
-    async with ActorSystem.local() as system:
-        notifications = []
-
-        class NotificationCollector(Actor[StateChanged]):
-            async def receive(self, msg: StateChanged, ctx: Context) -> None:
-                notifications.append(msg)
-
-        collector = await system.actor(NotificationCollector, name="notification-collector")
-
-        persistent = await system.actor(
-            PersistentActor,
-            name="persistent-state-change",
-            wrapped_actor_cls=Counter,
-            actor_id="counter-1",
-            node_id="node-a",
-            backend=InMemoryStoreBackend(),
-            on_state_change=collector,
-        )
-
-        await persistent.send(Increment(7))
-
+        await ref.send(Increment(5))
         await asyncio.sleep(0.1)
 
-        assert len(notifications) == 1
-        assert notifications[0].actor_id == "counter-1"
-        assert notifications[0].state == {"count": 7}
-        assert notifications[0].version.clock == {"node-a": 1}
+        v1 = await ref.ask(GetCurrentVersion())
+        assert "node-0" in v1.clock
+        assert v1.clock["node-0"] == 1
 
 
 @pytest.mark.asyncio
-async def test_persistent_actor_recovery():
-    backend = InMemoryStoreBackend()
+async def test_persistent_actor_multiple_state_changes():
+    async with DevelopmentCluster(1) as cluster:
+        node = cluster[0]
 
-    async with ActorSystem.local() as system:
-        persistent = await system.actor(
-            PersistentActor,
-            name="persistent-recovery-1",
-            wrapped_actor_cls=Counter,
-            actor_id="counter-1",
-            node_id="node-a",
-            backend=backend,
-        )
-
-        await persistent.send(Increment(10))
-        await persistent.send(Increment(5))
-
-        state = await persistent.ask(GetState())
-        assert state == {"count": 15}
-
-    async with ActorSystem.local() as system:
-        persistent = await system.actor(
-            PersistentActor,
-            name="persistent-recovery-2",
-            wrapped_actor_cls=Counter,
-            actor_id="counter-1",
-            node_id="node-a",
-            backend=backend,
-        )
-
-        state = await persistent.ask(GetState())
-        assert state == {"count": 15}
-
-        version = await persistent.ask(GetCurrentVersion())
-        assert version.clock == {"node-a": 2}
-
-
-@pytest.mark.asyncio
-async def test_persistent_actor_no_state_change_no_notification():
-    async with ActorSystem.local() as system:
-        notifications = []
-
-        class NotificationCollector(Actor[StateChanged]):
-            async def receive(self, msg: StateChanged, ctx: Context) -> None:
-                notifications.append(msg)
-
-        collector = await system.actor(NotificationCollector, name="noop-collector")
-
-        @dataclass
-        class NoOp:
-            pass
-
-        class NoOpActor(Actor[NoOp]):
-            def __init__(self):
-                self.value = 0
-
-            async def receive(self, msg: NoOp, ctx: Context) -> None:
-                pass
-
-        persistent = await system.actor(
-            PersistentActor,
-            name="persistent-noop",
-            wrapped_actor_cls=NoOpActor,
-            actor_id="noop-1",
-            node_id="node-a",
-            backend=InMemoryStoreBackend(),
-            on_state_change=collector,
-        )
-
-        await persistent.send(NoOp())
+        ref = await node.actor(Counter, name="counter-multi", scope="cluster")
         await asyncio.sleep(0.1)
 
-        assert len(notifications) == 0
+        await ref.send(Increment(10))
+        await ref.send(Increment(5))
+        await asyncio.sleep(0.1)
+
+        state = await ref.ask(GetState())
+        assert state == {"count": 15}
+
+        version = await ref.ask(GetCurrentVersion())
+        assert version.clock["node-0"] == 2
+
+
+@pytest.mark.asyncio
+async def test_persistent_actor_no_state_change_no_version_increment():
+    async with DevelopmentCluster(1) as cluster:
+        node = cluster[0]
+
+        ref = await node.actor(NoOpActor, name="noop-actor", scope="cluster")
+        await asyncio.sleep(0.1)
+
+        v0 = await ref.ask(GetCurrentVersion())
+        assert v0.clock == {}
+
+        await ref.send(NoOp())
+        await asyncio.sleep(0.1)
+
+        v1 = await ref.ask(GetCurrentVersion())
+        assert v1.clock == {}

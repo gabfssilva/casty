@@ -2,14 +2,13 @@
 
 Demonstrates:
 - Simple distributed cache using casty.cluster.cache
+- Entry-per-actor pattern (each cache key is a separate actor)
 - Multi-node cluster with DevelopmentCluster
 - Automatic sharding via consistent hashing
-- Per-key TTL support
-- Replication across nodes
+- Per-key TTL support with automatic cleanup
 - Values are automatically serialized via msgpack
 
 This is the high-level API built on top of Casty's clustering primitives.
-For a lower-level example, see 03-sharded-cache.py.
 
 Run with: uv run python examples/distributed/05-distributed-cache.py
 """
@@ -22,14 +21,10 @@ from casty.cluster.cache import DistributedCache
 async def main():
     print("=== Distributed Cache Example ===\n")
 
-    # Using cluster directly - no need to access specific nodes
     async with DevelopmentCluster(10) as cluster:
         print(f"Started {len(cluster)}-node cluster\n")
 
-        cache = await DistributedCache.create(
-            cluster,
-            name="my-cache",
-        )
+        cache = DistributedCache(cluster)
         print("Created distributed cache\n")
 
         # Set some values
@@ -53,6 +48,14 @@ async def main():
 
         missing = await cache.get("nonexistent")
         print(f"nonexistent = {missing}\n")
+
+        # Check existence
+        print("--- Checking existence ---")
+        exists = await cache.exists("user:1")
+        print(f"user:1 exists = {exists}")
+
+        exists = await cache.exists("nonexistent")
+        print(f"nonexistent exists = {exists}\n")
 
         # TTL example
         print("--- TTL expiration ---")

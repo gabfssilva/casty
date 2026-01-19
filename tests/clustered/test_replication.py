@@ -72,7 +72,7 @@ class TestReplication:
                     request_id="req-1",
                     payload_type=payload_type,
                     payload=payload_bytes,
-                    consistency=1,
+                    routing="leader",
                 )
             )
 
@@ -122,7 +122,7 @@ class TestReplication:
                     request_id="req-1",
                     payload_type=payload_type,
                     payload=payload_bytes,
-                    consistency=1,
+                    routing="leader",
                 )
             )
 
@@ -163,7 +163,7 @@ class TestReplication:
                         request_id=f"req-{i}",
                         payload_type=payload_type,
                         payload=payload_bytes,
-                        consistency=1,
+                        routing="leader",
                     )
                 )
 

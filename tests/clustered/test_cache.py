@@ -4,156 +4,107 @@ from casty import ActorSystem
 from casty.cluster.clustered_system import ClusteredSystem
 from casty.cluster.config import ClusterConfig
 from casty.cluster.cache import (
-    CacheActor,
+    CacheEntry,
     DistributedCache,
     Get,
     Set,
     Delete,
-    CacheHit,
-    CacheMiss,
-    Ok,
+    Exists,
 )
 
 
-class TestCacheActor:
+class TestCacheEntry:
     @pytest.mark.asyncio
-    async def test_get_empty_cache_returns_miss(self):
+    async def test_get_empty_entry_returns_none(self):
         async with ActorSystem.local() as system:
-            cache = await system.actor(CacheActor, name="cache-get-empty")
+            entry = await system.actor(CacheEntry, name="entry-empty")
 
-            result = await cache.ask(Get("nonexistent"))
+            result = await entry.ask(Get())
 
-            assert isinstance(result, CacheMiss)
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_set_then_get_returns_value(self):
         async with ActorSystem.local() as system:
-            cache = await system.actor(CacheActor, name="cache-set-get")
+            entry = await system.actor(CacheEntry, name="entry-set-get")
 
-            await cache.ask(Set("key1", b"value1", None))
-            result = await cache.ask(Get("key1"))
+            await entry.send(Set(b"value1"))
+            result = await entry.ask(Get())
 
-            assert isinstance(result, CacheHit)
-            assert result.value == b"value1"
-
-    @pytest.mark.asyncio
-    async def test_set_returns_ok(self):
-        async with ActorSystem.local() as system:
-            cache = await system.actor(CacheActor, name="cache-set-ok")
-
-            result = await cache.ask(Set("key1", b"value1", None))
-
-            assert isinstance(result, Ok)
+            assert result == b"value1"
 
     @pytest.mark.asyncio
-    async def test_delete_removes_key(self):
+    async def test_exists_returns_false_for_empty(self):
         async with ActorSystem.local() as system:
-            cache = await system.actor(CacheActor, name="cache-delete")
+            entry = await system.actor(CacheEntry, name="entry-exists-empty")
 
-            await cache.ask(Set("key1", b"value1", None))
-            delete_result = await cache.ask(Delete("key1"))
-            get_result = await cache.ask(Get("key1"))
+            result = await entry.ask(Exists())
 
-            assert isinstance(delete_result, Ok)
-            assert isinstance(get_result, CacheMiss)
+            assert result is False
 
     @pytest.mark.asyncio
-    async def test_delete_nonexistent_key_returns_ok(self):
+    async def test_exists_returns_true_after_set(self):
         async with ActorSystem.local() as system:
-            cache = await system.actor(CacheActor, name="cache-delete-nonexistent")
+            entry = await system.actor(CacheEntry, name="entry-exists-set")
 
-            result = await cache.ask(Delete("nonexistent"))
+            await entry.send(Set(b"value1"))
+            result = await entry.ask(Exists())
 
-            assert isinstance(result, Ok)
+            assert result is True
 
     @pytest.mark.asyncio
-    async def test_overwrite_key(self):
+    async def test_overwrite_value(self):
         async with ActorSystem.local() as system:
-            cache = await system.actor(CacheActor, name="cache-overwrite")
+            entry = await system.actor(CacheEntry, name="entry-overwrite")
 
-            await cache.ask(Set("key1", b"value1", None))
-            await cache.ask(Set("key1", b"value2", None))
-            result = await cache.ask(Get("key1"))
+            await entry.send(Set(b"value1"))
+            await entry.send(Set(b"value2"))
+            result = await entry.ask(Get())
 
-            assert isinstance(result, CacheHit)
-            assert result.value == b"value2"
+            assert result == b"value2"
 
     @pytest.mark.asyncio
-    async def test_multiple_keys(self):
+    async def test_ttl_expires_entry(self):
         async with ActorSystem.local() as system:
-            cache = await system.actor(CacheActor, name="cache-multiple-keys")
+            entry = await system.actor(CacheEntry, name="entry-ttl")
 
-            await cache.ask(Set("key1", b"value1", None))
-            await cache.ask(Set("key2", b"value2", None))
-            await cache.ask(Set("key3", b"value3", None))
+            await entry.send(Set(b"value1", ttl=0.1))
 
-            r1 = await cache.ask(Get("key1"))
-            r2 = await cache.ask(Get("key2"))
-            r3 = await cache.ask(Get("key3"))
-
-            assert isinstance(r1, CacheHit) and r1.value == b"value1"
-            assert isinstance(r2, CacheHit) and r2.value == b"value2"
-            assert isinstance(r3, CacheHit) and r3.value == b"value3"
-
-    @pytest.mark.asyncio
-    async def test_ttl_expires_key(self):
-        async with ActorSystem.local() as system:
-            cache = await system.actor(CacheActor, name="cache-ttl-expires")
-
-            await cache.ask(Set("key1", b"value1", 0.1))
-
-            result_before = await cache.ask(Get("key1"))
-            assert isinstance(result_before, CacheHit)
+            result_before = await entry.ask(Get())
+            assert result_before == b"value1"
 
             await asyncio.sleep(0.2)
 
-            result_after = await cache.ask(Get("key1"))
-            assert isinstance(result_after, CacheMiss)
+            entry2 = await system.actor(CacheEntry, name="entry-ttl")
+            result_after = await entry2.ask(Get())
+            assert result_after is None
 
     @pytest.mark.asyncio
     async def test_overwrite_cancels_old_ttl(self):
         async with ActorSystem.local() as system:
-            cache = await system.actor(CacheActor, name="cache-overwrite-ttl")
+            entry = await system.actor(CacheEntry, name="entry-overwrite-ttl")
 
-            await cache.ask(Set("key1", b"value1", 0.1))
-            await cache.ask(Set("key1", b"value2", None))
+            await entry.send(Set(b"value1", ttl=0.1))
+            await entry.send(Set(b"value2", ttl=None))
 
             await asyncio.sleep(0.2)
 
-            result = await cache.ask(Get("key1"))
-            assert isinstance(result, CacheHit)
-            assert result.value == b"value2"
-
-    @pytest.mark.asyncio
-    async def test_delete_cancels_ttl(self):
-        async with ActorSystem.local() as system:
-            cache = await system.actor(CacheActor, name="cache-delete-ttl")
-
-            await cache.ask(Set("key1", b"value1", 0.5))
-            await cache.ask(Delete("key1"))
-
-            await cache.ask(Set("key1", b"value2", None))
-
-            await asyncio.sleep(0.6)
-
-            result = await cache.ask(Get("key1"))
-            assert isinstance(result, CacheHit)
-            assert result.value == b"value2"
+            result = await entry.ask(Get())
+            assert result == b"value2"
 
 
 class TestDistributedCache:
     @pytest.mark.asyncio
     async def test_create_cache(self):
         async with ClusteredSystem(ClusterConfig(bind_port=19001)) as system:
-            cache = await DistributedCache.create(system, name="test-cache")
+            cache = DistributedCache(system)
 
             assert cache is not None
-            assert cache.ref is not None
 
     @pytest.mark.asyncio
     async def test_set_and_get(self):
         async with ClusteredSystem(ClusterConfig(bind_port=19002)) as system:
-            cache = await DistributedCache.create(system, name="test-cache")
+            cache = DistributedCache(system)
 
             await cache.set("user:1", {"name": "Alice", "age": 30})
             result = await cache.get("user:1")
@@ -163,7 +114,7 @@ class TestDistributedCache:
     @pytest.mark.asyncio
     async def test_get_missing_key_returns_none(self):
         async with ClusteredSystem(ClusterConfig(bind_port=19003)) as system:
-            cache = await DistributedCache.create(system, name="test-cache")
+            cache = DistributedCache(system)
 
             result = await cache.get("nonexistent")
 
@@ -172,7 +123,7 @@ class TestDistributedCache:
     @pytest.mark.asyncio
     async def test_delete(self):
         async with ClusteredSystem(ClusterConfig(bind_port=19004)) as system:
-            cache = await DistributedCache.create(system, name="test-cache")
+            cache = DistributedCache(system)
 
             await cache.set("key1", "value1")
             await cache.delete("key1")
@@ -181,9 +132,18 @@ class TestDistributedCache:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_various_value_types(self):
+    async def test_exists(self):
         async with ClusteredSystem(ClusterConfig(bind_port=19005)) as system:
-            cache = await DistributedCache.create(system, name="test-cache")
+            cache = DistributedCache(system)
+
+            assert await cache.exists("key1") is False
+            await cache.set("key1", "value1")
+            assert await cache.exists("key1") is True
+
+    @pytest.mark.asyncio
+    async def test_various_value_types(self):
+        async with ClusteredSystem(ClusterConfig(bind_port=19006)) as system:
+            cache = DistributedCache(system)
 
             await cache.set("string", "hello")
             await cache.set("int", 42)
@@ -201,8 +161,8 @@ class TestDistributedCache:
 
     @pytest.mark.asyncio
     async def test_ttl(self):
-        async with ClusteredSystem(ClusterConfig(bind_port=19006)) as system:
-            cache = await DistributedCache.create(system, name="test-cache")
+        async with ClusteredSystem(ClusterConfig(bind_port=19007)) as system:
+            cache = DistributedCache(system)
 
             await cache.set("key1", "value1", ttl=0.1)
 
@@ -216,8 +176,8 @@ class TestDistributedCache:
 
     @pytest.mark.asyncio
     async def test_overwrite_value(self):
-        async with ClusteredSystem(ClusterConfig(bind_port=19007)) as system:
-            cache = await DistributedCache.create(system, name="test-cache")
+        async with ClusteredSystem(ClusterConfig(bind_port=19008)) as system:
+            cache = DistributedCache(system)
 
             await cache.set("key1", "value1")
             await cache.set("key1", "value2")

@@ -14,7 +14,7 @@ from .cluster import Cluster, MemberInfo, MemberState
 from .hash_ring import HashRing
 from .transport import Transport, Connect, Disconnect
 from .tcp import TcpTransport
-from .consistency import Replication, Consistency, resolve_replication, resolve_consistency
+from .consistency import Replication, Consistency, Routing, NoLocalReplicaError, resolve_replication, resolve_consistency
 from .scope import ClusterScope, Scope
 from .clustered_ref import ClusteredActorRef
 from .clustered_system import ClusteredSystem
@@ -63,6 +63,8 @@ __all__ = [
     "TcpTransport",
     "Replication",
     "Consistency",
+    "Routing",
+    "NoLocalReplicaError",
     "resolve_replication",
     "resolve_consistency",
     "ClusterScope",

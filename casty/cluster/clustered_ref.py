@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable
-from uuid import uuid4
+import dataclasses
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Awaitable, Literal
 
 import msgpack
 
-from .consistency import Consistency
+from .consistency import Routing, NoLocalReplicaError
 from .messages import ClusteredSend, ClusteredAsk
 from ..protocols import ActorRef
 
@@ -27,18 +27,30 @@ class ClusteredActorRef[M](ActorRef[M]):
     actor_id: str
     cluster: LocalActorRef[Any]
     local_ref: LocalActorRef[M] | None
-    write_consistency: Consistency
 
-    async def send(self, msg: M, *, consistency: Consistency | None = None) -> None:
-        effective = consistency if consistency is not None else self.write_consistency
-        resolved = self._resolve_consistency(effective)
+    async def send(self, msg: M, *, routing: Routing = 'leader') -> None:
+        match routing:
+            case 'local':
+                if self.local_ref is None:
+                    raise NoLocalReplicaError(f"No local replica for actor {self.actor_id}")
+                await self.local_ref.send(msg)
 
-        if resolved <= 1 and self.local_ref is not None:
-            await self.local_ref.send(msg)
-            return
+            case 'fastest':
+                if self.local_ref is not None:
+                    await self.local_ref.send(msg)
+                else:
+                    await self._send_to_cluster(msg, routing='leader')
 
+            case 'leader':
+                await self._send_to_cluster(msg, routing='leader')
+
+            case node_id:
+                await self._send_to_cluster(msg, routing=node_id)
+
+    async def _send_to_cluster(self, msg: M, routing: str) -> None:
         payload_type = f"{type(msg).__module__}.{type(msg).__qualname__}"
-        payload_bytes = msgpack.packb(msg.__dict__, use_bin_type=True)
+        msg_dict = dataclasses.asdict(msg) if dataclasses.is_dataclass(msg) else msg.__dict__
+        payload_bytes = msgpack.packb(msg_dict, use_bin_type=True)
 
         request_id = _next_request_id()
         clustered_send = ClusteredSend(
@@ -46,49 +58,51 @@ class ClusteredActorRef[M](ActorRef[M]):
             request_id=request_id,
             payload_type=payload_type,
             payload=payload_bytes,
-            consistency=resolved,
+            routing=routing,
         )
 
-        if resolved <= 1:
-            await self.cluster.send(clustered_send)
-        else:
-            await self.cluster.ask(clustered_send, timeout=5.0)
+        await self.cluster.send(clustered_send)
 
     async def ask[R](
         self,
         msg: M,
         *,
+        routing: Routing = 'leader',
         timeout: float = 5.0,
     ) -> R:
-        if self.local_ref is not None:
-            return await self.local_ref.ask(msg, timeout=timeout)
+        match routing:
+            case 'local':
+                if self.local_ref is None:
+                    raise NoLocalReplicaError(f"No local replica for actor {self.actor_id}")
+                return await self.local_ref.ask(msg, timeout=timeout)
 
+            case 'fastest':
+                if self.local_ref is not None:
+                    return await self.local_ref.ask(msg, timeout=timeout)
+                else:
+                    return await self._ask_cluster(msg, routing='leader', timeout=timeout)
+
+            case 'leader':
+                return await self._ask_cluster(msg, routing='leader', timeout=timeout)
+
+            case node_id:
+                return await self._ask_cluster(msg, routing=node_id, timeout=timeout)
+
+    async def _ask_cluster[R](self, msg: M, routing: str, timeout: float) -> R:
         payload_type = f"{type(msg).__module__}.{type(msg).__qualname__}"
-        payload_bytes = msgpack.packb(msg.__dict__, use_bin_type=True)
+        msg_dict = dataclasses.asdict(msg) if dataclasses.is_dataclass(msg) else msg.__dict__
+        payload_bytes = msgpack.packb(msg_dict, use_bin_type=True)
 
         return await self.cluster.ask(
             ClusteredAsk(
                 actor_id=self.actor_id,
-                request_id="",
+                request_id=_next_request_id(),
                 payload_type=payload_type,
                 payload=payload_bytes,
-                consistency=1,
+                routing=routing,
             ),
             timeout=timeout,
         )
-
-    def _resolve_consistency(self, consistency: Consistency) -> int:
-        match consistency:
-            case 'async':
-                return 0
-            case 'one':
-                return 1
-            case 'all':
-                return -1
-            case 'quorum':
-                return -2
-            case int(n):
-                return n
 
     def __rshift__(self, msg: M) -> Awaitable[None]:
         return self.send(msg)

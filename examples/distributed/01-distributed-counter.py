@@ -1,14 +1,9 @@
-"""Distributed Counter with CRDT-like Semantics.
+"""Distributed Counter with Replication.
 
 Demonstrates:
 - DevelopmentCluster with multiple nodes
-- Counter replicated across all nodes
-- Concurrent increments from different nodes
-- State convergence via G-Counter (grow-only counter)
-
-A G-Counter is a CRDT (Conflict-free Replicated Data Type) that ensures
-all nodes eventually converge to the same value, even with concurrent
-updates from different nodes.
+- Single clustered counter replicated across nodes
+- Using routing to query specific nodes and verify replication
 
 Run with: uv run python examples/distributed/01-distributed-counter.py
 """
@@ -17,175 +12,88 @@ import asyncio
 from dataclasses import dataclass
 
 from casty import Actor, Context
-from casty.cluster import DevelopmentCluster
+from casty.cluster import DevelopmentCluster, ClusterScope
 
 
 @dataclass
 class Increment:
-    """Increment the counter by amount."""
     amount: int = 1
 
 
 @dataclass
 class GetCount:
-    """Get the current counter value."""
     pass
 
 
-@dataclass
-class GetState:
-    """Get the full CRDT state (for debugging)."""
-    pass
+class Counter(Actor[Increment | GetCount]):
+    def __init__(self):
+        self.count = 0
 
-
-@dataclass
-class MergeState:
-    """Merge state from another node (for CRDT convergence)."""
-    node_counts: dict[str, int]
-
-
-class GCounter(Actor[Increment | GetCount | GetState | MergeState]):
-    """A G-Counter (Grow-only Counter) CRDT.
-
-    Each node maintains its own counter. The total value is the sum of all
-    node counters. This ensures convergence even with concurrent increments.
-    """
-
-    def __init__(self, node_id: str):
-        self.node_id = node_id
-        self.counts: dict[str, int] = {node_id: 0}
-
-    async def receive(self, msg: Increment | GetCount | GetState | MergeState, ctx: Context):
+    async def receive(self, msg: Increment | GetCount, ctx: Context):
         match msg:
             case Increment(amount):
-                self.counts[self.node_id] = self.counts.get(self.node_id, 0) + amount
-                print(f"  [{self.node_id}] Incremented by {amount}, local={self.counts[self.node_id]}")
-
+                self.count += amount
+                print(f"  Counter incremented by {amount}, now={self.count}")
             case GetCount():
-                total = sum(self.counts.values())
-                await ctx.reply(total)
+                await ctx.reply(self.count)
 
-            case GetState():
-                await ctx.reply(dict(self.counts))
+    def get_state(self) -> dict:
+        return {"count": self.count}
 
-            case MergeState(node_counts):
-                for node, count in node_counts.items():
-                    self.counts[node] = max(self.counts.get(node, 0), count)
-                print(f"  [{self.node_id}] Merged state: {self.counts}")
+    def set_state(self, state: dict) -> None:
+        self.count = state.get("count", 0)
 
 
 async def main():
-    print("=== Distributed Counter (G-Counter CRDT) ===\n")
+    print("=== Distributed Counter with Replication ===\n")
 
     async with DevelopmentCluster(3) as cluster:
         node0, node1, node2 = cluster[0], cluster[1], cluster[2]
 
         print(f"Started 3-node cluster:")
-        print(f"  - Node 0: {node0.node_id}")
-        print(f"  - Node 1: {node1.node_id}")
-        print(f"  - Node 2: {node2.node_id}")
+        print(f"  - {node0.node_id}")
+        print(f"  - {node1.node_id}")
+        print(f"  - {node2.node_id}")
         print()
 
-        await asyncio.sleep(0.5)
-
-        # Each node spawns its own local counter with a unique node_id
-        counter0 = await node0.spawn(GCounter, node_id=node0.node_id)
-        counter1 = await node1.spawn(GCounter, node_id=node1.node_id)
-        counter2 = await node2.spawn(GCounter, node_id=node2.node_id)
-
-        print("Phase 1: Concurrent increments from different nodes")
-        print("-" * 50)
-
-        # Concurrent increments from different nodes
-        await asyncio.gather(
-            counter0.send(Increment(10)),
-            counter1.send(Increment(20)),
-            counter2.send(Increment(30)),
+        # Create a single clustered counter with replication=3 (all nodes)
+        print("Creating counter with replication=3...")
+        counter = await node0.actor(
+            Counter,
+            name="my-counter",
+            scope=ClusterScope(replication=3)
         )
+        await asyncio.sleep(0.3)
+        print(f"Counter created: {counter}\n")
 
-        # Each node sees only its local increment
-        await asyncio.sleep(0.1)
-        count0 = await counter0.ask(GetCount())
-        count1 = await counter1.ask(GetCount())
-        count2 = await counter2.ask(GetCount())
+        # Send increments (goes to leader)
+        print("Phase 1: Sending increments")
+        print("-" * 40)
+        await counter.send(Increment(10))
+        await counter.send(Increment(20))
+        await counter.send(Increment(5))
+        await asyncio.sleep(0.3)
 
-        print(f"\nBefore merge (local views):")
-        print(f"  Node 0 sees: {count0}")
-        print(f"  Node 1 sees: {count1}")
-        print(f"  Node 2 sees: {count2}")
+        # Query the leader
+        print("\nPhase 2: Querying leader")
+        print("-" * 40)
+        count = await counter.ask(GetCount())
+        print(f"Leader says count = {count}")
 
-        print("\nPhase 2: State synchronization (simulating gossip)")
-        print("-" * 50)
+        # Query specific nodes to verify replication
+        print("\nPhase 3: Verifying replication on each node")
+        print("-" * 40)
 
-        # Get states from all nodes
-        state0 = await counter0.ask(GetState())
-        state1 = await counter1.ask(GetState())
-        state2 = await counter2.ask(GetState())
-
-        # Merge states across all nodes (simulating gossip protocol)
-        # Each node receives states from other nodes
-        await counter0.send(MergeState(state1))
-        await counter0.send(MergeState(state2))
-
-        await counter1.send(MergeState(state0))
-        await counter1.send(MergeState(state2))
-
-        await counter2.send(MergeState(state0))
-        await counter2.send(MergeState(state1))
-
-        await asyncio.sleep(0.1)
-
-        # Now all nodes should converge to the same value
-        count0 = await counter0.ask(GetCount())
-        count1 = await counter1.ask(GetCount())
-        count2 = await counter2.ask(GetCount())
-
-        print(f"\nAfter merge (converged):")
-        print(f"  Node 0 sees: {count0}")
-        print(f"  Node 1 sees: {count1}")
-        print(f"  Node 2 sees: {count2}")
-
-        print("\nPhase 3: More concurrent updates")
-        print("-" * 50)
-
-        # More increments
-        await counter0.send(Increment(5))
-        await counter1.send(Increment(15))
-
-        # Partial sync - only node0 and node1 exchange
-        state0 = await counter0.ask(GetState())
-        state1 = await counter1.ask(GetState())
-
-        await counter0.send(MergeState(state1))
-        await counter1.send(MergeState(state0))
-
-        await asyncio.sleep(0.1)
-
-        count0 = await counter0.ask(GetCount())
-        count1 = await counter1.ask(GetCount())
-        count2 = await counter2.ask(GetCount())
-
-        print(f"\nPartial sync (node0 <-> node1):")
-        print(f"  Node 0 sees: {count0} (has node1's update)")
-        print(f"  Node 1 sees: {count1} (has node0's update)")
-        print(f"  Node 2 sees: {count2} (still has old state)")
-
-        # Full sync
-        state0 = await counter0.ask(GetState())
-        await counter2.send(MergeState(state0))
-
-        count2 = await counter2.ask(GetCount())
-        print(f"  Node 2 after sync: {count2}")
+        for node_id in [node0.node_id, node1.node_id, node2.node_id]:
+            try:
+                count = await counter.ask(GetCount(), routing=node_id)
+                print(f"  {node_id}: count = {count}")
+            except Exception as e:
+                print(f"  {node_id}: error - {e}")
 
         print("\n=== Summary ===")
-        print("G-Counter CRDT properties:")
-        print("  - Eventual consistency: all nodes converge to same value")
-        print("  - Partition tolerance: updates continue during network splits")
-        print("  - Conflict-free: merge operation is commutative and idempotent")
-        print(f"\nFinal converged value: {count2}")
-
-        # Allow cluster to settle before shutdown
-        await asyncio.sleep(0.2)
+        print("The counter state (35) is replicated across all 3 nodes.")
+        print("Each node can serve read requests via routing parameter.")
 
 
 if __name__ == "__main__":

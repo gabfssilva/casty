@@ -4,6 +4,12 @@ from typing import Literal
 
 type Replication = Literal['all', 'quorum'] | int
 type Consistency = Literal['all', 'quorum', 'one', 'async'] | int
+type Routing = Literal['leader', 'local', 'fastest'] | str
+
+
+class NoLocalReplicaError(Exception):
+    """Raised when routing='local' but no local replica exists."""
+    pass
 
 
 def resolve_replication(replication: Replication, total_nodes: int) -> int:

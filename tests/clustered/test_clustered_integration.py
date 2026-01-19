@@ -69,7 +69,7 @@ class TestActorIntegration:
                         request_id=f"req-{i}",
                         payload_type=payload_type,
                         payload=payload_bytes,
-                        consistency=1,
+                        routing="leader",
                     )
                 )
 
@@ -85,7 +85,7 @@ class TestActorIntegration:
                     request_id="final",
                     payload_type=get_type,
                     payload=get_bytes,
-                    consistency=1,
+                    routing="leader",
                 )
             )
 
@@ -142,7 +142,7 @@ class TestActorIntegration:
                         request_id=f"req-{i}",
                         payload_type=payload_type,
                         payload=payload_bytes,
-                        consistency=1,
+                        routing="leader",
                     )
                 )
 
@@ -168,7 +168,7 @@ class TestActorIntegration:
                     request_id="check",
                     payload_type=get_type,
                     payload=get_bytes,
-                    consistency=1,
+                    routing="leader",
                 )
             )
 

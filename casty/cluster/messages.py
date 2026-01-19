@@ -164,6 +164,13 @@ class HandshakeAck:
 
 @serializable
 @dataclass(frozen=True, slots=True)
+class MembershipSync:
+    """Sent after connection to share known members."""
+    members: list[tuple[str, tuple[str, int]]]  # list of (node_id, (host, port))
+
+
+@serializable
+@dataclass(frozen=True, slots=True)
 class ReplicateState:
     """Sent after mutation to sync state between replicas."""
     actor_id: str
@@ -212,7 +219,7 @@ class ClusteredSend:
     request_id: str
     payload_type: str
     payload: bytes
-    consistency: int
+    routing: str  # 'leader', 'local', 'fastest', or node_id
 
 
 @serializable
@@ -229,7 +236,7 @@ class ClusteredAsk:
     request_id: str
     payload_type: str
     payload: bytes
-    consistency: int
+    routing: str  # 'leader', 'local', 'fastest', or node_id
 
 
 @serializable
@@ -258,6 +265,12 @@ class ActorRegistered:
     replication: int
     singleton: bool
     owner_node: str
+
+
+@serializable
+@dataclass(frozen=True, slots=True)
+class ActorUnregistered:
+    actor_id: str
 
 
 @dataclass(frozen=True, slots=True)
