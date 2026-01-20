@@ -5,7 +5,7 @@ from typing import Any
 
 from .actor import Behavior
 from .envelope import Envelope
-from .mailbox import Mailbox, Stop
+from .mailbox import Mailbox, ActorMailbox, Stop
 from .protocols import System
 from .ref import ActorRef, LocalActorRef
 from .supervision import Decision
@@ -16,11 +16,13 @@ class LocalActorSystem(System):
     def __init__(
         self,
         node_id: str = "local",
+        debug_filter: Any = None,
     ) -> None:
         self._node_id = node_id
+        self._debug_filter = debug_filter
         self._actors: dict[str, ActorRef[Any]] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._queues: dict[str, asyncio.Queue[Envelope[Any]]] = {}
+        self._mailboxes: dict[str, ActorMailbox[Any]] = {}
 
     @property
     def node_id(self) -> str:
@@ -36,14 +38,20 @@ class LocalActorSystem(System):
         behavior: Behavior,
         mailbox: Mailbox[M],
         ref: ActorRef[M],
+        state: Any = None,
     ) -> None:
+        kwargs = dict(behavior.initial_kwargs)
+
+        if behavior.state_param is not None and state is not None:
+            kwargs[behavior.state_param] = state
+
         retries = 0
         while True:
             try:
                 await behavior.func(
                     *behavior.initial_args,
                     mailbox=mailbox,
-                    **behavior.initial_kwargs,
+                    **kwargs,
                 )
                 break
             except StopAsyncIteration:
@@ -69,29 +77,36 @@ class LocalActorSystem(System):
         name: str,
         replicas: int = 1,
     ) -> ActorRef[M]:
+        from .state import State
+
         actor_id = self._build_actor_id(behavior, name)
 
         if actor_id in self._actors:
             return self._actors[actor_id]
 
-        queue: asyncio.Queue[Envelope[M]] = asyncio.Queue()
-        mailbox: Mailbox[M] = Mailbox(
-            queue=queue,
+        state = None
+        if behavior.state_param is not None:
+            state = State(behavior.state_initial)
+
+        filters = [self._debug_filter] if self._debug_filter else []
+        mailbox: ActorMailbox[M] = ActorMailbox(
+            state=state,
             self_id=actor_id,
             node_id=self._node_id,
             is_leader=True,
             system=self,
+            filters=filters,
         )
         ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, mailbox=mailbox)
         mailbox.set_self_ref(ref)
 
         task = asyncio.create_task(
-            self._run_supervised_actor(actor_id, behavior, mailbox, ref)
+            self._run_supervised_actor(actor_id, behavior, mailbox, ref, state)
         )
 
         self._actors[actor_id] = ref
         self._tasks[actor_id] = task
-        self._queues[actor_id] = queue
+        self._mailboxes[actor_id] = mailbox
 
         return ref
 
@@ -103,30 +118,37 @@ class LocalActorSystem(System):
         name: str,
         replicas: int = 1,
     ) -> ActorRef[M]:
+        from .state import State
+
         func_name = behavior.func.__name__
         actor_id = f"{parent_id}/{func_name}/{name}"
 
         if actor_id in self._actors:
             return self._actors[actor_id]
 
-        queue: asyncio.Queue[Envelope[M]] = asyncio.Queue()
-        mailbox: Mailbox[M] = Mailbox(
-            queue=queue,
+        state = None
+        if behavior.state_param is not None:
+            state = State(behavior.state_initial)
+
+        filters = [self._debug_filter] if self._debug_filter else []
+        mailbox: ActorMailbox[M] = ActorMailbox(
+            state=state,
             self_id=actor_id,
             node_id=self._node_id,
             is_leader=True,
             system=self,
+            filters=filters,
         )
         ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, mailbox=mailbox)
         mailbox.set_self_ref(ref)
 
         task = asyncio.create_task(
-            self._run_supervised_actor(actor_id, behavior, mailbox, ref)
+            self._run_supervised_actor(actor_id, behavior, mailbox, ref, state)
         )
 
         self._actors[actor_id] = ref
         self._tasks[actor_id] = task
-        self._queues[actor_id] = queue
+        self._mailboxes[actor_id] = mailbox
 
         return ref
 
@@ -178,15 +200,15 @@ class LocalActorSystem(System):
         raise ValueError("Must specify either delay or every")
 
     async def shutdown(self) -> None:
-        for queue in self._queues.values():
-            await queue.put(Envelope(Stop()))
+        for mailbox in self._mailboxes.values():
+            await mailbox.put(Envelope(Stop()))
 
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
         self._actors.clear()
         self._tasks.clear()
-        self._queues.clear()
+        self._mailboxes.clear()
 
     async def __aenter__(self) -> "LocalActorSystem":
         return self

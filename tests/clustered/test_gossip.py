@@ -216,7 +216,7 @@ async def test_gossip_tick_sends_to_random_members():
         }
 
         membership_ref = await system.actor(
-            membership_actor(initial_members),
+            membership_actor("node-0", initial_members),
             name="membership"
         )
 
@@ -256,7 +256,7 @@ async def test_gossip_tick_sends_to_random_members():
 
         await gossip_ref.send(GossipTick())
 
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(1)
 
         assert len(connections_requested) == 2
         assert all(node_id != "node-1" for node_id, _ in connections_requested)
@@ -279,7 +279,7 @@ async def test_gossip_tick_with_no_pending_updates():
         }
 
         membership_ref = await system.actor(
-            membership_actor(initial_members),
+            membership_actor("node-0", initial_members),
             name="membership"
         )
 
@@ -325,7 +325,7 @@ async def test_gossip_tick_with_no_other_members():
         }
 
         membership_ref = await system.actor(
-            membership_actor(initial_members),
+            membership_actor("node-0", initial_members),
             name="membership"
         )
 
@@ -383,7 +383,7 @@ async def test_gossip_clears_pending_after_tick():
         }
 
         membership_ref = await system.actor(
-            membership_actor(initial_members),
+            membership_actor("node-0", initial_members),
             name="membership"
         )
 

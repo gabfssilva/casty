@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any, AsyncGenerator, AsyncIterator, Callable, Protocol, TYPE_CHECKING
 
 from .context import Context
 from .envelope import Envelope
+
+if TYPE_CHECKING:
+    from .state import State
+
+type MessageStream[M] = AsyncGenerator[tuple[M, Context], None]
+type Filter[M] = Callable[["State[Any] | None", MessageStream[M]], MessageStream[M]]
 
 
 @dataclass
@@ -13,49 +19,99 @@ class Stop:
     pass
 
 
-class Mailbox[M]:
+class Mailbox[M](Protocol):
+    def __aiter__(self) -> AsyncIterator[tuple[M, Context]]:
+        ...
+
+    async def __anext__(self) -> tuple[M, Context]:
+        ...
+
+    async def put(self, envelope: Envelope[M | Stop]) -> None:
+        ...
+
+
+class ActorMailbox[M](Mailbox[M]):
     def __init__(
         self,
-        queue: asyncio.Queue[Envelope[M | Stop]],
+        state: "State[Any] | None" = None,
+        filters: list[Filter[M]] | None = None,
         self_id: str = "",
         node_id: str = "local",
         is_leader: bool = True,
         system: Any = None,
         self_ref: Any = None,
     ) -> None:
-        self._queue = queue
+        self._queue: asyncio.Queue[Envelope[M | Stop]] = asyncio.Queue()
+        self._state = state
+        self._filters = filters or []
         self._self_id = self_id
         self._node_id = node_id
         self._is_leader = is_leader
         self._system = system
         self._self_ref = self_ref
+        self._stream: MessageStream[M] | None = None
+
+    def _resolve_sender(self, sender_id: str | None) -> Any:
+        """Resolve sender ID to ActorRef if available in system."""
+        if sender_id is None or self._system is None:
+            return None
+        return self._system._actors.get(sender_id)
+
+    def _base_stream(self) -> MessageStream[M]:
+        async def stream() -> MessageStream[M]:
+            while True:
+                envelope = await self._queue.get()
+
+                if isinstance(envelope.payload, Stop):
+                    return
+
+                sender_ref = self._resolve_sender(envelope.sender)
+
+                ctx = Context(
+                    self_id=self._self_id,
+                    sender_id=envelope.sender,
+                    sender=sender_ref,
+                    node_id=self._node_id,
+                    is_leader=self._is_leader,
+                    reply_to=envelope.reply_to,
+                    _system=self._system,
+                    _self_ref=self._self_ref,
+                )
+
+                yield envelope.payload, ctx
+
+        return stream()
+
+    def _build_stream(self) -> MessageStream[M]:
+        stream = self._base_stream()
+        for f in self._filters:
+            stream = f(self._state, stream)
+        return stream
 
     def __aiter__(self) -> AsyncIterator[tuple[M, Context]]:
+        self._stream = self._build_stream()
         return self
 
     async def __anext__(self) -> tuple[M, Context]:
-        envelope = await self._queue.get()
-
-        if isinstance(envelope.payload, Stop):
-            raise StopAsyncIteration
-
-        ctx = Context(
-            self_id=self._self_id,
-            sender=envelope.sender,
-            node_id=self._node_id,
-            is_leader=self._is_leader,
-            reply_to=envelope.reply_to,
-            _system=self._system,
-            _self_ref=self._self_ref,
-        )
-
-        return envelope.payload, ctx
+        if self._stream is None:
+            self._stream = self._build_stream()
+        try:
+            return await self._stream.__anext__()
+        except StopAsyncIteration:
+            raise
 
     async def put(self, envelope: Envelope[M | Stop]) -> None:
         await self._queue.put(envelope)
 
     def set_self_ref(self, ref: Any) -> None:
         self._self_ref = ref
+
+    def set_is_leader(self, value: bool) -> None:
+        self._is_leader = value
+
+    @property
+    def state(self) -> "State[Any] | None":
+        return self._state
 
     async def schedule[T](
         self,

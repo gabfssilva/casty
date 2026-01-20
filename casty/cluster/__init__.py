@@ -36,6 +36,15 @@ from .gossip import gossip_actor
 from .remote_ref import RemoteActorRef
 from .clustered_system import ClusteredActorSystem
 from .development import DevelopmentCluster, DistributionStrategy
+from .replication import (
+    ReplicationConfig,
+    Routing,
+    replicated,
+    Replicate,
+    ReplicateAck,
+    SyncRequest,
+    SyncResponse,
+)
 
 __all__ = [
     # Hash ring
@@ -86,4 +95,12 @@ __all__ = [
     "ClusteredActorSystem",
     "DevelopmentCluster",
     "DistributionStrategy",
+    # Replication
+    "ReplicationConfig",
+    "Routing",
+    "replicated",
+    "Replicate",
+    "ReplicateAck",
+    "SyncRequest",
+    "SyncResponse",
 ]

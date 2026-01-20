@@ -12,7 +12,8 @@ if TYPE_CHECKING:
 @dataclass
 class Context:
     self_id: str
-    sender: str | None = None
+    sender_id: str | None = None
+    sender: "ActorRef[Any] | None" = None
     node_id: str = "local"
     is_leader: bool = True
     reply_to: asyncio.Future[Any] | None = field(default=None, repr=False)

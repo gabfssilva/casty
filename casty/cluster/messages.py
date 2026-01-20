@@ -47,6 +47,11 @@ class Join:
     address: str
 
 
+@dataclass
+class SetLocalAddress:
+    address: str
+
+
 @serializable
 @dataclass
 class GetAliveMembers:
@@ -57,6 +62,12 @@ class GetAliveMembers:
 @dataclass
 class GetAllMembers:
     pass
+
+
+@dataclass
+class GetResponsibleNodes:
+    actor_id: str
+    count: int = 1
 
 
 @serializable

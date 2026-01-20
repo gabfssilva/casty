@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import msgpack
 from dataclasses import fields, is_dataclass
+from enum import Enum
 from typing import Any, TypeVar
 
 T = TypeVar("T")
@@ -38,6 +39,12 @@ def _is_serializable_value(value: Any) -> bool:
 def _to_dict(obj: Any) -> Any:
     if obj is None or isinstance(obj, (bool, int, float, str, bytes)):
         return obj
+
+    if isinstance(obj, Enum):
+        return {
+            "__enum__": f"{obj.__class__.__module__}.{obj.__class__.__qualname__}",
+            "value": obj.value,
+        }
 
     if isinstance(obj, (list, tuple)):
         return [_to_dict(item) for item in obj]
@@ -78,6 +85,14 @@ def _from_dict(data: Any) -> Any:
 
             field_values = {k: _from_dict(v) for k, v in data.items() if k != "__type__"}
             return cls(**field_values)
+
+        if "__enum__" in data:
+            enum_path = data["__enum__"]
+            module_name, enum_name = enum_path.rsplit(".", 1)
+            import importlib
+            module = importlib.import_module(module_name)
+            enum_cls = getattr(module, enum_name)
+            return enum_cls(data["value"])
 
         return {k: _from_dict(v) for k, v in data.items()}
 

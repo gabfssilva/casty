@@ -17,7 +17,7 @@ async def test_swim_sends_ping():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({}),
+            membership_actor("node-1", {}),
             name="membership"
         )
 
@@ -60,7 +60,7 @@ async def test_swim_no_ping_when_no_other_members():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({}),
+            membership_actor("node-1", {}),
             name="membership"
         )
 
@@ -100,7 +100,7 @@ async def test_swim_handles_ping_and_replies_with_ack():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({}),
+            membership_actor("node-1", {}),
             name="membership"
         )
 
@@ -135,7 +135,7 @@ async def test_swim_applies_updates_from_ping():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({
+            membership_actor("node-1", {
                 "node-2": MemberInfo(
                     node_id="node-2",
                     address="127.0.0.1:8002",
@@ -179,7 +179,7 @@ async def test_swim_probe_timeout_marks_member_down():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({
+            membership_actor("node-1", {
                 "node-2": MemberInfo(
                     node_id="node-2",
                     address="127.0.0.1:8002",
@@ -225,7 +225,7 @@ async def test_swim_ack_clears_pending_probe():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({
+            membership_actor("node-1", {
                 "node-2": MemberInfo(
                     node_id="node-2",
                     address="127.0.0.1:8002",
@@ -284,7 +284,7 @@ async def test_swim_handles_ping_req():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({}),
+            membership_actor("node-1", {}),
             name="membership"
         )
 
@@ -319,7 +319,7 @@ async def test_swim_ping_req_timeout_marks_member_down():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({
+            membership_actor("node-1", {
                 "node-2": MemberInfo(
                     node_id="node-2",
                     address="127.0.0.1:8002",
@@ -365,7 +365,7 @@ async def test_swim_successful_ping_req_ack_clears_pending():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({
+            membership_actor("node-1", {
                 "node-2": MemberInfo(
                     node_id="node-2",
                     address="127.0.0.1:8002",
@@ -414,7 +414,7 @@ async def test_swim_probe_timeout_ignores_unknown_target():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({
+            membership_actor("node-1", {
                 "node-2": MemberInfo(
                     node_id="node-2",
                     address="127.0.0.1:8002",
@@ -457,7 +457,7 @@ async def test_swim_multiple_members_picks_random():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({
+            membership_actor("node-1", {
                 "node-2": MemberInfo(
                     node_id="node-2",
                     address="127.0.0.1:8002",
@@ -511,7 +511,7 @@ async def test_swim_applies_multiple_updates_from_ping():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({
+            membership_actor("node-1", {
                 "node-2": MemberInfo(
                     node_id="node-2",
                     address="127.0.0.1:8002",
@@ -565,7 +565,7 @@ async def test_swim_ack_applies_updates():
 
     async with ActorSystem(node_id="node-1") as system:
         membership_ref = await system.actor(
-            membership_actor({
+            membership_actor("node-1", {
                 "node-2": MemberInfo(
                     node_id="node-2",
                     address="127.0.0.1:8002",

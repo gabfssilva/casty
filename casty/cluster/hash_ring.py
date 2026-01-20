@@ -36,6 +36,10 @@ class HashRing:
 
         return self._ring[self._sorted_keys[idx]]
 
+    @property
+    def nodes(self) -> set[str]:
+        return set(self._ring.values())
+
     def get_nodes(self, actor_id: str, n: int) -> list[str]:
         if not self._ring:
             raise RuntimeError("HashRing is empty")

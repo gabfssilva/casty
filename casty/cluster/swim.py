@@ -64,11 +64,28 @@ async def swim_actor(
                 for update in updates:
                     await membership_ref.send(ApplyUpdate(update))
 
-                await ctx.reply(Ack(updates=list(pending_updates)))
+                ack = Ack(updates=list(pending_updates))
+                if ctx.reply_to is not None:
+                    await ctx.reply(ack)
+                elif ctx.sender_id:
+                    members = await membership_ref.ask(GetAliveMembers())
+                    if ctx.sender_id in members:
+                        sender_info = members[ctx.sender_id]
+                        conn = await outbound_ref.ask(Connect(
+                            node_id=ctx.sender_id,
+                            address=sender_info.address,
+                        ))
+                        if conn:
+                            ack_envelope = Envelope(
+                                payload=ack,
+                                target=f"swim_actor/swim",
+                                sender=node_id,
+                            )
+                            await conn.send(Transmit(data=serialize(ack_envelope)))
 
             case Ack(updates):
-                if ctx.sender and ctx.sender in pending_probes:
-                    del pending_probes[ctx.sender]
+                if ctx.sender_id and ctx.sender_id in pending_probes:
+                    del pending_probes[ctx.sender_id]
 
                 for update in updates:
                     await membership_ref.send(ApplyUpdate(update))
@@ -112,6 +129,7 @@ async def swim_actor(
                 for update in updates:
                     await membership_ref.send(ApplyUpdate(update))
 
+                success = False
                 members = await membership_ref.ask(GetAliveMembers())
                 if target in members:
                     target_info = members[target]
@@ -126,11 +144,24 @@ async def swim_actor(
                             sender=node_id,
                         )
                         await conn.send(Transmit(data=serialize(envelope)))
-                        await ctx.reply(PingReqAck(target=target, success=True, updates=list(pending_updates)))
-                    else:
-                        await ctx.reply(PingReqAck(target=target, success=False, updates=list(pending_updates)))
-                else:
-                    await ctx.reply(PingReqAck(target=target, success=False, updates=list(pending_updates)))
+                        success = True
+
+                ack = PingReqAck(target=target, success=success, updates=list(pending_updates))
+                if ctx.reply_to is not None:
+                    await ctx.reply(ack)
+                elif ctx.sender_id and ctx.sender_id in members:
+                    sender_info = members[ctx.sender_id]
+                    conn = await outbound_ref.ask(Connect(
+                        node_id=ctx.sender_id,
+                        address=sender_info.address,
+                    ))
+                    if conn:
+                        ack_envelope = Envelope(
+                            payload=ack,
+                            target=f"swim_actor/swim",
+                            sender=node_id,
+                        )
+                        await conn.send(Transmit(data=serialize(ack_envelope)))
 
             case PingReqAck(target, success, updates):
                 if success and target in pending_probes:

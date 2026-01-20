@@ -50,8 +50,8 @@ def test_behavior_stores_function():
 
 @pytest.mark.asyncio
 async def test_behavior_can_be_started():
-    from casty.actor import actor, Behavior
-    from casty.mailbox import Mailbox, Stop
+    from casty.actor import actor
+    from casty.mailbox import Mailbox, ActorMailbox, Stop
     from casty.envelope import Envelope
 
     results = []
@@ -63,17 +63,13 @@ async def test_behavior_can_be_started():
 
     behavior = collector("test")
 
-    # Create queue and mailbox
-    queue: asyncio.Queue = asyncio.Queue()
-    mailbox = Mailbox(queue, self_id="collector/c1")
+    mailbox = ActorMailbox(self_id="collector/c1")
 
-    # Start the behavior
     task = asyncio.create_task(behavior.func("test", mailbox=mailbox))
 
-    # Send messages
-    await queue.put(Envelope("hello"))
-    await queue.put(Envelope("world"))
-    await queue.put(Envelope(Stop()))
+    await mailbox.put(Envelope("hello"))
+    await mailbox.put(Envelope("world"))
+    await mailbox.put(Envelope(Stop()))
 
     await task
 

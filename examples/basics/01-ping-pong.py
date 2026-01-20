@@ -13,7 +13,7 @@ Run with:
 import asyncio
 from dataclasses import dataclass
 
-from casty import actor, ActorSystem, Mailbox, LocalActorRef
+from casty import actor, ActorSystem, Mailbox, LocalActorRef, State
 
 
 @dataclass
@@ -33,25 +33,22 @@ class Start:
 
 
 @actor
-async def ping_actor(*, mailbox: Mailbox[Start | Pong]):
-    exchanges = 0
-    max_exchanges = 0
-
+async def ping_actor(state: State[int], mailbox: Mailbox[Start | Pong]):
     async for msg, ctx in mailbox:
         match msg:
             case Start(target, max_ex):
-                max_exchanges = max_ex
-                print(f"[Ping] Starting ping-pong for {max_exchanges} exchanges")
+                state.set(max_ex)
+                print(f"[Ping] Starting ping-pong for {max_ex} exchanges")
                 await target.send(Ping(count=1), sender=ctx.self_id)
 
             case Pong(count):
                 exchanges = count
                 print(f"[Ping] Received Pong #{count}")
 
-                if count < max_exchanges and ctx.sender:
+                if count < state.value and ctx.sender:
                     await ctx.sender.send(Ping(count=count + 1), sender=ctx.self_id)
-                elif count >= max_exchanges:
-                    print(f"[Ping] Reached {max_exchanges} exchanges. Done!")
+                elif count >= state.value:
+                    print(f"[Ping] Reached {state.value} exchanges. Done!")
 
 
 @actor

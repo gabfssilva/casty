@@ -1,5 +1,5 @@
 from .actor import actor, Behavior
-from .mailbox import Mailbox, Stop
+from .mailbox import Mailbox, ActorMailbox, Stop, Filter, MessageStream
 from .context import Context
 from .ref import ActorRef, LocalActorRef
 from .envelope import Envelope
@@ -17,12 +17,18 @@ from .supervision import (
     SupervisionConfig,
 )
 from .cluster import HashRing
+from .message import message
+from .state import State
+from .cluster.replication import replicated, Routing, ReplicationConfig
 
 __all__ = [
     "actor",
     "Behavior",
     "Mailbox",
+    "ActorMailbox",
     "Stop",
+    "Filter",
+    "MessageStream",
     "Context",
     "ActorRef",
     "LocalActorRef",
@@ -40,4 +46,9 @@ __all__ = [
     "supervised",
     "SupervisionConfig",
     "HashRing",
+    "message",
+    "State",
+    "replicated",
+    "Routing",
+    "ReplicationConfig",
 ]

@@ -44,7 +44,7 @@ async def counter(*, mailbox: Mailbox[CounterMsg]):
 async def main():
     print("=== Distributed Counter Example ===\n")
 
-    async with DevelopmentCluster(3) as cluster:
+    async with DevelopmentCluster(10) as cluster:
         node0, node1, node2 = cluster[0], cluster[1], cluster[2]
 
         print(f"Started 3-node cluster:")

@@ -30,3 +30,38 @@ def test_get_connection_serializable():
 def test_disconnect_serializable():
     msg = Disconnect()
     assert deserialize(serialize(msg)) == msg
+
+
+def test_spawn_replica_serializable():
+    from casty.cluster.transport_messages import SpawnReplica
+    from casty.cluster.replication import ReplicationConfig, Routing
+
+    msg = SpawnReplica(
+        actor_id="counter/main",
+        behavior_name="casty.actors.counter",
+        initial_args=(),
+        initial_kwargs={"initial": 0},
+        config=ReplicationConfig(factor=3, write_quorum=2, routing=Routing.LEADER),
+        is_leader=False,
+    )
+
+    data = serialize(msg)
+    restored = deserialize(data)
+
+    assert restored.actor_id == "counter/main"
+    assert restored.behavior_name == "casty.actors.counter"
+    assert restored.initial_args == []  # tuple becomes list after serialization
+    assert restored.initial_kwargs == {"initial": 0}
+    assert restored.config.factor == 3
+    assert restored.is_leader is False
+
+
+def test_promote_to_leader_serializable():
+    from casty.cluster.transport_messages import PromoteToLeader
+
+    msg = PromoteToLeader(actor_id="counter/main")
+
+    data = serialize(msg)
+    restored = deserialize(data)
+
+    assert restored.actor_id == "counter/main"

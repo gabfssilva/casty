@@ -86,7 +86,7 @@ async def test_remote_ref_send_with_sender():
     @actor
     async def echo_actor(*, mailbox: Mailbox[Ping]):
         async for msg, ctx in mailbox:
-            received_senders.append(ctx.sender)
+            received_senders.append(ctx.sender_id)
 
     # Node B (receiver)
     async with ActorSystem(node_id="node-b") as system_b:
