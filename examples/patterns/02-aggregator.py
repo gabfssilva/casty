@@ -14,18 +14,16 @@ import asyncio
 import random
 from dataclasses import dataclass
 
-from casty import Actor, ActorSystem, Context, LocalActorRef
+from casty import actor, ActorSystem, Mailbox, LocalActorRef
 
 
 @dataclass
 class GetPrice:
-    """Request a price quote for an item."""
     item: str
 
 
 @dataclass
 class PriceQuote:
-    """Price quote response from a supplier."""
     supplier: str
     item: str
     price: float
@@ -33,14 +31,12 @@ class PriceQuote:
 
 @dataclass
 class FindBestPrice:
-    """Request to find the best price across all suppliers."""
     item: str
     timeout: float = 1.0
 
 
 @dataclass
 class BestPriceResult:
-    """Result of the aggregation."""
     item: str
     best_price: float | None
     best_supplier: str | None
@@ -48,123 +44,105 @@ class BestPriceResult:
     total_suppliers: int
 
 
-class Supplier(Actor[GetPrice]):
-    """Simulates a price supplier with variable response time."""
-
-    def __init__(self, supplier_name: str, base_price: float, delay: float):
-        self.supplier_name = supplier_name
-        self.base_price = base_price
-        self.delay = delay
-
-    async def receive(self, msg: GetPrice, ctx: Context) -> None:
-        await asyncio.sleep(self.delay)
-
-        price = self.base_price + random.uniform(-10, 10)
-        price = round(price, 2)
-
-        print(f"  [{self.supplier_name}] Quote for '{msg.item}': ${price:.2f}")
-        await ctx.reply(PriceQuote(self.supplier_name, msg.item, price))
-
-
 @dataclass
 class _SupplierResponse:
-    """Internal message for collecting supplier responses."""
     quote: PriceQuote
 
 
 @dataclass
 class _Timeout:
-    """Internal message for aggregation timeout."""
     request_id: int
 
 
-class Aggregator(Actor[FindBestPrice | _SupplierResponse | _Timeout]):
-    """Aggregates price quotes from multiple suppliers."""
+@actor
+async def supplier(supplier_name: str, base_price: float, delay: float, *, mailbox: Mailbox[GetPrice]):
+    async for msg, ctx in mailbox:
+        match msg:
+            case GetPrice(item):
+                await asyncio.sleep(delay)
+                price = base_price + random.uniform(-10, 10)
+                price = round(price, 2)
+                print(f"  [{supplier_name}] Quote for '{item}': ${price:.2f}")
+                await ctx.reply(PriceQuote(supplier_name, item, price))
 
-    def __init__(self, suppliers: list[LocalActorRef[GetPrice]]):
-        self.suppliers = suppliers
-        self.pending_requests: dict[int, dict] = {}
-        self.request_counter = 0
 
-    async def receive(
-        self,
-        msg: FindBestPrice | _SupplierResponse | _Timeout,
-        ctx: Context,
-    ) -> None:
+@actor
+async def aggregator(suppliers: list[LocalActorRef[GetPrice]], *, mailbox: Mailbox[FindBestPrice | _SupplierResponse | _Timeout]):
+    pending_requests: dict[int, dict] = {}
+    request_counter = 0
+
+    async for msg, ctx in mailbox:
         match msg:
             case FindBestPrice(item, timeout):
-                self.request_counter += 1
-                request_id = self.request_counter
+                request_counter += 1
+                request_id = request_counter
 
-                self.pending_requests[request_id] = {
+                pending_requests[request_id] = {
                     "item": item,
                     "quotes": [],
-                    "sender": ctx.sender,
-                    "total": len(self.suppliers),
+                    "reply_to": ctx.reply_to,
+                    "total": len(suppliers),
                 }
 
-                print(f"[Aggregator] Requesting quotes for '{item}' from {len(self.suppliers)} suppliers")
+                print(f"[Aggregator] Requesting quotes for '{item}' from {len(suppliers)} suppliers")
 
-                await ctx.schedule(timeout, _Timeout(request_id))
+                await ctx.schedule(_Timeout(request_id), delay=timeout)
 
-                for supplier in self.suppliers:
-                    ctx.detach(self._request_quote(supplier, item)).then(
-                        lambda q: _SupplierResponse(q)
-                    )
+                for s in suppliers:
+                    asyncio.create_task(_fetch_quote(s, item, request_id, pending_requests, ctx._self_ref))
 
             case _SupplierResponse(quote):
-                for req_id, request in list(self.pending_requests.items()):
+                for req_id, request in list(pending_requests.items()):
                     if request["item"] == quote.item:
                         request["quotes"].append(quote)
-
                         if len(request["quotes"]) == request["total"]:
-                            await self._complete_request(req_id)
+                            await _complete_request(req_id, pending_requests)
                         break
 
             case _Timeout(request_id):
-                if request_id in self.pending_requests:
+                if request_id in pending_requests:
                     print(f"[Aggregator] Timeout reached, completing with partial results")
-                    await self._complete_request(request_id)
+                    await _complete_request(request_id, pending_requests)
 
-    async def _request_quote(
-        self,
-        supplier: LocalActorRef[GetPrice],
-        item: str,
-    ) -> PriceQuote:
-        """Request a quote from a single supplier."""
-        return await supplier.ask(GetPrice(item), timeout=5.0)
 
-    async def _complete_request(self, request_id: int) -> None:
-        """Complete a request and send the aggregated result."""
-        request = self.pending_requests.pop(request_id, None)
-        if not request:
-            return
+async def _fetch_quote(s, item, request_id, pending_requests, self_ref):
+    try:
+        quote = await s.ask(GetPrice(item), timeout=5.0)
+        await self_ref.send(_SupplierResponse(quote))
+    except asyncio.TimeoutError:
+        pass
 
-        quotes: list[PriceQuote] = request["quotes"]
-        sender = request["sender"]
 
-        if quotes:
-            best = min(quotes, key=lambda q: q.price)
-            result = BestPriceResult(
-                item=request["item"],
-                best_price=best.price,
-                best_supplier=best.supplier,
-                quotes_received=len(quotes),
-                total_suppliers=request["total"],
-            )
-        else:
-            result = BestPriceResult(
-                item=request["item"],
-                best_price=None,
-                best_supplier=None,
-                quotes_received=0,
-                total_suppliers=request["total"],
-            )
+async def _complete_request(request_id: int, pending_requests: dict) -> None:
+    request = pending_requests.pop(request_id, None)
+    if not request:
+        return
 
-        print(f"[Aggregator] Aggregation complete: {len(quotes)}/{request['total']} quotes received")
+    quotes: list[PriceQuote] = request["quotes"]
+    reply_to = request["reply_to"]
 
-        if sender:
-            await sender.send(result)
+    if quotes:
+        best = min(quotes, key=lambda q: q.price)
+        result = BestPriceResult(
+            item=request["item"],
+            best_price=best.price,
+            best_supplier=best.supplier,
+            quotes_received=len(quotes),
+            total_suppliers=request["total"],
+        )
+    else:
+        result = BestPriceResult(
+            item=request["item"],
+            best_price=None,
+            best_supplier=None,
+            quotes_received=0,
+            total_suppliers=request["total"],
+        )
+
+    print(f"[Aggregator] Aggregation complete: {len(quotes)}/{request['total']} quotes received")
+
+    if reply_to and not reply_to.done():
+        reply_to.set_result(result)
 
 
 async def main():
@@ -174,20 +152,20 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        supplier1 = await system.actor(Supplier, name="supplier-fastmart", supplier_name="FastMart", base_price=100.0, delay=0.1)
-        supplier2 = await system.actor(Supplier, name="supplier-budgetstore", supplier_name="BudgetStore", base_price=85.0, delay=0.2)
-        supplier3 = await system.actor(Supplier, name="supplier-slowshop", supplier_name="SlowShop", base_price=80.0, delay=2.0)
-        supplier4 = await system.actor(Supplier, name="supplier-quickdeal", supplier_name="QuickDeal", base_price=95.0, delay=0.15)
+        supplier1 = await system.actor(supplier(supplier_name="FastMart", base_price=100.0, delay=0.1), name="supplier-fastmart")
+        supplier2 = await system.actor(supplier(supplier_name="BudgetStore", base_price=85.0, delay=0.2), name="supplier-budgetstore")
+        supplier3 = await system.actor(supplier(supplier_name="SlowShop", base_price=80.0, delay=2.0), name="supplier-slowshop")
+        supplier4 = await system.actor(supplier(supplier_name="QuickDeal", base_price=95.0, delay=0.15), name="supplier-quickdeal")
 
-        suppliers = [supplier1, supplier2, supplier3, supplier4]
+        suppliers_list = [supplier1, supplier2, supplier3, supplier4]
 
-        aggregator = await system.actor(Aggregator, name="aggregator", suppliers=suppliers)
+        agg = await system.actor(aggregator(suppliers=suppliers_list), name="aggregator")
 
         print("[Main] Requesting best price for 'laptop' (1s timeout)...")
         print("       Note: SlowShop (2s delay) will likely timeout")
         print()
 
-        result: BestPriceResult = await aggregator.ask(
+        result: BestPriceResult = await agg.ask(
             FindBestPrice(item="laptop", timeout=1.0),
             timeout=5.0,
         )

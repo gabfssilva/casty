@@ -34,92 +34,73 @@ from dataclasses import dataclass
 
 from aiohttp import web
 
-from casty import Actor, ActorSystem, Context, on
+from casty import actor, ActorSystem, Mailbox, LocalActorRef
 
-
-# --- Messages ---
 
 @dataclass
 class Increment:
-    """Increment counter by amount."""
     amount: int = 1
 
 
 @dataclass
 class Decrement:
-    """Decrement counter by amount."""
     amount: int = 1
 
 
 @dataclass
 class GetCount:
-    """Query current count."""
     pass
 
 
 @dataclass
 class Reset:
-    """Reset counter to zero."""
     pass
 
 
-# --- Actor ---
-
-class CounterActor(Actor[Increment | Decrement | GetCount | Reset]):
-    """Counter actor that maintains state between HTTP requests.
-
-    This actor is thread-safe by design - all state modifications
-    happen through message processing, one message at a time.
-    """
-
-    def __init__(self):
-        self.count = 0
-        self.total_operations = 0
-
-    @on(Increment)
-    async def handle_increment(self, msg: Increment, ctx: Context):
-        self.count += msg.amount
-        self.total_operations += 1
-        print(f"[Counter] Incremented by {msg.amount} -> {self.count}")
-        await ctx.reply(self.count)
-
-    @on(Decrement)
-    async def handle_decrement(self, msg: Decrement, ctx: Context):
-        self.count -= msg.amount
-        self.total_operations += 1
-        print(f"[Counter] Decremented by {msg.amount} -> {self.count}")
-        await ctx.reply(self.count)
-
-    @on(GetCount)
-    async def handle_get_count(self, msg: GetCount, ctx: Context):
-        await ctx.reply({
-            "count": self.count,
-            "total_operations": self.total_operations
-        })
-
-    @on(Reset)
-    async def handle_reset(self, msg: Reset, ctx: Context):
-        old_count = self.count
-        self.count = 0
-        self.total_operations += 1
-        print(f"[Counter] Reset from {old_count} -> 0")
-        await ctx.reply({"reset": True, "previous_count": old_count})
+CounterMsg = Increment | Decrement | GetCount | Reset
 
 
-# --- HTTP Handlers ---
+@actor
+async def counter(*, mailbox: Mailbox[CounterMsg]):
+    count = 0
+    total_operations = 0
+
+    async for msg, ctx in mailbox:
+        match msg:
+            case Increment(amount):
+                count += amount
+                total_operations += 1
+                print(f"[Counter] Incremented by {amount} -> {count}")
+                await ctx.reply(count)
+
+            case Decrement(amount):
+                count -= amount
+                total_operations += 1
+                print(f"[Counter] Decremented by {amount} -> {count}")
+                await ctx.reply(count)
+
+            case GetCount():
+                await ctx.reply({
+                    "count": count,
+                    "total_operations": total_operations
+                })
+
+            case Reset():
+                old_count = count
+                count = 0
+                total_operations += 1
+                print(f"[Counter] Reset from {old_count} -> 0")
+                await ctx.reply({"reset": True, "previous_count": old_count})
+
 
 class HttpGateway:
-    """HTTP gateway that translates HTTP requests to actor messages."""
-
-    def __init__(self, counter_ref):
+    def __init__(self, counter_ref: LocalActorRef[CounterMsg]):
         self.counter = counter_ref
-        self.request_timeout = 5.0  # seconds
+        self.request_timeout = 5.0
 
     async def handle_increment(self, request: web.Request) -> web.Response:
-        """POST /increment - Increment the counter."""
         amount = 1
 
-        # Parse optional JSON body for amount
         if request.body_exists:
             try:
                 body = await request.json()
@@ -134,7 +115,6 @@ class HttpGateway:
             return web.json_response({"error": "Request timeout"}, status=504)
 
     async def handle_decrement(self, request: web.Request) -> web.Response:
-        """POST /decrement - Decrement the counter."""
         amount = 1
 
         if request.body_exists:
@@ -151,7 +131,6 @@ class HttpGateway:
             return web.json_response({"error": "Request timeout"}, status=504)
 
     async def handle_get_count(self, request: web.Request) -> web.Response:
-        """GET /count - Get the current count."""
         try:
             result = await self.counter.ask(GetCount(), timeout=self.request_timeout)
             return web.json_response(result)
@@ -159,7 +138,6 @@ class HttpGateway:
             return web.json_response({"error": "Request timeout"}, status=504)
 
     async def handle_reset(self, request: web.Request) -> web.Response:
-        """POST /reset - Reset the counter."""
         try:
             result = await self.counter.ask(Reset(), timeout=self.request_timeout)
             return web.json_response(result)
@@ -167,7 +145,6 @@ class HttpGateway:
             return web.json_response({"error": "Request timeout"}, status=504)
 
     async def handle_health(self, request: web.Request) -> web.Response:
-        """GET /health - Health check endpoint."""
         return web.json_response({"status": "healthy"})
 
 
@@ -177,15 +154,12 @@ async def main():
     print("=" * 60)
     print()
 
-    # Create the actor system and counter actor
     async with ActorSystem() as system:
-        counter = await system.actor(CounterActor, name="counter")
+        counter_ref = await system.actor(counter(), name="counter")
         print("[System] Counter actor created")
 
-        # Create HTTP gateway
-        gateway = HttpGateway(counter)
+        gateway = HttpGateway(counter_ref)
 
-        # Setup aiohttp web application
         app = web.Application()
         app.router.add_get("/health", gateway.handle_health)
         app.router.add_get("/count", gateway.handle_get_count)
@@ -193,7 +167,6 @@ async def main():
         app.router.add_post("/decrement", gateway.handle_decrement)
         app.router.add_post("/reset", gateway.handle_reset)
 
-        # Create runner for graceful shutdown
         runner = web.AppRunner(app)
         await runner.setup()
 
@@ -213,7 +186,6 @@ async def main():
         print("Press Ctrl+C to stop...")
         print()
 
-        # Setup graceful shutdown
         shutdown_event = asyncio.Event()
 
         def signal_handler():
@@ -224,10 +196,8 @@ async def main():
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, signal_handler)
 
-        # Wait for shutdown signal
         await shutdown_event.wait()
 
-        # Graceful shutdown
         print("[HTTP] Stopping server...")
         await runner.cleanup()
         print("[System] Server stopped gracefully")

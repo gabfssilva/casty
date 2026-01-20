@@ -14,40 +14,33 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from casty import Actor, ActorSystem, Context, LocalActorRef, on
+from casty import actor, ActorSystem, Mailbox, LocalActorRef
 
-
-# --- Messages ---
 
 @dataclass
 class Join:
-    """A user joins the chat room."""
     username: str
     user_ref: LocalActorRef
 
 
 @dataclass
 class Leave:
-    """A user leaves the chat room."""
     username: str
 
 
 @dataclass
 class SendMessage:
-    """Send a message to the room."""
     username: str
     text: str
 
 
 @dataclass
 class ListUsers:
-    """Request list of online users."""
     pass
 
 
 @dataclass
 class ChatMessage:
-    """Message delivered to participants."""
     sender: str
     text: str
     timestamp: datetime = field(default_factory=datetime.now)
@@ -55,97 +48,69 @@ class ChatMessage:
 
 @dataclass
 class SystemNotification:
-    """System notification (join/leave)."""
     text: str
     timestamp: datetime = field(default_factory=datetime.now)
 
 
-# --- Chat Room Actor ---
+ChatRoomMsg = Join | Leave | SendMessage | ListUsers
+UserMsg = ChatMessage | SystemNotification
 
-type ChatRoomMessage = Join | Leave | SendMessage | ListUsers
 
+@actor
+async def chat_room(room_name: str = "general", *, mailbox: Mailbox[ChatRoomMsg]):
+    participants: dict[str, LocalActorRef] = {}
 
-class ChatRoom(Actor[ChatRoomMessage]):
-    """Chat room that manages participants and broadcasts messages.
-
-    Participants are stored as a mapping from username to their actor ref.
-    When a message is sent, it's broadcast to all participants.
-    """
-
-    def __init__(self, room_name: str = "general"):
-        self.room_name = room_name
-        self.participants: dict[str, LocalActorRef] = {}
-
-    @on(Join)
-    async def handle_join(self, msg: Join, ctx: Context) -> None:
-        if msg.username in self.participants:
-            print(f"[{self.room_name}] User '{msg.username}' is already in the room")
-            return
-
-        self.participants[msg.username] = msg.user_ref
-        print(f"[{self.room_name}] User '{msg.username}' joined ({len(self.participants)} users)")
-
-        notification = SystemNotification(f"{msg.username} has joined the room")
-        await self._broadcast(notification, exclude=msg.username)
-
-    @on(Leave)
-    async def handle_leave(self, msg: Leave, ctx: Context) -> None:
-        if msg.username not in self.participants:
-            return
-
-        del self.participants[msg.username]
-        print(f"[{self.room_name}] User '{msg.username}' left ({len(self.participants)} users)")
-
-        notification = SystemNotification(f"{msg.username} has left the room")
-        await self._broadcast(notification)
-
-    @on(SendMessage)
-    async def handle_send(self, msg: SendMessage, ctx: Context) -> None:
-        if msg.username not in self.participants:
-            print(f"[{self.room_name}] User '{msg.username}' is not in the room")
-            return
-
-        chat_msg = ChatMessage(sender=msg.username, text=msg.text)
-        await self._broadcast(chat_msg, exclude=msg.username)
-
-    @on(ListUsers)
-    async def handle_list(self, msg: ListUsers, ctx: Context) -> None:
-        users = list(self.participants.keys())
-        await ctx.reply(users)
-
-    async def _broadcast(self, message: ChatMessage | SystemNotification, exclude: str | None = None) -> None:
-        """Broadcast a message to all participants except the excluded one."""
-        for username, ref in self.participants.items():
+    async def broadcast(message: ChatMessage | SystemNotification, exclude: str | None = None):
+        for username, ref in participants.items():
             if username != exclude:
                 await ref.send(message)
 
+    async for msg, ctx in mailbox:
+        match msg:
+            case Join(username, user_ref):
+                if username in participants:
+                    print(f"[{room_name}] User '{username}' is already in the room")
+                    continue
 
-# --- User Actor ---
+                participants[username] = user_ref
+                print(f"[{room_name}] User '{username}' joined ({len(participants)} users)")
+                await broadcast(SystemNotification(f"{username} has joined the room"), exclude=username)
 
-type UserMessage = ChatMessage | SystemNotification
+            case Leave(username):
+                if username not in participants:
+                    continue
 
+                del participants[username]
+                print(f"[{room_name}] User '{username}' left ({len(participants)} users)")
+                await broadcast(SystemNotification(f"{username} has left the room"))
 
-class User(Actor[UserMessage]):
-    """User actor that receives chat messages and notifications."""
+            case SendMessage(username, text):
+                if username not in participants:
+                    print(f"[{room_name}] User '{username}' is not in the room")
+                    continue
 
-    def __init__(self, username: str):
-        self.username = username
-        self.messages_received: list[str] = []
+                await broadcast(ChatMessage(sender=username, text=text), exclude=username)
 
-    @on(ChatMessage)
-    async def handle_chat(self, msg: ChatMessage, ctx: Context) -> None:
-        formatted = f"[{msg.timestamp.strftime('%H:%M:%S')}] {msg.sender}: {msg.text}"
-        self.messages_received.append(formatted)
-        print(f"  {self.username} received: {formatted}")
-
-    @on(SystemNotification)
-    async def handle_notification(self, msg: SystemNotification, ctx: Context) -> None:
-        formatted = f"[{msg.timestamp.strftime('%H:%M:%S')}] * {msg.text}"
-        self.messages_received.append(formatted)
-        print(f"  {self.username} received: {formatted}")
+            case ListUsers():
+                await ctx.reply(list(participants.keys()))
 
 
-# --- Main ---
+@actor
+async def user(username: str, *, mailbox: Mailbox[UserMsg]):
+    messages_received: list[str] = []
+
+    async for msg, ctx in mailbox:
+        match msg:
+            case ChatMessage(sender, text, timestamp):
+                formatted = f"[{timestamp.strftime('%H:%M:%S')}] {sender}: {text}"
+                messages_received.append(formatted)
+                print(f"  {username} received: {formatted}")
+
+            case SystemNotification(text, timestamp):
+                formatted = f"[{timestamp.strftime('%H:%M:%S')}] * {text}"
+                messages_received.append(formatted)
+                print(f"  {username} received: {formatted}")
+
 
 async def main():
     print("=" * 60)
@@ -154,17 +119,14 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        # Create chat room
-        room = await system.actor(ChatRoom, name="chat-room-python-devs", room_name="python-devs")
+        room = await system.actor(chat_room(room_name="python-devs"), name="chat-room-python-devs")
         print("Chat room 'python-devs' created")
         print()
 
-        # Create users
-        alice_ref = await system.actor(User, name="user-alice", username="alice")
-        bob_ref = await system.actor(User, name="user-bob", username="bob")
-        charlie_ref = await system.actor(User, name="user-charlie", username="charlie")
+        alice_ref = await system.actor(user(username="alice"), name="user-alice")
+        bob_ref = await system.actor(user(username="bob"), name="user-bob")
+        charlie_ref = await system.actor(user(username="charlie"), name="user-charlie")
 
-        # Users join the room
         print("--- Users joining ---")
         await room.send(Join("alice", alice_ref))
         await room.send(Join("bob", bob_ref))
@@ -172,13 +134,11 @@ async def main():
         await asyncio.sleep(0.1)
         print()
 
-        # List users
         print("--- Listing users ---")
         users = await room.ask(ListUsers())
         print(f"Online users: {users}")
         print()
 
-        # Send messages
         print("--- Sending messages ---")
         await room.send(SendMessage("alice", "Hello everyone!"))
         await asyncio.sleep(0.05)
@@ -190,19 +150,16 @@ async def main():
         await asyncio.sleep(0.1)
         print()
 
-        # User leaves
         print("--- User leaving ---")
         await room.send(Leave("bob"))
         await asyncio.sleep(0.1)
         print()
 
-        # More messages
         print("--- More messages ---")
         await room.send(SendMessage("alice", "Bye Bob!"))
         await asyncio.sleep(0.1)
         print()
 
-        # Final user list
         users = await room.ask(ListUsers())
         print(f"Final online users: {users}")
 

@@ -19,10 +19,8 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from casty import Actor, ActorSystem, Context, LocalActorRef, on
+from casty import actor, ActorSystem, Mailbox, LocalActorRef
 
-
-# --- Messages ---
 
 class JobStatus(Enum):
     PENDING = "pending"
@@ -34,7 +32,6 @@ class JobStatus(Enum):
 
 @dataclass
 class Job:
-    """A job to be processed."""
     id: str
     payload: Any
     max_retries: int = 3
@@ -49,45 +46,38 @@ class Job:
 
 @dataclass
 class Enqueue:
-    """Enqueue a new job."""
     job: Job
 
 
 @dataclass
 class RequestWork:
-    """Worker requests work from the queue."""
     worker_ref: LocalActorRef
 
 
 @dataclass
 class JobAssignment:
-    """Job assigned to a worker."""
     job: Job
 
 
 @dataclass
 class JobCompleted:
-    """Worker reports job completion."""
     job_id: str
     result: Any
 
 
 @dataclass
 class JobFailed:
-    """Worker reports job failure."""
     job_id: str
     error: str
 
 
 @dataclass
 class GetStats:
-    """Request queue statistics."""
     pass
 
 
 @dataclass
 class QueueStats:
-    """Queue statistics response."""
     pending: int
     processing: int
     completed: int
@@ -95,148 +85,97 @@ class QueueStats:
     dead_letter: int
 
 
-@dataclass
-class ProcessJob:
-    """Internal message to process a job."""
-    job: Job
-    queue_ref: LocalActorRef
+JobQueueMsg = Enqueue | RequestWork | JobCompleted | JobFailed | GetStats
 
 
-# --- Job Queue Actor ---
+@actor
+async def job_queue(queue_name: str = "default", *, mailbox: Mailbox[JobQueueMsg]):
+    pending: list[Job] = []
+    processing: dict[str, Job] = {}
+    completed: list[Job] = []
+    dead_letter: list[Job] = []
+    waiting_workers: list[LocalActorRef] = []
 
-type JobQueueMessage = Enqueue | RequestWork | JobCompleted | JobFailed | GetStats
-
-
-class JobQueue(Actor[JobQueueMessage]):
-    """Job queue that manages work distribution to workers.
-
-    Features:
-    - FIFO job queue
-    - Tracks jobs in processing
-    - Retries failed jobs with backoff
-    - Dead-letter queue for jobs exceeding max retries
-    """
-
-    def __init__(self, queue_name: str = "default"):
-        self.queue_name = queue_name
-        self.pending: list[Job] = []
-        self.processing: dict[str, Job] = {}
-        self.completed: list[Job] = []
-        self.dead_letter: list[Job] = []
-        self.waiting_workers: list[LocalActorRef] = []
-
-    @on(Enqueue)
-    async def handle_enqueue(self, msg: Enqueue, ctx: Context) -> None:
-        job = msg.job
-        print(f"[Queue:{self.queue_name}] Job {job.id} enqueued (payload: {job.payload})")
-        self.pending.append(job)
-        await self._dispatch_work(ctx)
-
-    @on(RequestWork)
-    async def handle_request(self, msg: RequestWork, ctx: Context) -> None:
-        if self.pending:
-            await self._assign_job(msg.worker_ref)
-        else:
-            self.waiting_workers.append(msg.worker_ref)
-
-    @on(JobCompleted)
-    async def handle_completed(self, msg: JobCompleted, ctx: Context) -> None:
-        job = self.processing.pop(msg.job_id, None)
-        if job:
-            job.status = JobStatus.COMPLETED
-            self.completed.append(job)
-            print(f"[Queue:{self.queue_name}] Job {msg.job_id} completed (result: {msg.result})")
-
-    @on(JobFailed)
-    async def handle_failed(self, msg: JobFailed, ctx: Context) -> None:
-        job = self.processing.pop(msg.job_id, None)
-        if not job:
+    async def assign_job(worker: LocalActorRef):
+        if not pending:
             return
-
-        job.attempt += 1
-        print(f"[Queue:{self.queue_name}] Job {msg.job_id} failed (attempt {job.attempt}/{job.max_retries}): {msg.error}")
-
-        if job.attempt >= job.max_retries:
-            job.status = JobStatus.DEAD
-            self.dead_letter.append(job)
-            print(f"[Queue:{self.queue_name}] Job {msg.job_id} moved to dead-letter queue")
-        else:
-            # Retry with exponential backoff
-            backoff = 0.1 * (2 ** job.attempt)
-            print(f"[Queue:{self.queue_name}] Job {msg.job_id} will retry in {backoff:.1f}s")
-            job.status = JobStatus.PENDING
-            await ctx.schedule(backoff, Enqueue(job))
-
-    @on(GetStats)
-    async def handle_stats(self, msg: GetStats, ctx: Context) -> None:
-        stats = QueueStats(
-            pending=len(self.pending),
-            processing=len(self.processing),
-            completed=len(self.completed),
-            failed=sum(1 for j in self.completed if j.status == JobStatus.FAILED),
-            dead_letter=len(self.dead_letter),
-        )
-        await ctx.reply(stats)
-
-    async def _dispatch_work(self, ctx: Context) -> None:
-        """Dispatch pending jobs to waiting workers."""
-        while self.pending and self.waiting_workers:
-            worker = self.waiting_workers.pop(0)
-            await self._assign_job(worker)
-
-    async def _assign_job(self, worker: LocalActorRef) -> None:
-        """Assign a pending job to a worker."""
-        if not self.pending:
-            return
-
-        job = self.pending.pop(0)
+        job = pending.pop(0)
         job.status = JobStatus.PROCESSING
-        self.processing[job.id] = job
+        processing[job.id] = job
         await worker.send(JobAssignment(job))
 
+    async def dispatch_work():
+        while pending and waiting_workers:
+            worker = waiting_workers.pop(0)
+            await assign_job(worker)
 
-# --- Worker Actor ---
+    async for msg, ctx in mailbox:
+        match msg:
+            case Enqueue(job):
+                print(f"[Queue:{queue_name}] Job {job.id} enqueued (payload: {job.payload})")
+                pending.append(job)
+                await dispatch_work()
 
-type WorkerMessage = JobAssignment
+            case RequestWork(worker_ref):
+                if pending:
+                    await assign_job(worker_ref)
+                else:
+                    waiting_workers.append(worker_ref)
+
+            case JobCompleted(job_id, result):
+                job = processing.pop(job_id, None)
+                if job:
+                    job.status = JobStatus.COMPLETED
+                    completed.append(job)
+                    print(f"[Queue:{queue_name}] Job {job_id} completed (result: {result})")
+
+            case JobFailed(job_id, error):
+                job = processing.pop(job_id, None)
+                if not job:
+                    continue
+
+                job.attempt += 1
+                print(f"[Queue:{queue_name}] Job {job_id} failed (attempt {job.attempt}/{job.max_retries}): {error}")
+
+                if job.attempt >= job.max_retries:
+                    job.status = JobStatus.DEAD
+                    dead_letter.append(job)
+                    print(f"[Queue:{queue_name}] Job {job_id} moved to dead-letter queue")
+                else:
+                    backoff = 0.1 * (2 ** job.attempt)
+                    print(f"[Queue:{queue_name}] Job {job_id} will retry in {backoff:.1f}s")
+                    job.status = JobStatus.PENDING
+                    await ctx.schedule(Enqueue(job), delay=backoff)
+
+            case GetStats():
+                stats = QueueStats(
+                    pending=len(pending),
+                    processing=len(processing),
+                    completed=len(completed),
+                    failed=sum(1 for j in completed if j.status == JobStatus.FAILED),
+                    dead_letter=len(dead_letter),
+                )
+                await ctx.reply(stats)
 
 
-class Worker(Actor[WorkerMessage]):
-    """Worker that processes jobs from the queue.
+@actor
+async def worker(worker_id: int, queue_ref: LocalActorRef[JobQueueMsg], fail_rate: float = 0.3, *, mailbox: Mailbox[JobAssignment]):
+    await queue_ref.send(RequestWork(mailbox._self_ref))
 
-    Simulates random failures to demonstrate retry logic.
-    """
+    async for msg, ctx in mailbox:
+        match msg:
+            case JobAssignment(job):
+                print(f"  [Worker-{worker_id}] Processing job {job.id}...")
+                await asyncio.sleep(random.uniform(0.05, 0.15))
 
-    def __init__(self, worker_id: int, queue_ref: LocalActorRef, fail_rate: float = 0.3):
-        self.worker_id = worker_id
-        self.queue_ref = queue_ref
-        self.fail_rate = fail_rate
-        self.jobs_processed = 0
+                if random.random() < fail_rate:
+                    await queue_ref.send(JobFailed(job.id, "Random processing error"))
+                else:
+                    result = f"processed:{job.payload}"
+                    await queue_ref.send(JobCompleted(job.id, result))
 
-    async def on_start(self) -> None:
-        """Request work when starting."""
-        await self.queue_ref.send(RequestWork(self._ctx.self_ref))
+                await queue_ref.send(RequestWork(ctx._self_ref))
 
-    @on(JobAssignment)
-    async def handle_assignment(self, msg: JobAssignment, ctx: Context) -> None:
-        job = msg.job
-        print(f"  [Worker-{self.worker_id}] Processing job {job.id}...")
-
-        # Simulate work
-        await asyncio.sleep(random.uniform(0.05, 0.15))
-
-        # Simulate random failures
-        if random.random() < self.fail_rate:
-            await self.queue_ref.send(JobFailed(job.id, "Random processing error"))
-        else:
-            result = f"processed:{job.payload}"
-            await self.queue_ref.send(JobCompleted(job.id, result))
-            self.jobs_processed += 1
-
-        # Request more work
-        await self.queue_ref.send(RequestWork(ctx.self_ref))
-
-
-# --- Main ---
 
 async def main():
     print("=" * 60)
@@ -245,39 +184,29 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        # Create job queue
-        queue = await system.actor(JobQueue, name="job-queue-tasks", queue_name="tasks")
+        queue = await system.actor(job_queue(queue_name="tasks"), name="job-queue-tasks")
         print("Job queue 'tasks' created")
         print()
 
-        # Create workers
         print("Spawning 3 workers...")
-        workers = []
         for i in range(3):
-            worker = await system.actor(
-                Worker,
+            await system.actor(
+                worker(worker_id=i, queue_ref=queue, fail_rate=0.3),
                 name=f"worker-{i}",
-                worker_id=i,
-                queue_ref=queue,
-                fail_rate=0.3,  # 30% failure rate
             )
-            workers.append(worker)
         await asyncio.sleep(0.1)
         print()
 
-        # Enqueue jobs
         print("--- Enqueueing jobs ---")
         for i in range(8):
             job = Job.create(payload=f"task-{i}", max_retries=3)
             await queue.send(Enqueue(job))
         print()
 
-        # Wait for processing
         print("--- Processing jobs ---")
         await asyncio.sleep(2.0)
         print()
 
-        # Get final stats
         print("--- Final Statistics ---")
         stats: QueueStats = await queue.ask(GetStats())
         print(f"Pending:     {stats.pending}")

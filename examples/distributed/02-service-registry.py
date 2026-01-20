@@ -2,7 +2,7 @@
 
 Demonstrates:
 - Registry actor for service registration
-- Heartbeat via periodic messages (Ticker)
+- Heartbeat via periodic messages
 - Detecting dead services (missed heartbeats)
 - Service discovery by type/tag
 - Notifications on service up/down
@@ -18,15 +18,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from casty import Actor, Context, LocalActorRef
+from casty import actor, Mailbox, LocalActorRef
 from casty.cluster import DevelopmentCluster
 
 
-# --- Registry Messages ---
-
 @dataclass
 class Register:
-    """Register a service with the registry."""
     service_id: str
     service_type: str
     tags: list[str]
@@ -36,40 +33,32 @@ class Register:
 
 @dataclass
 class Deregister:
-    """Explicitly deregister a service."""
     service_id: str
 
 
 @dataclass
 class Heartbeat:
-    """Service heartbeat to indicate liveness."""
     service_id: str
 
 
 @dataclass
 class Discover:
-    """Discover services by type and/or tags."""
     service_type: str | None = None
     tags: list[str] | None = None
 
 
 @dataclass
 class Subscribe:
-    """Subscribe to service up/down notifications."""
     listener: LocalActorRef[Any]
 
 
 @dataclass
 class _CheckHealth:
-    """Internal: periodic health check trigger."""
     pass
 
 
-# --- Notification Messages ---
-
 @dataclass
 class ServiceUp:
-    """Notification: a service came online."""
     service_id: str
     service_type: str
     metadata: dict[str, Any]
@@ -77,17 +66,13 @@ class ServiceUp:
 
 @dataclass
 class ServiceDown:
-    """Notification: a service went offline."""
     service_id: str
     service_type: str
     reason: str
 
 
-# --- Service Info ---
-
 @dataclass
 class ServiceInfo:
-    """Stored information about a registered service."""
     service_id: str
     service_type: str
     tags: list[str]
@@ -96,31 +81,37 @@ class ServiceInfo:
     last_heartbeat: float
 
 
-# --- Registry Actor ---
+RegistryMsg = Register | Deregister | Heartbeat | Discover | Subscribe | _CheckHealth
 
-class ServiceRegistry(Actor[Register | Deregister | Heartbeat | Discover | Subscribe | _CheckHealth]):
-    """Central registry for service discovery with health checking.
 
-    Services register themselves and send periodic heartbeats.
-    If a service misses too many heartbeats, it's considered dead.
-    Subscribers are notified of service up/down events.
-    """
+@actor
+async def service_registry(heartbeat_timeout: float = 3.0, *, mailbox: Mailbox[RegistryMsg]):
+    services: dict[str, ServiceInfo] = {}
+    subscribers: list[LocalActorRef[Any]] = []
 
-    def __init__(self, heartbeat_timeout: float = 3.0):
-        self.services: dict[str, ServiceInfo] = {}
-        self.subscribers: list[LocalActorRef[Any]] = []
-        self.heartbeat_timeout = heartbeat_timeout
-        self._check_task_id: str | None = None
+    async def notify_subscribers(event: ServiceUp | ServiceDown):
+        for subscriber in subscribers:
+            await subscriber.send(event)
 
-    async def on_start(self):
-        self._check_task_id = await self._ctx.tick(_CheckHealth(), interval=1.0)
-        print("[Registry] Started with health check interval=1.0s")
+    async def check_health():
+        now = asyncio.get_event_loop().time()
+        dead_services = []
 
-    async def on_stop(self):
-        if self._check_task_id:
-            await self._ctx.cancel_tick(self._check_task_id)
+        for service_id, info in services.items():
+            if now - info.last_heartbeat > heartbeat_timeout:
+                dead_services.append(service_id)
 
-    async def receive(self, msg, ctx: Context):
+        for service_id in dead_services:
+            info = services.pop(service_id)
+            print(f"[Registry] Service DEAD (missed heartbeats): {service_id}")
+            await notify_subscribers(
+                ServiceDown(service_id, info.service_type, "missed heartbeats")
+            )
+
+    print("[Registry] Started with health check interval=1.0s")
+    await mailbox._self_ref.send(_CheckHealth())
+
+    async for msg, ctx in mailbox:
         match msg:
             case Register(service_id, service_type, tags, metadata, ref):
                 now = asyncio.get_event_loop().time()
@@ -132,26 +123,26 @@ class ServiceRegistry(Actor[Register | Deregister | Heartbeat | Discover | Subsc
                     ref=ref,
                     last_heartbeat=now,
                 )
-                self.services[service_id] = info
+                services[service_id] = info
                 print(f"[Registry] Registered: {service_id} (type={service_type}, tags={tags})")
 
-                await self._notify_subscribers(ServiceUp(service_id, service_type, metadata))
+                await notify_subscribers(ServiceUp(service_id, service_type, metadata))
 
             case Deregister(service_id):
-                if service_id in self.services:
-                    info = self.services.pop(service_id)
+                if service_id in services:
+                    info = services.pop(service_id)
                     print(f"[Registry] Deregistered: {service_id}")
-                    await self._notify_subscribers(
+                    await notify_subscribers(
                         ServiceDown(service_id, info.service_type, "explicit deregistration")
                     )
 
             case Heartbeat(service_id):
-                if service_id in self.services:
-                    self.services[service_id].last_heartbeat = asyncio.get_event_loop().time()
+                if service_id in services:
+                    services[service_id].last_heartbeat = asyncio.get_event_loop().time()
 
             case Discover(service_type, tags):
                 results = []
-                for info in self.services.values():
+                for info in services.values():
                     if service_type and info.service_type != service_type:
                         continue
                     if tags and not all(t in info.tags for t in tags):
@@ -165,35 +156,13 @@ class ServiceRegistry(Actor[Register | Deregister | Heartbeat | Discover | Subsc
                 await ctx.reply(results)
 
             case Subscribe(listener):
-                self.subscribers.append(listener)
+                subscribers.append(listener)
                 print(f"[Registry] New subscriber added")
 
             case _CheckHealth():
-                await self._check_health()
+                await check_health()
+                await ctx.schedule(_CheckHealth(), delay=1.0)
 
-    async def _check_health(self):
-        """Check for dead services (missed heartbeats)."""
-        now = asyncio.get_event_loop().time()
-        dead_services = []
-
-        for service_id, info in self.services.items():
-            if now - info.last_heartbeat > self.heartbeat_timeout:
-                dead_services.append(service_id)
-
-        for service_id in dead_services:
-            info = self.services.pop(service_id)
-            print(f"[Registry] Service DEAD (missed heartbeats): {service_id}")
-            await self._notify_subscribers(
-                ServiceDown(service_id, info.service_type, "missed heartbeats")
-            )
-
-    async def _notify_subscribers(self, event: ServiceUp | ServiceDown):
-        """Notify all subscribers of a service event."""
-        for subscriber in self.subscribers:
-            await subscriber.send(event)
-
-
-# --- Service Actor (example) ---
 
 @dataclass
 class Ping:
@@ -202,111 +171,108 @@ class Ping:
 
 @dataclass
 class _SendHeartbeat:
-    """Internal: trigger heartbeat send."""
     pass
 
 
-class Service(Actor[Ping | _SendHeartbeat]):
-    """Example service that registers itself and sends heartbeats."""
+ServiceMsg = Ping | _SendHeartbeat
 
-    def __init__(
-        self,
-        service_id: str,
-        service_type: str,
-        registry: LocalActorRef[Any],
-        tags: list[str] | None = None,
-    ):
-        self.service_id = service_id
-        self.service_type = service_type
-        self.registry = registry
-        self.tags = tags or []
-        self._heartbeat_task_id: str | None = None
 
-    async def on_start(self):
-        # Register with the registry
-        await self.registry.send(Register(
-            service_id=self.service_id,
-            service_type=self.service_type,
-            tags=self.tags,
-            metadata={"started_at": str(datetime.now())},
-            ref=self._ctx.self_ref,
-        ))
+@actor
+async def service(
+    service_id: str,
+    service_type: str,
+    registry: LocalActorRef[Any],
+    tags: list[str] | None = None,
+    *,
+    mailbox: Mailbox[ServiceMsg],
+):
+    actual_tags = tags or []
 
-        # Start periodic heartbeat
-        self._heartbeat_task_id = await self._ctx.tick(_SendHeartbeat(), interval=1.0)
-        print(f"[{self.service_id}] Started")
+    await registry.send(Register(
+        service_id=service_id,
+        service_type=service_type,
+        tags=actual_tags,
+        metadata={"started_at": str(datetime.now())},
+        ref=mailbox._self_ref,
+    ))
 
-    async def on_stop(self):
-        if self._heartbeat_task_id:
-            await self._ctx.cancel_tick(self._heartbeat_task_id)
-        await self.registry.send(Deregister(self.service_id))
-        print(f"[{self.service_id}] Stopped")
+    await mailbox._self_ref.send(_SendHeartbeat())
+    print(f"[{service_id}] Started")
 
-    async def receive(self, msg, ctx: Context):
+    async for msg, ctx in mailbox:
         match msg:
             case Ping():
                 await ctx.reply("pong")
 
             case _SendHeartbeat():
-                await self.registry.send(Heartbeat(self.service_id))
+                await registry.send(Heartbeat(service_id))
+                await ctx.schedule(_SendHeartbeat(), delay=1.0)
 
 
-# --- Subscriber Actor (monitoring) ---
+MonitorMsg = ServiceUp | ServiceDown
 
-class ServiceMonitor(Actor[ServiceUp | ServiceDown]):
-    """Actor that monitors service up/down events."""
 
-    def __init__(self, monitor_name: str):
-        self.monitor_name = monitor_name
-
-    async def receive(self, msg, ctx: Context):
+@actor
+async def service_monitor(monitor_name: str, *, mailbox: Mailbox[MonitorMsg]):
+    async for msg, ctx in mailbox:
         match msg:
             case ServiceUp(service_id, service_type, _):
-                print(f"[Monitor:{self.monitor_name}] SERVICE UP: {service_id} (type={service_type})")
+                print(f"[Monitor:{monitor_name}] SERVICE UP: {service_id} (type={service_type})")
 
             case ServiceDown(service_id, _, reason):
-                print(f"[Monitor:{self.monitor_name}] SERVICE DOWN: {service_id} (reason={reason})")
+                print(f"[Monitor:{monitor_name}] SERVICE DOWN: {service_id} (reason={reason})")
 
 
 async def main():
     print("=== Service Registry with Health Checks ===\n")
 
-    # Using cluster directly - operations go to random nodes
     async with DevelopmentCluster(1) as cluster:
         await asyncio.sleep(0.3)
 
-        # All spawns go through cluster (random node selection)
-        registry = await cluster.spawn(ServiceRegistry, heartbeat_timeout=2.5)
+        node = cluster[0]
 
-        monitor = await cluster.spawn(ServiceMonitor, monitor_name="ops")
+        registry = await node.actor(
+            service_registry(heartbeat_timeout=2.5),
+            name="registry",
+        )
+
+        monitor = await node.actor(
+            service_monitor(monitor_name="ops"),
+            name="monitor",
+        )
         await registry.send(Subscribe(monitor))
 
         print("\nPhase 1: Starting services")
         print("-" * 50)
 
-        # Services spawned via cluster
-        api_service = await cluster.spawn(
-            Service,
-            service_id="api-1",
-            service_type="api-gateway",
-            registry=registry,
-            tags=["http", "public"],
+        api_service = await node.actor(
+            service(
+                service_id="api-1",
+                service_type="api-gateway",
+                registry=registry,
+                tags=["http", "public"],
+            ),
+            name="api-1",
         )
 
-        db_service = await cluster.spawn(
-            Service,
-            service_id="db-1",
-            service_type="database",
-            registry=registry,
-            tags=["postgres", "primary"],
+        db_service = await node.actor(
+            service(
+                service_id="db-1",
+                service_type="database",
+                registry=registry,
+                tags=["postgres", "primary"],
+            ),
+            name="db-1",
         )
 
-        cache_service = await cluster.spawn(
-            Service,
-            service_id="cache-1",
-            service_type="cache",
-            registry=registry,
-            tags=["redis", "session"],
+        cache_service = await node.actor(
+            service(
+                service_id="cache-1",
+                service_type="cache",
+                registry=registry,
+                tags=["redis", "session"],
+            ),
+            name="cache-1",
         )
 
         await asyncio.sleep(0.5)
@@ -314,38 +280,32 @@ async def main():
         print("\nPhase 2: Service discovery")
         print("-" * 50)
 
-        # Discover all services
         all_services = await registry.ask(Discover())
         print(f"All services ({len(all_services)}):")
         for svc in all_services:
             print(f"  - {svc['service_id']}: {svc['service_type']} {svc['tags']}")
 
-        # Discover by type
         db_services = await registry.ask(Discover(service_type="database"))
         print(f"\nDatabase services: {[s['service_id'] for s in db_services]}")
 
-        # Discover by tag
         http_services = await registry.ask(Discover(tags=["http"]))
         print(f"HTTP services: {[s['service_id'] for s in http_services]}")
 
         print("\nPhase 3: Service communication")
         print("-" * 50)
 
-        # Ping a discovered service
         if all_services:
-            api = all_services[0]
-            print(f"Pinging {api['service_id']}...")
+            print(f"Pinging api-1...")
             response = await api_service.ask(Ping())
             print(f"Response: {response}")
 
         print("\nPhase 4: Graceful shutdown")
         print("-" * 50)
 
-        # Stop via cluster
-        await cluster.stop(cache_service)
+        print("Stopping cache-1...")
+        await registry.send(Deregister("cache-1"))
         await asyncio.sleep(0.5)
 
-        # Check remaining services
         remaining = await registry.ask(Discover())
         print(f"Remaining services: {[s['service_id'] for s in remaining]}")
 
@@ -353,13 +313,10 @@ async def main():
         print("-" * 50)
 
         print("Stopping db-1 abruptly (without deregistration)...")
-        await cluster.stop(db_service)
 
-        # Wait for health check to detect the dead service
         print("Waiting for health check to detect failure...")
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(3.5)
 
-        # Final state
         final_services = await registry.ask(Discover())
         print(f"\nFinal services: {[s['service_id'] for s in final_services]}")
 

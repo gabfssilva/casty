@@ -13,25 +13,20 @@ Run with: uv run python examples/distributed/03-sharded-cache.py
 """
 
 import asyncio
-import hashlib
 from dataclasses import dataclass
 from typing import Any
 
-from casty import Actor, Context, LocalActorRef
+from casty import actor, Mailbox, LocalActorRef
 from casty.cluster import DevelopmentCluster, HashRing
 
 
-# --- Cache Messages ---
-
 @dataclass
 class Get:
-    """Get a value from cache."""
     key: str
 
 
 @dataclass
 class Set:
-    """Set a value in cache."""
     key: str
     value: Any
     ttl: float | None = None
@@ -39,98 +34,83 @@ class Set:
 
 @dataclass
 class Delete:
-    """Delete a key from cache."""
     key: str
 
 
 @dataclass
 class GetStats:
-    """Get cache statistics."""
     pass
 
 
 @dataclass
 class _ExpireKey:
-    """Internal: expire a key after TTL."""
     key: str
 
 
-# --- Cache Shard Actor ---
+CacheShardMsg = Get | Set | Delete | GetStats | _ExpireKey
 
-class CacheShard(Actor[Get | Set | Delete | GetStats | _ExpireKey]):
-    """A single shard of the distributed cache.
 
-    Each shard is responsible for a portion of the key space,
-    determined by consistent hashing.
-    """
+@actor
+async def cache_shard(shard_id: str, *, mailbox: Mailbox[CacheShardMsg]):
+    data: dict[str, Any] = {}
+    ttl_tasks: dict[str, str] = {}
+    stats = {"hits": 0, "misses": 0, "sets": 0, "deletes": 0}
 
-    def __init__(self, shard_id: str):
-        self.shard_id = shard_id
-        self.data: dict[str, Any] = {}
-        self.ttl_tasks: dict[str, str] = {}
-        self.stats = {"hits": 0, "misses": 0, "sets": 0, "deletes": 0}
-
-    async def receive(self, msg, ctx: Context):
+    async for msg, ctx in mailbox:
         match msg:
             case Get(key):
-                if key in self.data:
-                    self.stats["hits"] += 1
-                    await ctx.reply(("found", self.data[key]))
+                if key in data:
+                    stats["hits"] += 1
+                    await ctx.reply(("found", data[key]))
                 else:
-                    self.stats["misses"] += 1
+                    stats["misses"] += 1
                     await ctx.reply(("not_found", None))
 
             case Set(key, value, ttl):
-                # Cancel existing TTL if any
-                if key in self.ttl_tasks:
-                    await ctx.cancel_schedule(self.ttl_tasks[key])
+                if key in ttl_tasks:
+                    await ctx.cancel_schedule(ttl_tasks[key])
 
-                self.data[key] = value
-                self.stats["sets"] += 1
+                data[key] = value
+                stats["sets"] += 1
 
-                # Schedule expiration if TTL provided
                 if ttl is not None:
-                    task_id = await ctx.schedule(ttl, _ExpireKey(key))
-                    self.ttl_tasks[key] = task_id
+                    task_id = await ctx.schedule(_ExpireKey(key), delay=ttl)
+                    ttl_tasks[key] = task_id
 
-                print(f"  [{self.shard_id}] SET {key}={value}" + (f" (TTL={ttl}s)" if ttl else ""))
+                print(f"  [{shard_id}] SET {key}={value}" + (f" (TTL={ttl}s)" if ttl else ""))
                 await ctx.reply("ok")
 
             case Delete(key):
-                if key in self.data:
-                    del self.data[key]
-                    self.stats["deletes"] += 1
-                    if key in self.ttl_tasks:
-                        await ctx.cancel_schedule(self.ttl_tasks.pop(key))
+                if key in data:
+                    del data[key]
+                    stats["deletes"] += 1
+                    if key in ttl_tasks:
+                        await ctx.cancel_schedule(ttl_tasks.pop(key))
                     await ctx.reply(True)
                 else:
                     await ctx.reply(False)
 
             case GetStats():
                 await ctx.reply({
-                    "shard_id": self.shard_id,
-                    "keys": len(self.data),
-                    **self.stats,
+                    "shard_id": shard_id,
+                    "keys": len(data),
+                    **stats,
                 })
 
             case _ExpireKey(key):
-                if key in self.data:
-                    del self.data[key]
-                    self.ttl_tasks.pop(key, None)
-                    print(f"  [{self.shard_id}] EXPIRED {key}")
+                if key in data:
+                    del data[key]
+                    ttl_tasks.pop(key, None)
+                    print(f"  [{shard_id}] EXPIRED {key}")
 
-
-# --- Cache Router ---
 
 @dataclass
 class RouteGet:
-    """Get routed to correct shard."""
     key: str
 
 
 @dataclass
 class RouteSet:
-    """Set routed to correct shard."""
     key: str
     value: Any
     ttl: float | None = None
@@ -138,75 +118,63 @@ class RouteSet:
 
 @dataclass
 class RouteDelete:
-    """Delete routed to correct shard."""
     key: str
 
 
 @dataclass
 class GetAllStats:
-    """Get stats from all shards."""
     pass
 
 
-class CacheRouter(Actor[RouteGet | RouteSet | RouteDelete | GetAllStats]):
-    """Routes cache operations to the appropriate shard using consistent hashing.
+CacheRouterMsg = RouteGet | RouteSet | RouteDelete | GetAllStats
 
-    The router maintains a hash ring and directs each key to its
-    responsible shard based on the key's hash value.
-    """
 
-    def __init__(self, shards: dict[str, LocalActorRef[Any]]):
-        self.shards = shards
-        self.ring = HashRing(virtual_nodes=100)
-        for shard_id in shards.keys():
-            self.ring.add_node(shard_id)
+@actor
+async def cache_router(shards: dict[str, LocalActorRef[Any]], *, mailbox: Mailbox[CacheRouterMsg]):
+    ring = HashRing(virtual_nodes=100)
+    for shard_id in shards.keys():
+        ring.add_node(shard_id)
 
-    def _get_shard(self, key: str) -> LocalActorRef[Any]:
-        """Get the shard responsible for a key."""
-        shard_id = self.ring.get_node(key)
-        return self.shards[shard_id]
+    def get_shard(key: str) -> LocalActorRef[Any]:
+        shard_id = ring.get_node(key)
+        return shards[shard_id]
 
-    async def receive(self, msg, ctx: Context):
+    async for msg, ctx in mailbox:
         match msg:
             case RouteGet(key):
-                shard = self._get_shard(key)
+                shard = get_shard(key)
                 result = await shard.ask(Get(key))
                 await ctx.reply(result)
 
             case RouteSet(key, value, ttl):
-                shard = self._get_shard(key)
+                shard = get_shard(key)
                 result = await shard.ask(Set(key, value, ttl))
                 await ctx.reply(result)
 
             case RouteDelete(key):
-                shard = self._get_shard(key)
+                shard = get_shard(key)
                 result = await shard.ask(Delete(key))
                 await ctx.reply(result)
 
             case GetAllStats():
                 all_stats = []
-                for shard in self.shards.values():
+                for shard in shards.values():
                     stats = await shard.ask(GetStats())
                     all_stats.append(stats)
                 await ctx.reply(all_stats)
 
 
-# --- Client Helper Functions ---
-
 async def cache_get(router: LocalActorRef[Any], key: str) -> tuple[bool, Any]:
-    """Get a value from the distributed cache."""
     status, value = await router.ask(RouteGet(key))
     return status == "found", value
 
 
 async def cache_set(router: LocalActorRef[Any], key: str, value: Any, ttl: float | None = None) -> bool:
-    """Set a value in the distributed cache."""
     result = await router.ask(RouteSet(key, value, ttl))
     return result == "ok"
 
 
 async def cache_delete(router: LocalActorRef[Any], key: str) -> bool:
-    """Delete a key from the distributed cache."""
     return await router.ask(RouteDelete(key))
 
 
@@ -219,13 +187,12 @@ async def main():
         print(f"Started 3-node cluster")
         await asyncio.sleep(0.5)
 
-        # Create cache shards on each node
         print("\nPhase 1: Creating cache shards")
         print("-" * 50)
 
-        shard0 = await node0.spawn(CacheShard, shard_id="shard-0")
-        shard1 = await node1.spawn(CacheShard, shard_id="shard-1")
-        shard2 = await node2.spawn(CacheShard, shard_id="shard-2")
+        shard0 = await node0.actor(cache_shard(shard_id="shard-0"), name="shard-0")
+        shard1 = await node1.actor(cache_shard(shard_id="shard-1"), name="shard-1")
+        shard2 = await node2.actor(cache_shard(shard_id="shard-2"), name="shard-2")
 
         shards = {
             "shard-0": shard0,
@@ -233,15 +200,13 @@ async def main():
             "shard-2": shard2,
         }
 
-        # Create router on node0
-        router = await node0.spawn(CacheRouter, shards=shards)
+        router = await node0.actor(cache_router(shards=shards), name="router")
 
         print("Created 3 shards with consistent hashing router\n")
 
         print("Phase 2: Setting values")
         print("-" * 50)
 
-        # Set multiple keys - they'll be distributed across shards
         test_data = {
             "user:1001": {"name": "Alice", "email": "alice@example.com"},
             "user:1002": {"name": "Bob", "email": "bob@example.com"},
@@ -267,7 +232,6 @@ async def main():
         print("\nPhase 4: Getting values")
         print("-" * 50)
 
-        # Get some values
         found, user = await cache_get(router, "user:1001")
         print(f"user:1001 -> {'FOUND' if found else 'MISS'}: {user}")
 
@@ -280,14 +244,11 @@ async def main():
         print("\nPhase 5: TTL expiration")
         print("-" * 50)
 
-        # Set a key with TTL
         await cache_set(router, "temp:data", "expires soon", ttl=2.0)
 
-        # Verify it exists
         found, value = await cache_get(router, "temp:data")
         print(f"temp:data (before TTL) -> {'FOUND' if found else 'MISS'}: {value}")
 
-        # Wait for expiration
         print("Waiting 2.5s for TTL expiration...")
         await asyncio.sleep(2.5)
 
@@ -297,7 +258,6 @@ async def main():
         print("\nPhase 6: Demonstrating consistent hashing")
         print("-" * 50)
 
-        # Show which shard handles each key
         ring = HashRing(virtual_nodes=100)
         for shard_id in shards.keys():
             ring.add_node(shard_id)

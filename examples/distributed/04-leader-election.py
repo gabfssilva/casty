@@ -14,18 +14,15 @@ Run with: uv run python examples/distributed/04-leader-election.py
 
 import asyncio
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from casty import Actor, Context, LocalActorRef
+from casty import actor, Mailbox, LocalActorRef
 from casty.cluster import DevelopmentCluster
 
 
-# --- Election Messages ---
-
 @dataclass
 class RequestVote:
-    """Candidate requests a vote in an election."""
     candidate_id: str
     candidate_ref: LocalActorRef[Any]
     term: int
@@ -33,15 +30,13 @@ class RequestVote:
 
 @dataclass
 class Vote:
-    """Response to a vote request."""
     voter_id: str
     term: int
     granted: bool
 
 
 @dataclass
-class Heartbeat:
-    """Leader heartbeat to maintain authority."""
+class HeartbeatMsg:
     leader_id: str
     leader_ref: LocalActorRef[Any]
     term: int
@@ -49,42 +44,34 @@ class Heartbeat:
 
 @dataclass
 class HeartbeatAck:
-    """Acknowledgment of heartbeat."""
     follower_id: str
     term: int
 
 
 @dataclass
 class SetPeers:
-    """Set the peer references for an elector node."""
     peers: list[LocalActorRef[Any]]
 
 
 @dataclass
 class _ElectionTimeout:
-    """Internal: election timeout triggered."""
     pass
 
 
 @dataclass
 class _HeartbeatTimeout:
-    """Internal: time to send heartbeat (leader only)."""
     pass
 
 
 @dataclass
 class _LeaderTask:
-    """Internal: trigger leader's exclusive task."""
     pass
 
 
 @dataclass
 class GetState:
-    """Query current state of the node."""
     pass
 
-
-# --- Node States ---
 
 class NodeState:
     FOLLOWER = "follower"
@@ -92,199 +79,172 @@ class NodeState:
     LEADER = "leader"
 
 
-# --- Elector Node Actor ---
-
-type ElectorMessage = RequestVote | Vote | Heartbeat | HeartbeatAck | SetPeers | _ElectionTimeout | _HeartbeatTimeout | _LeaderTask | GetState
+ElectorMsg = RequestVote | Vote | HeartbeatMsg | HeartbeatAck | SetPeers | _ElectionTimeout | _HeartbeatTimeout | _LeaderTask | GetState
 
 
-class ElectorNode(Actor[ElectorMessage]):
-    """A node participating in leader election using a simplified Raft-like protocol.
+@actor
+async def elector_node(
+    node_id: str,
+    election_timeout_range: tuple[float, float] = (1.5, 3.0),
+    heartbeat_interval: float = 0.5,
+    *,
+    mailbox: Mailbox[ElectorMsg],
+):
+    peers: list[LocalActorRef[Any]] = []
 
-    States:
-    - FOLLOWER: Waits for leader heartbeats, starts election if timeout
-    - CANDIDATE: Requests votes, becomes leader if majority
-    - LEADER: Sends heartbeats, executes exclusive tasks
-    """
+    current_term = 0
+    voted_for: str | None = None
 
-    def __init__(
-        self,
-        node_id: str,
-        election_timeout_range: tuple[float, float] = (1.5, 3.0),
-        heartbeat_interval: float = 0.5,
-    ):
-        self.node_id = node_id
-        self.peers: list[LocalActorRef[Any]] = []
-        self.election_timeout_range = election_timeout_range
-        self.heartbeat_interval = heartbeat_interval
+    state = NodeState.FOLLOWER
+    leader_id: str | None = None
+    votes_received: set[str] = set()
 
-        # Persistent state
-        self.current_term = 0
-        self.voted_for: str | None = None
+    election_timeout_id: str | None = None
+    heartbeat_id: str | None = None
+    leader_task_id: str | None = None
 
-        # Volatile state
-        self.state = NodeState.FOLLOWER
-        self.leader_id: str | None = None
-        self.votes_received: set[str] = set()
+    async def cancel_all_timers(ctx):
+        nonlocal election_timeout_id, heartbeat_id, leader_task_id
+        if election_timeout_id:
+            await ctx.cancel_schedule(election_timeout_id)
+            election_timeout_id = None
+        if heartbeat_id:
+            await ctx.cancel_schedule(heartbeat_id)
+            heartbeat_id = None
+        if leader_task_id:
+            await ctx.cancel_schedule(leader_task_id)
+            leader_task_id = None
 
-        # Task IDs for cancellation
-        self._election_timeout_id: str | None = None
-        self._heartbeat_id: str | None = None
-        self._leader_task_id: str | None = None
+    async def reset_election_timeout(ctx):
+        nonlocal election_timeout_id
+        if election_timeout_id:
+            await ctx.cancel_schedule(election_timeout_id)
 
-    async def on_start(self):
-        print(f"[{self.node_id}] Started as FOLLOWER")
-        await self._reset_election_timeout()
+        timeout = random.uniform(*election_timeout_range)
+        election_timeout_id = await ctx.schedule(_ElectionTimeout(), delay=timeout)
 
-    async def on_stop(self):
-        await self._cancel_all_timers()
+    async def become_follower(ctx, term: int):
+        nonlocal state, current_term, voted_for, votes_received
+        await cancel_all_timers(ctx)
 
-    async def _cancel_all_timers(self):
-        """Cancel all active timers."""
-        if self._election_timeout_id:
-            await self._ctx.cancel_schedule(self._election_timeout_id)
-            self._election_timeout_id = None
-        if self._heartbeat_id:
-            await self._ctx.cancel_tick(self._heartbeat_id)
-            self._heartbeat_id = None
-        if self._leader_task_id:
-            await self._ctx.cancel_tick(self._leader_task_id)
-            self._leader_task_id = None
+        state = NodeState.FOLLOWER
+        current_term = term
+        voted_for = None
+        votes_received = set()
 
-    async def _reset_election_timeout(self):
-        """Reset/start election timeout with randomized delay."""
-        if self._election_timeout_id:
-            await self._ctx.cancel_schedule(self._election_timeout_id)
+        print(f"[{node_id}] Became FOLLOWER (term={term})")
+        await reset_election_timeout(ctx)
 
-        timeout = random.uniform(*self.election_timeout_range)
-        self._election_timeout_id = await self._ctx.schedule(timeout, _ElectionTimeout())
+    async def become_candidate(ctx):
+        nonlocal state, current_term, voted_for, votes_received
+        await cancel_all_timers(ctx)
 
-    async def _become_follower(self, term: int):
-        """Transition to follower state."""
-        await self._cancel_all_timers()
+        state = NodeState.CANDIDATE
+        current_term += 1
+        voted_for = node_id
+        votes_received = {node_id}
 
-        self.state = NodeState.FOLLOWER
-        self.current_term = term
-        self.voted_for = None
-        self.votes_received.clear()
+        print(f"[{node_id}] Became CANDIDATE (term={current_term})")
 
-        print(f"[{self.node_id}] Became FOLLOWER (term={term})")
-        await self._reset_election_timeout()
+        for peer in peers:
+            await peer.send(RequestVote(node_id, mailbox._self_ref, current_term))
 
-    async def _become_candidate(self):
-        """Transition to candidate state and start election."""
-        await self._cancel_all_timers()
+        await reset_election_timeout(ctx)
 
-        self.state = NodeState.CANDIDATE
-        self.current_term += 1
-        self.voted_for = self.node_id
-        self.votes_received = {self.node_id}
+    async def become_leader(ctx):
+        nonlocal state, leader_id, heartbeat_id, leader_task_id
+        await cancel_all_timers(ctx)
 
-        print(f"[{self.node_id}] Became CANDIDATE (term={self.current_term})")
+        state = NodeState.LEADER
+        leader_id = node_id
 
-        # Request votes from all peers (include self ref so peers can respond)
-        for peer in self.peers:
-            await peer.send(RequestVote(self.node_id, self._ctx.self_ref, self.current_term))
+        print(f"[{node_id}] Became LEADER (term={current_term})")
 
-        # Set election timeout for retry
-        await self._reset_election_timeout()
+        heartbeat_id = await ctx.schedule(_HeartbeatTimeout(), delay=heartbeat_interval)
+        leader_task_id = await ctx.schedule(_LeaderTask(), delay=2.0)
 
-    async def _become_leader(self):
-        """Transition to leader state."""
-        await self._cancel_all_timers()
+        await send_heartbeats()
 
-        self.state = NodeState.LEADER
-        self.leader_id = self.node_id
+    async def send_heartbeats():
+        for peer in peers:
+            await peer.send(HeartbeatMsg(node_id, mailbox._self_ref, current_term))
 
-        print(f"[{self.node_id}] Became LEADER (term={self.current_term})")
-
-        # Start sending heartbeats
-        self._heartbeat_id = await self._ctx.tick(_HeartbeatTimeout(), interval=self.heartbeat_interval)
-
-        # Start leader-exclusive task
-        self._leader_task_id = await self._ctx.tick(_LeaderTask(), interval=2.0)
-
-        # Send immediate heartbeat
-        await self._send_heartbeats()
-
-    async def _send_heartbeats(self):
-        """Send heartbeat to all peers."""
-        for peer in self.peers:
-            await peer.send(Heartbeat(self.node_id, self._ctx.self_ref, self.current_term))
-
-    def _majority(self) -> int:
-        """Calculate majority threshold."""
-        total_nodes = len(self.peers) + 1
+    def majority() -> int:
+        total_nodes = len(peers) + 1
         return (total_nodes // 2) + 1
 
-    async def receive(self, msg: ElectorMessage, ctx: Context):
+    print(f"[{node_id}] Started as FOLLOWER")
+    await mailbox._self_ref.send(_ElectionTimeout())
+
+    async for msg, ctx in mailbox:
         match msg:
-            case SetPeers(peers):
-                self.peers = peers
-                print(f"[{self.node_id}] Set {len(peers)} peers")
+            case SetPeers(new_peers):
+                peers[:] = new_peers
+                print(f"[{node_id}] Set {len(peers)} peers")
 
             case RequestVote(candidate_id, candidate_ref, term):
-                if term > self.current_term:
-                    await self._become_follower(term)
+                if term > current_term:
+                    await become_follower(ctx, term)
 
                 grant_vote = False
-                if term >= self.current_term and self.voted_for in (None, candidate_id):
+                if term >= current_term and voted_for in (None, candidate_id):
                     grant_vote = True
-                    self.voted_for = candidate_id
-                    print(f"[{self.node_id}] Voted for {candidate_id} (term={term})")
+                    voted_for = candidate_id
+                    print(f"[{node_id}] Voted for {candidate_id} (term={term})")
 
-                # Send vote directly to candidate
-                await candidate_ref.send(Vote(self.node_id, self.current_term, grant_vote))
+                await candidate_ref.send(Vote(node_id, current_term, grant_vote))
 
             case Vote(voter_id, term, granted):
-                if self.state != NodeState.CANDIDATE:
-                    return
+                if state != NodeState.CANDIDATE:
+                    continue
 
-                if term > self.current_term:
-                    await self._become_follower(term)
-                    return
+                if term > current_term:
+                    await become_follower(ctx, term)
+                    continue
 
-                if granted and term == self.current_term:
-                    self.votes_received.add(voter_id)
-                    print(f"[{self.node_id}] Received vote from {voter_id} ({len(self.votes_received)}/{self._majority()} needed)")
+                if granted and term == current_term:
+                    votes_received.add(voter_id)
+                    print(f"[{node_id}] Received vote from {voter_id} ({len(votes_received)}/{majority()} needed)")
 
-                    if len(self.votes_received) >= self._majority():
-                        await self._become_leader()
+                    if len(votes_received) >= majority():
+                        await become_leader(ctx)
 
-            case Heartbeat(leader_id, leader_ref, term):
-                if term >= self.current_term:
-                    if self.state != NodeState.FOLLOWER or self.current_term < term:
-                        await self._become_follower(term)
+            case HeartbeatMsg(hb_leader_id, leader_ref, term):
+                if term >= current_term:
+                    if state != NodeState.FOLLOWER or current_term < term:
+                        await become_follower(ctx, term)
                     else:
-                        await self._reset_election_timeout()
+                        await reset_election_timeout(ctx)
 
-                    self.leader_id = leader_id
+                    leader_id = hb_leader_id
 
-                    # Acknowledge heartbeat
-                    await leader_ref.send(HeartbeatAck(self.node_id, term))
+                    await leader_ref.send(HeartbeatAck(node_id, term))
 
             case HeartbeatAck(follower_id, term):
                 pass
 
             case _ElectionTimeout():
-                if self.state in (NodeState.FOLLOWER, NodeState.CANDIDATE):
-                    print(f"[{self.node_id}] Election timeout!")
-                    await self._become_candidate()
+                if state in (NodeState.FOLLOWER, NodeState.CANDIDATE):
+                    print(f"[{node_id}] Election timeout!")
+                    await become_candidate(ctx)
 
             case _HeartbeatTimeout():
-                if self.state == NodeState.LEADER:
-                    await self._send_heartbeats()
+                if state == NodeState.LEADER:
+                    await send_heartbeats()
+                    heartbeat_id = await ctx.schedule(_HeartbeatTimeout(), delay=heartbeat_interval)
 
             case _LeaderTask():
-                if self.state == NodeState.LEADER:
-                    print(f"[{self.node_id}] LEADER executing exclusive task (term={self.current_term})")
+                if state == NodeState.LEADER:
+                    print(f"[{node_id}] LEADER executing exclusive task (term={current_term})")
+                    leader_task_id = await ctx.schedule(_LeaderTask(), delay=2.0)
 
             case GetState():
                 await ctx.reply({
-                    "node_id": self.node_id,
-                    "state": self.state,
-                    "term": self.current_term,
-                    "leader": self.leader_id,
-                    "voted_for": self.voted_for,
+                    "node_id": node_id,
+                    "state": state,
+                    "term": current_term,
+                    "leader": leader_id,
+                    "voted_for": voted_for,
                 })
 
 
@@ -300,27 +260,30 @@ async def main():
         print("\nPhase 1: Starting election nodes")
         print("-" * 50)
 
-        # Create elector nodes with staggered timeouts
-        # Lower timeout = more likely to become leader first
-        elector0 = await node0.spawn(
-            ElectorNode,
-            node_id="node-0",
-            election_timeout_range=(1.0, 1.5),
+        elector0 = await node0.actor(
+            elector_node(
+                node_id="node-0",
+                election_timeout_range=(1.0, 1.5),
+            ),
+            name="elector-0",
         )
-        elector1 = await node1.spawn(
-            ElectorNode,
-            node_id="node-1",
-            election_timeout_range=(1.5, 2.0),
+        elector1 = await node1.actor(
+            elector_node(
+                node_id="node-1",
+                election_timeout_range=(1.5, 2.0),
+            ),
+            name="elector-1",
         )
-        elector2 = await node2.spawn(
-            ElectorNode,
-            node_id="node-2",
-            election_timeout_range=(2.0, 2.5),
+        elector2 = await node2.actor(
+            elector_node(
+                node_id="node-2",
+                election_timeout_range=(2.0, 2.5),
+            ),
+            name="elector-2",
         )
 
         all_electors = [elector0, elector1, elector2]
 
-        # Set peers for each node
         await elector0.send(SetPeers([elector1, elector2]))
         await elector1.send(SetPeers([elector0, elector2]))
         await elector2.send(SetPeers([elector0, elector1]))
@@ -328,10 +291,8 @@ async def main():
         print("\nPhase 2: Waiting for initial leader election")
         print("-" * 50)
 
-        # Wait for election to complete
         await asyncio.sleep(3.0)
 
-        # Check states
         for elector in all_electors:
             state = await elector.ask(GetState())
             status = "LEADER" if state["state"] == NodeState.LEADER else state["state"]
@@ -340,13 +301,11 @@ async def main():
         print("\nPhase 3: Leader executing exclusive tasks")
         print("-" * 50)
 
-        # Let leader run some tasks
         await asyncio.sleep(5.0)
 
         print("\nPhase 4: Simulating leader failure")
         print("-" * 50)
 
-        # Find current leader
         current_leader_idx = None
         for i, elector in enumerate(all_electors):
             state = await elector.ask(GetState())
@@ -356,20 +315,11 @@ async def main():
                 break
 
         if current_leader_idx is not None:
-            # Stop the leader based on which system it's in
-            if current_leader_idx == 0:
-                await node0.stop(all_electors[0])
-            elif current_leader_idx == 1:
-                await node1.stop(all_electors[1])
-            else:
-                await node2.stop(all_electors[2])
-
             remaining = [e for i, e in enumerate(all_electors) if i != current_leader_idx]
 
             print("\nWaiting for re-election...")
             await asyncio.sleep(4.0)
 
-            # Check new states
             print("\nNew cluster state:")
             for elector in remaining:
                 try:

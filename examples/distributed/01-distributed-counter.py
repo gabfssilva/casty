@@ -1,9 +1,9 @@
-"""Distributed Counter with Replication.
+"""Distributed Counter Example.
 
 Demonstrates:
 - DevelopmentCluster with multiple nodes
-- Single clustered counter replicated across nodes
-- Using routing to query specific nodes and verify replication
+- Creating a single actor that lives on one node
+- All nodes can access the same actor
 
 Run with: uv run python examples/distributed/01-distributed-counter.py
 """
@@ -11,8 +11,8 @@ Run with: uv run python examples/distributed/01-distributed-counter.py
 import asyncio
 from dataclasses import dataclass
 
-from casty import Actor, Context
-from casty.cluster import DevelopmentCluster, ClusterScope
+from casty import actor, Mailbox
+from casty.cluster import DevelopmentCluster
 
 
 @dataclass
@@ -25,27 +25,24 @@ class GetCount:
     pass
 
 
-class Counter(Actor[Increment | GetCount]):
-    def __init__(self):
-        self.count = 0
+CounterMsg = Increment | GetCount
 
-    async def receive(self, msg: Increment | GetCount, ctx: Context):
+
+@actor
+async def counter(*, mailbox: Mailbox[CounterMsg]):
+    count = 0
+
+    async for msg, ctx in mailbox:
         match msg:
             case Increment(amount):
-                self.count += amount
-                print(f"  Counter incremented by {amount}, now={self.count}")
+                count += amount
+                print(f"  Counter incremented by {amount}, now={count}")
             case GetCount():
-                await ctx.reply(self.count)
-
-    def get_state(self) -> dict:
-        return {"count": self.count}
-
-    def set_state(self, state: dict) -> None:
-        self.count = state.get("count", 0)
+                await ctx.reply(count)
 
 
 async def main():
-    print("=== Distributed Counter with Replication ===\n")
+    print("=== Distributed Counter Example ===\n")
 
     async with DevelopmentCluster(3) as cluster:
         node0, node1, node2 = cluster[0], cluster[1], cluster[2]
@@ -56,45 +53,30 @@ async def main():
         print(f"  - {node2.node_id}")
         print()
 
-        # Create a single clustered counter with replication=3 (all nodes)
-        print("Creating counter with replication=3...")
-        counter = await node0.actor(
-            Counter,
-            name="my-counter",
-            scope=ClusterScope(replication=3)
-        )
-        await asyncio.sleep(0.3)
-        print(f"Counter created: {counter}\n")
+        # Create ONE counter via cluster (placed on one node by round-robin)
+        print("Creating single counter via cluster...")
+        counter_ref = await cluster.actor(counter(), name="counter")
+        print()
 
-        # Send increments (goes to leader)
         print("Phase 1: Sending increments")
         print("-" * 40)
-        await counter.send(Increment(10))
-        await counter.send(Increment(20))
-        await counter.send(Increment(5))
-        await asyncio.sleep(0.3)
+        await counter_ref.send(Increment(10))
+        await counter_ref.send(Increment(20))
+        await counter_ref.send(Increment(5))
+        await counter_ref.send(Increment(100))
+        await counter_ref.send(Increment(1000))
+        await asyncio.sleep(0.1)
 
-        # Query the leader
-        print("\nPhase 2: Querying leader")
+        print("\nPhase 2: Querying counter")
         print("-" * 40)
-        count = await counter.ask(GetCount())
-        print(f"Leader says count = {count}")
-
-        # Query specific nodes to verify replication
-        print("\nPhase 3: Verifying replication on each node")
-        print("-" * 40)
-
-        for node_id in [node0.node_id, node1.node_id, node2.node_id]:
-            try:
-                count = await counter.ask(GetCount(), routing=node_id)
-                print(f"  {node_id}: count = {count}")
-            except Exception as e:
-                print(f"  {node_id}: error - {e}")
+        count = await counter_ref.ask(GetCount())
+        print(f"  Total count = {count}")
 
         print("\n=== Summary ===")
-        print("The counter state (35) is replicated across all 3 nodes.")
-        print("Each node can serve read requests via routing parameter.")
+        print("Single counter actor, accessed from cluster.")
+        print(f"Final count: {count}")
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+

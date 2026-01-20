@@ -1,43 +1,30 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from time import time
-from typing import Any
-
 import msgpack
-
-from .version import VectorClock
-
-
-class EntryType(Enum):
-    DELTA = auto()
-    SNAPSHOT = auto()
-    SYNC = auto()
+from dataclasses import dataclass
 
 
-@dataclass(slots=True)
+@dataclass
 class WALEntry:
-    version: VectorClock
-    delta: dict[str, Any]
-    timestamp: float = field(default_factory=time)
-    entry_type: EntryType = EntryType.DELTA
+    actor_id: str
+    sequence: int
+    timestamp: float
+    data: bytes
 
-    @property
-    def as_bytes(self) -> bytes:
+    def to_bytes(self) -> bytes:
         return msgpack.packb({
-            "v": self.version.to_dict(),
-            "d": self.delta,
-            "t": self.timestamp,
-            "e": self.entry_type.value,
+            "actor_id": self.actor_id,
+            "sequence": self.sequence,
+            "timestamp": self.timestamp,
+            "data": self.data,
         }, use_bin_type=True)
 
     @classmethod
     def from_bytes(cls, data: bytes) -> WALEntry:
         d = msgpack.unpackb(data, raw=False)
         return cls(
-            version=VectorClock.from_dict(d["v"]),
-            delta=d["d"],
-            timestamp=d["t"],
-            entry_type=EntryType(d["e"]),
+            actor_id=d["actor_id"],
+            sequence=d["sequence"],
+            timestamp=d["timestamp"],
+            data=d["data"],
         )

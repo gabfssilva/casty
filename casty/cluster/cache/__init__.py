@@ -1,12 +1,11 @@
-from .entry import CacheEntry, Set, Get, Delete, Exists, Expire
 from .cache import DistributedCache
+from .entry import cache_entry, Get, Set, Delete, Exists
 
 __all__ = [
-    "CacheEntry",
-    "Set",
+    "DistributedCache",
+    "cache_entry",
     "Get",
+    "Set",
     "Delete",
     "Exists",
-    "Expire",
-    "DistributedCache",
 ]

@@ -1,84 +1,37 @@
+# tests/test_wal_actor.py
 import pytest
 from casty import ActorSystem
-from casty.wal import (
-    WriteAheadLog,
-    Append,
-    GetCurrentVersion,
-    GetCurrentState,
-    Recover,
-    InMemoryStoreBackend,
-    VectorClock,
-)
 
 
 @pytest.mark.asyncio
-async def test_wal_actor_append():
-    async with ActorSystem.local() as system:
-        wal = await system.actor(
-            WriteAheadLog,
-            name="wal-append",
-            node_id="node-a",
-            backend=InMemoryStoreBackend(),
-        )
+async def test_wal_actor_append_and_read():
+    from casty.wal.actor import wal_actor, Append, ReadAll
+    from casty.wal.backend import InMemoryBackend
 
-        version = await wal.ask(Append(delta={"count": 10}))
+    backend = InMemoryBackend()
 
-        assert isinstance(version, VectorClock)
-        assert version.clock == {"node-a": 1}
+    async with ActorSystem() as system:
+        ref = await system.actor(wal_actor(backend, "test/actor"), name="wal")
 
+        await ref.send(Append(b"entry1"))
+        await ref.send(Append(b"entry2"))
 
-@pytest.mark.asyncio
-async def test_wal_actor_multiple_appends():
-    async with ActorSystem.local() as system:
-        wal = await system.actor(
-            WriteAheadLog,
-            name="wal-multiple-appends",
-            node_id="node-a",
-            backend=InMemoryStoreBackend(),
-        )
-
-        v1 = await wal.ask(Append(delta={"count": 1}))
-        v2 = await wal.ask(Append(delta={"count": 2}))
-        v3 = await wal.ask(Append(delta={"name": "test"}))
-
-        assert v1.clock == {"node-a": 1}
-        assert v2.clock == {"node-a": 2}
-        assert v3.clock == {"node-a": 3}
+        entries = await ref.ask(ReadAll())
+        assert len(entries) == 2
 
 
 @pytest.mark.asyncio
-async def test_wal_actor_get_current_state():
-    async with ActorSystem.local() as system:
-        wal = await system.actor(
-            WriteAheadLog,
-            name="wal-get-state",
-            node_id="node-a",
-            backend=InMemoryStoreBackend(),
-        )
+async def test_wal_actor_snapshot():
+    from casty.wal.actor import wal_actor, Append, Snapshot, GetSnapshot
+    from casty.wal.backend import InMemoryBackend
 
-        await wal.ask(Append(delta={"count": 1}))
-        await wal.ask(Append(delta={"count": 2}))
-        await wal.ask(Append(delta={"name": "test"}))
+    backend = InMemoryBackend()
 
-        state = await wal.ask(GetCurrentState())
+    async with ActorSystem() as system:
+        ref = await system.actor(wal_actor(backend, "test/actor"), name="wal")
 
-        assert state == {"count": 2, "name": "test"}
+        await ref.send(Append(b"entry1"))
+        await ref.send(Snapshot(b"snapshot_data"))
 
-
-@pytest.mark.asyncio
-async def test_wal_actor_get_current_version():
-    async with ActorSystem.local() as system:
-        wal = await system.actor(
-            WriteAheadLog,
-            name="wal-get-version",
-            node_id="node-a",
-            backend=InMemoryStoreBackend(),
-        )
-
-        v0 = await wal.ask(GetCurrentVersion())
-        assert v0.clock == {}
-
-        await wal.ask(Append(delta={"x": 1}))
-
-        v1 = await wal.ask(GetCurrentVersion())
-        assert v1.clock == {"node-a": 1}
+        snapshot = await ref.ask(GetSnapshot())
+        assert snapshot == b"snapshot_data"

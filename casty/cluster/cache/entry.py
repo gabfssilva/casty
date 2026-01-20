@@ -1,63 +1,72 @@
 from dataclasses import dataclass
-from time import time
 
-from casty import Actor, Context
-
-from ..serializable import serializable
+from casty import actor, Mailbox
+from casty.serializable import serializable
 
 
 @serializable
-@dataclass(frozen=True, slots=True)
+@dataclass
 class Set:
     value: bytes
     ttl: float | None = None
 
 
 @serializable
-@dataclass(frozen=True, slots=True)
+@dataclass
 class Get:
     pass
 
 
 @serializable
-@dataclass(frozen=True, slots=True)
+@dataclass
 class Delete:
     pass
 
 
 @serializable
-@dataclass(frozen=True, slots=True)
+@dataclass
 class Exists:
     pass
 
 
-@serializable
-@dataclass(frozen=True, slots=True)
+@dataclass
 class Expire:
     pass
 
 
-@dataclass
-class CacheEntry(Actor[Set | Get | Delete | Exists | Expire]):
-    value: bytes | None = None
-    created_at: float | None = None
-    ttl_schedule_id: str | None = None
+CacheMsg = Set | Get | Delete | Exists | Expire
 
-    async def receive(self, msg: Set | Get | Delete | Exists | Expire, ctx: Context):
+
+@actor
+async def cache_entry(*, mailbox: Mailbox[CacheMsg]):
+    value: bytes | None = None
+    deleted = False
+
+    async for msg, ctx in mailbox:
+        if deleted:
+            match msg:
+                case Get():
+                    await ctx.reply(None)
+                case Exists():
+                    await ctx.reply(False)
+            continue
+
         match msg:
-            case Set(value, ttl):
-                self.value = value
-                self.created_at = time()
-                if self.ttl_schedule_id is not None:
-                    await ctx.cancel_schedule(self.ttl_schedule_id)
-                    self.ttl_schedule_id = None
+            case Set(new_value, ttl):
+                value = new_value
                 if ttl is not None:
-                    self.ttl_schedule_id = await ctx.schedule(ttl, Expire())
+                    await ctx.schedule(Expire(), delay=ttl)
+
             case Get():
-                await ctx.reply(self.value)
+                await ctx.reply(value)
+
             case Delete():
-                await ctx.stop()
+                value = None
+                deleted = True
+
             case Exists():
-                await ctx.reply(self.value is not None)
+                await ctx.reply(value is not None)
+
             case Expire():
-                await ctx.stop()
+                value = None
+                deleted = True

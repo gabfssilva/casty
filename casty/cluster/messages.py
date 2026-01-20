@@ -1,278 +1,106 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from dataclasses import dataclass, field
 
-if TYPE_CHECKING:
-    from casty import LocalActorRef
-
-from casty.wal import VectorClock
-from .serializable import serializable
+from casty.serializable import serializable
 
 
 @serializable
-@dataclass(frozen=True, slots=True)
-class Node:
-    id: str
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class Shard:
-    key: str
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class All:
-    pass
-
-
-type Route = Node | Shard | All
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class Send:
-    payload: Any
-    to: Route
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class GetMembers:
-    pass
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class GetNodeForKey:
-    key: str
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class NodeJoined:
+@dataclass
+class MembershipUpdate:
     node_id: str
-    address: tuple[str, int]
+    status: str  # "alive" | "down"
+    incarnation: int
 
 
 @serializable
-@dataclass(frozen=True, slots=True)
-class NodeLeft:
-    node_id: str
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class NodeFailed:
-    node_id: str
-
-
-type ClusterEvent = NodeJoined | NodeLeft | NodeFailed
-
-
-@dataclass(frozen=True, slots=True)
-class Subscribe:
-    subscriber: LocalActorRef[ClusterEvent]
-
-
-@dataclass(frozen=True, slots=True)
-class Unsubscribe:
-    subscriber: LocalActorRef[ClusterEvent]
-
-
-@dataclass(frozen=True, slots=True)
-class TransportSend:
-    node_id: str
-    payload: Any
-
-
-@dataclass(frozen=True, slots=True)
-class TransportReceived:
-    node_id: str
-    payload: Any
-
-
-@dataclass(frozen=True, slots=True)
-class TransportConnected:
-    node_id: str
-    address: tuple[str, int]
-
-
-@dataclass(frozen=True, slots=True)
-class TransportDisconnected:
-    node_id: str
-
-
-type TransportEvent = TransportReceived | TransportConnected | TransportDisconnected
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
+@dataclass
 class Ping:
-    sequence: int
+    updates: list[MembershipUpdate] = field(default_factory=list)
 
 
 @serializable
-@dataclass(frozen=True, slots=True)
+@dataclass
 class Ack:
-    sequence: int
+    updates: list[MembershipUpdate] = field(default_factory=list)
 
 
 @serializable
-@dataclass(frozen=True, slots=True)
+@dataclass
 class PingReq:
     target: str
+    updates: list[MembershipUpdate] = field(default_factory=list)
+
+
+@serializable
+@dataclass
+class PingReqAck:
+    target: str
+    success: bool
+    updates: list[MembershipUpdate] = field(default_factory=list)
+
+
+@serializable
+@dataclass
+class Join:
+    node_id: str
+    address: str
+
+
+@serializable
+@dataclass
+class GetAliveMembers:
+    pass
+
+
+@serializable
+@dataclass
+class GetAllMembers:
+    pass
+
+
+@serializable
+@dataclass
+class ApplyUpdate:
+    update: MembershipUpdate
+
+
+# SWIM timing messages
+@serializable
+@dataclass
+class SwimTick:
+    pass
+
+
+@serializable
+@dataclass
+class ProbeTimeout:
+    target: str
+
+
+@serializable
+@dataclass
+class PingReqTimeout:
+    target: str
+
+
+# Gossip messages
+@serializable
+@dataclass
+class StateUpdate:
+    actor_id: str
     sequence: int
+    state: bytes
 
 
 @serializable
-@dataclass(frozen=True, slots=True)
-class Suspect:
-    node_id: str
-    incarnation: int
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class Alive:
-    node_id: str
-    incarnation: int
-    address: tuple[str, int]
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class Dead:
-    node_id: str
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class Handshake:
-    node_id: str
-    address: tuple[str, int]
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class HandshakeAck:
-    node_id: str
-    address: tuple[str, int]
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class MembershipSync:
-    """Sent after connection to share known members."""
-    members: list[tuple[str, tuple[str, int]]]  # list of (node_id, (host, port))
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class ReplicateState:
-    """Sent after mutation to sync state between replicas."""
+@dataclass
+class StatePull:
     actor_id: str
-    version: VectorClock
-    state: dict[str, Any]
+    since_sequence: int
 
 
 @serializable
-@dataclass(frozen=True, slots=True)
-class ReplicateAck:
-    """Acknowledgment of replication."""
-    actor_id: str
-    version: VectorClock
-    success: bool
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class RequestFullSync:
-    """Request full state sync (for new nodes)."""
-    actor_id: str
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class FullSyncResponse:
-    """Response with full state."""
-    actor_id: str
-    version: VectorClock
-    state: dict[str, Any]
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class ClusteredSpawn:
-    actor_id: str
-    actor_cls_fqn: str
-    replication: int
-    singleton: bool
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class ClusteredSend:
-    actor_id: str
-    request_id: str
-    payload_type: str
-    payload: bytes
-    routing: str  # 'leader', 'local', 'fastest', or node_id
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class ClusteredSendAck:
-    request_id: str
-    success: bool
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class ClusteredAsk:
-    actor_id: str
-    request_id: str
-    payload_type: str
-    payload: bytes
-    routing: str  # 'leader', 'local', 'fastest', or node_id
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class ClusteredAskResponse:
-    request_id: str
-    payload_type: str
-    payload: bytes
-    success: bool
-
-
-@dataclass(frozen=True, slots=True)
-class RegisterClusteredActor:
-    actor_id: str
-    actor_cls: type
-    replication: int
-    singleton: bool
-    actor_kwargs: dict[str, Any] | None = None
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class ActorRegistered:
-    actor_id: str
-    actor_cls_name: str
-    replication: int
-    singleton: bool
-    owner_node: str
-
-
-@serializable
-@dataclass(frozen=True, slots=True)
-class ActorUnregistered:
-    actor_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class GetClusteredActor:
-    actor_id: str
+@dataclass
+class GossipTick:
+    pass

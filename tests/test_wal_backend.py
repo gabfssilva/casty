@@ -1,97 +1,66 @@
-import tempfile
-from pathlib import Path
-
+# tests/test_wal_backend.py
 import pytest
-from casty.wal.backend import InMemoryStoreBackend, FileStoreBackend
-from casty.wal.entry import WALEntry, EntryType
-from casty.wal.version import VectorClock
+import tempfile
 
 
 @pytest.mark.asyncio
-async def test_in_memory_backend_append_and_read():
-    backend = InMemoryStoreBackend()
-    await backend.initialize()
+async def test_inmemory_backend():
+    from casty.wal.backend import InMemoryBackend
+    from casty.wal.entry import WALEntry
 
-    entry1 = WALEntry(
-        version=VectorClock({"node-a": 1}),
-        delta={"count": 1},
-    )
-    entry2 = WALEntry(
-        version=VectorClock({"node-a": 2}),
-        delta={"count": 2},
-    )
+    backend = InMemoryBackend()
 
-    await backend.append(entry1)
-    await backend.append(entry2)
+    entry = WALEntry("counter/c1", 1, 123.0, b"data1")
+    await backend.append(entry)
 
-    entries = [e async for e in backend.read_all()]
-
-    assert len(entries) == 2
-    assert entries[0].delta == {"count": 1}
-    assert entries[1].delta == {"count": 2}
-
-    await backend.close()
+    entries = await backend.read("counter/c1")
+    assert len(entries) == 1
+    assert entries[0] == entry
 
 
 @pytest.mark.asyncio
-async def test_in_memory_backend_empty():
-    backend = InMemoryStoreBackend()
-    await backend.initialize()
+async def test_inmemory_backend_multiple_actors():
+    from casty.wal.backend import InMemoryBackend
+    from casty.wal.entry import WALEntry
 
-    entries = [e async for e in backend.read_all()]
-    assert entries == []
+    backend = InMemoryBackend()
+
+    await backend.append(WALEntry("a/1", 1, 123.0, b"a1"))
+    await backend.append(WALEntry("b/1", 1, 124.0, b"b1"))
+    await backend.append(WALEntry("a/1", 2, 125.0, b"a2"))
+
+    a_entries = await backend.read("a/1")
+    assert len(a_entries) == 2
+
+    b_entries = await backend.read("b/1")
+    assert len(b_entries) == 1
 
 
 @pytest.mark.asyncio
-async def test_file_backend_append_and_read():
+async def test_file_backend():
+    from casty.wal.backend import FileBackend
+    from casty.wal.entry import WALEntry
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        backend = FileStoreBackend(Path(tmpdir))
-        await backend.initialize()
+        backend = FileBackend(path=tmpdir)
 
-        entry1 = WALEntry(
-            version=VectorClock({"node-a": 1}),
-            delta={"count": 1},
-        )
-        entry2 = WALEntry(
-            version=VectorClock({"node-a": 2}),
-            delta={"count": 2},
-        )
+        entry = WALEntry("counter/c1", 1, 123.0, b"data1")
+        await backend.append(entry)
 
-        await backend.append(entry1)
-        await backend.append(entry2)
-        await backend.close()
-
-        backend2 = FileStoreBackend(Path(tmpdir))
-        await backend2.initialize()
-
-        entries = [e async for e in backend2.read_all()]
-
-        assert len(entries) == 2
-        assert entries[0].delta == {"count": 1}
-        assert entries[1].delta == {"count": 2}
-
-        await backend2.close()
+        entries = await backend.read("counter/c1")
+        assert len(entries) == 1
+        assert entries[0].data == b"data1"
 
 
 @pytest.mark.asyncio
 async def test_file_backend_persistence():
+    from casty.wal.backend import FileBackend
+    from casty.wal.entry import WALEntry
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        backend = FileStoreBackend(Path(tmpdir))
-        await backend.initialize()
+        backend1 = FileBackend(path=tmpdir)
+        await backend1.append(WALEntry("counter/c1", 1, 123.0, b"data"))
 
-        entry = WALEntry(
-            version=VectorClock({"node-a": 5}),
-            delta={"name": "persisted"},
-        )
-        await backend.append(entry)
-        await backend.close()
-
-        backend2 = FileStoreBackend(Path(tmpdir))
-        await backend2.initialize()
-        entries = [e async for e in backend2.read_all()]
-
+        backend2 = FileBackend(path=tmpdir)
+        entries = await backend2.read("counter/c1")
         assert len(entries) == 1
-        assert entries[0].delta == {"name": "persisted"}
-        assert entries[0].version.clock == {"node-a": 5}
-
-        await backend2.close()

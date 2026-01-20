@@ -13,19 +13,17 @@ Run with:
 import asyncio
 from dataclasses import dataclass
 
-from casty import Actor, ActorSystem, Context, LocalActorRef
+from casty import actor, ActorSystem, Mailbox, LocalActorRef
 
 
 @dataclass
 class Job:
-    """A job to be processed by a worker."""
     id: int
     payload: str
 
 
 @dataclass
 class JobResult:
-    """Result from a completed job."""
     job_id: int
     worker_id: int
     result: str
@@ -33,77 +31,62 @@ class JobResult:
 
 @dataclass
 class GetStats:
-    """Request router statistics."""
     pass
 
 
 @dataclass
 class RouterStats:
-    """Router statistics response."""
     jobs_dispatched: int
     jobs_completed: int
     workers: int
 
 
-class Worker(Actor[Job]):
-    """Worker that processes jobs and reports back to the router."""
-
-    def __init__(self, worker_id: int, router: LocalActorRef):
-        self.worker_id = worker_id
-        self.router = router
-
-    async def receive(self, msg: Job, ctx: Context) -> None:
-        print(f"  [Worker-{self.worker_id}] Processing job #{msg.id}: {msg.payload}")
-
-        await asyncio.sleep(0.1)
-
-        result = f"Processed '{msg.payload}' by worker {self.worker_id}"
-        await self.router.send(JobResult(msg.id, self.worker_id, result))
+@actor
+async def worker(worker_id: int, router: LocalActorRef[JobResult], *, mailbox: Mailbox[Job]):
+    async for msg, ctx in mailbox:
+        match msg:
+            case Job(id, payload):
+                print(f"  [Worker-{worker_id}] Processing job #{id}: {payload}")
+                await asyncio.sleep(0.1)
+                result = f"Processed '{payload}' by worker {worker_id}"
+                await router.send(JobResult(id, worker_id, result))
 
 
-class Router(Actor[Job | JobResult | GetStats]):
-    """Router that distributes jobs across a pool of workers using round-robin."""
+@actor
+async def router(num_workers: int = 3, *, mailbox: Mailbox[Job | JobResult | GetStats]):
+    workers: list[LocalActorRef[Job]] = []
+    current_index = 0
+    jobs_dispatched = 0
+    jobs_completed = 0
 
-    def __init__(self, num_workers: int = 3):
-        self.num_workers = num_workers
-        self.workers: list[LocalActorRef[Job]] = []
-        self.current_index = 0
-        self.jobs_dispatched = 0
-        self.jobs_completed = 0
-        self.results: list[JobResult] = []
+    async for msg, ctx in mailbox:
+        if not workers:
+            print(f"[Router] Starting with {num_workers} workers")
+            for i in range(num_workers):
+                w = await ctx.actor(
+                    worker(worker_id=i, router=ctx._self_ref),
+                    name=f"worker-{i}",
+                )
+                workers.append(w)
+            print(f"[Router] All {num_workers} workers spawned")
 
-    async def on_start(self) -> None:
-        print(f"[Router] Starting with {self.num_workers} workers")
-        for i in range(self.num_workers):
-            worker = await self._ctx.actor(
-                Worker,
-                name=f"worker-{i}",
-                worker_id=i,
-                router=self._ctx.self_ref,
-            )
-            self.workers.append(worker)
-        print(f"[Router] All {self.num_workers} workers spawned")
-
-    async def receive(self, msg: Job | JobResult | GetStats, ctx: Context) -> None:
         match msg:
             case Job() as job:
-                worker = self.workers[self.current_index]
-                self.current_index = (self.current_index + 1) % len(self.workers)
-                self.jobs_dispatched += 1
-
-                print(f"[Router] Dispatching job #{job.id} to Worker-{self.current_index}")
-                await worker.send(job)
+                w = workers[current_index]
+                current_index = (current_index + 1) % len(workers)
+                jobs_dispatched += 1
+                print(f"[Router] Dispatching job #{job.id} to Worker-{current_index}")
+                await w.send(job)
 
             case JobResult() as result:
-                self.jobs_completed += 1
-                self.results.append(result)
+                jobs_completed += 1
                 print(f"[Router] Job #{result.job_id} completed: {result.result}")
 
             case GetStats():
                 await ctx.reply(RouterStats(
-                    jobs_dispatched=self.jobs_dispatched,
-                    jobs_completed=self.jobs_completed,
-                    workers=len(self.workers),
+                    jobs_dispatched=jobs_dispatched,
+                    jobs_completed=jobs_completed,
+                    workers=len(workers),
                 ))
 
 
@@ -114,7 +97,7 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        router = await system.actor(Router, name="router", num_workers=3)
+        r = await system.actor(router(num_workers=3), name="router")
 
         await asyncio.sleep(0.1)
 
@@ -123,12 +106,12 @@ async def main():
         print()
 
         for i in range(6):
-            await router.send(Job(id=i, payload=f"task-{i}"))
+            await r.send(Job(id=i, payload=f"task-{i}"))
 
         await asyncio.sleep(1.0)
 
         print()
-        stats: RouterStats = await router.ask(GetStats())
+        stats: RouterStats = await r.ask(GetStats())
         print("=" * 60)
         print(f"Final Stats:")
         print(f"  Workers: {stats.workers}")

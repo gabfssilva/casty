@@ -1,71 +1,152 @@
 import pytest
+import asyncio
 from dataclasses import dataclass
 
-from casty import Actor, LocalActorRef
-from casty.cluster import ClusteredActorRef
-from casty.cluster.clustered_system import ClusteredSystem
-from casty.cluster.config import ClusterConfig
-from casty.cluster.scope import ClusterScope
+from casty import actor, Mailbox
+from casty.serializable import serializable
+from casty.cluster import ClusteredActorSystem
 
 
+@serializable
 @dataclass
-class Increment:
+class Inc:
     amount: int
 
 
+@serializable
 @dataclass
-class GetCount:
+class Get:
     pass
 
 
-class Counter(Actor[Increment | GetCount]):
-    def __init__(self):
-        self.count = 0
-
-    async def receive(self, msg, ctx):
+@actor
+async def counter(initial: int, *, mailbox: Mailbox[Inc | Get]):
+    count = initial
+    async for msg, ctx in mailbox:
         match msg:
-            case Increment(amount=amount):
-                self.count += amount
-            case GetCount():
-                await ctx.reply(self.count)
+            case Inc(amount):
+                count += amount
+            case Get():
+                await ctx.reply(count)
 
 
-class TestClusteredActorSystem:
-    @pytest.mark.asyncio
-    async def test_factory_returns_clustered_system(self):
-        system = ClusteredSystem(ClusterConfig(bind_port=18000))
-        assert isinstance(system, ClusteredSystem)
+@pytest.mark.asyncio
+async def test_clustered_system_basic():
 
-    @pytest.mark.asyncio
-    async def test_spawn_local_actor(self):
-        async with ClusteredSystem(ClusterConfig(bind_port=18000)) as system:
-            ref = await system.actor(Counter, name="counter")
-            assert isinstance(ref, LocalActorRef)
+    async with ClusteredActorSystem(
+        node_id="node-1",
+        host="127.0.0.1",
+        port=0,
+    ) as system:
+        ref = await system.actor(counter(0), name="counter")
 
-    @pytest.mark.asyncio
-    async def test_spawn_clustered_actor(self):
-        async with ClusteredSystem(ClusterConfig(bind_port=18001)) as system:
-            ref = await system.actor(Counter, name="counter", scope='cluster')
-            assert isinstance(ref, ClusteredActorRef)
+        await ref.send(Inc(5))
+        await asyncio.sleep(0.05)
+        result = await ref.ask(Get())
 
-    @pytest.mark.asyncio
-    async def test_clustered_actor_has_local_ref(self):
-        async with ClusteredSystem(ClusterConfig(bind_port=18002)) as system:
-            ref = await system.actor(Counter, name="counter", scope=ClusterScope(replication=1))
-            assert ref.local_ref is not None
+        assert result == 5
 
-    @pytest.mark.asyncio
-    async def test_clustered_send_and_ask(self):
-        async with ClusteredSystem(ClusterConfig(bind_port=18003)) as system:
-            ref = await system.actor(Counter, name="counter", scope='cluster')
 
-            await ref.send(Increment(10))
-            await ref.send(Increment(5))
+@pytest.mark.asyncio
+async def test_clustered_system_multiple_actors():
+    async with ClusteredActorSystem(
+        node_id="node-1",
+        host="127.0.0.1",
+        port=0,
+    ) as system:
+        ref1 = await system.actor(counter(0), name="counter1")
+        ref2 = await system.actor(counter(100), name="counter2")
 
-            result = await ref.ask(GetCount())
-            assert result == 15
+        await ref1.send(Inc(10))
+        await ref2.send(Inc(20))
+        await asyncio.sleep(0.05)
 
-    @pytest.mark.asyncio
-    async def test_node_id_property(self):
-        async with ClusteredSystem(ClusterConfig(bind_port=18004, node_id="my-node")) as system:
-            assert system.node_id == "my-node"
+        result1 = await ref1.ask(Get())
+        result2 = await ref2.ask(Get())
+
+        assert result1 == 10
+        assert result2 == 120
+
+
+@pytest.mark.asyncio
+async def test_clustered_system_get_or_create():
+    async with ClusteredActorSystem(
+        node_id="node-1",
+        host="127.0.0.1",
+        port=0,
+    ) as system:
+        ref1 = await system.actor(counter(0), name="counter")
+        await ref1.send(Inc(5))
+        await asyncio.sleep(0.05)
+
+        ref2 = await system.actor(counter(100), name="counter")
+
+        assert ref1 is ref2
+
+        result = await ref2.ask(Get())
+        assert result == 5
+
+
+@pytest.mark.asyncio
+async def test_clustered_system_port_property():
+    async with ClusteredActorSystem(
+        node_id="node-1",
+        host="127.0.0.1",
+        port=0,
+    ) as system:
+        assert system.port > 0
+        assert isinstance(system.port, int)
+
+
+@pytest.mark.asyncio
+async def test_clustered_system_node_id_property():
+    async with ClusteredActorSystem(
+        node_id="my-node",
+        host="127.0.0.1",
+        port=0,
+    ) as system:
+        assert system.node_id == "my-node"
+
+
+@pytest.mark.asyncio
+async def test_clustered_system_address_property():
+    async with ClusteredActorSystem(
+        node_id="node-1",
+        host="127.0.0.1",
+        port=0,
+    ) as system:
+        assert system.address.startswith("127.0.0.1:")
+        assert int(system.address.split(":")[1]) > 0
+
+
+@pytest.mark.asyncio
+async def test_two_nodes_connect():
+    async with ClusteredActorSystem(
+        node_id="node-1",
+        host="127.0.0.1",
+        port=0,
+    ) as system1:
+        async with ClusteredActorSystem(
+            node_id="node-2",
+            host="127.0.0.1",
+            port=0,
+        ) as system2:
+            await system2.connect_to(system1.address)
+            await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_clustered_system_with_seeds():
+    async with ClusteredActorSystem(
+        node_id="seed-node",
+        host="127.0.0.1",
+        port=0,
+    ) as seed_system:
+        async with ClusteredActorSystem(
+            node_id="joining-node",
+            host="127.0.0.1",
+            port=0,
+            seeds=[seed_system.address],
+        ) as joining_system:
+            await asyncio.sleep(0.1)
+            assert joining_system.node_id == "joining-node"

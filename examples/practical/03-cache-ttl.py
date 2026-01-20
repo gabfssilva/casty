@@ -15,53 +15,44 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from casty import Actor, ActorSystem, Context, on
+from casty import actor, ActorSystem, Mailbox
 
-
-# --- Messages ---
 
 @dataclass
 class Set:
-    """Set a cache entry with optional TTL."""
     key: str
     value: Any
-    ttl: float | None = None  # seconds, None = no expiration
+    ttl: float | None = None
 
 
 @dataclass
 class Get:
-    """Get a cache entry by key."""
     key: str
 
 
 @dataclass
 class Delete:
-    """Delete a cache entry."""
     key: str
 
 
 @dataclass
 class GetStats:
-    """Get cache statistics."""
     pass
 
 
 @dataclass
 class Clear:
-    """Clear all cache entries."""
     pass
 
 
 @dataclass
 class _Expire:
-    """Internal message to expire an entry."""
     key: str
     set_at: datetime
 
 
 @dataclass
 class CacheStats:
-    """Cache statistics."""
     size: int
     hits: int
     misses: int
@@ -71,136 +62,91 @@ class CacheStats:
 
 @dataclass
 class CacheEntry:
-    """Internal cache entry with metadata."""
     value: Any
     set_at: datetime = field(default_factory=datetime.now)
     expires_at: datetime | None = None
-    ttl_task_id: str | None = None
 
 
-# --- Cache Actor ---
-
-type CacheMessage = Set | Get | Delete | GetStats | Clear | _Expire
+CacheMsg = Set | Get | Delete | GetStats | Clear | _Expire
 
 
-class Cache(Actor[CacheMessage]):
-    """In-memory cache with TTL support.
+@actor
+async def cache(cache_name: str = "default", default_ttl: float | None = None, *, mailbox: Mailbox[CacheMsg]):
+    entries: dict[str, CacheEntry] = {}
+    hits = 0
+    misses = 0
+    evictions = 0
 
-    Features:
-    - Get/Set/Delete operations
-    - Per-entry TTL with automatic expiration
-    - Statistics tracking (hits, misses, evictions)
-    - Uses ctx.schedule() for expiration timers
-    """
+    async for msg, ctx in mailbox:
+        match msg:
+            case Set(key, value, ttl):
+                actual_ttl = ttl if ttl is not None else default_ttl
+                now = datetime.now()
+                entry = CacheEntry(
+                    value=value,
+                    set_at=now,
+                    expires_at=now + timedelta(seconds=actual_ttl) if actual_ttl else None,
+                )
 
-    def __init__(self, cache_name: str = "default", default_ttl: float | None = None):
-        self.cache_name = cache_name
-        self.default_ttl = default_ttl
-        self.entries: dict[str, CacheEntry] = {}
-        self.hits = 0
-        self.misses = 0
-        self.evictions = 0
+                if actual_ttl:
+                    await ctx.schedule(_Expire(key, set_at=now), delay=actual_ttl)
 
-    @on(Set)
-    async def handle_set(self, msg: Set, ctx: Context) -> None:
-        key = msg.key
-        ttl = msg.ttl if msg.ttl is not None else self.default_ttl
+                entries[key] = entry
+                ttl_str = f" (TTL: {actual_ttl}s)" if actual_ttl else ""
+                print(f"[Cache:{cache_name}] SET {key} = {value}{ttl_str}")
 
-        # Cancel existing expiration timer if present
-        if key in self.entries:
-            old_entry = self.entries[key]
-            if old_entry.ttl_task_id:
-                await ctx.cancel_schedule(old_entry.ttl_task_id)
+            case Get(key):
+                entry = entries.get(key)
 
-        # Create entry
-        now = datetime.now()
-        entry = CacheEntry(
-            value=msg.value,
-            set_at=now,
-            expires_at=now + timedelta(seconds=ttl) if ttl else None,
-        )
+                if entry is None:
+                    misses += 1
+                    print(f"[Cache:{cache_name}] GET {key} -> MISS")
+                    await ctx.reply(None)
+                    continue
 
-        # Schedule expiration if TTL is set
-        if ttl:
-            task_id = await ctx.schedule(ttl, _Expire(key, set_at=now))
-            entry.ttl_task_id = task_id
+                if entry.expires_at and datetime.now() > entry.expires_at:
+                    del entries[key]
+                    misses += 1
+                    evictions += 1
+                    print(f"[Cache:{cache_name}] GET {key} -> EXPIRED")
+                    await ctx.reply(None)
+                    continue
 
-        self.entries[key] = entry
-        ttl_str = f" (TTL: {ttl}s)" if ttl else ""
-        print(f"[Cache:{self.cache_name}] SET {key} = {msg.value}{ttl_str}")
+                hits += 1
+                print(f"[Cache:{cache_name}] GET {key} -> HIT ({entry.value})")
+                await ctx.reply(entry.value)
 
-    @on(Get)
-    async def handle_get(self, msg: Get, ctx: Context) -> None:
-        key = msg.key
-        entry = self.entries.get(key)
+            case Delete(key):
+                entry = entries.pop(key, None)
+                if entry:
+                    print(f"[Cache:{cache_name}] DELETE {key}")
+                else:
+                    print(f"[Cache:{cache_name}] DELETE {key} -> NOT FOUND")
 
-        if entry is None:
-            self.misses += 1
-            print(f"[Cache:{self.cache_name}] GET {key} -> MISS")
-            await ctx.reply(None)
-            return
+            case _Expire(key, set_at):
+                entry = entries.get(key)
+                if entry and entry.set_at == set_at:
+                    del entries[key]
+                    evictions += 1
+                    print(f"[Cache:{cache_name}] EXPIRED {key}")
 
-        # Check if expired (belt-and-suspenders check)
-        if entry.expires_at and datetime.now() > entry.expires_at:
-            del self.entries[key]
-            self.misses += 1
-            self.evictions += 1
-            print(f"[Cache:{self.cache_name}] GET {key} -> EXPIRED")
-            await ctx.reply(None)
-            return
+            case GetStats():
+                total = hits + misses
+                hit_rate = hits / total if total > 0 else 0.0
+                stats = CacheStats(
+                    size=len(entries),
+                    hits=hits,
+                    misses=misses,
+                    evictions=evictions,
+                    hit_rate=hit_rate,
+                )
+                await ctx.reply(stats)
 
-        self.hits += 1
-        print(f"[Cache:{self.cache_name}] GET {key} -> HIT ({entry.value})")
-        await ctx.reply(entry.value)
+            case Clear():
+                count = len(entries)
+                entries.clear()
+                print(f"[Cache:{cache_name}] CLEARED {count} entries")
 
-    @on(Delete)
-    async def handle_delete(self, msg: Delete, ctx: Context) -> None:
-        key = msg.key
-        entry = self.entries.pop(key, None)
-
-        if entry:
-            if entry.ttl_task_id:
-                await ctx.cancel_schedule(entry.ttl_task_id)
-            print(f"[Cache:{self.cache_name}] DELETE {key}")
-        else:
-            print(f"[Cache:{self.cache_name}] DELETE {key} -> NOT FOUND")
-
-    @on(_Expire)
-    async def handle_expire(self, msg: _Expire, ctx: Context) -> None:
-        entry = self.entries.get(msg.key)
-
-        # Only expire if the entry exists and wasn't overwritten
-        if entry and entry.set_at == msg.set_at:
-            del self.entries[msg.key]
-            self.evictions += 1
-            print(f"[Cache:{self.cache_name}] EXPIRED {msg.key}")
-
-    @on(GetStats)
-    async def handle_stats(self, msg: GetStats, ctx: Context) -> None:
-        total = self.hits + self.misses
-        hit_rate = self.hits / total if total > 0 else 0.0
-        stats = CacheStats(
-            size=len(self.entries),
-            hits=self.hits,
-            misses=self.misses,
-            evictions=self.evictions,
-            hit_rate=hit_rate,
-        )
-        await ctx.reply(stats)
-
-    @on(Clear)
-    async def handle_clear(self, msg: Clear, ctx: Context) -> None:
-        # Cancel all expiration timers
-        for entry in self.entries.values():
-            if entry.ttl_task_id:
-                await ctx.cancel_schedule(entry.ttl_task_id)
-
-        count = len(self.entries)
-        self.entries.clear()
-        print(f"[Cache:{self.cache_name}] CLEARED {count} entries")
-
-
-# --- Main ---
 
 async def main():
     print("=" * 60)
@@ -209,53 +155,45 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        # Create cache with 5-second default TTL
-        cache = await system.actor(Cache, name="cache-user-cache", cache_name="user-cache", default_ttl=5.0)
+        c = await system.actor(cache(cache_name="user-cache", default_ttl=5.0), name="cache-user-cache")
         print("Cache 'user-cache' created (default TTL: 5s)")
         print()
 
-        # Set some entries
         print("--- Setting entries ---")
-        await cache.send(Set("user:1", {"name": "Alice", "role": "admin"}))
-        await cache.send(Set("user:2", {"name": "Bob", "role": "user"}, ttl=1.0))  # 1s TTL
-        await cache.send(Set("user:3", {"name": "Charlie", "role": "user"}))  # default TTL
+        await c.send(Set("user:1", {"name": "Alice", "role": "admin"}))
+        await c.send(Set("user:2", {"name": "Bob", "role": "user"}, ttl=1.0))
+        await c.send(Set("user:3", {"name": "Charlie", "role": "user"}))
         await asyncio.sleep(0.1)
         print()
 
-        # Get entries (all should be hits)
         print("--- Getting entries (immediate) ---")
-        user1 = await cache.ask(Get("user:1"))
-        user2 = await cache.ask(Get("user:2"))
-        user3 = await cache.ask(Get("user:3"))
-        user4 = await cache.ask(Get("user:4"))  # miss
+        await c.ask(Get("user:1"))
+        await c.ask(Get("user:2"))
+        await c.ask(Get("user:3"))
+        await c.ask(Get("user:4"))
         print()
 
-        # Wait for user:2 to expire (1s TTL)
         print("--- Waiting 1.5s for user:2 to expire ---")
         await asyncio.sleep(1.5)
         print()
 
-        # Get entries again
         print("--- Getting entries (after 1.5s) ---")
-        user2_after = await cache.ask(Get("user:2"))  # should be expired
-        user1_after = await cache.ask(Get("user:1"))  # should still be there
+        await c.ask(Get("user:2"))
+        await c.ask(Get("user:1"))
         print()
 
-        # Update an entry
         print("--- Updating entry ---")
-        await cache.send(Set("user:1", {"name": "Alice", "role": "superadmin"}, ttl=2.0))
+        await c.send(Set("user:1", {"name": "Alice", "role": "superadmin"}, ttl=2.0))
         await asyncio.sleep(0.1)
         print()
 
-        # Delete an entry
         print("--- Deleting entry ---")
-        await cache.send(Delete("user:3"))
+        await c.send(Delete("user:3"))
         await asyncio.sleep(0.1)
         print()
 
-        # Stats at this point
         print("--- Statistics (mid-session) ---")
-        stats: CacheStats = await cache.ask(GetStats())
+        stats: CacheStats = await c.ask(GetStats())
         print(f"Size:      {stats.size}")
         print(f"Hits:      {stats.hits}")
         print(f"Misses:    {stats.misses}")
@@ -263,19 +201,16 @@ async def main():
         print(f"Hit rate:  {stats.hit_rate:.1%}")
         print()
 
-        # Wait for remaining entries to expire
         print("--- Waiting 3s for remaining entries to expire ---")
         await asyncio.sleep(3.0)
         print()
 
-        # Try to get expired entries
         print("--- Getting entries (after expiration) ---")
-        user1_final = await cache.ask(Get("user:1"))  # should be expired
+        await c.ask(Get("user:1"))
         print()
 
-        # Final stats
         print("--- Final Statistics ---")
-        stats = await cache.ask(GetStats())
+        stats = await c.ask(GetStats())
         print(f"Size:      {stats.size}")
         print(f"Hits:      {stats.hits}")
         print(f"Misses:    {stats.misses}")

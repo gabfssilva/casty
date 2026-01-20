@@ -11,10 +11,10 @@ Run with:
 """
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
-from casty import Actor, ActorSystem, Context, LocalActorRef
+from casty import actor, ActorSystem, Mailbox, LocalActorRef
 
 
 class BookingStatus(Enum):
@@ -109,105 +109,8 @@ class PaymentFailed:
     reason: str
 
 
-class HotelService(Actor[ReserveHotel | CancelHotelReservation]):
-    """Simulates a hotel reservation service."""
-
-    def __init__(self, should_fail: bool = False):
-        self.should_fail = should_fail
-        self.reservations: dict[str, str] = {}
-
-    async def receive(
-        self,
-        msg: ReserveHotel | CancelHotelReservation,
-        ctx: Context,
-    ) -> None:
-        match msg:
-            case ReserveHotel(booking_id, hotel, nights):
-                await asyncio.sleep(0.1)
-
-                if self.should_fail:
-                    print(f"  [Hotel] Reservation FAILED for {hotel}")
-                    await ctx.reply(HotelFailed(booking_id, "No rooms available"))
-                else:
-                    confirmation = f"HOTEL-{booking_id[:8]}"
-                    self.reservations[booking_id] = confirmation
-                    print(f"  [Hotel] Reserved {hotel} for {nights} nights: {confirmation}")
-                    await ctx.reply(HotelReserved(booking_id, confirmation))
-
-            case CancelHotelReservation(booking_id):
-                await asyncio.sleep(0.05)
-                conf = self.reservations.pop(booking_id, None)
-                print(f"  [Hotel] Cancelled reservation: {conf or 'N/A'}")
-                await ctx.reply(HotelCancelled(booking_id))
-
-
-class FlightService(Actor[ReserveFlight | CancelFlightReservation]):
-    """Simulates a flight reservation service."""
-
-    def __init__(self, should_fail: bool = False):
-        self.should_fail = should_fail
-        self.reservations: dict[str, str] = {}
-
-    async def receive(
-        self,
-        msg: ReserveFlight | CancelFlightReservation,
-        ctx: Context,
-    ) -> None:
-        match msg:
-            case ReserveFlight(booking_id, flight):
-                await asyncio.sleep(0.1)
-
-                if self.should_fail:
-                    print(f"  [Flight] Reservation FAILED for {flight}")
-                    await ctx.reply(FlightFailed(booking_id, "Flight fully booked"))
-                else:
-                    confirmation = f"FLIGHT-{booking_id[:8]}"
-                    self.reservations[booking_id] = confirmation
-                    print(f"  [Flight] Reserved {flight}: {confirmation}")
-                    await ctx.reply(FlightReserved(booking_id, confirmation))
-
-            case CancelFlightReservation(booking_id):
-                await asyncio.sleep(0.05)
-                conf = self.reservations.pop(booking_id, None)
-                print(f"  [Flight] Cancelled reservation: {conf or 'N/A'}")
-                await ctx.reply(FlightCancelled(booking_id))
-
-
-class PaymentService(Actor[ChargePayment | RefundPayment]):
-    """Simulates a payment service."""
-
-    def __init__(self, should_fail: bool = False):
-        self.should_fail = should_fail
-        self.charges: dict[str, float] = {}
-
-    async def receive(
-        self,
-        msg: ChargePayment | RefundPayment,
-        ctx: Context,
-    ) -> None:
-        match msg:
-            case ChargePayment(booking_id, amount):
-                await asyncio.sleep(0.1)
-
-                if self.should_fail:
-                    print(f"  [Payment] Charge FAILED for ${amount:.2f}")
-                    await ctx.reply(PaymentFailed(booking_id, "Card declined"))
-                else:
-                    transaction_id = f"TXN-{booking_id[:8]}"
-                    self.charges[booking_id] = amount
-                    print(f"  [Payment] Charged ${amount:.2f}: {transaction_id}")
-                    await ctx.reply(PaymentCharged(booking_id, transaction_id))
-
-            case RefundPayment(booking_id):
-                await asyncio.sleep(0.05)
-                amount = self.charges.pop(booking_id, 0)
-                print(f"  [Payment] Refunded ${amount:.2f}")
-                await ctx.reply(PaymentRefunded(booking_id))
-
-
 @dataclass
 class BookTrip:
-    """Request to book a complete trip."""
     booking_id: str
     hotel: str
     nights: int
@@ -217,7 +120,6 @@ class BookTrip:
 
 @dataclass
 class BookingResult:
-    """Result of a booking attempt."""
     booking_id: str
     success: bool
     message: str
@@ -226,16 +128,8 @@ class BookingResult:
     payment_transaction: str | None = None
 
 
-SagaResponse = (
-    HotelReserved | HotelFailed | HotelCancelled |
-    FlightReserved | FlightFailed | FlightCancelled |
-    PaymentCharged | PaymentFailed | PaymentRefunded
-)
-
-
 @dataclass
 class SagaState:
-    """Tracks the state of a saga execution."""
     booking: BookTrip
     sender: LocalActorRef | None
     hotel_confirmation: str | None = None
@@ -245,123 +139,194 @@ class SagaState:
     compensating: bool = False
 
 
-class SagaOrchestrator(Actor[BookTrip | SagaResponse]):
-    """Orchestrates the booking saga with compensation on failure."""
+HotelMsg = ReserveHotel | CancelHotelReservation
+FlightMsg = ReserveFlight | CancelFlightReservation
+PaymentMsg = ChargePayment | RefundPayment
 
-    def __init__(
-        self,
-        hotel_service: LocalActorRef,
-        flight_service: LocalActorRef,
-        payment_service: LocalActorRef,
-    ):
-        self.hotel_service = hotel_service
-        self.flight_service = flight_service
-        self.payment_service = payment_service
-        self.sagas: dict[str, SagaState] = {}
+SagaResponse = (
+    HotelReserved | HotelFailed | HotelCancelled |
+    FlightReserved | FlightFailed | FlightCancelled |
+    PaymentCharged | PaymentFailed | PaymentRefunded
+)
 
-    async def receive(self, msg: BookTrip | SagaResponse, ctx: Context) -> None:
+
+@actor
+async def hotel_service(should_fail: bool = False, *, mailbox: Mailbox[HotelMsg]):
+    reservations: dict[str, str] = {}
+
+    async for msg, ctx in mailbox:
+        match msg:
+            case ReserveHotel(booking_id, hotel, nights):
+                await asyncio.sleep(0.1)
+                if should_fail:
+                    print(f"  [Hotel] Reservation FAILED for {hotel}")
+                    await ctx.reply(HotelFailed(booking_id, "No rooms available"))
+                else:
+                    confirmation = f"HOTEL-{booking_id[:8]}"
+                    reservations[booking_id] = confirmation
+                    print(f"  [Hotel] Reserved {hotel} for {nights} nights: {confirmation}")
+                    await ctx.reply(HotelReserved(booking_id, confirmation))
+
+            case CancelHotelReservation(booking_id):
+                await asyncio.sleep(0.05)
+                conf = reservations.pop(booking_id, None)
+                print(f"  [Hotel] Cancelled reservation: {conf or 'N/A'}")
+                await ctx.reply(HotelCancelled(booking_id))
+
+
+@actor
+async def flight_service(should_fail: bool = False, *, mailbox: Mailbox[FlightMsg]):
+    reservations: dict[str, str] = {}
+
+    async for msg, ctx in mailbox:
+        match msg:
+            case ReserveFlight(booking_id, flight):
+                await asyncio.sleep(0.1)
+                if should_fail:
+                    print(f"  [Flight] Reservation FAILED for {flight}")
+                    await ctx.reply(FlightFailed(booking_id, "Flight fully booked"))
+                else:
+                    confirmation = f"FLIGHT-{booking_id[:8]}"
+                    reservations[booking_id] = confirmation
+                    print(f"  [Flight] Reserved {flight}: {confirmation}")
+                    await ctx.reply(FlightReserved(booking_id, confirmation))
+
+            case CancelFlightReservation(booking_id):
+                await asyncio.sleep(0.05)
+                conf = reservations.pop(booking_id, None)
+                print(f"  [Flight] Cancelled reservation: {conf or 'N/A'}")
+                await ctx.reply(FlightCancelled(booking_id))
+
+
+@actor
+async def payment_service(should_fail: bool = False, *, mailbox: Mailbox[PaymentMsg]):
+    charges: dict[str, float] = {}
+
+    async for msg, ctx in mailbox:
+        match msg:
+            case ChargePayment(booking_id, amount):
+                await asyncio.sleep(0.1)
+                if should_fail:
+                    print(f"  [Payment] Charge FAILED for ${amount:.2f}")
+                    await ctx.reply(PaymentFailed(booking_id, "Card declined"))
+                else:
+                    transaction_id = f"TXN-{booking_id[:8]}"
+                    charges[booking_id] = amount
+                    print(f"  [Payment] Charged ${amount:.2f}: {transaction_id}")
+                    await ctx.reply(PaymentCharged(booking_id, transaction_id))
+
+            case RefundPayment(booking_id):
+                await asyncio.sleep(0.05)
+                amount = charges.pop(booking_id, 0)
+                print(f"  [Payment] Refunded ${amount:.2f}")
+                await ctx.reply(PaymentRefunded(booking_id))
+
+
+@actor
+async def saga_orchestrator(
+    hotel_svc: LocalActorRef[HotelMsg],
+    flight_svc: LocalActorRef[FlightMsg],
+    payment_svc: LocalActorRef[PaymentMsg],
+    *,
+    mailbox: Mailbox[BookTrip | SagaResponse],
+):
+    sagas: dict[str, SagaState] = {}
+
+    async for msg, ctx in mailbox:
         match msg:
             case BookTrip() as booking:
                 print(f"[Saga] Starting booking saga: {booking.booking_id}")
-                self.sagas[booking.booking_id] = SagaState(
+                sagas[booking.booking_id] = SagaState(
                     booking=booking,
                     sender=ctx.sender,
                 )
-                await self._step_reserve_hotel(booking)
+                print(f"[Saga] Step 1: Reserving hotel...")
+                await hotel_svc.send(
+                    ReserveHotel(booking.booking_id, booking.hotel, booking.nights),
+                    sender=ctx.self_id,
+                )
 
             case HotelReserved(booking_id, confirmation):
-                saga = self.sagas.get(booking_id)
+                saga = sagas.get(booking_id)
                 if saga:
                     saga.hotel_confirmation = confirmation
-                    await self._step_reserve_flight(saga)
+                    print(f"[Saga] Step 2: Reserving flight...")
+                    await flight_svc.send(
+                        ReserveFlight(saga.booking.booking_id, saga.booking.flight),
+                        sender=ctx.self_id,
+                    )
 
             case HotelFailed(booking_id, reason):
-                saga = self.sagas.get(booking_id)
+                saga = sagas.get(booking_id)
                 if saga:
-                    await self._complete_saga(saga, False, f"Hotel booking failed: {reason}")
+                    await _complete_saga(saga, False, f"Hotel booking failed: {reason}", sagas)
 
             case FlightReserved(booking_id, confirmation):
-                saga = self.sagas.get(booking_id)
+                saga = sagas.get(booking_id)
                 if saga:
                     saga.flight_confirmation = confirmation
-                    await self._step_charge_payment(saga)
+                    print(f"[Saga] Step 3: Charging payment...")
+                    await payment_svc.send(
+                        ChargePayment(saga.booking.booking_id, saga.booking.total_amount),
+                        sender=ctx.self_id,
+                    )
 
             case FlightFailed(booking_id, reason):
-                saga = self.sagas.get(booking_id)
+                saga = sagas.get(booking_id)
                 if saga:
                     saga.compensating = True
                     print(f"[Saga] Flight failed, starting compensation...")
-                    await self.hotel_service.send(
+                    await hotel_svc.send(
                         CancelHotelReservation(booking_id),
-                        sender=self._ctx.self_ref,
+                        sender=ctx.self_id,
                     )
                     saga.step = "compensate_hotel"
 
             case PaymentCharged(booking_id, transaction_id):
-                saga = self.sagas.get(booking_id)
+                saga = sagas.get(booking_id)
                 if saga:
                     saga.payment_transaction = transaction_id
-                    await self._complete_saga(saga, True, "Booking completed successfully!")
+                    await _complete_saga(saga, True, "Booking completed successfully!", sagas)
 
             case PaymentFailed(booking_id, reason):
-                saga = self.sagas.get(booking_id)
+                saga = sagas.get(booking_id)
                 if saga:
                     saga.compensating = True
                     print(f"[Saga] Payment failed, starting compensation...")
-                    await self.flight_service.send(
+                    await flight_svc.send(
                         CancelFlightReservation(booking_id),
-                        sender=self._ctx.self_ref,
+                        sender=ctx.self_id,
                     )
                     saga.step = "compensate_flight"
 
             case FlightCancelled(booking_id):
-                saga = self.sagas.get(booking_id)
+                saga = sagas.get(booking_id)
                 if saga and saga.compensating:
-                    await self.hotel_service.send(
+                    await hotel_svc.send(
                         CancelHotelReservation(booking_id),
-                        sender=self._ctx.self_ref,
+                        sender=ctx.self_id,
                     )
                     saga.step = "compensate_hotel"
 
             case HotelCancelled(booking_id):
-                saga = self.sagas.get(booking_id)
+                saga = sagas.get(booking_id)
                 if saga and saga.compensating:
-                    await self._complete_saga(saga, False, "Booking failed - all reservations rolled back")
+                    await _complete_saga(saga, False, "Booking failed - all reservations rolled back", sagas)
 
-    async def _step_reserve_hotel(self, booking: BookTrip) -> None:
-        print(f"[Saga] Step 1: Reserving hotel...")
-        await self.hotel_service.send(
-            ReserveHotel(booking.booking_id, booking.hotel, booking.nights),
-            sender=self._ctx.self_ref,
-        )
 
-    async def _step_reserve_flight(self, saga: SagaState) -> None:
-        print(f"[Saga] Step 2: Reserving flight...")
-        await self.flight_service.send(
-            ReserveFlight(saga.booking.booking_id, saga.booking.flight),
-            sender=self._ctx.self_ref,
-        )
-
-    async def _step_charge_payment(self, saga: SagaState) -> None:
-        print(f"[Saga] Step 3: Charging payment...")
-        await self.payment_service.send(
-            ChargePayment(saga.booking.booking_id, saga.booking.total_amount),
-            sender=self._ctx.self_ref,
-        )
-
-    async def _complete_saga(self, saga: SagaState, success: bool, message: str) -> None:
-        print(f"[Saga] Completed: {'SUCCESS' if success else 'FAILED'} - {message}")
-        result = BookingResult(
-            booking_id=saga.booking.booking_id,
-            success=success,
-            message=message,
-            hotel_confirmation=saga.hotel_confirmation if success else None,
-            flight_confirmation=saga.flight_confirmation if success else None,
-            payment_transaction=saga.payment_transaction if success else None,
-        )
-        if saga.sender:
-            await saga.sender.send(result)
-        del self.sagas[saga.booking.booking_id]
+async def _complete_saga(saga: SagaState, success: bool, message: str, sagas: dict) -> None:
+    print(f"[Saga] Completed: {'SUCCESS' if success else 'FAILED'} - {message}")
+    result = BookingResult(
+        booking_id=saga.booking.booking_id,
+        success=success,
+        message=message,
+        hotel_confirmation=saga.hotel_confirmation if success else None,
+        flight_confirmation=saga.flight_confirmation if success else None,
+        payment_transaction=saga.payment_transaction if success else None,
+    )
+    if saga.sender:
+        await saga.sender.send(result)
+    del sagas[saga.booking.booking_id]
 
 
 async def main():
@@ -374,16 +339,13 @@ async def main():
         print("Scenario 1: Successful booking")
         print("-" * 40)
 
-        hotel1 = await system.actor(HotelService, name="hotel-service-1", should_fail=False)
-        flight1 = await system.actor(FlightService, name="flight-service-1", should_fail=False)
-        payment1 = await system.actor(PaymentService, name="payment-service-1", should_fail=False)
+        hotel1 = await system.actor(hotel_service(should_fail=False), name="hotel-service-1")
+        flight1 = await system.actor(flight_service(should_fail=False), name="flight-service-1")
+        payment1 = await system.actor(payment_service(should_fail=False), name="payment-service-1")
 
         saga1 = await system.actor(
-            SagaOrchestrator,
+            saga_orchestrator(hotel_svc=hotel1, flight_svc=flight1, payment_svc=payment1),
             name="saga-orchestrator-1",
-            hotel_service=hotel1,
-            flight_service=flight1,
-            payment_service=payment1,
         )
 
         result1: BookingResult = await saga1.ask(
@@ -409,16 +371,13 @@ async def main():
         print("Scenario 2: Payment fails -> rollback hotel and flight")
         print("-" * 40)
 
-        hotel2 = await system.actor(HotelService, name="hotel-service-2", should_fail=False)
-        flight2 = await system.actor(FlightService, name="flight-service-2", should_fail=False)
-        payment2 = await system.actor(PaymentService, name="payment-service-2", should_fail=True)
+        hotel2 = await system.actor(hotel_service(should_fail=False), name="hotel-service-2")
+        flight2 = await system.actor(flight_service(should_fail=False), name="flight-service-2")
+        payment2 = await system.actor(payment_service(should_fail=True), name="payment-service-2")
 
         saga2 = await system.actor(
-            SagaOrchestrator,
+            saga_orchestrator(hotel_svc=hotel2, flight_svc=flight2, payment_svc=payment2),
             name="saga-orchestrator-2",
-            hotel_service=hotel2,
-            flight_service=flight2,
-            payment_service=payment2,
         )
 
         result2: BookingResult = await saga2.ask(
@@ -440,16 +399,13 @@ async def main():
         print("Scenario 3: Flight fails -> rollback hotel only")
         print("-" * 40)
 
-        hotel3 = await system.actor(HotelService, name="hotel-service-3", should_fail=False)
-        flight3 = await system.actor(FlightService, name="flight-service-3", should_fail=True)
-        payment3 = await system.actor(PaymentService, name="payment-service-3", should_fail=False)
+        hotel3 = await system.actor(hotel_service(should_fail=False), name="hotel-service-3")
+        flight3 = await system.actor(flight_service(should_fail=True), name="flight-service-3")
+        payment3 = await system.actor(payment_service(should_fail=False), name="payment-service-3")
 
         saga3 = await system.actor(
-            SagaOrchestrator,
+            saga_orchestrator(hotel_svc=hotel3, flight_svc=flight3, payment_svc=payment3),
             name="saga-orchestrator-3",
-            hotel_service=hotel3,
-            flight_service=flight3,
-            payment_service=payment3,
         )
 
         result3: BookingResult = await saga3.ask(

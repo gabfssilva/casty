@@ -16,7 +16,7 @@ import random
 from dataclasses import dataclass
 from enum import Enum
 
-from casty import Actor, ActorSystem, Context
+from casty import actor, ActorSystem, Mailbox
 
 
 class CircuitState(Enum):
@@ -27,13 +27,11 @@ class CircuitState(Enum):
 
 @dataclass
 class Call:
-    """Request to call the protected service."""
     request_id: int
 
 
 @dataclass
 class CallResult:
-    """Result of a call attempt."""
     request_id: int
     success: bool
     message: str
@@ -41,13 +39,11 @@ class CallResult:
 
 @dataclass
 class GetStatus:
-    """Get circuit breaker status."""
     pass
 
 
 @dataclass
 class CircuitStatus:
-    """Status response."""
     state: str
     failure_count: int
     success_count: int
@@ -57,114 +53,97 @@ class CircuitStatus:
 
 @dataclass
 class _TryHalfOpen:
-    """Internal message to transition to half-open state."""
     pass
 
 
-class CircuitBreaker(Actor[Call | GetStatus | _TryHalfOpen]):
-    """Circuit breaker that protects calls to an unreliable service.
+@actor
+async def circuit_breaker(
+    failure_threshold: int = 3,
+    reset_timeout: float = 5.0,
+    success_threshold: int = 2,
+    failure_rate: float = 0.4,
+    *,
+    mailbox: Mailbox[Call | GetStatus | _TryHalfOpen],
+):
+    state = CircuitState.CLOSED
+    failure_count = 0
+    success_count = 0
+    half_open_successes = 0
+    total_calls = 0
+    rejected_calls = 0
 
-    Configuration:
-    - failure_threshold: Number of consecutive failures before opening
-    - reset_timeout: Seconds before transitioning from open to half-open
-    - success_threshold: Successes needed in half-open to close
-    """
+    async def call_service(request_id: int) -> bool:
+        await asyncio.sleep(0.05)
+        return random.random() > failure_rate
 
-    def __init__(
-        self,
-        failure_threshold: int = 3,
-        reset_timeout: float = 5.0,
-        success_threshold: int = 2,
-        failure_rate: float = 0.4,
-    ):
-        self.failure_threshold = failure_threshold
-        self.reset_timeout = reset_timeout
-        self.success_threshold = success_threshold
-        self.failure_rate = failure_rate
-
-        self.state = CircuitState.CLOSED
-        self.failure_count = 0
-        self.success_count = 0
-        self.half_open_successes = 0
-        self.total_calls = 0
-        self.rejected_calls = 0
-
-    async def receive(self, msg: Call | GetStatus | _TryHalfOpen, ctx: Context) -> None:
+    async for msg, ctx in mailbox:
         match msg:
             case Call(request_id):
-                self.total_calls += 1
-                await self._handle_call(request_id, ctx)
+                total_calls += 1
+
+                if state == CircuitState.OPEN:
+                    rejected_calls += 1
+                    print(f"[Circuit] Call #{request_id} REJECTED (circuit OPEN)")
+                    await ctx.reply(CallResult(
+                        request_id=request_id,
+                        success=False,
+                        message="Circuit breaker is OPEN - request rejected",
+                    ))
+
+                elif state == CircuitState.HALF_OPEN:
+                    success = await call_service(request_id)
+
+                    if success:
+                        half_open_successes += 1
+                        success_count += 1
+                        print(f"[Circuit] Call #{request_id} SUCCESS in HALF_OPEN ({half_open_successes}/{success_threshold})")
+
+                        if half_open_successes >= success_threshold:
+                            print(f"[Circuit] Transitioning from HALF_OPEN -> CLOSED (service recovered)")
+                            state = CircuitState.CLOSED
+                            failure_count = 0
+
+                        await ctx.reply(CallResult(request_id, True, "Success"))
+                    else:
+                        print(f"[Circuit] Call #{request_id} FAILED in HALF_OPEN -> back to OPEN")
+                        failure_count += 1
+                        state = CircuitState.OPEN
+                        await ctx.schedule(_TryHalfOpen(), delay=reset_timeout)
+                        await ctx.reply(CallResult(request_id, False, "Failed in half-open"))
+
+                else:  # CLOSED
+                    success = await call_service(request_id)
+
+                    if success:
+                        success_count += 1
+                        failure_count = 0
+                        print(f"[Circuit] Call #{request_id} SUCCESS (circuit CLOSED)")
+                        await ctx.reply(CallResult(request_id, True, "Success"))
+                    else:
+                        failure_count += 1
+                        print(f"[Circuit] Call #{request_id} FAILED ({failure_count}/{failure_threshold})")
+
+                        if failure_count >= failure_threshold:
+                            print(f"[Circuit] Transitioning from CLOSED -> OPEN (too many failures)")
+                            state = CircuitState.OPEN
+                            await ctx.schedule(_TryHalfOpen(), delay=reset_timeout)
+
+                        await ctx.reply(CallResult(request_id, False, "Service call failed"))
 
             case GetStatus():
                 await ctx.reply(CircuitStatus(
-                    state=self.state.value,
-                    failure_count=self.failure_count,
-                    success_count=self.success_count,
-                    total_calls=self.total_calls,
-                    rejected_calls=self.rejected_calls,
+                    state=state.value,
+                    failure_count=failure_count,
+                    success_count=success_count,
+                    total_calls=total_calls,
+                    rejected_calls=rejected_calls,
                 ))
 
             case _TryHalfOpen():
-                if self.state == CircuitState.OPEN:
+                if state == CircuitState.OPEN:
                     print(f"[Circuit] Transitioning from OPEN -> HALF_OPEN (testing)")
-                    self.state = CircuitState.HALF_OPEN
-                    self.half_open_successes = 0
-
-    async def _handle_call(self, request_id: int, ctx: Context) -> None:
-        match self.state:
-            case CircuitState.OPEN:
-                self.rejected_calls += 1
-                print(f"[Circuit] Call #{request_id} REJECTED (circuit OPEN)")
-                await ctx.reply(CallResult(
-                    request_id=request_id,
-                    success=False,
-                    message="Circuit breaker is OPEN - request rejected",
-                ))
-
-            case CircuitState.HALF_OPEN:
-                success = await self._call_service(request_id)
-
-                if success:
-                    self.half_open_successes += 1
-                    self.success_count += 1
-                    print(f"[Circuit] Call #{request_id} SUCCESS in HALF_OPEN ({self.half_open_successes}/{self.success_threshold})")
-
-                    if self.half_open_successes >= self.success_threshold:
-                        print(f"[Circuit] Transitioning from HALF_OPEN -> CLOSED (service recovered)")
-                        self.state = CircuitState.CLOSED
-                        self.failure_count = 0
-
-                    await ctx.reply(CallResult(request_id, True, "Success"))
-                else:
-                    print(f"[Circuit] Call #{request_id} FAILED in HALF_OPEN -> back to OPEN")
-                    self.failure_count += 1
-                    self.state = CircuitState.OPEN
-                    await ctx.schedule(self.reset_timeout, _TryHalfOpen())
-                    await ctx.reply(CallResult(request_id, False, "Failed in half-open"))
-
-            case CircuitState.CLOSED:
-                success = await self._call_service(request_id)
-
-                if success:
-                    self.success_count += 1
-                    self.failure_count = 0
-                    print(f"[Circuit] Call #{request_id} SUCCESS (circuit CLOSED)")
-                    await ctx.reply(CallResult(request_id, True, "Success"))
-                else:
-                    self.failure_count += 1
-                    print(f"[Circuit] Call #{request_id} FAILED ({self.failure_count}/{self.failure_threshold})")
-
-                    if self.failure_count >= self.failure_threshold:
-                        print(f"[Circuit] Transitioning from CLOSED -> OPEN (too many failures)")
-                        self.state = CircuitState.OPEN
-                        await ctx.schedule(self.reset_timeout, _TryHalfOpen())
-
-                    await ctx.reply(CallResult(request_id, False, "Service call failed"))
-
-    async def _call_service(self, request_id: int) -> bool:
-        """Simulate calling an unreliable external service."""
-        await asyncio.sleep(0.05)
-        return random.random() > self.failure_rate
+                    state = CircuitState.HALF_OPEN
+                    half_open_successes = 0
 
 
 async def main():
@@ -181,12 +160,13 @@ async def main():
 
     async with ActorSystem() as system:
         circuit = await system.actor(
-            CircuitBreaker,
+            circuit_breaker(
+                failure_threshold=3,
+                reset_timeout=2.0,
+                success_threshold=2,
+                failure_rate=0.7,
+            ),
             name="circuit-breaker",
-            failure_threshold=3,
-            reset_timeout=2.0,
-            success_threshold=2,
-            failure_rate=0.7,
         )
 
         print("Phase 1: Making calls until circuit opens...")

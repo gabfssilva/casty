@@ -1,10 +1,9 @@
-"""State Machine: FSM with become() for behavior switching.
+"""State Machine: FSM with behavior switching.
 
 Demonstrates:
 - Traffic light FSM: green -> yellow -> red -> green
-- Using ctx.become() to switch behavior/state
 - Using ctx.schedule() for timed state transitions
-- Each state as a separate behavior function
+- State as local variable in the actor
 
 Run with:
     uv run python examples/basics/04-state-machine.py
@@ -13,108 +12,59 @@ Run with:
 import asyncio
 from dataclasses import dataclass
 
-from casty import Actor, ActorSystem, Context
+from casty import actor, ActorSystem, Mailbox
 
-
-# --- Messages ---
 
 @dataclass
 class Timeout:
-    """Internal message for timed transitions."""
     pass
 
 
 @dataclass
 class GetState:
-    """Query current traffic light state."""
     pass
 
 
 @dataclass
 class Start:
-    """Start the traffic light cycle."""
     pass
 
 
-# --- Traffic Light Actor ---
+GREEN_DURATION = 1.0
+YELLOW_DURATION = 0.5
+RED_DURATION = 1.0
 
-class TrafficLight(Actor[Start | Timeout | GetState]):
-    """Traffic light that cycles: green -> yellow -> red -> green.
 
-    Each state is a separate behavior function. The light uses
-    ctx.schedule() to trigger automatic transitions after a delay.
+@actor
+async def traffic_light(mailbox: Mailbox[Start | Timeout | GetState]):
+    current_state = "off"
+    cycles_completed = 0
 
-    Timing:
-    - Green: 3 seconds
-    - Yellow: 1 second
-    - Red: 3 seconds
-    """
-
-    # Durations in seconds (shortened for demo)
-    GREEN_DURATION = 1.0
-    YELLOW_DURATION = 0.5
-    RED_DURATION = 1.0
-
-    def __init__(self):
-        self.current_state = "off"
-        self.cycles_completed = 0
-
-    async def receive(self, msg: Start | Timeout | GetState, ctx: Context):
-        """Initial state (off) - waiting to be started."""
+    async for msg, ctx in mailbox:
         match msg:
-            case Start():
+            case Start() if current_state == "off":
                 print("[TrafficLight] Starting in GREEN state")
-                self.current_state = "green"
-                # Schedule transition to yellow
-                await ctx.schedule(self.GREEN_DURATION, Timeout())
-                # Switch to green behavior
-                ctx.become(self.green_behavior)
+                current_state = "green"
+                await ctx.schedule(Timeout(), delay=GREEN_DURATION)
 
-            case GetState():
-                await ctx.reply(self.current_state)
-
-    async def green_behavior(self, msg: Start | Timeout | GetState, ctx: Context):
-        """Green state - cars can go."""
-        match msg:
-            case Timeout():
+            case Timeout() if current_state == "green":
                 print("[TrafficLight] GREEN -> YELLOW")
-                self.current_state = "yellow"
-                await ctx.schedule(self.YELLOW_DURATION, Timeout())
-                ctx.become(self.yellow_behavior, discard_old=True)
+                current_state = "yellow"
+                await ctx.schedule(Timeout(), delay=YELLOW_DURATION)
 
-            case GetState():
-                await ctx.reply(self.current_state)
-
-            case Start():
-                pass  # Already running
-
-    async def yellow_behavior(self, msg: Start | Timeout | GetState, ctx: Context):
-        """Yellow state - prepare to stop."""
-        match msg:
-            case Timeout():
+            case Timeout() if current_state == "yellow":
                 print("[TrafficLight] YELLOW -> RED")
-                self.current_state = "red"
-                await ctx.schedule(self.RED_DURATION, Timeout())
-                ctx.become(self.red_behavior, discard_old=True)
+                current_state = "red"
+                await ctx.schedule(Timeout(), delay=RED_DURATION)
+
+            case Timeout() if current_state == "red":
+                cycles_completed += 1
+                print(f"[TrafficLight] RED -> GREEN (cycle {cycles_completed} complete)")
+                current_state = "green"
+                await ctx.schedule(Timeout(), delay=GREEN_DURATION)
 
             case GetState():
-                await ctx.reply(self.current_state)
-
-            case Start():
-                pass  # Already running
-
-    async def red_behavior(self, msg: Start | Timeout | GetState, ctx: Context):
-        """Red state - cars must stop."""
-        match msg:
-            case Timeout():
-                self.cycles_completed += 1
-                print(f"[TrafficLight] RED -> GREEN (cycle {self.cycles_completed} complete)")
-                self.current_state = "green"
-                await ctx.schedule(self.GREEN_DURATION, Timeout())
-                ctx.become(self.green_behavior, discard_old=True)
-
-            case GetState():
-                await ctx.reply(self.current_state)
+                await ctx.reply(current_state)
 
             case Start():
                 pass  # Already running
@@ -127,23 +77,19 @@ async def main():
     print()
 
     async with ActorSystem() as system:
-        traffic_light = await system.actor(TrafficLight, name="traffic-light")
+        light = await system.actor(traffic_light(), name="traffic-light")
 
-        # Check initial state
-        state = await traffic_light.ask(GetState())
+        state = await light.ask(GetState())
         print(f"Initial state: {state}")
         print()
 
-        # Start the traffic light
-        await traffic_light.send(Start())
+        await light.send(Start())
 
-        # Watch the traffic light cycle through states
         print("\nWatching traffic light for 2 full cycles...\n")
 
         for i in range(12):
             await asyncio.sleep(0.5)
-            state = await traffic_light.ask(GetState())
-            # Visual representation of traffic light
+            state = await light.ask(GetState())
             match state:
                 case "green":
                     visual = "[  G  ]"

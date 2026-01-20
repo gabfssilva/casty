@@ -2,24 +2,21 @@ from typing import Any
 
 import msgpack
 
-from casty.protocols import System
-
-from .entry import CacheEntry, Get, Set, Delete, Exists
+from .entry import cache_entry, Get, Set, Delete, Exists
 
 
 class DistributedCache:
-    def __init__(self, system: System, prefix: str = "cache"):
-        self._system = system
+    def __init__(self, cluster, prefix: str = "cache"):
+        self._cluster = cluster
         self._prefix = prefix
 
     def _key(self, key: str) -> str:
         return f"{self._prefix}:{key}"
 
     async def _entry(self, key: str):
-        return await self._system.actor(
-            CacheEntry,
+        return await self._cluster.actor(
+            cache_entry(),
             name=self._key(key),
-            scope="cluster",
         )
 
     async def get(self, key: str) -> Any | None:

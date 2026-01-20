@@ -1,29 +1,33 @@
-import msgpack
-from casty.wal.entry import WALEntry, EntryType
-from casty.wal.version import VectorClock
+# tests/test_wal_entry.py
+import pytest
 
 
-def test_wal_entry_as_bytes_roundtrip():
-    version = VectorClock({"node-a": 1, "node-b": 2})
+def test_wal_entry_creation():
+    from casty.wal.entry import WALEntry
+
     entry = WALEntry(
-        version=version,
-        delta={"count": 10, "name": "test"},
+        actor_id="counter/c1",
+        sequence=1,
         timestamp=1234567890.0,
-        entry_type=EntryType.DELTA,
+        data=b"test data",
     )
 
-    data = entry.as_bytes
-    restored = WALEntry.from_bytes(data)
-
-    assert restored.version == entry.version
-    assert restored.delta == entry.delta
-    assert restored.timestamp == entry.timestamp
-    assert restored.entry_type == entry.entry_type
+    assert entry.actor_id == "counter/c1"
+    assert entry.sequence == 1
+    assert entry.data == b"test data"
 
 
-def test_wal_entry_default_values():
-    version = VectorClock()
-    entry = WALEntry(version=version, delta={"x": 1})
+def test_wal_entry_serialization():
+    from casty.wal.entry import WALEntry
 
-    assert entry.entry_type == EntryType.DELTA
-    assert entry.timestamp > 0
+    entry = WALEntry(
+        actor_id="counter/c1",
+        sequence=1,
+        timestamp=1234567890.0,
+        data=b"test data",
+    )
+
+    serialized = entry.to_bytes()
+    restored = WALEntry.from_bytes(serialized)
+
+    assert restored == entry

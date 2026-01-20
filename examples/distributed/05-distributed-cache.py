@@ -4,24 +4,22 @@ Demonstrates:
 - Simple distributed cache using casty.cluster.cache
 - Entry-per-actor pattern (each cache key is a separate actor)
 - Multi-node cluster with DevelopmentCluster
-- Automatic sharding via consistent hashing
 - Per-key TTL support with automatic cleanup
 - Values are automatically serialized via msgpack
-
-This is the high-level API built on top of Casty's clustering primitives.
 
 Run with: uv run python examples/distributed/05-distributed-cache.py
 """
 
 import asyncio
 from casty.cluster import DevelopmentCluster
+from casty.cluster.development import DistributionStrategy
 from casty.cluster.cache import DistributedCache
 
 
 async def main():
     print("=== Distributed Cache Example ===\n")
 
-    async with DevelopmentCluster(10) as cluster:
+    async with DevelopmentCluster(3, strategy=DistributionStrategy.CONSISTENT) as cluster:
         print(f"Started {len(cluster)}-node cluster\n")
 
         cache = DistributedCache(cluster)

@@ -2,116 +2,59 @@ from __future__ import annotations
 
 import bisect
 import hashlib
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True, slots=True)
-class VirtualNode:
-    node_id: str
-    index: int
-    position: int
 
 
 class HashRing:
-    RING_SIZE = 2**32
-
     def __init__(self, virtual_nodes: int = 150) -> None:
+        self._ring: dict[int, str] = {}
+        self._sorted_keys: list[int] = []
         self._virtual_nodes = virtual_nodes
-        self._ring: list[VirtualNode] = []
-        self._positions: list[int] = []
-        self._nodes: set[str] = set()
 
     def _hash(self, key: str) -> int:
-        digest = hashlib.md5(key.encode("utf-8")).digest()
-        return int.from_bytes(digest[:4], "big")
+        return int(hashlib.md5(key.encode()).hexdigest(), 16)
 
-    def add_node(self, node_id: str) -> None:
-        if node_id in self._nodes:
-            return
-
-        self._nodes.add(node_id)
-
+    def add_node(self, node: str) -> None:
         for i in range(self._virtual_nodes):
-            vnode_key = f"{node_id}#vnode{i}"
-            position = self._hash(vnode_key)
-            vnode = VirtualNode(node_id, i, position)
+            key = self._hash(f"{node}:{i}")
+            self._ring[key] = node
+        self._sorted_keys = sorted(self._ring.keys())
 
-            idx = bisect.bisect_left(self._positions, position)
-            self._ring.insert(idx, vnode)
-            self._positions.insert(idx, position)
+    def remove_node(self, node: str) -> None:
+        for i in range(self._virtual_nodes):
+            key = self._hash(f"{node}:{i}")
+            self._ring.pop(key, None)
+        self._sorted_keys = sorted(self._ring.keys())
 
-    def remove_node(self, node_id: str) -> None:
-        if node_id not in self._nodes:
-            return
-
-        self._nodes.discard(node_id)
-
-        new_ring: list[VirtualNode] = []
-        new_positions: list[int] = []
-
-        for vnode, pos in zip(self._ring, self._positions):
-            if vnode.node_id != node_id:
-                new_ring.append(vnode)
-                new_positions.append(pos)
-
-        self._ring = new_ring
-        self._positions = new_positions
-
-    def get_node(self, key: str) -> str | None:
+    def get_node(self, actor_id: str) -> str:
         if not self._ring:
-            return None
+            raise RuntimeError("HashRing is empty")
 
-        hash_val = self._hash(key)
-        idx = bisect.bisect_left(self._positions, hash_val)
-
-        if idx >= len(self._ring):
+        key = self._hash(actor_id)
+        idx = bisect.bisect_left(self._sorted_keys, key)
+        if idx == len(self._sorted_keys):
             idx = 0
 
-        return self._ring[idx].node_id
+        return self._ring[self._sorted_keys[idx]]
 
-    def get_preference_list(self, key: str, n: int = 3) -> list[str]:
+    def get_nodes(self, actor_id: str, n: int) -> list[str]:
         if not self._ring:
-            return []
+            raise RuntimeError("HashRing is empty")
 
-        hash_val = self._hash(key)
-        idx = bisect.bisect_left(self._positions, hash_val)
+        key = self._hash(actor_id)
+        idx = bisect.bisect_left(self._sorted_keys, key)
 
-        if idx >= len(self._ring):
-            idx = 0
+        nodes = []
+        seen = set()
 
-        result: list[str] = []
-        seen: set[str] = set()
+        for i in range(len(self._sorted_keys)):
+            pos = (idx + i) % len(self._sorted_keys)
+            node = self._ring[self._sorted_keys[pos]]
 
-        for i in range(len(self._ring)):
-            vnode = self._ring[(idx + i) % len(self._ring)]
-            if vnode.node_id not in seen:
-                seen.add(vnode.node_id)
-                result.append(vnode.node_id)
-                if len(result) >= n:
-                    break
+            if node not in seen:
+                nodes.append(node)
+                seen.add(node)
 
-        return result
+            if len(nodes) == n:
+                break
 
-    def is_responsible(self, node_id: str, key: str) -> bool:
-        return self.get_node(key) == node_id
-
-    @property
-    def nodes(self) -> frozenset[str]:
-        return frozenset(self._nodes)
-
-    @property
-    def node_count(self) -> int:
-        return len(self._nodes)
-
-    @property
-    def vnode_count(self) -> int:
-        return len(self._ring)
-
-    def __len__(self) -> int:
-        return len(self._nodes)
-
-    def __contains__(self, node_id: str) -> bool:
-        return node_id in self._nodes
-
-    def __repr__(self) -> str:
-        return f"HashRing(nodes={len(self._nodes)}, vnodes={len(self._ring)})"
+        return nodes
