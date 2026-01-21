@@ -6,9 +6,7 @@ from typing import TYPE_CHECKING
 from casty import actor, Mailbox
 from casty.io.messages import Received, Write, PeerClosed, ErrorClosed, Aborted
 from .protocol import RemoteEnvelope, RemoteError
-from .messages import Lookup
 from .ref import SendDeliver, SendAsk, RemoteRef
-from .registry import SessionConnected, SessionDisconnected
 
 if TYPE_CHECKING:
     from casty.ref import ActorRef
@@ -30,29 +28,27 @@ type SessionMessage = (
 @actor
 async def session_actor(
     connection: "ActorRef",
-    registry: "ActorRef",
+    remote_ref: "ActorRef",
     serializer: "Serializer",
+    peer_id: str,
     *,
     mailbox: Mailbox[SessionMessage],
 ):
     pending: dict[str, tuple[str, ActorRef | None]] = {}
-    self_ref: ActorRef | None = None
+
+    from .remote import _SessionConnected, _SessionDisconnected, _LocalLookup
+    await remote_ref.send(_SessionConnected(peer_id=peer_id, session=mailbox.ref()))
 
     async for msg, ctx in mailbox:
-        if self_ref is None:
-            self_ref = ctx._self_ref
-            await registry.send(SessionConnected(self_ref))
-
         match msg:
             case Received(data):
                 envelope = RemoteEnvelope.from_dict(serializer.decode(data))
                 await _handle_envelope(
-                    envelope, registry, connection, pending, serializer, self_ref
+                    envelope, remote_ref, connection, pending, serializer, mailbox.ref()
                 )
 
             case PeerClosed() | ErrorClosed(_) | Aborted():
-                if self_ref:
-                    await registry.send(SessionDisconnected(self_ref))
+                await remote_ref.send(_SessionDisconnected(peer_id=peer_id))
                 for _, reply_to in pending.values():
                     if reply_to:
                         from casty.reply import Reply
@@ -90,16 +86,18 @@ async def session_actor(
 
 async def _handle_envelope(
     envelope: RemoteEnvelope,
-    registry: "ActorRef",
+    remote_ref: "ActorRef",
     connection: "ActorRef",
     pending: dict[str, tuple[str, "ActorRef | None"]],
     serializer: "Serializer",
     self_ref: "ActorRef",
 ):
+    from .remote import _LocalLookup
+
     match envelope.type:
         case "deliver":
-            result = await registry.ask(Lookup(envelope.target))
-            if result.ref:
+            local_ref = await remote_ref.ask(_LocalLookup(envelope.target))
+            if local_ref:
                 msg = serializer.decode(envelope.payload)
                 sender = None
                 if envelope.sender_name:
@@ -109,14 +107,14 @@ async def _handle_envelope(
                         _session=self_ref,
                         _serializer=serializer,
                     )
-                await result.ref.send(msg, sender=sender)
+                await local_ref.send(msg, sender=sender)
 
         case "ask":
-            result = await registry.ask(Lookup(envelope.target))
-            if result.ref:
+            local_ref = await remote_ref.ask(_LocalLookup(envelope.target))
+            if local_ref:
                 msg = serializer.decode(envelope.payload)
                 try:
-                    response = await result.ref.ask(msg)
+                    response = await local_ref.ask(msg)
                     reply = RemoteEnvelope(
                         type="reply",
                         correlation_id=envelope.correlation_id,
@@ -153,8 +151,8 @@ async def _handle_envelope(
                     await reply_to.send(Reply(result=RemoteError(envelope.error)))
 
         case "lookup":
-            result = await registry.ask(Lookup(envelope.name))
-            exists = result.ref is not None
+            local_ref = await remote_ref.ask(_LocalLookup(envelope.name))
+            exists = local_ref is not None
             reply = RemoteEnvelope(
                 type="lookup_result",
                 name=envelope.name,

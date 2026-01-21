@@ -24,14 +24,13 @@ class Connect:
 
 @dataclass
 class Listening:
-    registry: "ActorRef"
     address: tuple[str, int]
 
 
 @dataclass
 class Connected:
-    registry: "ActorRef"
     remote_address: tuple[str, int]
+    peer_id: str
 
 
 @dataclass
@@ -58,6 +57,7 @@ class Unexpose:
 @dataclass
 class Lookup:
     name: str
+    peer: str | None = None
 
 
 @dataclass

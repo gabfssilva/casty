@@ -8,7 +8,7 @@ from casty import actor, Mailbox
 from casty.io import tcp
 from casty.io.messages import (
     Bound, BindFailed, Connected as TcpConnected, ConnectFailed as TcpConnectFailed,
-    Received, Register, PeerClosed, ErrorClosed, Aborted,
+    Register, PeerClosed, ErrorClosed, Aborted,
     InboundEvent,
 )
 from casty.io import Bind, Connect as TcpConnect, LengthPrefixedFramer
@@ -18,7 +18,6 @@ from .messages import (
     Lookup, LookupResult, Expose, Unexpose, Exposed, Unexposed,
 )
 from .serializer import MsgPackSerializer
-from .registry import registry_actor, SessionConnected, SessionDisconnected
 from .session import session_actor, SendLookup
 from .ref import RemoteRef
 
@@ -27,34 +26,127 @@ if TYPE_CHECKING:
     from .serializer import Serializer
 
 
+@dataclass
+class _SessionConnected:
+    peer_id: str
+    session: "ActorRef"
+
+
+@dataclass
+class _SessionDisconnected:
+    peer_id: str
+
+
+@dataclass
+class _LocalLookup:
+    name: str
+
+
+type RemoteMessage = (
+    Listen | Connect |
+    Expose | Unexpose | Lookup |
+    _SessionConnected | _SessionDisconnected | _LocalLookup
+)
+
+
 @actor
-async def remote(*, mailbox: Mailbox[Listen | Connect]):
+async def remote(*, mailbox: Mailbox[RemoteMessage]):
     tcp_mgr: ActorRef | None = None
+    serializer: Serializer = MsgPackSerializer()
+    exposed: dict[str, ActorRef] = {}
+    sessions: dict[str, ActorRef] = {}
 
     async for msg, ctx in mailbox:
         if tcp_mgr is None:
             tcp_mgr = await ctx.actor(tcp(), name="tcp")
 
         match msg:
-            case Listen(port, host, serializer):
-                ser = serializer or MsgPackSerializer()
+            case Listen(port, host, ser):
+                s = ser or serializer
                 try:
                     await ctx.actor(
-                        _remote_listener(tcp_mgr, host, port, ser, ctx.sender),
+                        _remote_listener(tcp_mgr, host, port, s, mailbox.ref(), ctx.sender),
                         name=f"listener-{port}"
                     )
                 except Exception as e:
                     await ctx.reply(ListenFailed(str(e)))
 
-            case Connect(host, port, serializer):
-                ser = serializer or MsgPackSerializer()
+            case Connect(host, port, ser):
+                s = ser or serializer
                 try:
                     await ctx.actor(
-                        _remote_connector(tcp_mgr, host, port, ser, ctx.sender),
+                        _remote_connector(tcp_mgr, host, port, s, mailbox.ref(), ctx.sender),
                         name=f"connector-{host}-{port}"
                     )
                 except Exception as e:
                     await ctx.reply(ConnectFailed(str(e)))
+
+            case Expose(ref, name):
+                exposed[name] = ref
+                await ctx.reply(Exposed(name))
+
+            case Unexpose(name):
+                exposed.pop(name, None)
+                await ctx.reply(Unexposed(name))
+
+            case Lookup(name, peer=None):
+                if name in exposed:
+                    await ctx.reply(LookupResult(ref=exposed[name]))
+                else:
+                    found = False
+                    for peer_id, session in sessions.items():
+                        try:
+                            correlation_id = uuid.uuid4().hex
+                            exists = await session.ask(SendLookup(name=name, correlation_id=correlation_id))
+                            if exists:
+                                ref = RemoteRef(
+                                    actor_id=f"remote/{name}",
+                                    name=name,
+                                    _session=session,
+                                    _serializer=serializer,
+                                )
+                                await ctx.reply(LookupResult(ref=ref))
+                                found = True
+                                break
+                        except Exception:
+                            continue
+                    if not found:
+                        await ctx.reply(LookupResult(ref=None))
+
+            case Lookup(name, peer=peer_id) if peer_id is not None:
+                if name in exposed:
+                    await ctx.reply(LookupResult(ref=exposed[name]))
+                elif peer_id in sessions:
+                    session = sessions[peer_id]
+                    try:
+                        correlation_id = uuid.uuid4().hex
+                        exists = await session.ask(SendLookup(name=name, correlation_id=correlation_id))
+                        if exists:
+                            ref = RemoteRef(
+                                actor_id=f"remote/{name}",
+                                name=name,
+                                _session=session,
+                                _serializer=serializer,
+                            )
+                            await ctx.reply(LookupResult(ref=ref))
+                        else:
+                            await ctx.reply(LookupResult(ref=None))
+                    except Exception:
+                        await ctx.reply(LookupResult(ref=None))
+                else:
+                    await ctx.reply(LookupResult(ref=None))
+
+            case _SessionConnected(peer_id, session):
+                sessions[peer_id] = session
+
+            case _SessionDisconnected(peer_id):
+                sessions.pop(peer_id, None)
+
+            case _LocalLookup(name):
+                if name in exposed:
+                    await ctx.reply(exposed[name])
+                else:
+                    await ctx.reply(None)
 
 
 @actor
@@ -63,12 +155,13 @@ async def _remote_listener(
     host: str,
     port: int,
     serializer: "Serializer",
+    remote_ref: "ActorRef",
     reply_to: "ActorRef | None",
     *,
     mailbox: Mailbox[InboundEvent],
 ):
-    registry: ActorRef | None = None
     replied = False
+    local_address: tuple[str, int] | None = None
 
     await tcp_mgr.send(Bind(
         handler=mailbox.ref(),
@@ -79,14 +172,11 @@ async def _remote_listener(
 
     async for msg, ctx in mailbox:
         match msg:
-            case Bound(local_address):
-                registry = await ctx.actor(
-                    registry_actor(),
-                    name="registry"
-                )
+            case Bound(addr):
+                local_address = addr
                 if reply_to and not replied:
                     replied = True
-                    await reply_to.send(Reply(result=Listening(registry=registry, address=local_address)))
+                    await reply_to.send(Reply(result=Listening(address=local_address)))
 
             case BindFailed(reason):
                 if reply_to and not replied:
@@ -94,10 +184,11 @@ async def _remote_listener(
                     await reply_to.send(Reply(result=ListenFailed(reason)))
                 break
 
-            case TcpConnected(connection, remote_addr, local_addr):
+            case TcpConnected(connection, remote_addr, _):
+                peer_id = f"{remote_addr[0]}:{remote_addr[1]}"
                 session = await ctx.actor(
-                    session_actor(connection, registry, serializer),
-                    name=f"session-{remote_addr[0]}-{remote_addr[1]}"
+                    session_actor(connection, remote_ref, serializer, peer_id),
+                    name=f"session-{peer_id}"
                 )
                 await connection.send(Register(session))
 
@@ -108,12 +199,11 @@ async def _remote_connector(
     host: str,
     port: int,
     serializer: "Serializer",
+    remote_ref: "ActorRef",
     reply_to: "ActorRef | None",
     *,
     mailbox: Mailbox[InboundEvent],
 ):
-    registry: ActorRef | None = None
-    session: ActorRef | None = None
     replied = False
 
     await tcp_mgr.send(TcpConnect(
@@ -125,22 +215,18 @@ async def _remote_connector(
 
     async for msg, ctx in mailbox:
         match msg:
-            case TcpConnected(connection, remote_addr, local_addr):
-                registry = await ctx.actor(
-                    _client_registry(serializer),
-                    name="registry"
-                )
+            case TcpConnected(connection, remote_addr, _):
+                peer_id = f"{remote_addr[0]}:{remote_addr[1]}"
                 session = await ctx.actor(
-                    session_actor(connection, registry, serializer),
+                    session_actor(connection, remote_ref, serializer, peer_id),
                     name="session"
                 )
                 await connection.send(Register(session))
-                await registry.send(_SetSession(session))
                 if reply_to and not replied:
                     replied = True
                     await reply_to.send(Reply(result=Connected(
-                        registry=registry,
                         remote_address=remote_addr,
+                        peer_id=peer_id,
                     )))
 
             case TcpConnectFailed(reason):
@@ -151,56 +237,3 @@ async def _remote_connector(
 
             case PeerClosed() | ErrorClosed(_) | Aborted():
                 break
-
-
-@dataclass
-class _SetSession:
-    session: "ActorRef"
-
-
-@actor
-async def _client_registry(
-    serializer: "Serializer",
-    *,
-    mailbox: Mailbox,
-):
-    exposed: dict[str, ActorRef] = {}
-    session: ActorRef | None = None
-
-    async for msg, ctx in mailbox:
-        match msg:
-            case _SetSession(s):
-                session = s
-
-            case Expose(ref, name):
-                exposed[name] = ref
-                await ctx.reply(Exposed(name))
-
-            case Unexpose(name):
-                exposed.pop(name, None)
-                await ctx.reply(Unexposed(name))
-
-            case Lookup(name):
-                if name in exposed:
-                    await ctx.reply(LookupResult(ref=exposed[name]))
-                elif session:
-                    correlation_id = uuid.uuid4().hex
-                    exists = await session.ask(SendLookup(name=name, correlation_id=correlation_id))
-                    if exists:
-                        ref = RemoteRef(
-                            actor_id=f"remote/{name}",
-                            name=name,
-                            _session=session,
-                            _serializer=serializer,
-                        )
-                        await ctx.reply(LookupResult(ref=ref))
-                    else:
-                        await ctx.reply(LookupResult(ref=None))
-                else:
-                    await ctx.reply(LookupResult(ref=None))
-
-            case SessionConnected(_):
-                pass
-
-            case SessionDisconnected(_):
-                session = None
