@@ -1,3 +1,4 @@
+"""Tests for DevelopmentCluster."""
 import pytest
 import asyncio
 from dataclasses import dataclass
@@ -55,7 +56,6 @@ async def test_development_cluster_basic():
 
         node0 = cluster[0]
         assert node0.node_id == "node-0"
-        assert node0.port > 0
 
 
 @pytest.mark.asyncio
@@ -68,7 +68,10 @@ async def test_development_cluster_two_nodes():
 
         assert node0.node_id == "node-0"
         assert node1.node_id == "node-1"
-        assert node0.port != node1.port
+
+        addr0 = await node0.address()
+        addr1 = await node1.address()
+        assert addr0 != addr1
 
 
 @pytest.mark.asyncio
@@ -144,8 +147,11 @@ async def test_development_cluster_single_node():
 
 
 @pytest.mark.asyncio
-async def test_development_cluster_address_property():
+async def test_development_cluster_addresses():
     async with DevelopmentCluster(2) as cluster:
-        assert cluster[0].address.startswith("127.0.0.1:")
-        assert cluster[1].address.startswith("127.0.0.1:")
-        assert cluster[0].address != cluster[1].address
+        addr0 = await cluster[0].address()
+        addr1 = await cluster[1].address()
+
+        assert addr0.startswith("127.0.0.1:")
+        assert addr1.startswith("127.0.0.1:")
+        assert addr0 != addr1

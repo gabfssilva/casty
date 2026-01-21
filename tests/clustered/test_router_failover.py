@@ -5,11 +5,11 @@ from casty import ActorSystem
 from casty.cluster.router import router_actor, RegisterPending
 from casty.cluster.transport_messages import RegisterReplication
 from casty.cluster.replication import ReplicationConfig, Routing
-from casty.cluster.messages import MembershipUpdate
+from casty.cluster.messages import MarkDown
 
 
 @pytest.mark.asyncio
-async def test_router_handles_membership_down():
+async def test_router_handles_mark_down():
     async with ActorSystem() as system:
         router = await system.actor(router_actor(), name="router")
 
@@ -19,25 +19,7 @@ async def test_router_handles_membership_down():
             config=config,
         ))
 
-        await router.send(MembershipUpdate(
-            node_id="node-1",
-            status="down",
-            incarnation=1,
-        ))
-
-        await asyncio.sleep(0.01)
-
-
-@pytest.mark.asyncio
-async def test_router_handles_membership_alive():
-    async with ActorSystem() as system:
-        router = await system.actor(router_actor(), name="router")
-
-        await router.send(MembershipUpdate(
-            node_id="node-2",
-            status="alive",
-            incarnation=1,
-        ))
+        await router.send(MarkDown(node_id="node-1"))
 
         await asyncio.sleep(0.01)
 
@@ -57,10 +39,6 @@ async def test_router_logs_leader_down(caplog):
             config=config,
         ))
 
-        await router.send(MembershipUpdate(
-            node_id="leader-node",
-            status="down",
-            incarnation=1,
-        ))
+        await router.send(MarkDown(node_id="leader-node"))
 
         await asyncio.sleep(0.01)

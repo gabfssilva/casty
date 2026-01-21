@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from casty import actor, Mailbox
-from .messages import Join, ApplyUpdate, GetAliveMembers, GetAllMembers, GetResponsibleNodes, SetLocalAddress
+from .messages import Join, MergeMembership, MarkDown, MemberSnapshot, GetAliveMembers, GetAllMembers, GetResponsibleNodes, SetLocalAddress, GetAddress
 from .hash_ring import HashRing
 
 
@@ -27,7 +27,7 @@ async def membership_actor(
     node_id: str,
     initial_members: dict[str, MemberInfo] | None = None,
     *,
-    mailbox: Mailbox[Join | ApplyUpdate | GetAliveMembers | GetAllMembers | GetResponsibleNodes | SetLocalAddress],
+    mailbox: Mailbox[Join | MergeMembership | MarkDown | GetAliveMembers | GetAllMembers | GetResponsibleNodes | SetLocalAddress | GetAddress],
 ):
     members = dict(initial_members or {})
     hash_ring = HashRing()
@@ -56,18 +56,40 @@ async def membership_actor(
                 if is_new and local_address:
                     await ctx.reply(Join(node_id=node_id, address=local_address))
 
-            case ApplyUpdate(update):
-                if update.node_id in members:
-                    member = members[update.node_id]
-                    if update.incarnation >= member.incarnation:
-                        old_state = member.state
-                        member.state = MemberState(update.status)
-                        member.incarnation = update.incarnation
+            case MergeMembership(remote_members):
+                for snapshot in remote_members:
+                    if snapshot.node_id == node_id:
+                        continue
 
-                        if member.state == MemberState.DOWN and old_state == MemberState.ALIVE:
-                            hash_ring.remove_node(update.node_id)
-                        elif member.state == MemberState.ALIVE and old_state == MemberState.DOWN:
-                            hash_ring.add_node(update.node_id)
+                    if snapshot.node_id not in members:
+                        members[snapshot.node_id] = MemberInfo(
+                            node_id=snapshot.node_id,
+                            address=snapshot.address,
+                            state=MemberState(snapshot.state),
+                            incarnation=snapshot.incarnation,
+                        )
+                        if snapshot.state == "alive":
+                            hash_ring.add_node(snapshot.node_id)
+                    else:
+                        local = members[snapshot.node_id]
+                        if snapshot.incarnation > local.incarnation:
+                            old_state = local.state
+                            local.state = MemberState(snapshot.state)
+                            local.incarnation = snapshot.incarnation
+                            local.address = snapshot.address
+
+                            if local.state == MemberState.DOWN and old_state == MemberState.ALIVE:
+                                hash_ring.remove_node(snapshot.node_id)
+                            elif local.state == MemberState.ALIVE and old_state == MemberState.DOWN:
+                                hash_ring.add_node(snapshot.node_id)
+
+            case MarkDown(target_node_id):
+                if target_node_id in members:
+                    member = members[target_node_id]
+                    if member.state == MemberState.ALIVE:
+                        member.state = MemberState.DOWN
+                        member.incarnation += 1
+                        hash_ring.remove_node(target_node_id)
 
             case GetAliveMembers():
                 alive = {
@@ -86,3 +108,9 @@ async def membership_actor(
                     await ctx.reply(nodes)
                 except RuntimeError:
                     await ctx.reply([])
+
+            case GetAddress(target_node_id):
+                if target_node_id in members:
+                    await ctx.reply(members[target_node_id].address)
+                else:
+                    await ctx.reply(None)

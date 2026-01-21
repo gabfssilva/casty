@@ -1,3 +1,4 @@
+"""Tests for ClusteredActorSystem."""
 import pytest
 import asyncio
 from dataclasses import dataclass
@@ -32,7 +33,6 @@ async def counter(initial: int, *, mailbox: Mailbox[Inc | Get]):
 
 @pytest.mark.asyncio
 async def test_clustered_system_basic():
-
     async with ClusteredActorSystem(
         node_id="node-1",
         host="127.0.0.1",
@@ -88,17 +88,6 @@ async def test_clustered_system_get_or_create():
 
 
 @pytest.mark.asyncio
-async def test_clustered_system_port_property():
-    async with ClusteredActorSystem(
-        node_id="node-1",
-        host="127.0.0.1",
-        port=0,
-    ) as system:
-        assert system.port > 0
-        assert isinstance(system.port, int)
-
-
-@pytest.mark.asyncio
 async def test_clustered_system_node_id_property():
     async with ClusteredActorSystem(
         node_id="my-node",
@@ -109,30 +98,16 @@ async def test_clustered_system_node_id_property():
 
 
 @pytest.mark.asyncio
-async def test_clustered_system_address_property():
+async def test_clustered_system_address():
     async with ClusteredActorSystem(
         node_id="node-1",
         host="127.0.0.1",
         port=0,
     ) as system:
-        assert system.address.startswith("127.0.0.1:")
-        assert int(system.address.split(":")[1]) > 0
-
-
-@pytest.mark.asyncio
-async def test_two_nodes_connect():
-    async with ClusteredActorSystem(
-        node_id="node-1",
-        host="127.0.0.1",
-        port=0,
-    ) as system1:
-        async with ClusteredActorSystem(
-            node_id="node-2",
-            host="127.0.0.1",
-            port=0,
-        ) as system2:
-            await system2.connect_to(system1.address)
-            await asyncio.sleep(0.1)
+        address = await system.address()
+        assert address.startswith("127.0.0.1:")
+        port = int(address.split(":")[1])
+        assert port > 0
 
 
 @pytest.mark.asyncio
@@ -142,11 +117,16 @@ async def test_clustered_system_with_seeds():
         host="127.0.0.1",
         port=0,
     ) as seed_system:
+        seed_address = await seed_system.address()
+
         async with ClusteredActorSystem(
             node_id="joining-node",
             host="127.0.0.1",
             port=0,
-            seeds=[seed_system.address],
+            seeds=[("seed-node", seed_address)],
         ) as joining_system:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.3)
+
+            # Both systems should be running
+            assert seed_system.node_id == "seed-node"
             assert joining_system.node_id == "joining-node"

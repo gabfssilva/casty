@@ -13,72 +13,32 @@ Run with:
 import asyncio
 from dataclasses import dataclass
 
-from casty import actor, ActorSystem, Mailbox, LocalActorRef, State
+from casty import actor, ActorSystem, Mailbox, State
 
 
 @dataclass
-class Ping:
-    count: int
+class Ping: pass
 
 
 @dataclass
 class Pong:
-    count: int
-
-
-@dataclass
-class Start:
-    target: LocalActorRef[Ping]
-    max_exchanges: int
+    count: int = 0
 
 
 @actor
-async def ping_actor(state: State[int], mailbox: Mailbox[Start | Pong]):
+async def ping_actor(state: State[int], mailbox: Mailbox[Ping]):
     async for msg, ctx in mailbox:
-        match msg:
-            case Start(target, max_ex):
-                state.set(max_ex)
-                print(f"[Ping] Starting ping-pong for {max_ex} exchanges")
-                await target.send(Ping(count=1), sender=ctx.self_id)
-
-            case Pong(count):
-                exchanges = count
-                print(f"[Ping] Received Pong #{count}")
-
-                if count < state.value and ctx.sender:
-                    await ctx.sender.send(Ping(count=count + 1), sender=ctx.self_id)
-                elif count >= state.value:
-                    print(f"[Ping] Reached {state.value} exchanges. Done!")
-
-
-@actor
-async def pong_actor(*, mailbox: Mailbox[Ping]):
-    async for msg, ctx in mailbox:
-        match msg:
-            case Ping(count):
-                print(f"[Pong] Received Ping #{count}, sending Pong")
-                if ctx.sender:
-                    await ctx.sender.send(Pong(count=count), sender=ctx.self_id)
+        state.set(state.value + 1)
+        await ctx.reply(Pong(state.value))
 
 
 async def main():
-    print("=" * 50)
-    print("Casty Ping-Pong Example")
-    print("=" * 50)
-    print()
-
     async with ActorSystem() as system:
-        ping = await system.actor(ping_actor(), name="ping")
-        pong = await system.actor(pong_actor(), name="pong")
+        ping = await system.actor(ping_actor(0), name="ping")
 
-        await ping.send(Start(target=pong, max_exchanges=5))
-
-        await asyncio.sleep(0.5)
-
-    print()
-    print("=" * 50)
-    print("Done!")
-    print("=" * 50)
+        for _ in range(10):
+            pong = await ping.ask(Ping())
+            print(pong)
 
 
 if __name__ == "__main__":

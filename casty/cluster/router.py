@@ -8,14 +8,28 @@ from typing import Any
 from casty import actor, Mailbox
 from casty.ref import ActorRef
 from casty.envelope import Envelope
+from casty.reply import Reply
 from casty.serializable import deserialize, serialize
 from .replication import ReplicationConfig, Routing
 from .replication.messages import Replicate, ReplicateAck
 from .transport_messages import Register, Deliver, Transmit, RegisterReplication, SpawnReplica, Connect, RegisterReplicators
-from .messages import MembershipUpdate, GetResponsibleNodes, GetAliveMembers
+from .messages import MarkDown, GetResponsibleNodes, GetAliveMembers
 from .registry import get_behavior
 
 logger = logging.getLogger(__name__)
+
+
+class NetworkReplySender:
+    """Handles Reply messages by serializing and sending via TCP connection."""
+
+    def __init__(self, connection: ActorRef, target: str | None):
+        self.connection = connection
+        self.target = target
+
+    async def send(self, msg: Any) -> None:
+        if isinstance(msg, Reply):
+            envelope = Envelope(payload=msg.result, target=self.target)
+            await self.connection.send(Transmit(data=serialize(envelope)))
 
 
 def select_target(
@@ -68,7 +82,7 @@ class SetReferences:
 @actor
 async def router_actor(
     *,
-    mailbox: Mailbox[Register | RegisterPending | RegisterReplication | RegisterReplicators | Deliver | MembershipUpdate | SetReferences],
+    mailbox: Mailbox[Register | RegisterPending | RegisterReplication | RegisterReplicators | Deliver | MarkDown | SetReferences],
 ):
     from .replication import Replicator
 
@@ -143,30 +157,43 @@ async def router_actor(
                         future.set_result(envelope.payload)
                 else:
                     ref = registry.get(envelope.target)
+                    if not ref:
+                        ref = await ctx._system.actor(name=envelope.target)
+                    logger.debug(f"Routing to target={envelope.target}, found={ref is not None}, registry_keys={list(registry.keys())}")
                     if ref:
-                        if envelope.correlation_id and reply_connection:
-                            reply_future: asyncio.Future[Any] = asyncio.Future()
+                        if reply_connection:
+                            if envelope.correlation_id:
+                                reply_future: asyncio.Future[Any] = asyncio.Future()
 
-                            async def send_reply(
-                                fut: asyncio.Future[Any],
-                                corr_id: str,
-                                conn: ActorRef,
-                            ):
-                                try:
-                                    result = await fut
-                                    reply_envelope = Envelope(
-                                        payload=result,
-                                        correlation_id=corr_id,
+                                async def send_reply(
+                                    fut: asyncio.Future[Any],
+                                    corr_id: str,
+                                    conn: ActorRef,
+                                ):
+                                    try:
+                                        result = await fut
+                                        reply_envelope = Envelope(
+                                            payload=result,
+                                            correlation_id=corr_id,
+                                        )
+                                        reply_data = serialize(reply_envelope)
+                                        await conn.send(Transmit(data=reply_data))
+                                    except asyncio.CancelledError:
+                                        pass
+
+                                asyncio.create_task(
+                                    send_reply(
+                                        reply_future,
+                                        envelope.correlation_id,
+                                        reply_connection,
                                     )
-                                    reply_data = serialize(reply_envelope)
-                                    await conn.send(Transmit(data=reply_data))
-                                except asyncio.CancelledError:
-                                    pass
-
-                            asyncio.create_task(
-                                send_reply(reply_future, envelope.correlation_id, reply_connection)
-                            )
-                            envelope.reply_to = reply_future
+                                )
+                                envelope.reply_to = reply_future
+                            else:
+                                envelope.sender = NetworkReplySender(
+                                    connection=reply_connection,
+                                    target=envelope.target,
+                                )
 
                         await ref.send_envelope(envelope)
                     elif membership_ref and outbound_ref and envelope.target:
@@ -180,11 +207,10 @@ async def router_actor(
                                 if conn:
                                     await conn.send(Transmit(data=data))
 
-            case MembershipUpdate(node_id, status, _):
-                if status == "down":
-                    logger.info(f"Node {node_id} is DOWN, checking affected actors")
+            case MarkDown(down_node_id):
+                logger.info(f"Node {down_node_id} is DOWN, checking affected actors")
 
-                    for actor_id, config in list(replication_configs.items()):
-                        leader = actor_leaders.get(actor_id)
-                        if leader == node_id:
-                            logger.warning(f"Leader {node_id} down for actor {actor_id}")
+                for actor_id, config in list(replication_configs.items()):
+                    leader = actor_leaders.get(actor_id)
+                    if leader == down_node_id:
+                        logger.warning(f"Leader {down_node_id} down for actor {actor_id}")

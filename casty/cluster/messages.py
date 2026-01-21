@@ -7,37 +7,42 @@ from casty.serializable import serializable
 
 @serializable
 @dataclass
-class MembershipUpdate:
+class MemberSnapshot:
     node_id: str
-    status: str  # "alive" | "down"
+    address: str
+    state: str  # "alive" | "down"
     incarnation: int
 
 
 @serializable
 @dataclass
 class Ping:
-    updates: list[MembershipUpdate] = field(default_factory=list)
+    sender: str
+    members: list[MemberSnapshot] = field(default_factory=list)
 
 
 @serializable
 @dataclass
 class Ack:
-    updates: list[MembershipUpdate] = field(default_factory=list)
+    sender: str
+    members: list[MemberSnapshot] = field(default_factory=list)
 
 
 @serializable
 @dataclass
 class PingReq:
+    sender: str
     target: str
-    updates: list[MembershipUpdate] = field(default_factory=list)
+    members: list[MemberSnapshot] = field(default_factory=list)
 
 
 @serializable
 @dataclass
 class PingReqAck:
+    sender: str
     target: str
     success: bool
-    updates: list[MembershipUpdate] = field(default_factory=list)
+    members: list[MemberSnapshot] = field(default_factory=list)
 
 
 @serializable
@@ -70,10 +75,19 @@ class GetResponsibleNodes:
     count: int = 1
 
 
-@serializable
 @dataclass
-class ApplyUpdate:
-    update: MembershipUpdate
+class GetAddress:
+    node_id: str
+
+
+@dataclass
+class MergeMembership:
+    members: list[MemberSnapshot]
+
+
+@dataclass
+class MarkDown:
+    node_id: str
 
 
 # SWIM timing messages
@@ -95,23 +109,3 @@ class PingReqTimeout:
     target: str
 
 
-# Gossip messages
-@serializable
-@dataclass
-class StateUpdate:
-    actor_id: str
-    sequence: int
-    state: bytes
-
-
-@serializable
-@dataclass
-class StatePull:
-    actor_id: str
-    since_sequence: int
-
-
-@serializable
-@dataclass
-class GossipTick:
-    pass

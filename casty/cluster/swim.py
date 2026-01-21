@@ -2,37 +2,59 @@ from __future__ import annotations
 
 import random
 import time
-from typing import TYPE_CHECKING
 
 from casty import actor, Mailbox
-from casty.envelope import Envelope
-from casty.serializable import serialize
+from casty.protocols import System
+from casty.remote import Connect, Lookup
 from .messages import (
     Ping, Ack, PingReq, PingReqAck,
-    MembershipUpdate, SwimTick, ProbeTimeout, PingReqTimeout,
-    GetAliveMembers, ApplyUpdate,
+    MemberSnapshot, SwimTick, ProbeTimeout, PingReqTimeout,
+    GetAliveMembers, GetAllMembers, MergeMembership, MarkDown,
 )
-from .transport_messages import Connect, Transmit
+from .membership import MemberInfo
 
-if TYPE_CHECKING:
-    from casty.ref import ActorRef
+
+def to_snapshots(members: dict[str, MemberInfo]) -> list[MemberSnapshot]:
+    return [
+        MemberSnapshot(m.node_id, m.address, m.state.value, m.incarnation)
+        for m in members.values()
+    ]
 
 
 @actor
 async def swim_actor(
     node_id: str,
-    membership_ref: "ActorRef",
-    outbound_ref: "ActorRef",
-    probe_interval: float,
-    probe_timeout: float,
-    ping_req_fanout: int,
+    probe_interval: float = 1.0,
+    probe_timeout: float = 0.5,
+    ping_req_fanout: int = 3,
     *,
     mailbox: Mailbox[SwimTick | Ping | Ack | PingReq | PingReqAck | ProbeTimeout | PingReqTimeout],
+    system: System,
 ):
-    pending_updates: list[MembershipUpdate] = []
     pending_probes: dict[str, float] = {}
 
+    membership_ref = await system.actor(name="membership_actor/membership")
+    remote_ref = await system.actor(name="remote/remote")
+
+    if membership_ref is None or remote_ref is None:
+        return
+
     await mailbox.schedule(SwimTick(), every=probe_interval)
+
+    async def get_member_snapshots() -> list[MemberSnapshot]:
+        all_members = await membership_ref.ask(GetAllMembers())
+        return to_snapshots(all_members)
+
+    async def send_to_node(address: str, actor_name: str, message) -> bool:
+        if remote_ref is None:
+            return False
+        host, port = address.rsplit(":", 1)
+        await remote_ref.ask(Connect(host=host, port=int(port)))
+        result = await remote_ref.ask(Lookup(actor_name, peer=address))
+        if result.ref:
+            await result.ref.send(message)
+            return True
+        return False
 
     async for msg, ctx in mailbox:
         match msg:
@@ -46,49 +68,33 @@ async def swim_actor(
                 target = random.choice(other_members)
                 target_info = members[target]
 
-                conn = await outbound_ref.ask(Connect(
-                    node_id=target,
-                    address=target_info.address,
-                ))
                 pending_probes[target] = time.time()
-                if conn:
-                    envelope = Envelope(
-                        payload=Ping(updates=list(pending_updates)),
-                        target=f"swim_actor/swim",
-                        sender=node_id,
-                    )
-                    await conn.send(Transmit(data=serialize(envelope)))
+                snapshots = await get_member_snapshots()
+                await send_to_node(
+                    target_info.address,
+                    "swim",
+                    Ping(sender=node_id, members=snapshots),
+                )
                 await ctx.schedule(ProbeTimeout(target), delay=probe_timeout)
 
-            case Ping(updates):
-                for update in updates:
-                    await membership_ref.send(ApplyUpdate(update))
+            case Ping(sender=ping_sender, members=remote_members):
+                await membership_ref.send(MergeMembership(remote_members))
 
-                ack = Ack(updates=list(pending_updates))
-                if ctx.reply_to is not None:
+                snapshots = await get_member_snapshots()
+                ack = Ack(sender=node_id, members=snapshots)
+
+                if ctx.reply_to is not None or ctx.sender is not None:
                     await ctx.reply(ack)
-                elif ctx.sender_id:
+                else:
                     members = await membership_ref.ask(GetAliveMembers())
-                    if ctx.sender_id in members:
-                        sender_info = members[ctx.sender_id]
-                        conn = await outbound_ref.ask(Connect(
-                            node_id=ctx.sender_id,
-                            address=sender_info.address,
-                        ))
-                        if conn:
-                            ack_envelope = Envelope(
-                                payload=ack,
-                                target=f"swim_actor/swim",
-                                sender=node_id,
-                            )
-                            await conn.send(Transmit(data=serialize(ack_envelope)))
+                    if ping_sender in members:
+                        sender_info = members[ping_sender]
+                        await send_to_node(sender_info.address, "swim", ack)
 
-            case Ack(updates):
-                if ctx.sender_id and ctx.sender_id in pending_probes:
-                    del pending_probes[ctx.sender_id]
-
-                for update in updates:
-                    await membership_ref.send(ApplyUpdate(update))
+            case Ack(sender=ack_sender, members=remote_members):
+                if ack_sender in pending_probes:
+                    del pending_probes[ack_sender]
+                await membership_ref.send(MergeMembership(remote_members))
 
             case ProbeTimeout(target):
                 if target not in pending_probes:
@@ -99,83 +105,50 @@ async def swim_actor(
 
                 if not other_members:
                     del pending_probes[target]
-                    update = MembershipUpdate(
-                        node_id=target,
-                        status="down",
-                        incarnation=0,
-                    )
-                    await membership_ref.send(ApplyUpdate(update))
-                    pending_updates.append(update)
+                    await membership_ref.send(MarkDown(target))
                     continue
 
                 probers = random.sample(other_members, min(ping_req_fanout, len(other_members)))
+                snapshots = await get_member_snapshots()
                 for prober in probers:
                     prober_info = members[prober]
-                    conn = await outbound_ref.ask(Connect(
-                        node_id=prober,
-                        address=prober_info.address,
-                    ))
-                    if conn:
-                        envelope = Envelope(
-                            payload=PingReq(target=target, updates=list(pending_updates)),
-                            target=f"swim_actor/swim",
-                            sender=node_id,
-                        )
-                        await conn.send(Transmit(data=serialize(envelope)))
+                    await send_to_node(
+                        prober_info.address,
+                        "swim",
+                        PingReq(sender=node_id, target=target, members=snapshots),
+                    )
 
                 await ctx.schedule(PingReqTimeout(target), delay=probe_timeout)
 
-            case PingReq(target, updates):
-                for update in updates:
-                    await membership_ref.send(ApplyUpdate(update))
+            case PingReq(sender=req_sender, target=req_target, members=remote_members):
+                await membership_ref.send(MergeMembership(remote_members))
 
                 success = False
                 members = await membership_ref.ask(GetAliveMembers())
-                if target in members:
-                    target_info = members[target]
-                    conn = await outbound_ref.ask(Connect(
-                        node_id=target,
-                        address=target_info.address,
-                    ))
-                    if conn:
-                        envelope = Envelope(
-                            payload=Ping(updates=[]),
-                            target=f"swim_actor/swim",
-                            sender=node_id,
-                        )
-                        await conn.send(Transmit(data=serialize(envelope)))
-                        success = True
+                if req_target in members:
+                    target_info = members[req_target]
+                    snapshots = await get_member_snapshots()
+                    success = await send_to_node(
+                        target_info.address,
+                        "swim",
+                        Ping(sender=node_id, members=snapshots),
+                    )
 
-                ack = PingReqAck(target=target, success=success, updates=list(pending_updates))
-                if ctx.reply_to is not None:
+                snapshots = await get_member_snapshots()
+                ack = PingReqAck(sender=node_id, target=req_target, success=success, members=snapshots)
+
+                if ctx.reply_to is not None or ctx.sender is not None:
                     await ctx.reply(ack)
-                elif ctx.sender_id and ctx.sender_id in members:
-                    sender_info = members[ctx.sender_id]
-                    conn = await outbound_ref.ask(Connect(
-                        node_id=ctx.sender_id,
-                        address=sender_info.address,
-                    ))
-                    if conn:
-                        ack_envelope = Envelope(
-                            payload=ack,
-                            target=f"swim_actor/swim",
-                            sender=node_id,
-                        )
-                        await conn.send(Transmit(data=serialize(ack_envelope)))
+                elif req_sender in members:
+                    sender_info = members[req_sender]
+                    await send_to_node(sender_info.address, "swim", ack)
 
-            case PingReqAck(target, success, updates):
-                if success and target in pending_probes:
-                    del pending_probes[target]
-                for update in updates:
-                    await membership_ref.send(ApplyUpdate(update))
+            case PingReqAck(sender=_, target=ack_target, success=success, members=remote_members):
+                if success and ack_target in pending_probes:
+                    del pending_probes[ack_target]
+                await membership_ref.send(MergeMembership(remote_members))
 
             case PingReqTimeout(target):
                 if target in pending_probes:
                     del pending_probes[target]
-                    update = MembershipUpdate(
-                        node_id=target,
-                        status="down",
-                        incarnation=0,
-                    )
-                    await membership_ref.send(ApplyUpdate(update))
-                    pending_updates.append(update)
+                    await membership_ref.send(MarkDown(target))

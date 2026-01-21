@@ -19,21 +19,25 @@ from casty.cluster.cache import DistributedCache
 async def main():
     print("=== Distributed Cache Example ===\n")
 
-    async with DevelopmentCluster(3, strategy=DistributionStrategy.ROUND_ROBIN, debug=False) as cluster:
+    async with DevelopmentCluster(3, strategy=DistributionStrategy.ROUND_ROBIN, debug=True) as cluster:
         print(f"Started {len(cluster)}-node cluster\n")
 
-        # Debug: Check membership on each node
         from casty.cluster.messages import GetAliveMembers, GetResponsibleNodes
+
+        await asyncio.sleep(5)
+
         print("--- Debug: Membership on each node ---")
         for i, node in enumerate(cluster.nodes):
-            members = await node._membership_ref.ask(GetAliveMembers())
+            membership = await node.actor(name="membership_actor/membership")
+            members = await membership.ask(GetAliveMembers())
             print(f"  node-{i} sees members: {list(members.keys())}")
 
         # Debug: Check who each node thinks is the leader for cache:user:1
         test_key = "cache_entry/cache:user:1"
         print(f"\n--- Debug: Leader for '{test_key}' ---")
         for i, node in enumerate(cluster.nodes):
-            leaders = await node._membership_ref.ask(GetResponsibleNodes(test_key, 3))
+            membership = await node.actor(name="membership_actor/membership")
+            leaders = await membership.ask(GetResponsibleNodes(test_key, 3))
             print(f"  node-{i} thinks leader is: {leaders[0] if leaders else 'none'}")
         print()
 

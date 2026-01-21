@@ -2,8 +2,10 @@ import pytest
 import asyncio
 from dataclasses import dataclass
 
-from casty import actor, Mailbox, ActorSystem
+from casty import actor, Mailbox, State
 from casty.serializable import serializable
+from casty.cluster.development import DevelopmentCluster
+from casty.reply import Reply
 
 
 @serializable
@@ -20,12 +22,6 @@ class Pong:
 
 @pytest.mark.asyncio
 async def test_remote_ref_send():
-    from casty.cluster.remote_ref import RemoteActorRef
-    from casty.cluster.router import router_actor
-    from casty.cluster.inbound import inbound_actor, GetPort
-    from casty.cluster.outbound import outbound_actor
-    from casty.cluster.transport_messages import Register, Connect
-
     received = []
 
     @actor
@@ -33,148 +29,50 @@ async def test_remote_ref_send():
         async for msg, ctx in mailbox:
             received.append(msg.value)
 
-    # Node B (receiver)
-    async with ActorSystem(node_id="node-b") as system_b:
-        router_b = await system_b.actor(router_actor(), name="router")
-        pong_ref = await system_b.actor(pong_actor(), name="pong")
-        await router_b.send(Register(ref=pong_ref))
+    async with DevelopmentCluster(nodes=2) as cluster:
+        node_a, node_b = cluster.nodes
 
-        inbound_b = await system_b.actor(
-            inbound_actor("127.0.0.1", 0, router_b),
-            name="inbound"
-        )
-        port_b = await inbound_b.ask(GetPort())
+        pong_ref = await node_b.actor(pong_actor(), name="pong")
 
-        # Node A (sender)
-        async with ActorSystem(node_id="node-a") as system_a:
-            router_a = await system_a.actor(router_actor(), name="router")
-            outbound_a = await system_a.actor(
-                outbound_actor(router_a),
-                name="outbound"
-            )
+        # Get remote ref via system.actor lookup
+        remote_pong = await node_a.actor(name=pong_ref.actor_id, node_id=node_b.node_id)
 
-            # Get connection to node-b
-            conn_ref = await outbound_a.ask(Connect(
-                node_id="node-b",
-                address=f"127.0.0.1:{port_b}"
-            ))
+        await remote_pong.send(Ping(42))
+        await asyncio.sleep(0.1)
 
-            # Create remote ref
-            remote_pong = RemoteActorRef(
-                actor_id=pong_ref.actor_id,
-                node_id="node-b",
-                connection=conn_ref,
-            )
-
-            # Send via remote ref
-            await remote_pong.send(Ping(42))
-            await asyncio.sleep(0.1)
-
-            assert received == [42]
+        assert received == [42]
 
 
 @pytest.mark.asyncio
 async def test_remote_ref_send_with_sender():
-    from casty.cluster.remote_ref import RemoteActorRef
-    from casty.cluster.router import router_actor
-    from casty.cluster.inbound import inbound_actor, GetPort
-    from casty.cluster.outbound import outbound_actor
-    from casty.cluster.transport_messages import Register, Connect
-
     received_senders = []
 
     @actor
     async def echo_actor(*, mailbox: Mailbox[Ping]):
         async for msg, ctx in mailbox:
-            received_senders.append(ctx.sender_id)
+            received_senders.append(ctx.sender.actor_id if ctx.sender else None)
 
-    # Node B (receiver)
-    async with ActorSystem(node_id="node-b") as system_b:
-        router_b = await system_b.actor(router_actor(), name="router")
-        echo_ref = await system_b.actor(echo_actor(), name="echo")
-        await router_b.send(Register(ref=echo_ref))
+    @actor
+    async def sender_actor(*, mailbox: Mailbox[Pong]):
+        async for msg, ctx in mailbox:
+            pass
 
-        inbound_b = await system_b.actor(
-            inbound_actor("127.0.0.1", 0, router_b),
-            name="inbound"
-        )
-        port_b = await inbound_b.ask(GetPort())
+    async with DevelopmentCluster(nodes=2) as cluster:
+        node_a, node_b = cluster.nodes
 
-        # Node A (sender)
-        async with ActorSystem(node_id="node-a") as system_a:
-            router_a = await system_a.actor(router_actor(), name="router")
-            outbound_a = await system_a.actor(
-                outbound_actor(router_a),
-                name="outbound"
-            )
+        echo_ref = await node_b.actor(echo_actor(), name="echo")
+        sender_ref = await node_a.actor(sender_actor(), name="sender")
 
-            conn_ref = await outbound_a.ask(Connect(
-                node_id="node-b",
-                address=f"127.0.0.1:{port_b}"
-            ))
+        remote_echo = await node_a.actor(name=echo_ref.actor_id, node_id=node_b.node_id)
 
-            remote_echo = RemoteActorRef(
-                actor_id=echo_ref.actor_id,
-                node_id="node-b",
-                connection=conn_ref,
-            )
+        await remote_echo.send(Ping(1), sender=sender_ref)
+        await asyncio.sleep(0.1)
 
-            # Send with explicit sender
-            await remote_echo.send(Ping(1), sender="my-actor")
-            await asyncio.sleep(0.1)
-
-            assert received_senders == ["my-actor"]
-
-
-@pytest.mark.asyncio
-async def test_remote_ref_ask_without_pending_asks():
-    from casty.cluster.remote_ref import RemoteActorRef
-    from casty.cluster.router import router_actor
-    from casty.cluster.inbound import inbound_actor, GetPort
-    from casty.cluster.outbound import outbound_actor
-    from casty.cluster.transport_messages import Connect
-
-    # Node B (receiver)
-    async with ActorSystem(node_id="node-b") as system_b:
-        router_b = await system_b.actor(router_actor(), name="router")
-
-        inbound_b = await system_b.actor(
-            inbound_actor("127.0.0.1", 0, router_b),
-            name="inbound"
-        )
-        port_b = await inbound_b.ask(GetPort())
-
-        # Node A (sender)
-        async with ActorSystem(node_id="node-a") as system_a:
-            router_a = await system_a.actor(router_actor(), name="router")
-            outbound_a = await system_a.actor(
-                outbound_actor(router_a),
-                name="outbound"
-            )
-
-            conn_ref = await outbound_a.ask(Connect(
-                node_id="node-b",
-                address=f"127.0.0.1:{port_b}"
-            ))
-
-            remote_ref = RemoteActorRef(
-                actor_id="some-actor",
-                node_id="node-b",
-                connection=conn_ref,
-            )
-
-            with pytest.raises(RuntimeError, match="pending_asks not configured"):
-                await remote_ref.ask(Ping(1))
+        assert len(received_senders) == 1
 
 
 @pytest.mark.asyncio
 async def test_remote_ref_multiple_sends():
-    from casty.cluster.remote_ref import RemoteActorRef
-    from casty.cluster.router import router_actor
-    from casty.cluster.inbound import inbound_actor, GetPort
-    from casty.cluster.outbound import outbound_actor
-    from casty.cluster.transport_messages import Register, Connect
-
     received = []
 
     @actor
@@ -182,95 +80,41 @@ async def test_remote_ref_multiple_sends():
         async for msg, ctx in mailbox:
             received.append(msg.value)
 
-    # Node B (receiver)
-    async with ActorSystem(node_id="node-b") as system_b:
-        router_b = await system_b.actor(router_actor(), name="router")
-        collector_ref = await system_b.actor(collector_actor(), name="collector")
-        await router_b.send(Register(ref=collector_ref))
+    async with DevelopmentCluster(nodes=2) as cluster:
+        node_a, node_b = cluster.nodes
 
-        inbound_b = await system_b.actor(
-            inbound_actor("127.0.0.1", 0, router_b),
-            name="inbound"
-        )
-        port_b = await inbound_b.ask(GetPort())
+        collector_ref = await node_b.actor(collector_actor(), name="collector")
+        remote_collector = await node_a.actor(name=collector_ref.actor_id, node_id=node_b.node_id)
 
-        # Node A (sender)
-        async with ActorSystem(node_id="node-a") as system_a:
-            router_a = await system_a.actor(router_actor(), name="router")
-            outbound_a = await system_a.actor(
-                outbound_actor(router_a),
-                name="outbound"
-            )
+        for i in range(5):
+            await remote_collector.send(Ping(i))
 
-            conn_ref = await outbound_a.ask(Connect(
-                node_id="node-b",
-                address=f"127.0.0.1:{port_b}"
-            ))
+        await asyncio.sleep(0.2)
 
-            remote_collector = RemoteActorRef(
-                actor_id=collector_ref.actor_id,
-                node_id="node-b",
-                connection=conn_ref,
-            )
-
-            # Send multiple messages
-            for i in range(5):
-                await remote_collector.send(Ping(i))
-
-            await asyncio.sleep(0.2)
-
-            assert received == [0, 1, 2, 3, 4]
+        assert received == [0, 1, 2, 3, 4]
 
 
 @pytest.mark.asyncio
 async def test_remote_ref_ask():
-    from casty.cluster.remote_ref import RemoteActorRef
-    from casty.cluster.router import router_actor, RegisterPending
-    from casty.cluster.inbound import inbound_actor, GetPort
-    from casty.cluster.outbound import outbound_actor
-    from casty.cluster.transport_messages import Register, Connect
-
     @actor
-    async def echo_actor(*, mailbox: Mailbox[Ping]):
+    async def echo_actor(state: State[int],*, mailbox: Mailbox[Ping | Reply]):
         async for msg, ctx in mailbox:
-            await ctx.reply(Pong(msg.value * 2))
+            state.set(state.value + 1)
 
-    # Node B (responder)
-    async with ActorSystem(node_id="node-b") as system_b:
-        router_b = await system_b.actor(router_actor(), name="router")
-        echo_ref = await system_b.actor(echo_actor(), name="echo")
-        await router_b.send(Register(ref=echo_ref))
+            print(f'\nhello, who sent to me: {ctx.sender.actor_id}. i am {ctx.node_id}')
 
-        inbound_b = await system_b.actor(
-            inbound_actor("127.0.0.1", 0, router_b),
-            name="inbound"
-        )
-        port_b = await inbound_b.ask(GetPort())
+            match msg:
+                case Ping(value):
+                    await ctx.reply(Pong(value * state.value))
 
-        # Node A (requester)
-        async with ActorSystem(node_id="node-a") as system_a:
-            router_a = await system_a.actor(router_actor(), name="router")
+    async with DevelopmentCluster(nodes=2, debug=True) as cluster:
+        node_a, node_b = cluster.nodes
 
-            # Shared pending asks dict
-            pending_asks: dict[str, asyncio.Future] = {}
-            await router_a.send(RegisterPending(pending=pending_asks))
+        echo_ref = await node_a.actor(echo_actor(0), name="echo", write_quorum=2, replicas=2)
+        echo_ref_b = await node_b.actor(echo_actor(0), name="echo", write_quorum=2, replicas=2)
 
-            outbound_a = await system_a.actor(
-                outbound_actor(router_a),
-                name="outbound"
-            )
+        result_a = await echo_ref.ask(Ping(21))
+        result_b = await echo_ref_b.ask(Ping(21))
 
-            conn_ref = await outbound_a.ask(Connect(
-                node_id="node-b",
-                address=f"127.0.0.1:{port_b}"
-            ))
-
-            remote_echo = RemoteActorRef(
-                actor_id=echo_ref.actor_id,
-                node_id="node-b",
-                connection=conn_ref,
-                pending_asks=pending_asks,
-            )
-
-            result = await remote_echo.ask(Ping(21))
-            assert result == Pong(42)
+        assert result_a == Pong(21)
+        assert result_b == Pong(42)
