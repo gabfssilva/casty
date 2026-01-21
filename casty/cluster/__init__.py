@@ -1,6 +1,6 @@
 from .hash_ring import HashRing
 from .messages import (
-    MembershipUpdate,
+    MemberSnapshot,
     Ping,
     Ack,
     PingReq,
@@ -8,49 +8,25 @@ from .messages import (
     Join,
     GetAliveMembers,
     GetAllMembers,
-    ApplyUpdate,
+    GetAddress,
+    MergeMembership,
+    MarkDown,
     SwimTick,
     ProbeTimeout,
     PingReqTimeout,
-    StateUpdate,
-    StatePull,
-    GossipTick,
 )
 from .membership import membership_actor, MemberInfo, MemberState
-from .transport_messages import (
-    Transmit,
-    Deliver,
-    Register,
-    NewConnection,
-    Connect,
-    GetConnection,
-    Disconnect,
-    Received,
-)
-from .router import router_actor, RegisterPending
-from .connection import connection_actor
-from .inbound import inbound_actor, GetPort
-from .outbound import outbound_actor
 from .swim import swim_actor
-from .gossip import gossip_actor
-from .remote_ref import RemoteActorRef
+from .gossip import gossip_actor, Put, Get
+from .cluster import cluster, CreateActor, WaitFor
 from .clustered_system import ClusteredActorSystem
 from .development import DevelopmentCluster, DistributionStrategy
-from .replication import (
-    ReplicationConfig,
-    Routing,
-    replicated,
-    Replicate,
-    ReplicateAck,
-    SyncRequest,
-    SyncResponse,
-)
 
 __all__ = [
     # Hash ring
     "HashRing",
     # Messages
-    "MembershipUpdate",
+    "MemberSnapshot",
     "Ping",
     "Ack",
     "PingReq",
@@ -58,49 +34,28 @@ __all__ = [
     "Join",
     "GetAliveMembers",
     "GetAllMembers",
-    "ApplyUpdate",
+    "GetAddress",
+    "MergeMembership",
+    "MarkDown",
     "SwimTick",
     "ProbeTimeout",
     "PingReqTimeout",
-    "StateUpdate",
-    "StatePull",
-    "GossipTick",
     # Membership
     "membership_actor",
     "MemberInfo",
     "MemberState",
-    # Transport messages
-    "Transmit",
-    "Deliver",
-    "Register",
-    "NewConnection",
-    "Connect",
-    "GetConnection",
-    "Disconnect",
-    "Received",
-    # Transport actors
-    "router_actor",
-    "RegisterPending",
-    "connection_actor",
-    "inbound_actor",
-    "GetPort",
-    "outbound_actor",
+    # Cluster
+    "cluster",
+    "CreateActor",
+    "WaitFor",
     # Failure detection
     "swim_actor",
-    # State replication
+    # Gossip (key-value store)
     "gossip_actor",
-    # Remote references
-    "RemoteActorRef",
+    "Put",
+    "Get",
     # Systems
     "ClusteredActorSystem",
     "DevelopmentCluster",
     "DistributionStrategy",
-    # Replication
-    "ReplicationConfig",
-    "Routing",
-    "replicated",
-    "Replicate",
-    "ReplicateAck",
-    "SyncRequest",
-    "SyncResponse",
 ]

@@ -207,6 +207,7 @@ class LocalActorSystem(System):
         to: ActorRef[M] | None = None,
         delay: float | None = None,
         every: float | None = None,
+        sender: ActorRef | None = None,
     ) -> Callable[[], Coroutine[Any, Any, None]] | None:
         if delay is not None and every is not None:
             raise ValueError("Cannot specify both delay and every")
@@ -217,7 +218,7 @@ class LocalActorSystem(System):
         if delay is not None:
             async def delayed_send() -> None:
                 await asyncio.sleep(delay)
-                await to.send(msg)
+                await to.send(msg, sender=sender)
 
             asyncio.create_task(delayed_send())
             return None
@@ -230,7 +231,7 @@ class LocalActorSystem(System):
                 while not cancelled:
                     await asyncio.sleep(every)
                     if not cancelled:
-                        await to.send(msg)
+                        await to.send(msg, sender=sender)
 
             task = asyncio.create_task(periodic_send())
 
@@ -341,8 +342,9 @@ class ActorSystem(System):
         to: ActorRef[M] | None = None,
         delay: float | None = None,
         every: float | None = None,
+        sender: ActorRef | None = None,
     ) -> Callable[[], Coroutine[Any, Any, None]] | None:
-        return await self._inner.schedule(msg, to=to, delay=delay, every=every)
+        return await self._inner.schedule(msg, to=to, delay=delay, every=every, sender=sender)
 
     async def shutdown(self) -> None:
         await self._inner.shutdown()

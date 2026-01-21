@@ -36,6 +36,7 @@ class Mailbox[M](Protocol):
         *,
         delay: float | None = None,
         every: float | None = None,
+        sender: "ActorRef | None" = None,
     ) -> Any: ...
 
     def ref(self) -> ActorRef[M]:
@@ -132,10 +133,11 @@ class ActorMailbox[M](Mailbox[M]):
         *,
         delay: float | None = None,
         every: float | None = None,
+        sender: ActorRef | None = None,
     ) -> Any:
         if self._system is None:
             raise RuntimeError("Mailbox not bound to system")
-        return await self._system.schedule(msg, to=self._self_ref, delay=delay, every=every)
+        return await self._system.schedule(msg, to=self._self_ref, delay=delay, every=every, sender=sender)
 
     def ref(self) -> ActorRef[M]:
         return self._self_ref

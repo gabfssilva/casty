@@ -72,6 +72,14 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                     await ctx.reply(ListenFailed(str(e)))
 
             case Connect(host, port, ser):
+                peer_addr = f"{host}:{port}"
+                if peer_addr in sessions:
+                    await ctx.reply(Connected(
+                        remote_address=(host, port),
+                        peer_id=peer_addr,
+                    ))
+                    continue
+
                 s = ser or serializer
                 try:
                     await ctx.actor(
@@ -114,9 +122,7 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                         await ctx.reply(LookupResult(ref=None))
 
             case Lookup(name, peer=peer_id) if peer_id is not None:
-                if name in exposed:
-                    await ctx.reply(LookupResult(ref=exposed[name]))
-                elif peer_id in sessions:
+                if peer_id in sessions:
                     session = sessions[peer_id]
                     try:
                         correlation_id = uuid.uuid4().hex

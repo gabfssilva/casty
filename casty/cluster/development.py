@@ -9,7 +9,6 @@ from casty.actor import Behavior
 from casty.ref import ActorRef
 from casty.mailbox import Filter, MessageStream
 from casty.state import State
-from .replication import Routing
 from .clustered_system import ClusteredActorSystem
 
 
@@ -73,18 +72,9 @@ class DevelopmentCluster:
         behavior: Behavior,
         *,
         name: str,
-        replicas: int | None = None,
-        write_quorum: int | None = None,
-        routing: Routing | None = None,
-    ) -> ActorRef[M]:
+    ) -> ActorRef[M] | None:
         node = self._next_node(name)
-        return await node.actor(
-            behavior,
-            name=name,
-            replicas=replicas,
-            write_quorum=write_quorum,
-            routing=routing,
-        )
+        return await node.actor(behavior, name=name)
 
     async def start(self) -> None:
         first_system = ClusteredActorSystem(
@@ -96,28 +86,21 @@ class DevelopmentCluster:
         await first_system.start()
         self._systems.append(first_system)
 
+        first_address = await first_system.address()
+
         for i in range(1, self._node_count):
             node_id = f"node-{i}"
             system = ClusteredActorSystem(
                 node_id=node_id,
                 host="127.0.0.1",
                 port=0,
-                seeds=[first_system.address],
+                seeds=[("node-0", first_address)],
                 debug_filter=debug_filter(node_id) if self._debug else None,
             )
             await system.start()
             self._systems.append(system)
 
-        await asyncio.sleep(0.3)
-
-        from .messages import GetAliveMembers, Join
-        seed_members = await first_system._membership_ref.ask(GetAliveMembers())
-        for system in self._systems[1:]:
-            for member_id, info in seed_members.items():
-                if member_id != system.node_id:
-                    await system._membership_ref.send(Join(node_id=member_id, address=info.address))
-
-        await asyncio.sleep(0.2)
+        await self.wait_for(self._node_count)
 
     async def shutdown(self) -> None:
         for system in reversed(self._systems):
@@ -130,3 +113,12 @@ class DevelopmentCluster:
 
     async def __aexit__(self, *args: Any) -> None:
         await self.shutdown()
+
+    async def wait_for(self, nodes: int):
+        from casty.cluster import WaitFor
+        cluster = await self._next_node().actor(name="cluster/cluster")
+        await cluster.ask(WaitFor(nodes=nodes))
+
+    async def gossip(self) -> ActorRef:
+        node = self._next_node()
+        return await node._system.actor(name="gossip_actor/gossip")

@@ -53,9 +53,10 @@ class Context:
         to: "ActorRef[M] | None" = None,
         delay: float | None = None,
         every: float | None = None,
+        sender: "ActorRef | None" = None,
     ) -> Any:
         if self._system is None:
             raise RuntimeError("Context not bound to system")
 
         target = to if to is not None else self._self_ref
-        return await self._system.schedule(msg, to=target, delay=delay, every=every)
+        return await self._system.schedule(msg, to=target, delay=delay, every=every, sender=sender)

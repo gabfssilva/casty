@@ -1,35 +1,66 @@
 from __future__ import annotations
 
 import random
+from dataclasses import dataclass
+from typing import Any
 
 from casty import actor, Mailbox
-from casty.ref import ActorRef
-from casty.envelope import Envelope
-from casty.serializable import serialize
-from .messages import StateUpdate, StatePull, GossipTick, GetAliveMembers
-from .transport_messages import Connect, Transmit
+from casty.protocols import System
+from casty.serializable import serializable
+from casty.reply import Reply
+from casty.remote import Connect, Connected, Lookup, LookupResult
+from .messages import GetAliveMembers
+
+
+@serializable
+@dataclass
+class Put:
+    key: str
+    value: bytes
+    version: int = 0  # 0 means auto-increment
+
+
+@dataclass
+class Get:
+    key: str
+
+
+@dataclass
+class _Tick:
+    pass
+
+
+GossipMessage = Put | Get | _Tick | Reply[Any]
 
 
 @actor
 async def gossip_actor(
     node_id: str,
-    membership_ref: ActorRef,
-    outbound_ref: ActorRef,
-    fanout: int,
+    fanout: int = 3,
+    tick_interval: float = 0.5,
     *,
-    mailbox: Mailbox[StateUpdate | StatePull | GossipTick],
+    mailbox: Mailbox[GossipMessage],
+    system: System,
 ):
-    pending_updates: dict[str, StateUpdate] = {}
+    store: dict[str, tuple[bytes, int]] = {}  # key -> (value, version)
+
+    membership_ref = await system.actor(name="membership_actor/membership")
+    remote_ref = await system.actor(name="remote/remote")
+
+    await mailbox.schedule(_Tick(), every=tick_interval)
 
     async for msg, ctx in mailbox:
         match msg:
-            case GossipTick():
-                if not pending_updates:
+            case _Tick():
+                if not store or membership_ref is None:
+                    continue
+                await membership_ref.send(GetAliveMembers(), sender=mailbox.ref())
+
+            case Reply(result=members) if isinstance(members, dict):
+                if not store or remote_ref is None:
                     continue
 
-                members = await membership_ref.ask(GetAliveMembers())
                 other_members = [m for m in members if m != node_id]
-
                 if not other_members:
                     continue
 
@@ -38,31 +69,32 @@ async def gossip_actor(
                     min(fanout, len(other_members))
                 )
 
-                for target in targets:
-                    target_info = members[target]
-                    conn = await outbound_ref.ask(Connect(
-                        node_id=target,
-                        address=target_info.address,
-                    ))
-                    if conn:
-                        for update in pending_updates.values():
-                            envelope = Envelope(
-                                payload=update,
-                                target="gossip_actor/gossip",
-                                sender=node_id,
-                            )
-                            await conn.send(Transmit(data=serialize(envelope)))
+                for t in targets:
+                    addr = members[t].address
+                    host, port = addr.rsplit(":", 1)
+                    await remote_ref.send(Connect(host=host, port=int(port)), sender=mailbox.ref())
+                    await remote_ref.send(Lookup("gossip", peer=addr), sender=mailbox.ref())
 
-                pending_updates.clear()
+            case Reply(result=Connected()):
+                pass
 
-            case StateUpdate(actor_id, sequence, state):
-                current = pending_updates.get(actor_id)
-                if current is None or sequence > current.sequence:
-                    pending_updates[actor_id] = msg
+            case Reply(result=LookupResult(ref=ref)) if ref is not None:
+                for key, (value, version) in store.items():
+                    await ref.send(Put(key, value, version))
 
-            case StatePull(actor_id, since_sequence):
-                update = pending_updates.get(actor_id)
-                if update and update.sequence > since_sequence:
-                    await ctx.reply(update)
-                else:
-                    await ctx.reply(None)
+            case Reply(result=LookupResult(ref=None)):
+                pass
+
+            case Put(key, value, version):
+                current = store.get(key)
+                current_version = current[1] if current else 0
+
+                if version == 0:
+                    new_version = current_version + 1
+                    store[key] = (value, new_version)
+                elif version > current_version:
+                    store[key] = (value, version)
+
+            case Get(key):
+                entry = store.get(key)
+                await ctx.reply(entry[0] if entry else None)
