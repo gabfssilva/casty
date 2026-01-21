@@ -6,6 +6,7 @@ from typing import Any, AsyncGenerator, AsyncIterator, Callable, Protocol, TYPE_
 
 from .context import Context
 from .envelope import Envelope
+from .ref import ActorRef, UnresolvedActorRef
 
 if TYPE_CHECKING:
     from .state import State
@@ -29,6 +30,16 @@ class Mailbox[M](Protocol):
     async def put(self, envelope: Envelope[M | Stop]) -> None:
         ...
 
+    async def schedule[T](
+        self,
+        msg: T,
+        *,
+        delay: float | None = None,
+        every: float | None = None,
+    ) -> Any: ...
+
+    def ref(self) -> ActorRef[M]:
+        pass
 
 class ActorMailbox[M](Mailbox[M]):
     def __init__(
@@ -51,11 +62,14 @@ class ActorMailbox[M](Mailbox[M]):
         self._self_ref = self_ref
         self._stream: MessageStream[M] | None = None
 
-    def _resolve_sender(self, sender_id: str | None) -> Any:
-        """Resolve sender ID to ActorRef if available in system."""
-        if sender_id is None or self._system is None:
-            return None
-        return self._system._actors.get(sender_id)
+    async def _resolve_sender(self, sender: UnresolvedActorRef | ActorRef[Any] | None) -> ActorRef[Any] | None:
+        match sender:
+            case ActorRef() as ref:
+                return ref
+            case UnresolvedActorRef() as unresolved:
+                return await unresolved.resolve(self._system)
+            case None:
+                return None
 
     def _base_stream(self) -> MessageStream[M]:
         async def stream() -> MessageStream[M]:
@@ -65,17 +79,16 @@ class ActorMailbox[M](Mailbox[M]):
                 if isinstance(envelope.payload, Stop):
                     return
 
-                sender_ref = self._resolve_sender(envelope.sender)
+                sender_ref = await self._resolve_sender(envelope.sender)
 
                 ctx = Context(
                     self_id=self._self_id,
-                    sender_id=envelope.sender,
                     sender=sender_ref,
                     node_id=self._node_id,
                     is_leader=self._is_leader,
-                    reply_to=envelope.reply_to,
                     _system=self._system,
                     _self_ref=self._self_ref,
+                    reply_to=envelope.reply_to,
                 )
 
                 yield envelope.payload, ctx
@@ -123,3 +136,6 @@ class ActorMailbox[M](Mailbox[M]):
         if self._system is None:
             raise RuntimeError("Mailbox not bound to system")
         return await self._system.schedule(msg, to=self._self_ref, delay=delay, every=every)
+
+    def ref(self) -> ActorRef[M]:
+        return self._self_ref

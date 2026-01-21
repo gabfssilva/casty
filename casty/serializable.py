@@ -52,6 +52,18 @@ def _to_dict(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _to_dict(v) for k, v in obj.items()}
 
+    # Convert ActorRef to UnresolvedActorRef for serialization
+    from .ref import ActorRef, UnresolvedActorRef
+    if isinstance(obj, ActorRef):
+        # Get node_id from _system if available, otherwise use attribute or "local"
+        system = getattr(obj, "_system", None)
+        if system is not None:
+            node_id = system.node_id
+        else:
+            node_id = getattr(obj, "node_id", "local")
+        unresolved = UnresolvedActorRef(actor_id=obj.actor_id, node_id=node_id)
+        return _to_dict(unresolved)
+
     if is_dataclass(obj) and not isinstance(obj, type):
         type_name = getattr(obj.__class__, "__serializable_type__", None)
         if type_name is None:

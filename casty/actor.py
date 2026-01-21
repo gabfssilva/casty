@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Coroutine, get_origin, get_args
+from typing import Any, Callable, Coroutine, get_origin, get_type_hints
 from functools import wraps
-
-from .mailbox import Mailbox
 
 
 @dataclass
@@ -16,35 +13,30 @@ class Behavior:
     supervision: Any = None
     state_param: str | None = None
     state_initial: Any = None
+    system_param: str | None = None
 
 
-def _get_state_param(func: Callable[..., Any]) -> str | None:
-    from typing import get_type_hints
-
-    from .state import State
-
+def _find_param(func: Callable[..., Any], target: type, *, generic: bool = False) -> str | None:
     try:
         hints = get_type_hints(func)
         for name, annotation in hints.items():
-            origin = get_origin(annotation)
-            if origin is State:
+            if generic and get_origin(annotation) is target:
+                return name
+            if not generic and annotation is target:
                 return name
     except Exception:
-        sig = inspect.signature(func)
-        for name, param in sig.parameters.items():
-            annotation = param.annotation
-            if annotation is inspect.Parameter.empty:
-                continue
-            if isinstance(annotation, str) and annotation.startswith("State["):
-                return name
-
+        pass
     return None
 
 
-def actor[M](
+def actor(
     func: Callable[..., Coroutine[Any, Any, None]]
 ) -> Callable[..., Behavior]:
-    state_param = _get_state_param(func)
+    from .state import State
+    from .protocols import System
+
+    state_param = _find_param(func, State, generic=True)
+    system_param = _find_param(func, System)
 
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Behavior:
@@ -67,6 +59,7 @@ def actor[M](
             supervision=supervision,
             state_param=state_param,
             state_initial=state_initial,
+            system_param=system_param,
         )
 
     return wrapper

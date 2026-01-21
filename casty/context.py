@@ -12,17 +12,22 @@ if TYPE_CHECKING:
 @dataclass
 class Context:
     self_id: str
-    sender_id: str | None = None
     sender: "ActorRef[Any] | None" = None
     node_id: str = "local"
     is_leader: bool = True
-    reply_to: asyncio.Future[Any] | None = field(default=None, repr=False)
     _system: Any = field(default=None, repr=False)
     _self_ref: "ActorRef[Any] | None" = field(default=None, repr=False)
+    reply_to: "asyncio.Future[Any] | None" = field(default=None, repr=False)
 
     async def reply(self, value: Any) -> None:
-        if self.reply_to is not None and not self.reply_to.done():
-            self.reply_to.set_result(value)
+        if self.reply_to is not None:
+            if not self.reply_to.done():
+                self.reply_to.set_result(value)
+            return
+
+        from .reply import Reply
+        if self.sender is not None:
+            await self.sender.send(Reply(result=value))
 
     async def actor[M](
         self,

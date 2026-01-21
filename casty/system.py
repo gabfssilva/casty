@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import uuid
+from typing import Any, Callable, Coroutine, overload
 
 from .actor import Behavior
 from .envelope import Envelope
-from .mailbox import Mailbox, ActorMailbox, Stop
+from .mailbox import Mailbox, ActorMailbox, Stop, Filter
 from .protocols import System
 from .ref import ActorRef, LocalActorRef
+from .reply import reply
 from .supervision import Decision
-from typing import Callable, Coroutine
 
 
 class LocalActorSystem(System):
@@ -46,6 +47,9 @@ class LocalActorSystem(System):
             kwargs[behavior.state_param] = state
 
         retries = 0
+        if behavior.system_param is not None:
+            kwargs[behavior.system_param] = self
+
         while True:
             try:
                 await behavior.func(
@@ -70,14 +74,38 @@ class LocalActorSystem(System):
                 else:
                     raise
 
+    @overload
     async def actor[M](
         self,
         behavior: Behavior,
         *,
         name: str,
-        replicas: int = 1,
-    ) -> ActorRef[M]:
+        filters: list[Filter] | None = None,
+    ) -> ActorRef[M]: ...
+
+    @overload
+    async def actor[M](
+        self,
+        behavior: None = None,
+        *,
+        name: str,
+        node_id: str | None = None,
+    ) -> ActorRef[M] | None: ...
+
+    async def actor[M](
+        self,
+        behavior: Behavior | None = None,
+        *,
+        name: str,
+        filters: list[Filter] | None = None,
+        node_id: str | None = None,
+    ) -> ActorRef[M] | None:
         from .state import State
+
+        if behavior is None:
+            if node_id is not None and node_id != self._node_id:
+                return None
+            return self._actors.get(name)
 
         actor_id = self._build_actor_id(behavior, name)
 
@@ -88,16 +116,21 @@ class LocalActorSystem(System):
         if behavior.state_param is not None:
             state = State(behavior.state_initial)
 
-        filters = [self._debug_filter] if self._debug_filter else []
+        all_filters = []
+        if self._debug_filter:
+            all_filters.append(self._debug_filter)
+        if filters:
+            all_filters.extend(filters)
+
         mailbox: ActorMailbox[M] = ActorMailbox(
             state=state,
             self_id=actor_id,
             node_id=self._node_id,
             is_leader=True,
             system=self,
-            filters=filters,
+            filters=all_filters,
         )
-        ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, mailbox=mailbox)
+        ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, mailbox=mailbox, _system=self)
         mailbox.set_self_ref(ref)
 
         task = asyncio.create_task(
@@ -139,7 +172,7 @@ class LocalActorSystem(System):
             system=self,
             filters=filters,
         )
-        ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, mailbox=mailbox)
+        ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, mailbox=mailbox, _system=self)
         mailbox.set_self_ref(ref)
 
         task = asyncio.create_task(
@@ -151,6 +184,21 @@ class LocalActorSystem(System):
         self._mailboxes[actor_id] = mailbox
 
         return ref
+
+    async def ask[M, R](
+        self,
+        ref: ActorRef[M],
+        msg: M,
+        timeout: float = 30.0,
+        filters: list[Filter] | None = None,
+    ) -> R:
+        promise: asyncio.Future[R] = asyncio.Future()
+        await self.actor(
+            reply(msg, ref, promise, timeout),
+            name=uuid.uuid4().hex,
+            filters=filters
+        )
+        return await promise
 
     async def schedule[M](
         self,
@@ -218,8 +266,13 @@ class LocalActorSystem(System):
 
 
 class ActorSystem(System):
-    def __init__(self, node_id: str = "local") -> None:
+    def __init__(
+        self,
+        node_id: str = "local",
+        filters: list[Filter] | None = None,
+    ) -> None:
         self._inner: LocalActorSystem | Any = LocalActorSystem(node_id=node_id)
+        self._filters = filters or []
 
     @classmethod
     def clustered(
@@ -244,13 +297,42 @@ class ActorSystem(System):
     def node_id(self) -> str:
         return self._inner.node_id
 
+    @overload
     async def actor[M](
         self,
         behavior: Behavior,
         *,
         name: str,
-    ) -> ActorRef[M]:
-        return await self._inner.actor(behavior, name=name)
+        filters: list[Filter] | None = None,
+    ) -> ActorRef[M]: ...
+
+    @overload
+    async def actor[M](
+        self,
+        behavior: None = None,
+        *,
+        name: str,
+        filters: list[Filter] | None = None,
+        node_id: str | None = None,
+    ) -> ActorRef[M] | None: ...
+
+    async def actor[M](
+        self,
+        behavior: Behavior | None = None,
+        *,
+        name: str,
+        filters: list[Filter] | None = None,
+        node_id: str | None = None,
+    ) -> ActorRef[M] | None:
+        return await self._inner.actor(behavior, name=name, filters=self._filters + (filters or []), node_id=node_id)
+
+    async def ask[M, R](
+        self,
+        ref: ActorRef[M],
+        msg: M,
+        timeout: float = 30.0,
+    ) -> R:
+        return await self._inner.ask(ref, msg, timeout)
 
     async def schedule[M](
         self,
