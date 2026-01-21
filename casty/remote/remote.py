@@ -81,7 +81,7 @@ async def _remote_listener(
         match msg:
             case Bound(local_address):
                 registry = await ctx.actor(
-                    registry_actor(serializer),
+                    registry_actor(),
                     name="registry"
                 )
                 if reply_to and not replied:
@@ -199,8 +199,8 @@ async def _client_registry(
                 else:
                     await ctx.reply(LookupResult(ref=None))
 
-            case SessionConnected(s):
+            case SessionConnected(_):
                 pass
 
-            case SessionDisconnected(s):
+            case SessionDisconnected(_):
                 session = None

@@ -4,8 +4,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, TYPE_CHECKING
 
-from .protocol import RemoteEnvelope
-
 if TYPE_CHECKING:
     from casty.ref import ActorRef
     from casty.envelope import Envelope

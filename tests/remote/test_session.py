@@ -36,7 +36,7 @@ async def test_session_handles_deliver():
                 received_msgs.append(msg)
 
         target = await system.actor(target_actor(), name="target")
-        registry = await system.actor(registry_actor(serializer), name="registry")
+        registry = await system.actor(registry_actor(), name="registry")
         await registry.ask(Expose(ref=target, name="target"))
 
         connection = AsyncMock()
@@ -61,7 +61,7 @@ async def test_session_handles_deliver():
 async def test_session_send_deliver():
     async with ActorSystem() as system:
         serializer = MsgPackSerializer()
-        registry = await system.actor(registry_actor(serializer), name="registry")
+        registry = await system.actor(registry_actor(), name="registry")
 
         connection = AsyncMock()
         session = await system.actor(

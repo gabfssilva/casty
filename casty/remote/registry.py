@@ -11,7 +11,6 @@ from .messages import (
 
 if TYPE_CHECKING:
     from casty.ref import ActorRef
-    from .serializer import Serializer
 
 
 @dataclass
@@ -28,13 +27,8 @@ type RegistryMessage = Expose | Unexpose | Lookup | SessionConnected | SessionDi
 
 
 @actor
-async def registry_actor(
-    serializer: "Serializer",
-    *,
-    mailbox: Mailbox[RegistryMessage],
-):
+async def registry_actor(*, mailbox: Mailbox[RegistryMessage]):
     exposed: dict[str, ActorRef] = {}
-    sessions: list[ActorRef] = []
 
     async for msg, ctx in mailbox:
         match msg:
@@ -50,9 +44,5 @@ async def registry_actor(
                 ref = exposed.get(name)
                 await ctx.reply(LookupResult(ref=ref))
 
-            case SessionConnected(session):
-                sessions.append(session)
-
-            case SessionDisconnected(session):
-                if session in sessions:
-                    sessions.remove(session)
+            case SessionConnected(_) | SessionDisconnected(_):
+                pass

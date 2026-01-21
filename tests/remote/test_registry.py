@@ -4,15 +4,13 @@ from unittest.mock import MagicMock
 from casty import ActorSystem
 from casty.remote.registry import registry_actor, SessionConnected, SessionDisconnected
 from casty.remote.messages import Expose, Unexpose, Lookup, Exposed, Unexposed, LookupResult
-from casty.remote.serializer import MsgPackSerializer
 
 
 @pytest.mark.asyncio
 async def test_registry_expose_and_lookup():
     async with ActorSystem() as system:
-        serializer = MsgPackSerializer()
         registry = await system.actor(
-            registry_actor(serializer),
+            registry_actor(),
             name="registry"
         )
 
@@ -31,9 +29,8 @@ async def test_registry_expose_and_lookup():
 @pytest.mark.asyncio
 async def test_registry_lookup_not_found():
     async with ActorSystem() as system:
-        serializer = MsgPackSerializer()
         registry = await system.actor(
-            registry_actor(serializer),
+            registry_actor(),
             name="registry"
         )
 
@@ -45,9 +42,8 @@ async def test_registry_lookup_not_found():
 @pytest.mark.asyncio
 async def test_registry_unexpose():
     async with ActorSystem() as system:
-        serializer = MsgPackSerializer()
         registry = await system.actor(
-            registry_actor(serializer),
+            registry_actor(),
             name="registry"
         )
 
@@ -65,9 +61,8 @@ async def test_registry_unexpose():
 @pytest.mark.asyncio
 async def test_registry_session_management():
     async with ActorSystem() as system:
-        serializer = MsgPackSerializer()
         registry = await system.actor(
-            registry_actor(serializer),
+            registry_actor(),
             name="registry"
         )
 

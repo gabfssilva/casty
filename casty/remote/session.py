@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from casty import actor, Mailbox
 from casty.io.messages import Received, Write, PeerClosed, ErrorClosed, Aborted
 from .protocol import RemoteEnvelope, RemoteError
-from .messages import Lookup, LookupResult
+from .messages import Lookup
 from .ref import SendDeliver, SendAsk, RemoteRef
 from .registry import SessionConnected, SessionDisconnected
 
@@ -47,13 +47,13 @@ async def session_actor(
             case Received(data):
                 envelope = RemoteEnvelope.from_dict(serializer.decode(data))
                 await _handle_envelope(
-                    envelope, ctx, registry, connection, pending, serializer, self_ref
+                    envelope, registry, connection, pending, serializer, self_ref
                 )
 
             case PeerClosed() | ErrorClosed(_) | Aborted():
                 if self_ref:
                     await registry.send(SessionDisconnected(self_ref))
-                for request_type, reply_to in pending.values():
+                for _, reply_to in pending.values():
                     if reply_to:
                         from casty.reply import Reply
                         await reply_to.send(Reply(result=RemoteError("Connection closed")))
@@ -90,7 +90,6 @@ async def session_actor(
 
 async def _handle_envelope(
     envelope: RemoteEnvelope,
-    ctx,
     registry: "ActorRef",
     connection: "ActorRef",
     pending: dict[str, tuple[str, "ActorRef | None"]],
@@ -141,14 +140,14 @@ async def _handle_envelope(
 
         case "reply":
             if envelope.correlation_id in pending:
-                request_type, reply_to = pending.pop(envelope.correlation_id)
+                _, reply_to = pending.pop(envelope.correlation_id)
                 if reply_to:
                     from casty.reply import Reply
                     await reply_to.send(Reply(result=envelope.payload))
 
         case "error":
             if envelope.correlation_id in pending:
-                request_type, reply_to = pending.pop(envelope.correlation_id)
+                _, reply_to = pending.pop(envelope.correlation_id)
                 if reply_to:
                     from casty.reply import Reply
                     await reply_to.send(Reply(result=RemoteError(envelope.error)))
@@ -166,7 +165,7 @@ async def _handle_envelope(
 
         case "lookup_result":
             if envelope.correlation_id in pending:
-                request_type, reply_to = pending.pop(envelope.correlation_id)
+                _, reply_to = pending.pop(envelope.correlation_id)
                 if reply_to:
                     from casty.reply import Reply
                     exists = envelope.payload == b"1"
