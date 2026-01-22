@@ -3,7 +3,7 @@ import pytest
 import asyncio
 from casty import actor, Mailbox, message
 from casty.state import State
-from casty.cluster.replication import replicated, Routing
+from casty.actor_config import Routing
 from casty.cluster import DevelopmentCluster
 
 
@@ -19,8 +19,7 @@ class Set:
 
 @pytest.mark.asyncio
 async def test_state_replicated_after_mutation():
-    @replicated(factor=2, write_quorum=1, routing=Routing.LEADER)
-    @actor
+    @actor(replicated=2, routing={Get: Routing.LEADER, Set: Routing.LEADER})
     async def counter(state: State[int], mailbox: Mailbox[Get | Set]):
         async for msg, ctx in mailbox:
             match msg:
@@ -45,8 +44,7 @@ async def test_state_replicated_after_mutation():
 async def test_state_change_detection():
     changes_detected: list[int] = []
 
-    @replicated(factor=2, write_quorum=1, routing=Routing.LEADER)
-    @actor
+    @actor(replicated=2, routing={Get: Routing.LEADER, Set: Routing.LEADER})
     async def tracker(state: State[int], mailbox: Mailbox[Get | Set]):
         async for msg, ctx in mailbox:
             match msg:

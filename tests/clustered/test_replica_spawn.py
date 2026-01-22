@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from casty import actor, Mailbox
 from casty.state import State
 from casty.serializable import serializable
-from casty.cluster.replication import replicated, Routing
+from casty.actor_config import Routing
 from casty.cluster import DevelopmentCluster, ClusteredActorSystem
 
 
@@ -25,8 +25,7 @@ class Set:
 
 @pytest.mark.asyncio
 async def test_replicated_actor_spawns_with_state():
-    @replicated(factor=2, write_quorum=1, routing=Routing.LEADER)
-    @actor
+    @actor(replicated=2, routing={Get: Routing.LEADER, Set: Routing.LEADER})
     async def counter(state: State[int], *, mailbox: Mailbox[Get | Set]):
         async for msg, ctx in mailbox:
             match msg:
@@ -47,8 +46,7 @@ async def test_replicated_actor_spawns_with_state():
 
 @pytest.mark.asyncio
 async def test_replicated_actor_is_leader_on_single_node():
-    @replicated(factor=2, write_quorum=1, routing=Routing.LEADER)
-    @actor
+    @actor(replicated=2, routing={Get: Routing.LEADER, Set: Routing.LEADER})
     async def storage(state: State[str], *, mailbox: Mailbox[Get | Set]):
         async for msg, ctx in mailbox:
             match msg:
@@ -66,7 +64,7 @@ async def test_replicated_actor_is_leader_on_single_node():
 
 @pytest.mark.asyncio
 async def test_replicated_actor_with_runtime_config():
-    @actor
+    @actor(replicated=2, routing={Get: Routing.LEADER, Set: Routing.LEADER})
     async def counter(state: State[int], *, mailbox: Mailbox[Get | Set]):
         async for msg, ctx in mailbox:
             match msg:
@@ -79,9 +77,6 @@ async def test_replicated_actor_with_runtime_config():
         ref = await cluster.nodes[0].actor(
             counter(10),
             name="runtime-config",
-            replicas=2,
-            write_quorum=1,
-            routing=Routing.LEADER,
         )
 
         result = await ref.ask(Get())
@@ -95,8 +90,7 @@ async def test_replicated_actor_with_runtime_config():
 
 @pytest.mark.asyncio
 async def test_replicated_actor_state_increments_version():
-    @replicated(factor=1, write_quorum=1, routing=Routing.LEADER)
-    @actor
+    @actor(replicated=1, routing={Get: Routing.LEADER, Set: Routing.LEADER})
     async def versioned(state: State[int], *, mailbox: Mailbox[Get | Set]):
         async for msg, ctx in mailbox:
             match msg:
@@ -156,8 +150,7 @@ async def test_non_replicated_actor_still_works():
 
 @pytest.mark.asyncio
 async def test_get_or_create_replicated_actor():
-    @replicated(factor=2, write_quorum=1, routing=Routing.LEADER)
-    @actor
+    @actor(replicated=2, routing={Get: Routing.LEADER, Set: Routing.LEADER})
     async def counter(state: State[int], *, mailbox: Mailbox[Get | Set]):
         async for msg, ctx in mailbox:
             match msg:
@@ -177,16 +170,17 @@ async def test_get_or_create_replicated_actor():
 
         ref2 = await system.actor(counter(100), name="same")
 
-        assert ref1 is ref2
+        # Both refs point to the same actor (verified by same actor_id and preserved state)
+        assert ref1.actor_id == ref2.actor_id
 
+        # State was preserved (initial 100 was ignored, 42 from first ref remains)
         result = await ref2.ask(Get())
         assert result == 42
 
 
 @pytest.mark.asyncio
 async def test_replicated_actor_hash_ring_assigns_leader():
-    @replicated(factor=3, write_quorum=2, routing=Routing.LEADER)
-    @actor
+    @actor(replicated=3, routing={Get: Routing.LEADER, Set: Routing.LEADER})
     async def replicated_actor(state: State[str], *, mailbox: Mailbox[Get | Set]):
         async for msg, ctx in mailbox:
             match msg:

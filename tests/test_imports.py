@@ -21,7 +21,6 @@ def test_import_state():
 
 
 def test_import_replication():
-    from casty import replicated, Routing, ReplicationConfig
-    assert callable(replicated)
+    from casty import Routing, ReplicationConfig
     assert Routing.LEADER.value == "leader"
     assert ReplicationConfig is not None

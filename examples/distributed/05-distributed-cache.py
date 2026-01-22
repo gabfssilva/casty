@@ -19,12 +19,10 @@ from casty.cluster.cache import DistributedCache
 async def main():
     print("=== Distributed Cache Example ===\n")
 
-    async with DevelopmentCluster(3, strategy=DistributionStrategy.ROUND_ROBIN, debug=True) as cluster:
+    async with DevelopmentCluster(3, strategy=DistributionStrategy.ROUND_ROBIN, debug=False) as cluster:
         print(f"Started {len(cluster)}-node cluster\n")
 
         from casty.cluster.messages import GetAliveMembers, GetResponsibleNodes
-
-        await asyncio.sleep(5)
 
         print("--- Debug: Membership on each node ---")
         for i, node in enumerate(cluster.nodes):

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Coroutine, get_origin, get_type_hints
 from functools import wraps
 
+from .actor_config import ActorReplicationConfig, Routing
+
 
 @dataclass
 class Behavior:
@@ -30,36 +32,54 @@ def _find_param(func: Callable[..., Any], target: type, *, generic: bool = False
 
 
 def actor(
-    func: Callable[..., Coroutine[Any, Any, None]]
-) -> Callable[..., Behavior]:
-    from .state import State
-    from .protocols import System
+    func: Callable[..., Coroutine[Any, Any, None]] | None = None,
+    *,
+    clustered: bool = False,
+    replicated: int | None = None,
+    persistence: Any = None,
+    routing: dict[type, Any] | None = None,
+) -> Callable[..., Behavior] | Callable[[Callable[..., Coroutine[Any, Any, None]]], Callable[..., Behavior]]:
+    def decorator(f: Callable[..., Coroutine[Any, Any, None]]) -> Callable[..., Behavior]:
+        from .state import State
+        from .protocols import System
 
-    state_param = _find_param(func, State, generic=True)
-    system_param = _find_param(func, System)
+        if clustered or replicated is not None or persistence is not None or routing is not None:
+            f.__replication_config__ = ActorReplicationConfig(
+                clustered=clustered or (replicated is not None),
+                replicated=replicated,
+                persistence=persistence,
+                routing=routing or {},
+            )
 
-    @wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> Behavior:
-        supervision = getattr(func, "__supervision__", None)
+        state_param = _find_param(f, State, generic=True)
+        system_param = _find_param(f, System)
 
-        state_initial = None
-        remaining_args = args
+        @wraps(f)
+        def wrapper(*args: Any, **kwargs: Any) -> Behavior:
+            supervision = getattr(f, "__supervision__", None)
 
-        if state_param is not None:
-            if state_param in kwargs:
-                state_initial = kwargs.pop(state_param)
-            elif args:
-                state_initial = args[0]
-                remaining_args = args[1:]
+            state_initial = None
+            remaining_args = args
 
-        return Behavior(
-            func=func,
-            initial_args=remaining_args,
-            initial_kwargs=kwargs,
-            supervision=supervision,
-            state_param=state_param,
-            state_initial=state_initial,
-            system_param=system_param,
-        )
+            if state_param is not None:
+                if state_param in kwargs:
+                    state_initial = kwargs.pop(state_param)
+                elif args:
+                    state_initial = args[0]
+                    remaining_args = args[1:]
 
-    return wrapper
+            return Behavior(
+                func=f,
+                initial_args=remaining_args,
+                initial_kwargs=kwargs,
+                supervision=supervision,
+                state_param=state_param,
+                state_initial=state_initial,
+                system_param=system_param,
+            )
+
+        return wrapper
+
+    if func is not None:
+        return decorator(func)
+    return decorator

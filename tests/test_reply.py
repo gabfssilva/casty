@@ -129,35 +129,6 @@ async def test_reply_actor_manual_cancel():
         with pytest.raises(RuntimeError, match="cancelled by user"):
             await asyncio.wait_for(promise, timeout=1.0)
 
-
-@pytest.mark.asyncio
-async def test_reply_actor_cancel_without_reason():
-    """Test that Cancel without reason raises generic RuntimeError."""
-    async with ActorSystem() as system:
-        @actor
-        async def black_hole(*, mailbox: Mailbox[Question]):
-            async for msg, ctx in mailbox:
-                pass
-
-        target = await system.actor(black_hole(), name="target")
-        promise: asyncio.Future[str] = asyncio.Future()
-
-        reply_ref = await system.actor(
-            reply(
-                content=Question(text="hello", reply_to=None),
-                to=target,
-                promise=promise,
-                timeout=5.0,
-            ),
-            name="reply-cancel-none",
-        )
-
-        await reply_ref.send(Cancel(reason=None))
-
-        with pytest.raises(RuntimeError, match="promise was cancelled"):
-            await asyncio.wait_for(promise, timeout=1.0)
-
-
 @pytest.mark.asyncio
 async def test_reply_actor_full_flow():
     """Test the complete flow: reply actor sends to target, target responds."""

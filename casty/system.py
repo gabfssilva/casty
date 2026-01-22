@@ -114,7 +114,7 @@ class LocalActorSystem(System):
 
         state = None
         if behavior.state_param is not None:
-            state = State(behavior.state_initial)
+            state = State(behavior.state_initial, node_id=self._node_id)
 
         all_filters = []
         if self._debug_filter:
@@ -161,7 +161,7 @@ class LocalActorSystem(System):
 
         state = None
         if behavior.state_param is not None:
-            state = State(behavior.state_initial)
+            state = State(behavior.state_initial, node_id=self._node_id)
 
         filters = [self._debug_filter] if self._debug_filter else []
         mailbox: ActorMailbox[M] = ActorMailbox(

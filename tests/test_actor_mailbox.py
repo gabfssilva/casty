@@ -91,18 +91,22 @@ async def test_actor_mailbox_multiple_filters():
 
 @pytest.mark.asyncio
 async def test_actor_mailbox_context_fields():
+    from casty.ref import LocalActorRef
+
     mailbox: ActorMailbox[str] = ActorMailbox(
         self_id="test-actor",
         node_id="node-1",
         is_leader=False,
     )
 
-    await mailbox.put(Envelope(payload="msg", sender="other-actor"))
+    sender_ref = LocalActorRef[str](actor_id="other-actor", mailbox=ActorMailbox())
+
+    await mailbox.put(Envelope(payload="msg", sender=sender_ref))
     await mailbox.put(Envelope(payload=Stop()))
 
     async for msg, ctx in mailbox:
         assert ctx.self_id == "test-actor"
-        assert ctx.sender_id == "other-actor"
+        assert ctx.sender is sender_ref
         assert ctx.node_id == "node-1"
         assert ctx.is_leader is False
 

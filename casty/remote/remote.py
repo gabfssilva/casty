@@ -152,7 +152,11 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                 if name in exposed:
                     await ctx.reply(exposed[name])
                 else:
-                    await ctx.reply(None)
+                    # Also check system for actors (e.g., lazily created replicas)
+                    ref = await ctx._system.actor(name=name)
+                    if ref:
+                        exposed[name] = ref
+                    await ctx.reply(ref)
 
 
 @actor

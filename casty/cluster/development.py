@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 from enum import Enum
-from typing import Any
+from typing import Any, Awaitable
 
 from casty.actor import Behavior
 from casty.ref import ActorRef
@@ -27,6 +27,38 @@ class DistributionStrategy(Enum):
     ROUND_ROBIN = "round-robin"
     CONSISTENT = "consistent"
 
+class ClusteredDevelopmentActorRef[M](ActorRef[M]):
+    def __init__(
+        self,
+        cluster: DevelopmentCluster,
+        behavior: Behavior,
+        *,
+        name: str,
+    ) -> None:
+        self._cluster = cluster
+        self.actor_id = name
+        self._behavior = behavior
+
+    async def send(self, msg: M, *, sender: ActorRef[Any] | None = None) -> None:
+        ref = self._cluster._next_node(name=self.actor_id)
+        ref = await ref.actor(behavior=self._behavior, name=self.actor_id)
+        await ref.send(msg=msg, sender=sender)
+
+    async def send_envelope(self, envelope: "Envelope[M]") -> None:
+        ref = self._cluster._next_node(name=self.actor_id)
+        ref = await ref.actor(behavior=self._behavior, name=self.actor_id)
+        await ref.send_envelope(envelope)
+
+    async def ask(self, msg: M, timeout: float | None = None) -> Any:
+        ref = self._cluster._next_node(name=self.actor_id)
+        ref = await ref.actor(behavior=self._behavior, name=self.actor_id)
+        await ref.ask(msg=msg, timeout=timeout)
+
+    def __rshift__(self, msg: M) -> Awaitable[None]:
+        return self.send(msg)
+
+    def __lshift__[R](self, msg: M) -> Awaitable[R]:
+        return self.ask(msg)
 
 class DevelopmentCluster:
     def __init__(
@@ -73,8 +105,7 @@ class DevelopmentCluster:
         *,
         name: str,
     ) -> ActorRef[M] | None:
-        node = self._next_node(name)
-        return await node.actor(behavior, name=name)
+        return ClusteredDevelopmentActorRef(cluster=self,behavior=behavior,name=name)
 
     async def start(self) -> None:
         first_system = ClusteredActorSystem(

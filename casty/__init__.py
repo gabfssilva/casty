@@ -19,7 +19,8 @@ from .supervision import (
 from .cluster import HashRing
 from .message import message
 from .state import State
-from .cluster.replication import replicated, Routing, ReplicationConfig
+from .actor_config import Routing, ActorReplicationConfig
+from .cluster.replication import ReplicationConfig
 
 __all__ = [
     "actor",
@@ -48,7 +49,7 @@ __all__ = [
     "HashRing",
     "message",
     "State",
-    "replicated",
     "Routing",
     "ReplicationConfig",
+    "ActorReplicationConfig",
 ]

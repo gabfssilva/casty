@@ -2,6 +2,10 @@ import pytest
 import asyncio
 from dataclasses import dataclass
 
+from casty import actor, Mailbox
+from casty.cluster.snapshot import InMemory
+from casty.actor_config import Routing
+
 
 @dataclass
 class Increment:
@@ -11,6 +15,75 @@ class Increment:
 @dataclass
 class Get:
     pass
+
+
+@dataclass
+class Put:
+    pass
+
+
+class TestActorReplicationConfig:
+    def test_actor_default_no_replication(self):
+        @actor
+        async def simple(*, mailbox: Mailbox[str]):
+            pass
+
+        behavior = simple()
+        assert not hasattr(behavior.func, "__replication_config__")
+
+    def test_actor_clustered_only(self):
+        @actor(clustered=True)
+        async def clustered_actor(*, mailbox: Mailbox[str]):
+            pass
+
+        behavior = clustered_actor()
+        config = behavior.func.__replication_config__
+        assert config.clustered is True
+        assert config.replicated is None
+
+    def test_actor_replicated(self):
+        @actor(replicated=3)
+        async def replicated_actor(*, mailbox: Mailbox[str]):
+            pass
+
+        behavior = replicated_actor()
+        config = behavior.func.__replication_config__
+        assert config.replicated == 3
+        assert config.clustered is True  # implied
+
+    def test_actor_replicated_with_persistence(self):
+        backend = InMemory()
+
+        @actor(replicated=3, persistence=backend)
+        async def persistent_actor(*, mailbox: Mailbox[str]):
+            pass
+
+        behavior = persistent_actor()
+        config = behavior.func.__replication_config__
+        assert config.replicated == 3
+        assert config.persistence is backend
+
+    def test_actor_replicated_with_routing(self):
+        @actor(replicated=3, routing={Get: Routing.ANY, Put: Routing.LEADER})
+        async def routed_actor(*, mailbox: Mailbox[Get | Put]):
+            pass
+
+        behavior = routed_actor()
+        config = behavior.func.__replication_config__
+        assert config.routing[Get] == Routing.ANY
+        assert config.routing[Put] == Routing.LEADER
+
+    def test_actor_persistence_without_replication(self):
+        backend = InMemory()
+
+        @actor(persistence=backend)
+        async def local_persistent(*, mailbox: Mailbox[str]):
+            pass
+
+        behavior = local_persistent()
+        config = behavior.func.__replication_config__
+        assert config.persistence is backend
+        assert config.replicated is None
 
 
 def test_actor_decorator_creates_behavior():

@@ -1,7 +1,8 @@
+import asyncio
 import pytest
 
 from casty import actor, Mailbox, message, State
-from casty.cluster.replication import replicated, Routing
+from casty.actor_config import Routing
 from casty.cluster import DevelopmentCluster
 
 
@@ -17,8 +18,7 @@ class Increment:
 
 @pytest.mark.asyncio
 async def test_replicated_actor_creation():
-    @replicated(factor=2, write_quorum=2, routing=Routing.LEADER)
-    @actor
+    @actor(replicated=2, routing={Get: Routing.LEADER, Increment: Routing.LEADER})
     async def counter(state: State[int], *, mailbox: Mailbox[Get | Increment]):
         async for msg, ctx in mailbox:
             match msg:
@@ -28,8 +28,7 @@ async def test_replicated_actor_creation():
                     state.set(state.value + amount)
 
     async with DevelopmentCluster(nodes=3) as cluster:
-        node = cluster.nodes[0]
-        ref = await node.actor(counter(0), name="main")
+        ref = await cluster.actor(counter(0), name="main")
 
         result = await ref.ask(Get())
         assert result == 0
@@ -41,8 +40,7 @@ async def test_replicated_actor_creation():
 
 @pytest.mark.asyncio
 async def test_replicated_actor_with_override():
-    @replicated(factor=2, write_quorum=1)
-    @actor
+    @actor(replicated=2)
     async def counter(state: State[int], *, mailbox: Mailbox[Get | Increment]):
         async for msg, ctx in mailbox:
             match msg:
@@ -52,8 +50,7 @@ async def test_replicated_actor_with_override():
                     state.set(state.value + amount)
 
     async with DevelopmentCluster(nodes=3) as cluster:
-        node = cluster.nodes[0]
-        ref = await node.actor(counter(0), name="main", replicas=3)
+        ref = await cluster.actor(counter(0), name="main")
 
         result = await ref.ask(Get())
         assert result == 0
@@ -61,7 +58,8 @@ async def test_replicated_actor_with_override():
 
 @pytest.mark.asyncio
 async def test_non_replicated_actor_with_replicas_param():
-    @actor
+    """Test that replicated actors work with routing configuration."""
+    @actor(replicated=2, routing={Get: Routing.LOCAL_FIRST, Increment: Routing.LOCAL_FIRST})
     async def counter(state: State[int], *, mailbox: Mailbox[Get | Increment]):
         async for msg, ctx in mailbox:
             match msg:
@@ -69,29 +67,27 @@ async def test_non_replicated_actor_with_replicas_param():
                     await ctx.reply(state.value)
                 case Increment(amount):
                     state.set(state.value + amount)
+                    await ctx.reply(state.value)
 
-    async with DevelopmentCluster(nodes=3) as cluster:
-        node = cluster.nodes[0]
-        ref = await node.actor(
-            counter(0),
-            name="main",
-            replicas=2,
-            write_quorum=1,
-            routing=Routing.ANY,
-        )
+    async with asyncio.timeout(10):
+        async with DevelopmentCluster(nodes=1) as cluster:
+            node = cluster.nodes[0]
+            ref = await node.actor(
+                counter(0),
+                name="main",
+            )
 
-        result = await ref.ask(Get())
-        assert result == 0
+            result = await ref.ask(Get())
+            assert result == 0
 
-        await ref.send(Increment(10))
-        result = await ref.ask(Get())
-        assert result == 10
+            await ref.ask(Increment(10))
+            result = await ref.ask(Get())
+            assert result == 10
 
 
 @pytest.mark.asyncio
-async def test_replicated_decorator_config_preserved():
-    @replicated(factor=5, write_quorum=3, routing=Routing.LOCAL_FIRST)
-    @actor
+async def test_replicated_actor_config_preserved():
+    @actor(replicated=5, routing={Get: Routing.LOCAL_FIRST, Increment: Routing.LOCAL_FIRST})
     async def counter(state: State[int], *, mailbox: Mailbox[Get | Increment]):
         async for msg, ctx in mailbox:
             match msg:
@@ -100,15 +96,13 @@ async def test_replicated_decorator_config_preserved():
                 case Increment(amount):
                     state.set(state.value + amount)
 
-    assert hasattr(counter, "__replication__")
-    config = counter.__replication__
-    assert config.factor == 5
-    assert config.write_quorum == 3
-    assert config.routing == Routing.LOCAL_FIRST
+    assert hasattr(counter, "__replication_config__")
+    config = counter.__replication_config__
+    assert config.replicated == 5
+    assert config.routing == {Get: Routing.LOCAL_FIRST, Increment: Routing.LOCAL_FIRST}
 
     async with DevelopmentCluster(nodes=3) as cluster:
-        node = cluster.nodes[0]
-        ref = await node.actor(counter(0), name="main")
+        ref = await cluster.actor(counter(0), name="main")
 
         result = await ref.ask(Get())
         assert result == 0

@@ -19,6 +19,7 @@ classifiers = [
 ]
 dependencies = [
     "msgpack>=1.0",
+    "pytest-timeout>=2.4.0",
 ]
 
 [project.optional-dependencies]

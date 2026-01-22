@@ -13,6 +13,7 @@ class RemoteEnvelope:
     payload: bytes | None = None
     error: str | None = None
     sender_name: str | None = None
+    version: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
@@ -27,6 +28,7 @@ class RemoteEnvelope:
             payload=data.get("payload"),
             error=data.get("error"),
             sender_name=data.get("sender_name"),
+            version=data.get("version"),
         )
 
 

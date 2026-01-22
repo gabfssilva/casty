@@ -11,7 +11,7 @@ Run with: uv run python examples/distributed/01-distributed-counter.py
 import asyncio
 from dataclasses import dataclass
 
-from casty import actor, Mailbox, replicated
+from casty import actor, Mailbox
 from casty.cluster import DevelopmentCluster, DistributionStrategy
 
 
@@ -28,7 +28,6 @@ class GetCount:
 CounterMsg = Increment | GetCount
 
 
-@replicated()
 @actor
 async def counter(*, mailbox: Mailbox[CounterMsg]):
     count = 0
@@ -47,7 +46,7 @@ async def main():
     async with asyncio.timeout(10):
         print("=== Distributed Counter Example ===\n")
 
-        async with DevelopmentCluster(3, strategy=DistributionStrategy.CONSISTENT, debug=True) as cluster:
+        async with DevelopmentCluster(3, strategy=DistributionStrategy.CONSISTENT, debug=False) as cluster:
             node0, node1, node2 = cluster[0], cluster[1], cluster[2]
 
             print(f"Started 3-node cluster:")

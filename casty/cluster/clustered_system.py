@@ -8,7 +8,7 @@ from casty.actor import Behavior
 from casty.mailbox import Filter
 from casty.protocols import System
 from casty.ref import ActorRef
-from casty.remote import Listening
+from casty.remote import Listening, Lookup
 
 from .cluster import cluster, CreateActor, GetClusterAddress
 
@@ -61,14 +61,37 @@ class ClusteredActorSystem(System):
         *,
         name: str,
         filters: list[Filter] | None = None,
+        node_id: str | None = None,
+        replicas: int | None = None,
+        write_quorum: int | None = None,
     ) -> ActorRef[M] | None:
         if behavior is None:
+            if node_id:
+                return await self._lookup_remote(name, node_id)
             return await self._system.actor(name=name)
 
         if self._cluster_ref is None:
             raise RuntimeError("ClusteredActorSystem not started")
 
         return await self._cluster_ref.ask(CreateActor(behavior, name))
+
+    async def _lookup_remote[M](self, name: str, node_id: str) -> ActorRef[M] | None:
+        from .messages import GetAddress
+
+        membership_ref = await self._system.actor(name="membership/membership")
+        if not membership_ref:
+            return None
+
+        address = await membership_ref.ask(GetAddress(node_id))
+        if not address:
+            return None
+
+        remote_ref = await self._system.actor(name="remote/remote")
+        if not remote_ref:
+            return None
+
+        result = await remote_ref.ask(Lookup(name, peer=address))
+        return result.ref if result else None
 
     async def ask[M, R](
         self,

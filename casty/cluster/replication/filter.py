@@ -22,12 +22,12 @@ def replication_filter[M](replicator: Replicator) -> Filter[M]:
         async for msg, ctx in inner:
             before: bytes | None = None
             if state is not None:
-                before = state.snapshot()
+                before = state.snapshot_bytes()
 
             yield msg, ctx
 
             if state is not None and before is not None:
-                after = state.snapshot()
+                after = state.snapshot_bytes()
                 await replicator.replicate(before, after, state.version)
 
     return apply

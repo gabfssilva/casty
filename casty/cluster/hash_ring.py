@@ -40,25 +40,32 @@ class HashRing:
     def nodes(self) -> set[str]:
         return set(self._ring.values())
 
-    def get_nodes(self, actor_id: str, n: int) -> list[str]:
-        if not self._ring:
-            raise RuntimeError("HashRing is empty")
+    def get_n_nodes(self, key: str, n: int) -> list[str]:
+        """Get N nodes for a key, starting from the key's position and going clockwise."""
+        if not self._ring or n <= 0:
+            return []
 
-        key = self._hash(actor_id)
-        idx = bisect.bisect_left(self._sorted_keys, key)
+        key_hash = self._hash(key)
+        idx = bisect.bisect_left(self._sorted_keys, key_hash)
+        if idx >= len(self._sorted_keys):
+            idx = 0
 
-        nodes = []
-        seen = set()
+        result: list[str] = []
+        seen: set[str] = set()
 
         for i in range(len(self._sorted_keys)):
             pos = (idx + i) % len(self._sorted_keys)
             node = self._ring[self._sorted_keys[pos]]
 
             if node not in seen:
-                nodes.append(node)
+                result.append(node)
                 seen.add(node)
 
-            if len(nodes) == n:
+            if len(result) == n:
                 break
 
-        return nodes
+        return result
+
+    def get_nodes(self, actor_id: str, n: int) -> list[str]:
+        """Alias for get_n_nodes for backward compatibility."""
+        return self.get_n_nodes(actor_id, n)

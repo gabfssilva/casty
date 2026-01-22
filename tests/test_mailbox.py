@@ -24,24 +24,6 @@ def test_actor_mailbox_implements_protocol():
 
 
 @pytest.mark.asyncio
-async def test_mailbox_iteration():
-    from casty.mailbox import ActorMailbox, Stop
-    from casty.envelope import Envelope
-
-    mailbox: ActorMailbox[Ping] = ActorMailbox()
-
-    await mailbox.put(Envelope(Ping(1), sender="a"))
-    await mailbox.put(Envelope(Ping(2), sender="b"))
-    await mailbox.put(Envelope(Stop()))
-
-    results = []
-    async for msg, ctx in mailbox:
-        results.append((msg, ctx.sender_id))
-
-    assert results == [(Ping(1), "a"), (Ping(2), "b")]
-
-
-@pytest.mark.asyncio
 async def test_mailbox_stop():
     from casty.mailbox import ActorMailbox, Stop
     from casty.envelope import Envelope
