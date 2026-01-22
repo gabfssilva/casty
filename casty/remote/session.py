@@ -19,6 +19,7 @@ class SendLookup:
     correlation_id: str
     ensure: bool = False
     initial_state: bytes | None = None
+    behavior: str | None = None
 
 
 @dataclass
@@ -26,6 +27,7 @@ class SendReplicate:
     actor_id: str
     snapshot: bytes
     version: int
+    behavior: str | None = None
 
 
 type SessionMessage = (
@@ -83,7 +85,7 @@ async def session_actor(
                 )
                 await connection.send(Write(serializer.encode(envelope.to_dict())))
 
-            case SendLookup(name, correlation_id, ensure, initial_state):
+            case SendLookup(name, correlation_id, ensure, initial_state, behavior):
                 pending[correlation_id] = ("lookup", ctx.sender)
                 envelope = RemoteEnvelope(
                     type="lookup",
@@ -91,15 +93,17 @@ async def session_actor(
                     correlation_id=correlation_id,
                     ensure=ensure,
                     initial_state=initial_state,
+                    behavior=behavior,
                 )
                 await connection.send(Write(serializer.encode(envelope.to_dict())))
 
-            case SendReplicate(actor_id, snapshot, version):
+            case SendReplicate(actor_id, snapshot, version, behavior):
                 envelope = RemoteEnvelope(
                     type="replicate",
                     target=actor_id,
                     payload=snapshot,
                     version=version,
+                    behavior=behavior,
                 )
                 await connection.send(Write(serializer.encode(envelope.to_dict())))
 
@@ -134,17 +138,15 @@ async def _handle_envelope(
             local_ref = await remote_ref.ask(_LocalLookup(envelope.target))
 
             # Lazy replication: create replica if this node is responsible
-            if not local_ref and envelope.target and "/" in envelope.target and system:
+            if not local_ref and envelope.target and envelope.behavior and system:
                 try:
                     from casty.actor import get_behavior
-                    func_name = envelope.target.split("/", 1)[0]
-                    behavior = get_behavior(func_name)
+                    behavior = get_behavior(envelope.behavior)
                     if behavior:
                         replication_config = behavior.__replication_config__
                         replicated = replication_config.replicated if replication_config else None
                         if replicated and replicated > 1:
-                            actor_name = envelope.target.split("/", 1)[1]
-                            local_ref = await system.actor(behavior, name=actor_name)
+                            local_ref = await system.actor(behavior, name=envelope.target)
                             from .messages import Expose
                             await remote_ref.send(Expose(ref=local_ref, name=envelope.target))
                 except (KeyError, RuntimeError, TypeError, AttributeError):
@@ -193,38 +195,34 @@ async def _handle_envelope(
             local_ref = await remote_ref.ask(_LocalLookup(envelope.name))
 
             # Ensure-create: if ensure=True and actor doesn't exist, create it
-            if not local_ref and envelope.ensure and envelope.name and "/" in envelope.name and system:
+            if not local_ref and envelope.ensure and envelope.name and envelope.behavior and system:
                 try:
                     from casty.actor import get_registered_actor
-                    func_name = envelope.name.split("/", 1)[0]
-                    actor_fn = get_registered_actor(func_name)
+                    actor_fn = get_registered_actor(envelope.behavior)
                     if actor_fn:
-                        actor_name = envelope.name.split("/", 1)[1]
-                        local_ref = await system.actor(actor_fn(), name=actor_name)
+                        local_ref = await system.actor(actor_fn(), name=envelope.name)
                         from .messages import Expose
                         await remote_ref.send(Expose(ref=local_ref, name=envelope.name))
                 except (KeyError, RuntimeError, TypeError, AttributeError):
                     pass
 
             # Lazy replication for lookup: create actor if behavior is registered
-            if not local_ref and envelope.name and "/" in envelope.name and system:
+            if not local_ref and envelope.name and envelope.behavior and system:
                 try:
                     from casty.actor import get_behavior
                     from casty.serializable import deserialize
-                    func_name = envelope.name.split("/", 1)[0]
-                    behavior = get_behavior(func_name)
+                    behavior = get_behavior(envelope.behavior)
                     if behavior:
                         replication_config = behavior.__replication_config__
                         replicated = replication_config.replicated if replication_config else None
                         if replicated and replicated > 1:
-                            actor_name = envelope.name.split("/", 1)[1]
                             # Use initial_state from envelope if provided
                             if envelope.initial_state:
                                 initial_state = deserialize(envelope.initial_state)
                                 behavior_with_state = behavior(initial_state)
-                                local_ref = await system.actor(behavior_with_state, name=actor_name)
+                                local_ref = await system.actor(behavior_with_state, name=envelope.name)
                             else:
-                                local_ref = await system.actor(behavior, name=actor_name)
+                                local_ref = await system.actor(behavior, name=envelope.name)
                             from .messages import Expose
                             await remote_ref.send(Expose(ref=local_ref, name=envelope.name))
                 except (KeyError, RuntimeError, TypeError, AttributeError):
@@ -253,14 +251,12 @@ async def _handle_envelope(
 
                 # Get or create the actor if it doesn't exist
                 mailbox = system._mailboxes.get(envelope.target)
-                if not mailbox and "/" in envelope.target:
+                if not mailbox and envelope.behavior:
                     try:
                         from casty.actor import get_behavior
-                        func_name = envelope.target.split("/", 1)[0]
-                        behavior = get_behavior(func_name)
+                        behavior = get_behavior(envelope.behavior)
                         if behavior:
-                            actor_name = envelope.target.split("/", 1)[1]
-                            await system.actor(behavior, name=actor_name)
+                            await system.actor(behavior, name=envelope.target)
                             from .messages import Expose
                             await remote_ref.send(Expose(ref=system._actors.get(envelope.target), name=envelope.target))
                             mailbox = system._mailboxes.get(envelope.target)

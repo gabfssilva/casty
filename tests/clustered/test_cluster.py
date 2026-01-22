@@ -51,7 +51,7 @@ async def test_global_actor_lookup():
     Both refs should point to the same actor instance, meaning
     state changes via ref0 should be visible via ref1.
     """
-    async with DevelopmentCluster(2) as cluster:
+    async with DevelopmentCluster(2, debug=True) as cluster:
         node0, node1 = cluster[0], cluster[1]
 
         # Create on node0

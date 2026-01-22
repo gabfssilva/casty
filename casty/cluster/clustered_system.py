@@ -20,6 +20,7 @@ class ClusteredActorSystem(System):
         node_id: str,
         host: str = "127.0.0.1",
         port: int = 0,
+        start_timeout: float = 10.0,
         seeds: list[tuple[str, str]] | None = None,
         debug_filter: Any = None,
     ) -> None:
@@ -30,6 +31,7 @@ class ClusteredActorSystem(System):
         self._seeds = seeds or []
         self._cluster_ref: ActorRef | None = None
         self._address: str | None = None
+        self._start_timeout = start_timeout
 
     @property
     def node_id(self) -> str:
@@ -41,20 +43,21 @@ class ClusteredActorSystem(System):
         return f"{self._host}:{self._port}"
 
     async def start(self) -> None:
-        self._cluster_ref = await self._system.actor(
-            cluster(self._node_id, self._host, self._port, self._seeds),
-            name="cluster"
-        )
+        async with asyncio.timeout(self._start_timeout):
+            self._cluster_ref = await self._system.actor(
+                cluster(self._node_id, self._host, self._port, self._seeds),
+                name="cluster"
+            )
 
-        # Wait for remote to be ready
-        while True:
-            remote_ref = await self._system.actor(name=REMOTE_ACTOR_ID)
-            if remote_ref:
-                break
-            await asyncio.sleep(0.01)
+            while True:
+                remote_ref = await self._system.actor(name=REMOTE_ACTOR_ID)
 
-        # Get the actual bound address from the cluster
-        self._address = await self._cluster_ref.ask(GetClusterAddress())
+                if remote_ref:
+                    break
+
+                await asyncio.sleep(0.01)
+
+            self._address = await self._cluster_ref.ask(GetClusterAddress())
 
     async def actor[M](
         self,

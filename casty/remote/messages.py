@@ -61,6 +61,7 @@ class Lookup:
     timeout: float | None = None
     ensure: bool = False
     initial_state: bytes | None = None
+    behavior: str | None = None
 
 
 @dataclass

@@ -33,7 +33,7 @@ async def test_system_actor_creation():
     async with ActorSystem() as system:
         ref = await system.actor(counter(0), name="c1")
         assert ref is not None
-        assert ref.actor_id == "counter/c1"
+        assert ref.actor_id == "c1"
 
 
 @pytest.mark.asyncio

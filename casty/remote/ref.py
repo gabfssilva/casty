@@ -31,6 +31,7 @@ class RemoteRef[M]:
     _session: "ActorRef" = field(repr=False)
     _serializer: "Serializer" = field(repr=False)
     default_timeout: float = 30.0
+    behavior_name: str | None = None
 
     async def send(self, msg: M, *, sender: "ActorRef[Any] | None" = None) -> None:
         payload = self._serializer.encode(msg)

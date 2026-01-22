@@ -101,17 +101,16 @@ async def cluster(
 
             case CreateActor(behavior, name):
                 func_name = behavior.func.__name__
-                actor_id = f"{func_name}/{name}"
                 replication_config = behavior.__replication_config__
                 replicated = replication_config.replicated if replication_config else None
 
                 # Check if already exists locally
-                local_ref = await system.actor(name=actor_id)
+                local_ref = await system.actor(name=name)
                 if local_ref:
-                    info = replica_manager.get(actor_id)
+                    info = replica_manager.get(name)
                     if info and replication_config:
                         await ctx.reply(ReplicatedActorRef(
-                            actor_id=actor_id,
+                            actor_id=name,
                             manager=replica_manager,
                             node_refs={node_id: local_ref},
                             routing=replication_config.routing,
@@ -126,7 +125,7 @@ async def cluster(
                 if replicated and replicated > 1:
                     # Get responsible nodes via HashRing in membership
                     responsible_nodes = await membership_ref.ask(
-                        GetResponsibleNodes(actor_id, replicated)
+                        GetResponsibleNodes(name, replicated)
                     )
 
                     if node_id in responsible_nodes:
@@ -147,7 +146,7 @@ async def cluster(
                                     try:
                                         await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
                                         initial_state = serialize(behavior.state_initial) if behavior.state_param else None
-                                        result = await remote_ref.ask(Lookup(actor_id, peer=address, initial_state=initial_state), timeout=2.0)
+                                        result = await remote_ref.ask(Lookup(name, peer=address, initial_state=initial_state), timeout=2.0)
                                         if result and result.ref and hasattr(result.ref, '_session'):
                                             sessions[target_node] = result.ref._session
                                     except (TimeoutError, Exception):
@@ -156,7 +155,7 @@ async def cluster(
                             session = sessions.get(target_node)
                             if session:
                                 await session.send(SendReplicate(
-                                    actor_id=actor_id,
+                                    actor_id=name,
                                     snapshot=msg.snapshot,
                                     version=msg.version,
                                 ))
@@ -168,7 +167,7 @@ async def cluster(
                             routing=Routing.LEADER,
                         )
                         replicator = Replicator(
-                            actor_id=actor_id,
+                            actor_id=name,
                             config=rep_config,
                             replica_nodes=other_replicas,
                             send_fn=send_to_node,
@@ -178,7 +177,7 @@ async def cluster(
 
                         # Create local replica with replication filter
                         local_ref = await system.actor(behavior, name=name, filters=[rep_filter])
-                        await remote_ref.ask(Expose(ref=local_ref, name=actor_id))
+                        await remote_ref.ask(Expose(ref=local_ref, name=name))
 
                         # Build refs for all responsible nodes (replicas created lazily)
                         node_refs: dict[str, Any] = {node_id: local_ref}
@@ -190,15 +189,15 @@ async def cluster(
                                 host, port_str = member_info.address.rsplit(":", 1)
                                 try:
                                     await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
-                                    result = await remote_ref.ask(Lookup(actor_id, peer=member_info.address, initial_state=initial_state), timeout=2.0)
+                                    result = await remote_ref.ask(Lookup(name, peer=member_info.address, initial_state=initial_state, behavior=behavior.__name__), timeout=2.0)
                                     if result and result.ref:
                                         node_refs[resp_node] = result.ref
                                 except (TimeoutError, Exception):
                                     pass
 
-                        replica_manager.register(actor_id, list(node_refs.keys()), node_id)
+                        replica_manager.register(name, list(node_refs.keys()), node_id)
                         await ctx.reply(ReplicatedActorRef(
-                            actor_id=actor_id,
+                            actor_id=name,
                             manager=replica_manager,
                             node_refs=node_refs,
                             routing=replication_config.routing,
@@ -215,7 +214,7 @@ async def cluster(
                                 try:
                                     await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
                                     result = await remote_ref.ask(Lookup(
-                                        actor_id,
+                                        name,
                                         peer=member_info.address,
                                         initial_state=initial_state,
                                     ), timeout=2.0)
@@ -231,13 +230,13 @@ async def cluster(
                             # Create locally with full behavior (includes initial state)
                             # Replication will sync to responsible nodes
                             local_ref = await system.actor(behavior, name=name)
-                            await remote_ref.ask(Expose(ref=local_ref, name=actor_id))
+                            await remote_ref.ask(Expose(ref=local_ref, name=name))
                             await ctx.reply(local_ref)
                 else:
                     # Non-replicated: global lookup then create
                     for _, member_info in members.items():
                         try:
-                            result = await remote_ref.ask(Lookup(actor_id, peer=member_info.address), timeout=2.0)
+                            result = await remote_ref.ask(Lookup(name, peer=member_info.address), timeout=2.0)
                             if result and result.ref:
                                 await ctx.reply(result.ref)
                                 break
@@ -245,7 +244,7 @@ async def cluster(
                             continue
                     else:
                         ref = await system.actor(behavior, name=name)
-                        await remote_ref.ask(Expose(ref=ref, name=actor_id))
+                        await remote_ref.ask(Expose(ref=ref, name=name))
                         await ctx.reply(ref)
 
             case WaitFor(nodes):

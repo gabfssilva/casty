@@ -6,8 +6,8 @@ Instance names are used when creating actors.
 """
 
 # Actor IDs for local lookups (system.actor(name=...))
-REMOTE_ACTOR_ID = "remote/remote"
-MEMBERSHIP_ACTOR_ID = "membership_actor/membership"
+REMOTE_ACTOR_ID = "remote"
+MEMBERSHIP_ACTOR_ID = "membership"
 
 # Exposed/instance names (for network lookups and actor creation)
 REMOTE_NAME = "remote"

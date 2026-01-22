@@ -67,4 +67,4 @@ async def test_child_actor_hierarchy():
         child_ref = await parent_ref.ask(CreateChild("c1"))
 
         # Child ID should include parent path
-        assert child_ref.actor_id == "parent/p1/child/c1"
+        assert child_ref.actor_id == "p1/c1"

@@ -16,7 +16,7 @@ def debug_filter[M](node_id: str) -> Filter[M]:
     def filter_fn(state: State[Any] | None, stream: MessageStream[M]) -> MessageStream[M]:
         async def filtered() -> MessageStream[M]:
             async for msg, ctx in stream:
-                print(f"[{node_id}] {ctx.self_id} <- {type(msg).__name__}: {msg}")
+                print(f"[{node_id}] {ctx.self_id} <- {type(msg).__name__}: {msg}", flush=True)
                 yield msg, ctx
         return filtered()
     return filter_fn
@@ -114,22 +114,22 @@ class DevelopmentCluster:
         return ClusteredDevelopmentActorRef(cluster=self,behavior=behavior,name=name)
 
     async def start(self) -> None:
-        print("Starting development cluster...")
+        print("Starting development cluster...", flush=True)
         first_system = ClusteredActorSystem(
             node_id="node-0",
             host="127.0.0.1",
             port=0,
             debug_filter=debug_filter("node-0") if self._debug else None,
         )
-        print("Initializing node #1...")
+        print("Initializing node #1...", flush=True)
         await first_system.start()
-        print("Node #1 is ready!")
+        print("Node #1 is ready!", flush=True)
         self._systems.append(first_system)
 
         first_address = await first_system.address()
 
         for i in range(1, self._node_count):
-            print(f"Initializing node #{i}...")
+            print(f"Initializing node #{i}...", flush=True)
 
             node_id = f"node-{i}"
             system = ClusteredActorSystem(
@@ -141,11 +141,11 @@ class DevelopmentCluster:
             )
             await system.start()
 
-            print(f"Node #{i} is ready!")
+            print(f"Node #{i} is ready!", flush=True)
 
             self._systems.append(system)
 
-        print("Waiting for node discovery...")
+        print("Waiting for node discovery...", flush=True)
         await self.wait_for(self._node_count)
 
     async def shutdown(self) -> None:
@@ -162,9 +162,9 @@ class DevelopmentCluster:
 
     async def wait_for(self, nodes: int):
         from casty.cluster import WaitFor
-        cluster = await self._next_node().actor(name="cluster/cluster")
+        cluster = await self._next_node().actor(name="cluster")
         await cluster.ask(WaitFor(nodes=nodes))
 
     async def gossip(self) -> ActorRef:
         node = self._next_node()
-        return await node._system.actor(name="gossip_actor/gossip")
+        return await node._system.actor(name="gossip")

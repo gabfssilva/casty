@@ -20,11 +20,11 @@ async def test_two_node_cluster_join():
         await asyncio.sleep(0.1)
 
         # Get node-1's port
-        remote1 = await system1.actor(name="remote/remote")
+        remote1 = await system1.actor(name="remote")
         assert remote1 is not None
 
         # Get membership
-        membership1 = await system1.actor(name="membership_actor/membership")
+        membership1 = await system1.actor(name="membership")
         assert membership1 is not None, "Membership not found on node-1"
 
         members = await membership1.ask(GetAliveMembers())
@@ -45,7 +45,7 @@ async def test_two_nodes_with_seed():
         )
         await asyncio.sleep(0.2)
 
-        membership1 = await system1.actor(name="membership_actor/membership")
+        membership1 = await system1.actor(name="membership")
         print(f"Membership1 ref: {membership1}")
 
         async with ActorSystem(node_id="node-2") as system2:
@@ -61,7 +61,7 @@ async def test_two_nodes_with_seed():
             )
             await asyncio.sleep(0.5)
 
-            membership2 = await system2.actor(name="membership_actor/membership")
+            membership2 = await system2.actor(name="membership")
             print(f"Membership2 ref: {membership2}")
 
             # Check members on both nodes

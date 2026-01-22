@@ -141,8 +141,7 @@ class LocalActorSystem(System):
                 return None
             return self._actors.get(name)
 
-        actor_id = f"{behavior.func.__name__}/{name}"
-        return await self._spawn_actor(actor_id, behavior, filters)
+        return await self._spawn_actor(name, behavior, filters)
 
     async def _create_child[M](
         self,
@@ -151,7 +150,7 @@ class LocalActorSystem(System):
         *,
         name: str,
     ) -> ActorRef[M]:
-        actor_id = f"{parent_id}/{behavior.func.__name__}/{name}"
+        actor_id = f"{parent_id}/{name}"
         return await self._spawn_actor(actor_id, behavior)
 
     async def ask[M, R](

@@ -42,7 +42,7 @@ async def main():
             for i in range(10):
                 nodes_with_data = 0
                 for node in cluster:
-                    node_gossip = await node._system.actor(name="gossip_actor/gossip")
+                    node_gossip = await node._system.actor(name="gossip")
                     try:
                         val = await node_gossip.ask(Get("config/timeout"), timeout=1.0)
                         if val == b"30":

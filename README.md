@@ -128,6 +128,7 @@ balance = await ref.ask(GetBalance())  # request-response
 Every message comes with a `ctx` that lets you:
 
 - `ctx.reply(value)` — respond to `ask()` calls
+- `ctx.forward(msg, to=ref)` — forward message to another actor, preserving original sender
 - `ctx.actor(...)` — spawn child actors
 - `ctx.schedule(...)` — schedule delayed/periodic messages
 - `ctx.sender` — reference to who sent the message
@@ -181,6 +182,9 @@ await ctx.schedule(Reminder("Check status"), delay=30.0)
 cancel = await ctx.schedule(Tick(), every=1.0)
 # later...
 await cancel()
+
+# With explicit sender (replies go to sender instead of scheduler)
+await ctx.schedule(Ping(), delay=1.0, sender=some_ref)
 ```
 
 ### Supervision
