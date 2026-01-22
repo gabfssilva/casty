@@ -10,6 +10,7 @@ from casty.actor_config import Routing
 from casty.protocols import System
 from casty.remote import remote, Listen, Connect, Expose, Lookup
 from casty.remote.session import SendReplicate
+from casty.serializable import serialize
 
 from .membership import membership_actor, MemberInfo, MemberState
 from .swim import swim_actor
@@ -145,7 +146,8 @@ async def cluster(
                                     host, port_str = address.rsplit(":", 1)
                                     try:
                                         await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
-                                        result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
+                                        initial_state = serialize(behavior.state_initial) if behavior.state_param else None
+                                        result = await remote_ref.ask(Lookup(actor_id, peer=address, initial_state=initial_state), timeout=2.0)
                                         if result and result.ref and hasattr(result.ref, '_session'):
                                             sessions[target_node] = result.ref._session
                                     except (TimeoutError, Exception):
@@ -181,13 +183,14 @@ async def cluster(
                         # Build refs for all responsible nodes (replicas created lazily)
                         node_refs: dict[str, Any] = {node_id: local_ref}
 
+                        initial_state = serialize(behavior.state_initial) if behavior.state_param else None
                         for resp_node in responsible_nodes:
                             if resp_node != node_id and resp_node in members:
                                 member_info = members[resp_node]
                                 host, port_str = member_info.address.rsplit(":", 1)
                                 try:
                                     await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
-                                    result = await remote_ref.ask(Lookup(actor_id, peer=member_info.address), timeout=2.0)
+                                    result = await remote_ref.ask(Lookup(actor_id, peer=member_info.address, initial_state=initial_state), timeout=2.0)
                                     if result and result.ref:
                                         node_refs[resp_node] = result.ref
                                 except (TimeoutError, Exception):
@@ -204,6 +207,7 @@ async def cluster(
                     else:
                         # Not responsible - check if already exists on responsible node
                         found_ref = None
+                        initial_state = serialize(behavior.state_initial) if behavior.state_param else None
                         for resp_node in responsible_nodes:
                             if resp_node in members:
                                 member_info = members[resp_node]
@@ -213,6 +217,7 @@ async def cluster(
                                     result = await remote_ref.ask(Lookup(
                                         actor_id,
                                         peer=member_info.address,
+                                        initial_state=initial_state,
                                     ), timeout=2.0)
                                     if result and result.ref:
                                         found_ref = result.ref

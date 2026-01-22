@@ -18,6 +18,7 @@ class SendLookup:
     name: str
     correlation_id: str
     ensure: bool = False
+    initial_state: bytes | None = None
 
 
 @dataclass
@@ -82,13 +83,14 @@ async def session_actor(
                 )
                 await connection.send(Write(serializer.encode(envelope.to_dict())))
 
-            case SendLookup(name, correlation_id, ensure):
+            case SendLookup(name, correlation_id, ensure, initial_state):
                 pending[correlation_id] = ("lookup", ctx.sender)
                 envelope = RemoteEnvelope(
                     type="lookup",
                     name=name,
                     correlation_id=correlation_id,
                     ensure=ensure,
+                    initial_state=initial_state,
                 )
                 await connection.send(Write(serializer.encode(envelope.to_dict())))
 
@@ -208,6 +210,7 @@ async def _handle_envelope(
             if not local_ref and envelope.name and "/" in envelope.name and system:
                 try:
                     from casty.actor import get_behavior
+                    from casty.serializable import deserialize
                     func_name = envelope.name.split("/", 1)[0]
                     behavior = get_behavior(func_name)
                     if behavior:
@@ -215,7 +218,13 @@ async def _handle_envelope(
                         replicated = replication_config.replicated if replication_config else None
                         if replicated and replicated > 1:
                             actor_name = envelope.name.split("/", 1)[1]
-                            local_ref = await system.actor(behavior, name=actor_name)
+                            # Use initial_state from envelope if provided
+                            if envelope.initial_state:
+                                initial_state = deserialize(envelope.initial_state)
+                                behavior_with_state = behavior(initial_state)
+                                local_ref = await system.actor(behavior_with_state, name=actor_name)
+                            else:
+                                local_ref = await system.actor(behavior, name=actor_name)
                             from .messages import Expose
                             await remote_ref.send(Expose(ref=local_ref, name=envelope.name))
                 except (KeyError, RuntimeError, TypeError, AttributeError):

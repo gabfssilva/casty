@@ -15,6 +15,7 @@ class RemoteEnvelope:
     sender_name: str | None = None
     version: int | None = None
     ensure: bool = False
+    initial_state: bytes | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
@@ -31,6 +32,7 @@ class RemoteEnvelope:
             sender_name=data.get("sender_name"),
             version=data.get("version"),
             ensure=data.get("ensure", False),
+            initial_state=data.get("initial_state"),
         )
 
 

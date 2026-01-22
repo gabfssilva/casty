@@ -60,6 +60,7 @@ class Lookup:
     peer: str | None = None
     timeout: float | None = None
     ensure: bool = False
+    initial_state: bytes | None = None
 
 
 @dataclass
