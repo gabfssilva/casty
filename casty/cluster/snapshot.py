@@ -67,7 +67,7 @@ class FileBackend:
                 data = file.read_bytes()
                 snapshot = deserialize(data)
                 self._index.append((file.name, snapshot.clock))
-            except Exception:
+            except (OSError, TypeError, KeyError, ValueError):
                 pass
 
     def _snapshot_path(self, filename: str) -> Path:

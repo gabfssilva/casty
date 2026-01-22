@@ -1,36 +1,41 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, get_origin, get_type_hints
 
 from .actor_config import ActorReplicationConfig, Routing
 
 
-_actor_registry: dict[str, Callable] = {}
+_actor_registry: dict[str, "Behavior"] = {}
 
 
-def get_registered_actor(name: str) -> Callable | None:
+def get_registered_actor(name: str) -> "Behavior | None":
     return _actor_registry.get(name)
+
+
+def register_behavior(name: str, behavior: "Behavior") -> None:
+    _actor_registry[name] = behavior
 
 
 def clear_actor_registry() -> None:
     _actor_registry.clear()
 
 
+# Aliases for backward compatibility
+get_behavior = get_registered_actor
+clear_registry = clear_actor_registry
+
+
 @dataclass
 class Behavior[**P]:
     func: Callable[..., Coroutine[Any, Any, None]]
     initial_args: tuple[Any, ...] = ()
-    initial_kwargs: dict[str, Any] = None  # type: ignore[assignment]
+    initial_kwargs: dict[str, Any] = field(default_factory=dict)
     supervision: Any = None
     state_param: str | None = None
     state_initial: Any = None
     system_param: str | None = None
     __replication_config__: "ActorReplicationConfig | None" = None
-
-    def __post_init__(self) -> None:
-        if self.initial_kwargs is None:
-            self.initial_kwargs = {}
 
     @property
     def __name__(self) -> str:
@@ -67,7 +72,7 @@ def _find_param(func: Callable[..., Any], target: type, *, generic: bool = False
                 return name
             if not generic and annotation is target:
                 return name
-    except Exception:
+    except (NameError, AttributeError, TypeError):
         pass
 
     target_name = target.__name__

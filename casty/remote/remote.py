@@ -116,7 +116,7 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                                 await ctx.reply(LookupResult(ref=ref, peer=peer_id))
                                 found = True
                                 break
-                        except Exception:
+                        except (TimeoutError, OSError, KeyError):
                             continue
                     if not found:
                         await ctx.reply(LookupResult(ref=None, peer=None))
@@ -137,7 +137,7 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                             await ctx.reply(LookupResult(ref=ref, peer=peer_id))
                         else:
                             await ctx.reply(LookupResult(ref=None, peer=peer_id))
-                    except Exception:
+                    except (TimeoutError, OSError, KeyError):
                         await ctx.reply(LookupResult(ref=None, peer=peer_id))
                 else:
                     await ctx.reply(LookupResult(ref=None, peer=peer_id))

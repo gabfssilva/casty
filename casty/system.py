@@ -29,9 +29,43 @@ class LocalActorSystem(System):
     def node_id(self) -> str:
         return self._node_id
 
-    def _build_actor_id(self, behavior: Behavior, name: str) -> str:
-        func_name = behavior.func.__name__
-        return f"{func_name}/{name}"
+    async def _spawn_actor[M](
+        self,
+        actor_id: str,
+        behavior: Behavior,
+        filters: list[Filter] | None = None,
+    ) -> ActorRef[M]:
+        from .state import State
+
+        if actor_id in self._actors:
+            return self._actors[actor_id]
+
+        state = State(behavior.state_initial, node_id=self._node_id) if behavior.state_param else None
+
+        all_filters = [self._debug_filter] if self._debug_filter else []
+        if filters:
+            all_filters.extend(filters)
+
+        mailbox: ActorMailbox[M] = ActorMailbox(
+            state=state,
+            self_id=actor_id,
+            node_id=self._node_id,
+            is_leader=True,
+            system=self,
+            filters=all_filters,
+        )
+        ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, mailbox=mailbox, _system=self)
+        mailbox.set_self_ref(ref)
+
+        task = asyncio.create_task(
+            self._run_supervised_actor(actor_id, behavior, mailbox, ref, state)
+        )
+
+        self._actors[actor_id] = ref
+        self._tasks[actor_id] = task
+        self._mailboxes[actor_id] = mailbox
+
+        return ref
 
     async def _run_supervised_actor[M](
         self,
@@ -101,48 +135,13 @@ class LocalActorSystem(System):
         filters: list[Filter] | None = None,
         node_id: str | None = None,
     ) -> ActorRef[M] | None:
-        from .state import State
-
         if behavior is None:
             if node_id is not None and node_id != self._node_id:
                 return None
             return self._actors.get(name)
 
-        actor_id = self._build_actor_id(behavior, name)
-
-        if actor_id in self._actors:
-            return self._actors[actor_id]
-
-        state = None
-        if behavior.state_param is not None:
-            state = State(behavior.state_initial, node_id=self._node_id)
-
-        all_filters = []
-        if self._debug_filter:
-            all_filters.append(self._debug_filter)
-        if filters:
-            all_filters.extend(filters)
-
-        mailbox: ActorMailbox[M] = ActorMailbox(
-            state=state,
-            self_id=actor_id,
-            node_id=self._node_id,
-            is_leader=True,
-            system=self,
-            filters=all_filters,
-        )
-        ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, mailbox=mailbox, _system=self)
-        mailbox.set_self_ref(ref)
-
-        task = asyncio.create_task(
-            self._run_supervised_actor(actor_id, behavior, mailbox, ref, state)
-        )
-
-        self._actors[actor_id] = ref
-        self._tasks[actor_id] = task
-        self._mailboxes[actor_id] = mailbox
-
-        return ref
+        actor_id = f"{behavior.func.__name__}/{name}"
+        return await self._spawn_actor(actor_id, behavior, filters)
 
     async def _create_child[M](
         self,
@@ -150,41 +149,9 @@ class LocalActorSystem(System):
         behavior: Behavior,
         *,
         name: str,
-        replicas: int = 1,
     ) -> ActorRef[M]:
-        from .state import State
-
-        func_name = behavior.func.__name__
-        actor_id = f"{parent_id}/{func_name}/{name}"
-
-        if actor_id in self._actors:
-            return self._actors[actor_id]
-
-        state = None
-        if behavior.state_param is not None:
-            state = State(behavior.state_initial, node_id=self._node_id)
-
-        filters = [self._debug_filter] if self._debug_filter else []
-        mailbox: ActorMailbox[M] = ActorMailbox(
-            state=state,
-            self_id=actor_id,
-            node_id=self._node_id,
-            is_leader=True,
-            system=self,
-            filters=filters,
-        )
-        ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, mailbox=mailbox, _system=self)
-        mailbox.set_self_ref(ref)
-
-        task = asyncio.create_task(
-            self._run_supervised_actor(actor_id, behavior, mailbox, ref, state)
-        )
-
-        self._actors[actor_id] = ref
-        self._tasks[actor_id] = task
-        self._mailboxes[actor_id] = mailbox
-
-        return ref
+        actor_id = f"{parent_id}/{behavior.func.__name__}/{name}"
+        return await self._spawn_actor(actor_id, behavior)
 
     async def ask[M, R](
         self,

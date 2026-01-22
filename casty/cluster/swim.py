@@ -9,6 +9,7 @@ from casty import actor, Mailbox
 from casty.protocols import System
 from casty.remote import Connect, Lookup, Connected, LookupResult
 from casty.reply import Reply
+from .constants import REMOTE_ACTOR_ID, MEMBERSHIP_ACTOR_ID, SWIM_NAME
 from .messages import (
     Ping, Ack, PingReq, PingReqAck,
     MemberSnapshot, SwimTick, ProbeTimeout, PingReqTimeout,
@@ -42,8 +43,8 @@ async def swim_actor(
     pending_probes: dict[str, float] = {}
     pending_sends: dict[str, _PendingSend] = {}
 
-    membership_ref = await system.actor(name="membership_actor/membership")
-    remote_ref = await system.actor(name="remote/remote")
+    membership_ref = await system.actor(name=MEMBERSHIP_ACTOR_ID)
+    remote_ref = await system.actor(name=REMOTE_ACTOR_ID)
 
     if membership_ref is None or remote_ref is None:
         return
@@ -78,7 +79,7 @@ async def swim_actor(
                 snapshots = await get_member_snapshots()
                 await initiate_send(
                     target_info.address,
-                    "swim",
+                    SWIM_NAME,
                     Ping(sender=node_id, members=snapshots),
                 )
                 await ctx.schedule(ProbeTimeout(target), delay=probe_timeout)
@@ -95,7 +96,7 @@ async def swim_actor(
                     members = await membership_ref.ask(GetAliveMembers())
                     if ping_sender in members:
                         sender_info = members[ping_sender]
-                        await initiate_send(sender_info.address, "swim", ack)
+                        await initiate_send(sender_info.address, SWIM_NAME, ack)
 
             case Ack(sender=ack_sender, members=remote_members):
                 if ack_sender in pending_probes:
@@ -120,7 +121,7 @@ async def swim_actor(
                     prober_info = members[prober]
                     await initiate_send(
                         prober_info.address,
-                        "swim",
+                        SWIM_NAME,
                         PingReq(sender=node_id, target=target, members=snapshots),
                     )
 
@@ -135,7 +136,7 @@ async def swim_actor(
                     snapshots = await get_member_snapshots()
                     await initiate_send(
                         target_info.address,
-                        "swim",
+                        SWIM_NAME,
                         Ping(sender=node_id, members=snapshots),
                     )
 
@@ -146,7 +147,7 @@ async def swim_actor(
                     await ctx.reply(ack)
                 elif req_sender in members:
                     sender_info = members[req_sender]
-                    await initiate_send(sender_info.address, "swim", ack)
+                    await initiate_send(sender_info.address, SWIM_NAME, ack)
 
             case PingReqAck(sender=_, target=ack_target, success=success, members=remote_members):
                 if success and ack_target in pending_probes:

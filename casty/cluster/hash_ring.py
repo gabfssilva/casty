@@ -16,14 +16,18 @@ class HashRing:
     def add_node(self, node: str) -> None:
         for i in range(self._virtual_nodes):
             key = self._hash(f"{node}:{i}")
-            self._ring[key] = node
-        self._sorted_keys = sorted(self._ring.keys())
+            if key not in self._ring:
+                self._ring[key] = node
+                bisect.insort(self._sorted_keys, key)
 
     def remove_node(self, node: str) -> None:
         for i in range(self._virtual_nodes):
             key = self._hash(f"{node}:{i}")
-            self._ring.pop(key, None)
-        self._sorted_keys = sorted(self._ring.keys())
+            if key in self._ring:
+                del self._ring[key]
+                idx = bisect.bisect_left(self._sorted_keys, key)
+                if idx < len(self._sorted_keys) and self._sorted_keys[idx] == key:
+                    self._sorted_keys.pop(idx)
 
     def get_node(self, actor_id: str) -> str:
         if not self._ring:

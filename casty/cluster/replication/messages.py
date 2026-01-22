@@ -1,34 +1,28 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from casty.serializable import serializable
+from casty.message import message
 
 
-@serializable
-@dataclass
+@message
 class Replicate:
     actor_id: str
     version: int
     snapshot: bytes
 
 
-@serializable
-@dataclass
+@message
 class ReplicateAck:
     actor_id: str
     version: int
     node_id: str
 
 
-@serializable
-@dataclass
+@message
 class SyncRequest:
     actor_id: str
 
 
-@serializable
-@dataclass
+@message
 class SyncResponse:
     actor_id: str
     version: int

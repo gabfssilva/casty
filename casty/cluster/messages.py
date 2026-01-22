@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from casty.serializable import serializable
+from casty.message import message
 
 
-@serializable
-@dataclass
+@message
 class MemberSnapshot:
     node_id: str
     address: str
@@ -14,30 +13,26 @@ class MemberSnapshot:
     incarnation: int
 
 
-@serializable
-@dataclass
+@message
 class Ping:
     sender: str
     members: list[MemberSnapshot] = field(default_factory=list)
 
 
-@serializable
-@dataclass
+@message
 class Ack:
     sender: str
     members: list[MemberSnapshot] = field(default_factory=list)
 
 
-@serializable
-@dataclass
+@message
 class PingReq:
     sender: str
     target: str
     members: list[MemberSnapshot] = field(default_factory=list)
 
 
-@serializable
-@dataclass
+@message
 class PingReqAck:
     sender: str
     target: str
@@ -45,8 +40,7 @@ class PingReqAck:
     members: list[MemberSnapshot] = field(default_factory=list)
 
 
-@serializable
-@dataclass
+@message
 class Join:
     node_id: str
     address: str
@@ -57,14 +51,12 @@ class SetLocalAddress:
     address: str
 
 
-@serializable
-@dataclass
+@message
 class GetAliveMembers:
     pass
 
 
-@serializable
-@dataclass
+@message
 class GetAllMembers:
     pass
 
@@ -90,22 +82,16 @@ class MarkDown:
     node_id: str
 
 
-# SWIM timing messages
-@serializable
-@dataclass
+@message
 class SwimTick:
     pass
 
 
-@serializable
-@dataclass
+@message
 class ProbeTimeout:
     target: str
 
 
-@serializable
-@dataclass
+@message
 class PingReqTimeout:
     target: str
-
-

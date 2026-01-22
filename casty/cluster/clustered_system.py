@@ -11,6 +11,7 @@ from casty.ref import ActorRef
 from casty.remote import Listening, Lookup
 
 from .cluster import cluster, CreateActor, GetClusterAddress
+from .constants import REMOTE_ACTOR_ID, MEMBERSHIP_ACTOR_ID
 
 
 class ClusteredActorSystem(System):
@@ -47,7 +48,7 @@ class ClusteredActorSystem(System):
 
         # Wait for remote to be ready
         while True:
-            remote_ref = await self._system.actor(name="remote/remote")
+            remote_ref = await self._system.actor(name=REMOTE_ACTOR_ID)
             if remote_ref:
                 break
             await asyncio.sleep(0.01)
@@ -78,7 +79,7 @@ class ClusteredActorSystem(System):
     async def _lookup_remote[M](self, name: str, node_id: str) -> ActorRef[M] | None:
         from .messages import GetAddress
 
-        membership_ref = await self._system.actor(name="membership/membership")
+        membership_ref = await self._system.actor(name=MEMBERSHIP_ACTOR_ID)
         if not membership_ref:
             return None
 
@@ -86,7 +87,7 @@ class ClusteredActorSystem(System):
         if not address:
             return None
 
-        remote_ref = await self._system.actor(name="remote/remote")
+        remote_ref = await self._system.actor(name=REMOTE_ACTOR_ID)
         if not remote_ref:
             return None
 

@@ -2,26 +2,22 @@ from __future__ import annotations
 
 import asyncio
 from asyncio import Future
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import actor
-from .envelope import Envelope
-from .serializable import serializable
+from .message import message
 
 if TYPE_CHECKING:
     from .mailbox import Mailbox
     from .ref import ActorRef
 
 
-@serializable
-@dataclass
+@message
 class Reply[R]:
     result: R | Exception
 
 
-@serializable
-@dataclass
+@message
 class Cancel:
     reason: Exception | None
 

@@ -37,7 +37,6 @@ class Context:
         behavior: "Behavior",
         *,
         name: str,
-        replicas: int = 1,
     ) -> "ActorRef[M]":
         if self._system is None:
             raise RuntimeError("Context not bound to system")
@@ -46,7 +45,6 @@ class Context:
             parent_id=self.self_id,
             behavior=behavior,
             name=name,
-            replicas=replicas,
         )
 
     async def schedule[M](

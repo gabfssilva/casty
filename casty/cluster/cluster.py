@@ -17,7 +17,7 @@ from .gossip import gossip_actor
 from .messages import Join, SetLocalAddress, GetAliveMembers, GetResponsibleNodes, GetAddress
 from .replica_manager import ReplicaManager
 from .replicated_ref import ReplicatedActorRef
-from .registry import register_behavior
+from casty.actor import register_behavior
 from .replication import Replicator, ReplicationConfig, replication_filter
 
 if TYPE_CHECKING:

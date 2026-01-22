@@ -92,20 +92,17 @@ async def membership_actor(
                         hash_ring.remove_node(target_node_id)
 
             case GetAliveMembers():
-                alive = {
-                    member_id: info
-                    for member_id, info in members.items()
+                await ctx.reply({
+                    mid: info for mid, info in members.items()
                     if info.state == MemberState.ALIVE
-                }
-                await ctx.reply(alive)
+                })
 
             case GetAllMembers():
                 await ctx.reply(dict(members))
 
             case GetResponsibleNodes(actor_id, count):
                 try:
-                    nodes = hash_ring.get_nodes(actor_id, count)
-                    await ctx.reply(nodes)
+                    await ctx.reply(hash_ring.get_nodes(actor_id, count))
                 except RuntimeError:
                     await ctx.reply([])
 

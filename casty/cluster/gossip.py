@@ -9,6 +9,7 @@ from casty.protocols import System
 from casty.serializable import serializable
 from casty.reply import Reply
 from casty.remote import Connect, Connected, Lookup, LookupResult
+from .constants import REMOTE_ACTOR_ID, MEMBERSHIP_ACTOR_ID, GOSSIP_NAME
 from .messages import GetAliveMembers
 
 
@@ -44,8 +45,8 @@ async def gossip_actor(
 ):
     store: dict[str, tuple[bytes, int]] = {}  # key -> (value, version)
 
-    membership_ref = await system.actor(name="membership_actor/membership")
-    remote_ref = await system.actor(name="remote/remote")
+    membership_ref = await system.actor(name=MEMBERSHIP_ACTOR_ID)
+    remote_ref = await system.actor(name=REMOTE_ACTOR_ID)
 
     await mailbox.schedule(_Tick(), every=tick_interval)
 
@@ -73,7 +74,7 @@ async def gossip_actor(
                     addr = members[t].address
                     host, port = addr.rsplit(":", 1)
                     await remote_ref.send(Connect(host=host, port=int(port)), sender=mailbox.ref())
-                    await remote_ref.send(Lookup("gossip", peer=addr), sender=mailbox.ref())
+                    await remote_ref.send(Lookup(GOSSIP_NAME, peer=addr), sender=mailbox.ref())
 
             case Reply(result=Connected()):
                 pass

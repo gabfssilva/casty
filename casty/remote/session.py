@@ -134,7 +134,7 @@ async def _handle_envelope(
             # Lazy replication: create replica if this node is responsible
             if not local_ref and envelope.target and "/" in envelope.target and system:
                 try:
-                    from casty.cluster.registry import get_behavior
+                    from casty.actor import get_behavior
                     func_name = envelope.target.split("/", 1)[0]
                     behavior = get_behavior(func_name)
                     if behavior:
@@ -145,7 +145,7 @@ async def _handle_envelope(
                             local_ref = await system.actor(behavior, name=actor_name)
                             from .messages import Expose
                             await remote_ref.send(Expose(ref=local_ref, name=envelope.target))
-                except Exception:
+                except (KeyError, RuntimeError, TypeError, AttributeError):
                     pass
 
             if local_ref:
@@ -201,13 +201,13 @@ async def _handle_envelope(
                         local_ref = await system.actor(actor_fn(), name=actor_name)
                         from .messages import Expose
                         await remote_ref.send(Expose(ref=local_ref, name=envelope.name))
-                except Exception:
+                except (KeyError, RuntimeError, TypeError, AttributeError):
                     pass
 
             # Lazy replication for lookup: create actor if behavior is registered
             if not local_ref and envelope.name and "/" in envelope.name and system:
                 try:
-                    from casty.cluster.registry import get_behavior
+                    from casty.actor import get_behavior
                     func_name = envelope.name.split("/", 1)[0]
                     behavior = get_behavior(func_name)
                     if behavior:
@@ -218,7 +218,7 @@ async def _handle_envelope(
                             local_ref = await system.actor(behavior, name=actor_name)
                             from .messages import Expose
                             await remote_ref.send(Expose(ref=local_ref, name=envelope.name))
-                except Exception:
+                except (KeyError, RuntimeError, TypeError, AttributeError):
                     pass
 
             exists = local_ref is not None
@@ -246,7 +246,7 @@ async def _handle_envelope(
                 mailbox = system._mailboxes.get(envelope.target)
                 if not mailbox and "/" in envelope.target:
                     try:
-                        from casty.cluster.registry import get_behavior
+                        from casty.actor import get_behavior
                         func_name = envelope.target.split("/", 1)[0]
                         behavior = get_behavior(func_name)
                         if behavior:
@@ -255,7 +255,7 @@ async def _handle_envelope(
                             from .messages import Expose
                             await remote_ref.send(Expose(ref=system._actors.get(envelope.target), name=envelope.target))
                             mailbox = system._mailboxes.get(envelope.target)
-                    except Exception:
+                    except (KeyError, RuntimeError, TypeError, AttributeError):
                         pass
 
                 if mailbox and mailbox.state is not None:

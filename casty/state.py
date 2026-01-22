@@ -11,22 +11,18 @@ if TYPE_CHECKING:
     from .cluster.snapshot import Snapshot
 
 
+def _make_clock() -> "VectorClock":
+    from .cluster.vector_clock import VectorClock
+    return VectorClock()
+
+
 @dataclass
 class State[T]:
     value: T
     node_id: str = ""
-    clock: "VectorClock" = field(default=None)  # type: ignore[assignment]
+    clock: "VectorClock" = field(default_factory=_make_clock, repr=False)
     _hash: bytes = field(default=b"", repr=False)
     _version: int = field(default=0, repr=False)
-
-    def __init__(self, value: T, node_id: str = "") -> None:
-        from .cluster.vector_clock import VectorClock
-
-        self.value = value
-        self.node_id = node_id
-        self.clock = VectorClock()
-        self._hash = b""
-        self._version = 0
 
     @property
     def version(self) -> int:
