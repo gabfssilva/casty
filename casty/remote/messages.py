@@ -58,6 +58,8 @@ class Unexpose:
 class Lookup:
     name: str
     peer: str | None = None
+    timeout: float | None = None
+    ensure: bool = False
 
 
 @dataclass
@@ -73,3 +75,5 @@ class Unexposed:
 @dataclass
 class LookupResult:
     ref: "ActorRef | None"
+    error: str | None = None
+    peer: str | None = None

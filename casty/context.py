@@ -29,6 +29,9 @@ class Context:
         if self.sender is not None:
             await self.sender.send(Reply(result=value))
 
+    async def forward(self, value: Any, to: ActorRef[Any]) -> None:
+        await to.send(msg=value, sender=self.sender)
+
     async def actor[M](
         self,
         behavior: "Behavior",

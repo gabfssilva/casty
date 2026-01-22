@@ -18,24 +18,25 @@ class Increment:
 
 @pytest.mark.asyncio
 async def test_replicated_actor_creation():
-    @actor(replicated=2, routing={Get: Routing.LEADER, Increment: Routing.LEADER})
-    async def counter(state: State[int], *, mailbox: Mailbox[Get | Increment]):
-        async for msg, ctx in mailbox:
-            match msg:
-                case Get():
-                    await ctx.reply(state.value)
-                case Increment(amount):
-                    state.set(state.value + amount)
+    async with asyncio.timeout(5):
+        @actor(replicated=2)
+        async def counter(state: State[int], *, mailbox: Mailbox[Get | Increment]):
+            async for msg, ctx in mailbox:
+                match msg:
+                    case Get():
+                        await ctx.reply(state.value)
+                    case Increment(amount):
+                        state.set(state.value + amount)
 
-    async with DevelopmentCluster(nodes=3) as cluster:
-        ref = await cluster.actor(counter(0), name="main")
+        async with DevelopmentCluster(nodes=3, debug=True) as cluster:
+            ref = await cluster.actor(counter(0), name="main")
 
-        result = await ref.ask(Get())
-        assert result == 0
+            result = await ref.ask(Get())
+            assert result == 0
 
-        await ref.send(Increment(5))
-        result = await ref.ask(Get())
-        assert result == 5
+            await ref.send(Increment(5))
+            result = await ref.ask(Get())
+            assert result == 5
 
 
 @pytest.mark.asyncio

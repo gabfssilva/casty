@@ -44,13 +44,12 @@ async def reply[M, R](
         match message:
             case Reply(result=e) if isinstance(e, Exception):
                 promise.set_exception(e)
-                return
 
             case Reply(result=result):
                 promise.set_result(result)
-                return
 
             case Cancel(reason=e):
                 if not promise.done():
                     promise.set_exception(e or TimeoutError())
-                return
+
+        return

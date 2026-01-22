@@ -101,7 +101,7 @@ async def cluster(
             case CreateActor(behavior, name):
                 func_name = behavior.func.__name__
                 actor_id = f"{func_name}/{name}"
-                replication_config = getattr(behavior.func, '__replication_config__', None)
+                replication_config = behavior.__replication_config__
                 replicated = replication_config.replicated if replication_config else None
 
                 # Check if already exists locally
@@ -143,10 +143,13 @@ async def cluster(
                                 address = await membership_ref.ask(GetAddress(target_node))
                                 if address:
                                     host, port_str = address.rsplit(":", 1)
-                                    await remote_ref.ask(Connect(host=host, port=int(port_str)))
-                                    result = await remote_ref.ask(Lookup(actor_id, peer=address))
-                                    if result and result.ref and hasattr(result.ref, '_session'):
-                                        sessions[target_node] = result.ref._session
+                                    try:
+                                        await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
+                                        result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
+                                        if result and result.ref and hasattr(result.ref, '_session'):
+                                            sessions[target_node] = result.ref._session
+                                    except (TimeoutError, Exception):
+                                        pass
 
                             session = sessions.get(target_node)
                             if session:
@@ -183,11 +186,11 @@ async def cluster(
                                 member_info = members[resp_node]
                                 host, port_str = member_info.address.rsplit(":", 1)
                                 try:
-                                    await remote_ref.ask(Connect(host=host, port=int(port_str)))
-                                    result = await remote_ref.ask(Lookup(actor_id, peer=member_info.address))
+                                    await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
+                                    result = await remote_ref.ask(Lookup(actor_id, peer=member_info.address), timeout=2.0)
                                     if result and result.ref:
                                         node_refs[resp_node] = result.ref
-                                except Exception:
+                                except (TimeoutError, Exception):
                                     pass
 
                         replica_manager.register(actor_id, list(node_refs.keys()), node_id)
@@ -199,24 +202,41 @@ async def cluster(
                             local_node=node_id,
                         ))
                     else:
-                        # Not responsible - forward to responsible node
+                        # Not responsible - check if already exists on responsible node
+                        found_ref = None
                         for resp_node in responsible_nodes:
                             if resp_node in members:
-                                result = await remote_ref.ask(Lookup(actor_id, peer=members[resp_node].address))
-                                if result and result.ref:
-                                    await ctx.reply(result.ref)
-                                    break
+                                member_info = members[resp_node]
+                                host, port_str = member_info.address.rsplit(":", 1)
+                                try:
+                                    await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
+                                    result = await remote_ref.ask(Lookup(
+                                        actor_id,
+                                        peer=member_info.address,
+                                    ), timeout=2.0)
+                                    if result and result.ref:
+                                        found_ref = result.ref
+                                        break
+                                except (TimeoutError, Exception):
+                                    continue
+
+                        if found_ref:
+                            await ctx.reply(found_ref)
                         else:
-                            await ctx.reply(None)
+                            # Create locally with full behavior (includes initial state)
+                            # Replication will sync to responsible nodes
+                            local_ref = await system.actor(behavior, name=name)
+                            await remote_ref.ask(Expose(ref=local_ref, name=actor_id))
+                            await ctx.reply(local_ref)
                 else:
                     # Non-replicated: global lookup then create
                     for _, member_info in members.items():
                         try:
-                            result = await remote_ref.ask(Lookup(actor_id, peer=member_info.address))
+                            result = await remote_ref.ask(Lookup(actor_id, peer=member_info.address), timeout=2.0)
                             if result and result.ref:
                                 await ctx.reply(result.ref)
                                 break
-                        except Exception:
+                        except (TimeoutError, Exception):
                             continue
                     else:
                         ref = await system.actor(behavior, name=name)
@@ -246,12 +266,12 @@ async def _connect_to_seed(
 ):
     try:
         host, port_str = seed_address.rsplit(":", 1)
-        await remote_ref.ask(Connect(host=host, port=int(port_str)))
+        await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
 
-        result = await remote_ref.ask(Lookup("membership", peer=seed_address))
+        result = await remote_ref.ask(Lookup("membership", peer=seed_address), timeout=2.0)
         if result.ref:
-            response = await result.ref.ask(Join(node_id=node_id, address=local_address))
+            response = await result.ref.ask(Join(node_id=node_id, address=local_address), timeout=2.0)
             if isinstance(response, Join):
                 await membership_ref.send(Join(node_id=response.node_id, address=response.address))
-    except Exception:
+    except (TimeoutError, Exception):
         pass

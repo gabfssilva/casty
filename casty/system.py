@@ -89,6 +89,7 @@ class LocalActorSystem(System):
         behavior: None = None,
         *,
         name: str,
+        filters: list[Filter] | None = None,
         node_id: str | None = None,
     ) -> ActorRef[M] | None: ...
 
@@ -298,25 +299,6 @@ class ActorSystem(System):
     def node_id(self) -> str:
         return self._inner.node_id
 
-    @overload
-    async def actor[M](
-        self,
-        behavior: Behavior,
-        *,
-        name: str,
-        filters: list[Filter] | None = None,
-    ) -> ActorRef[M]: ...
-
-    @overload
-    async def actor[M](
-        self,
-        behavior: None = None,
-        *,
-        name: str,
-        filters: list[Filter] | None = None,
-        node_id: str | None = None,
-    ) -> ActorRef[M] | None: ...
-
     async def actor[M](
         self,
         behavior: Behavior | None = None,
@@ -332,8 +314,9 @@ class ActorSystem(System):
         ref: ActorRef[M],
         msg: M,
         timeout: float = 30.0,
+        filters: list[Filter] | None = None,
     ) -> R:
-        return await self._inner.ask(ref, msg, timeout)
+        return await self._inner.ask(ref, msg, timeout, filters=filters)
 
     async def schedule[M](
         self,

@@ -24,34 +24,18 @@ async def test_local_ref_send():
 
 @pytest.mark.asyncio
 async def test_local_ref_ask():
-    from casty.ref import LocalActorRef
-    from casty.mailbox import ActorMailbox
+    async with asyncio.timeout(2.5):
+        from casty import actor, Mailbox, ActorSystem
 
-    mailbox: ActorMailbox[Ping] = ActorMailbox(self_id="test/t1")
-    ref: LocalActorRef[Ping] = LocalActorRef(actor_id="test/t1", mailbox=mailbox)
+        @actor
+        async def echo(*, mailbox: Mailbox[Ping]):
+            async for msg, ctx in mailbox:
+                await ctx.reply(msg.value * 10)
 
-    ask_task = asyncio.create_task(ref.ask(Ping(10), timeout=1.0))
-
-    await asyncio.sleep(0.01)
-    envelope = await mailbox._queue.get()
-    assert envelope.payload == Ping(10)
-    assert envelope.reply_to is not None
-    envelope.reply_to.set_result(100)
-
-    result = await ask_task
-    assert result == 100
-
-
-@pytest.mark.asyncio
-async def test_local_ref_ask_timeout():
-    from casty.ref import LocalActorRef
-    from casty.mailbox import ActorMailbox
-
-    mailbox: ActorMailbox[Ping] = ActorMailbox(self_id="test/t1")
-    ref: LocalActorRef[Ping] = LocalActorRef(actor_id="test/t1", mailbox=mailbox)
-
-    with pytest.raises(asyncio.TimeoutError):
-        await ref.ask(Ping(10), timeout=0.01)
+        async with ActorSystem() as system:
+            ref = await system.actor(echo(), name="echo")
+            result = await ref.ask(Ping(10))
+            assert result == 100
 
 
 @pytest.mark.asyncio

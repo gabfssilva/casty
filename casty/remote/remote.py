@@ -97,15 +97,15 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                 exposed.pop(name, None)
                 await ctx.reply(Unexposed(name))
 
-            case Lookup(name, peer=None):
+            case Lookup(name, peer=None, ensure=ensure):
                 if name in exposed:
-                    await ctx.reply(LookupResult(ref=exposed[name]))
+                    await ctx.reply(LookupResult(ref=exposed[name], peer=None))
                 else:
                     found = False
                     for peer_id, session in sessions.items():
                         try:
                             correlation_id = uuid.uuid4().hex
-                            exists = await session.ask(SendLookup(name=name, correlation_id=correlation_id))
+                            exists = await session.ask(SendLookup(name=name, correlation_id=correlation_id, ensure=ensure))
                             if exists:
                                 ref = RemoteRef(
                                     actor_id=f"remote/{name}",
@@ -113,20 +113,20 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                                     _session=session,
                                     _serializer=serializer,
                                 )
-                                await ctx.reply(LookupResult(ref=ref))
+                                await ctx.reply(LookupResult(ref=ref, peer=peer_id))
                                 found = True
                                 break
                         except Exception:
                             continue
                     if not found:
-                        await ctx.reply(LookupResult(ref=None))
+                        await ctx.reply(LookupResult(ref=None, peer=None))
 
-            case Lookup(name, peer=peer_id) if peer_id is not None:
+            case Lookup(name, peer=peer_id, ensure=ensure) if peer_id is not None:
                 if peer_id in sessions:
                     session = sessions[peer_id]
                     try:
                         correlation_id = uuid.uuid4().hex
-                        exists = await session.ask(SendLookup(name=name, correlation_id=correlation_id))
+                        exists = await session.ask(SendLookup(name=name, correlation_id=correlation_id, ensure=ensure))
                         if exists:
                             ref = RemoteRef(
                                 actor_id=f"remote/{name}",
@@ -134,13 +134,13 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                                 _session=session,
                                 _serializer=serializer,
                             )
-                            await ctx.reply(LookupResult(ref=ref))
+                            await ctx.reply(LookupResult(ref=ref, peer=peer_id))
                         else:
-                            await ctx.reply(LookupResult(ref=None))
+                            await ctx.reply(LookupResult(ref=None, peer=peer_id))
                     except Exception:
-                        await ctx.reply(LookupResult(ref=None))
+                        await ctx.reply(LookupResult(ref=None, peer=peer_id))
                 else:
-                    await ctx.reply(LookupResult(ref=None))
+                    await ctx.reply(LookupResult(ref=None, peer=peer_id))
 
             case _SessionConnected(peer_id, session):
                 sessions[peer_id] = session

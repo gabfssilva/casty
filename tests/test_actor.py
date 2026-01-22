@@ -37,7 +37,7 @@ class TestActorReplicationConfig:
             pass
 
         behavior = clustered_actor()
-        config = behavior.func.__replication_config__
+        config = behavior.__replication_config__
         assert config.clustered is True
         assert config.replicated is None
 
@@ -47,7 +47,7 @@ class TestActorReplicationConfig:
             pass
 
         behavior = replicated_actor()
-        config = behavior.func.__replication_config__
+        config = behavior.__replication_config__
         assert config.replicated == 3
         assert config.clustered is True  # implied
 
@@ -59,7 +59,7 @@ class TestActorReplicationConfig:
             pass
 
         behavior = persistent_actor()
-        config = behavior.func.__replication_config__
+        config = behavior.__replication_config__
         assert config.replicated == 3
         assert config.persistence is backend
 
@@ -69,7 +69,7 @@ class TestActorReplicationConfig:
             pass
 
         behavior = routed_actor()
-        config = behavior.func.__replication_config__
+        config = behavior.__replication_config__
         assert config.routing[Get] == Routing.ANY
         assert config.routing[Put] == Routing.LEADER
 
@@ -81,7 +81,7 @@ class TestActorReplicationConfig:
             pass
 
         behavior = local_persistent()
-        config = behavior.func.__replication_config__
+        config = behavior.__replication_config__
         assert config.persistence is backend
         assert config.replicated is None
 

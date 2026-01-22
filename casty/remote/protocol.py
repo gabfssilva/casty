@@ -14,6 +14,7 @@ class RemoteEnvelope:
     error: str | None = None
     sender_name: str | None = None
     version: int | None = None
+    ensure: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
@@ -29,6 +30,7 @@ class RemoteEnvelope:
             error=data.get("error"),
             sender_name=data.get("sender_name"),
             version=data.get("version"),
+            ensure=data.get("ensure", False),
         )
 
 

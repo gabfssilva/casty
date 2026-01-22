@@ -57,7 +57,7 @@ async def main():
     async with asyncio.timeout(10):
         print("=== Replicated Counter Example ===\n")
 
-        async with DevelopmentCluster(5) as cluster:
+        async with DevelopmentCluster(10) as cluster:
             print("Creating replicated counter (replicas=3)...")
             ref = await cluster.actor(counter(state=0), name="counter")
             print()

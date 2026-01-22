@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol, Any, TYPE_CHECKING, overload, List
+from typing import Protocol, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .actor import Behavior
@@ -11,24 +11,6 @@ if TYPE_CHECKING:
 class System(Protocol):
     @property
     def node_id(self) -> str: ...
-
-    @overload
-    async def actor[M](
-        self,
-        behavior: "Behavior",
-        *,
-        name: str,
-        filters: "list[Filter] | None" = None,
-    ) -> "ActorRef[M]": ...
-
-    @overload
-    async def actor[M](
-        self,
-        behavior: None = None,
-        *,
-        name: str,
-        node_id: str | None = None,
-    ) -> "ActorRef[M] | None": ...
 
     async def actor[M](
         self,
@@ -44,7 +26,7 @@ class System(Protocol):
         ref: "ActorRef[M]",
         msg: M,
         timeout: float = 30.0,
-        filters: List[Filter] = None
+        filters: "list[Filter] | None" = None,
     ) -> R: ...
 
     async def shutdown(self) -> None: ...
