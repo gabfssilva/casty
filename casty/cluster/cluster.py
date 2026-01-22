@@ -271,7 +271,8 @@ async def _connect_to_seed(
         result = await remote_ref.ask(Lookup("membership", peer=seed_address), timeout=2.0)
         if result.ref:
             response = await result.ref.ask(Join(node_id=node_id, address=local_address), timeout=2.0)
-            if isinstance(response, Join):
-                await membership_ref.send(Join(node_id=response.node_id, address=response.address))
+            match response:
+                case Join(node_id=resp_node_id, address=resp_address):
+                    await membership_ref.send(Join(node_id=resp_node_id, address=resp_address))
     except (TimeoutError, Exception):
         pass

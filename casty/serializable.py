@@ -37,75 +37,76 @@ def _is_serializable_value(value: Any) -> bool:
 
 
 def _to_dict(obj: Any) -> Any:
-    if obj is None or isinstance(obj, (bool, int, float, str, bytes)):
-        return obj
-
-    if isinstance(obj, Enum):
-        return {
-            "__enum__": f"{obj.__class__.__module__}.{obj.__class__.__qualname__}",
-            "value": obj.value,
-        }
-
-    if isinstance(obj, (list, tuple)):
-        return [_to_dict(item) for item in obj]
-
-    if isinstance(obj, dict):
-        return {k: _to_dict(v) for k, v in obj.items()}
-
-    # Convert ActorRef to UnresolvedActorRef for serialization
     from .ref import ActorRef, UnresolvedActorRef
-    if isinstance(obj, ActorRef):
-        # Get node_id from _system if available, otherwise use attribute or "local"
-        system = getattr(obj, "_system", None)
-        if system is not None:
-            node_id = system.node_id
-        else:
-            node_id = getattr(obj, "node_id", "local")
-        unresolved = UnresolvedActorRef(actor_id=obj.actor_id, node_id=node_id)
-        return _to_dict(unresolved)
 
-    if is_dataclass(obj) and not isinstance(obj, type):
-        type_name = getattr(obj.__class__, "__serializable_type__", None)
-        if type_name is None:
-            raise TypeError(f"{obj.__class__.__name__} is not @serializable")
+    match obj:
+        case None | bool() | int() | float() | str() | bytes():
+            return obj
 
-        return {
-            "__type__": type_name,
-            **{
-                f.name: _to_dict(getattr(obj, f.name))
-                for f in fields(obj)
-                if _is_serializable_value(getattr(obj, f.name))
-            },
-        }
+        case Enum():
+            return {
+                "__enum__": f"{obj.__class__.__module__}.{obj.__class__.__qualname__}",
+                "value": obj.value,
+            }
 
-    raise TypeError(f"Cannot serialize {type(obj)}")
+        case list() | tuple():
+            return [_to_dict(item) for item in obj]
+
+        case dict():
+            return {k: _to_dict(v) for k, v in obj.items()}
+
+        case ActorRef():
+            system = getattr(obj, "_system", None)
+            if system is not None:
+                node_id = system.node_id
+            else:
+                node_id = getattr(obj, "node_id", "local")
+            unresolved = UnresolvedActorRef(actor_id=obj.actor_id, node_id=node_id)
+            return _to_dict(unresolved)
+
+        case _ if is_dataclass(obj) and not isinstance(obj, type):
+            type_name = getattr(obj.__class__, "__serializable_type__", None)
+            if type_name is None:
+                raise TypeError(f"{obj.__class__.__name__} is not @serializable")
+
+            return {
+                "__type__": type_name,
+                **{
+                    f.name: _to_dict(getattr(obj, f.name))
+                    for f in fields(obj)
+                    if _is_serializable_value(getattr(obj, f.name))
+                },
+            }
+
+        case _:
+            raise TypeError(f"Cannot serialize {type(obj)}")
 
 
 def _from_dict(data: Any) -> Any:
-    if data is None or isinstance(data, (bool, int, float, str, bytes)):
-        return data
+    import importlib
 
-    if isinstance(data, list):
-        return [_from_dict(item) for item in data]
+    match data:
+        case None | bool() | int() | float() | str() | bytes():
+            return data
 
-    if isinstance(data, dict):
-        if "__type__" in data:
-            type_name = data["__type__"]
+        case list():
+            return [_from_dict(item) for item in data]
+
+        case {"__type__": type_name, **rest}:
             cls = _registry.get(type_name)
             if cls is None:
                 raise TypeError(f"Unknown type: {type_name}")
-
-            field_values = {k: _from_dict(v) for k, v in data.items() if k != "__type__"}
+            field_values = {k: _from_dict(v) for k, v in rest.items()}
             return cls(**field_values)
 
-        if "__enum__" in data:
-            enum_path = data["__enum__"]
+        case {"__enum__": enum_path, "value": value}:
             module_name, enum_name = enum_path.rsplit(".", 1)
-            import importlib
             module = importlib.import_module(module_name)
             enum_cls = getattr(module, enum_name)
-            return enum_cls(data["value"])
+            return enum_cls(value)
 
-        return {k: _from_dict(v) for k, v in data.items()}
+        case dict():
+            return {k: _from_dict(v) for k, v in data.items()}
 
-    return data
+        case _:
+            return data

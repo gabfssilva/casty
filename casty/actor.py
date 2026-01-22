@@ -78,10 +78,10 @@ def _find_param(func: Callable[..., Any], target: type, *, generic: bool = False
     target_name = target.__name__
     annotations = getattr(func, "__annotations__", {})
     for name, annotation in annotations.items():
-        if isinstance(annotation, str):
-            if generic and annotation.startswith(f"{target_name}["):
+        match annotation:
+            case str() if generic and annotation.startswith(f"{target_name}["):
                 return name
-            if not generic and annotation == target_name:
+            case str() if not generic and annotation == target_name:
                 return name
 
     return None

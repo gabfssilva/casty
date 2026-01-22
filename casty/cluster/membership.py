@@ -78,10 +78,11 @@ async def membership_actor(
                             local.incarnation = snapshot.incarnation
                             local.address = snapshot.address
 
-                            if local.state == MemberState.DOWN and old_state == MemberState.ALIVE:
-                                hash_ring.remove_node(snapshot.node_id)
-                            elif local.state == MemberState.ALIVE and old_state == MemberState.DOWN:
-                                hash_ring.add_node(snapshot.node_id)
+                            match (local.state, old_state):
+                                case (MemberState.DOWN, MemberState.ALIVE):
+                                    hash_ring.remove_node(snapshot.node_id)
+                                case (MemberState.ALIVE, MemberState.DOWN):
+                                    hash_ring.add_node(snapshot.node_id)
 
             case MarkDown(target_node_id):
                 if target_node_id in members:

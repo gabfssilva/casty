@@ -10,7 +10,7 @@ from .mailbox import Mailbox, ActorMailbox, Stop, Filter
 from .protocols import System
 from .ref import ActorRef, LocalActorRef
 from .reply import reply
-from .supervision import Decision
+from .supervision import DecisionType
 
 
 class LocalActorSystem(System):
@@ -100,13 +100,14 @@ class LocalActorSystem(System):
 
                 decision = behavior.supervision.strategy.decide(e, retries)
 
-                if decision == Decision.restart():
-                    retries += 1
-                    continue
-                elif decision == Decision.stop():
-                    break
-                else:
-                    raise
+                match decision.type:
+                    case DecisionType.RESTART:
+                        retries += 1
+                        continue
+                    case DecisionType.STOP:
+                        break
+                    case _:
+                        raise
 
     @overload
     async def actor[M](
