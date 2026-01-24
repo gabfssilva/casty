@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 
 WriteQuorum = int | Literal["async", "all", "quorum"]
@@ -12,7 +12,6 @@ class ActorReplicationConfig:
     clustered: bool = False
     replicas: int | None = None
     write_quorum: WriteQuorum = "async"
-    persistence: Any = None
 
     def __post_init__(self) -> None:
         if self.replicas is not None:

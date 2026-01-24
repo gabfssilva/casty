@@ -3,7 +3,6 @@ import asyncio
 from dataclasses import dataclass
 
 from casty import actor, Mailbox
-from casty.cluster.snapshot import InMemory
 
 
 @dataclass
@@ -49,31 +48,6 @@ class TestActorReplicationConfig:
         config = behavior.__replication_config__
         assert config.replicas == 3
         assert config.clustered is True  # implied
-
-    def test_actor_replicated_with_persistence(self):
-        backend = InMemory()
-
-        @actor(replicas=3, persistence=backend)
-        async def persistent_actor(*, mailbox: Mailbox[str]):
-            pass
-
-        behavior = persistent_actor()
-        config = behavior.__replication_config__
-        assert config.replicas == 3
-        assert config.persistence is backend
-
-    def test_actor_persistence_without_replication(self):
-        backend = InMemory()
-
-        @actor(persistence=backend)
-        async def local_persistent(*, mailbox: Mailbox[str]):
-            pass
-
-        behavior = local_persistent()
-        config = behavior.__replication_config__
-        assert config.persistence is backend
-        assert config.replicas is None
-
 
 def test_actor_decorator_creates_behavior():
     from casty.actor import actor, Behavior

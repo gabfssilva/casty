@@ -110,7 +110,6 @@ def actor[**P](
     clustered: bool = False,
     replicas: int | None = None,
     write_quorum: WriteQuorum = "async",
-    persistence: Any = None,
 ) -> Behavior[P] | Callable[[Callable[P, Coroutine[Any, Any, None]]], Behavior[P]]:
     def decorator(f: Callable[P, Coroutine[Any, Any, None]]) -> Behavior[P]:
         from .protocols import System
@@ -122,12 +121,11 @@ def actor[**P](
         )
 
         replication_config = None
-        if clustered or replicas is not None or persistence is not None:
+        if clustered or replicas is not None:
             replication_config = ActorReplicationConfig(
                 clustered=clustered,
                 replicas=replicas,
                 write_quorum=write_quorum,
-                persistence=persistence,
             )
 
         positional_params = get_positional_params(f)
