@@ -155,8 +155,8 @@ async def cluster(
                                     result = await remote_ref.ask(Lookup("states", peer=member_info.address), timeout=2.0)
                                     if result and result.ref:
                                         states_refs.append(result.ref)
-                                except (TimeoutError, Exception) as e:
-                                    print(f"[DEBUG] cluster states lookup for {resp_node} failed: {type(e).__name__}: {e}", flush=True)
+                                except (TimeoutError, Exception):
+                                    pass
 
                         write_quorum = replication_config.write_quorum if replication_config else 1
                         quorum_count = 1
@@ -191,7 +191,6 @@ async def cluster(
                         )
 
                         async def send_fn(address: str, actor_id: str, msg: Any) -> None:
-                            print(f"[DEBUG] cluster send_fn (leader): address={address}, actor={actor_id}, msg={type(msg).__name__}", flush=True)
                             host, port_str = address.rsplit(":", 1)
                             if address == local_address:
                                 await local_ref.send(msg)
@@ -201,11 +200,10 @@ async def cluster(
                                 result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
                                 if result and result.ref:
                                     await result.ref.send(msg)
-                            except (TimeoutError, Exception) as e:
-                                print(f"[DEBUG] cluster send_fn (leader) failed: {type(e).__name__}: {e}", flush=True)
+                            except (TimeoutError, Exception):
+                                pass
 
                         async def ask_fn(address: str, actor_id: str, msg: Any) -> Any:
-                            print(f"[DEBUG] cluster ask_fn (leader): address={address}, actor={actor_id}, msg={type(msg).__name__}", flush=True)
                             host, port_str = address.rsplit(":", 1)
                             if address == local_address:
                                 return await local_ref.ask(msg)
@@ -214,8 +212,8 @@ async def cluster(
                                 result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
                                 if result and result.ref:
                                     return await result.ref.ask(msg)
-                            except (TimeoutError, Exception) as e:
-                                print(f"[DEBUG] cluster ask_fn (leader) failed: {type(e).__name__}: {e}", flush=True)
+                            except (TimeoutError, Exception):
+                                pass
                             return None
 
                         sharded_ref = ShardedActorRef(
@@ -241,8 +239,8 @@ async def cluster(
                                         _RemoteCreateActor(behavior_name=func_name, actor_name=name),
                                         timeout=5.0
                                     )
-                            except (TimeoutError, Exception) as e:
-                                print(f"[DEBUG] cluster non-leader forward to leader failed: {type(e).__name__}: {e}", flush=True)
+                            except (TimeoutError, Exception):
+                                pass
 
                         all_members = dict(members)
                         all_members[node_id] = MemberInfo(
@@ -259,26 +257,24 @@ async def cluster(
                         )
 
                         async def send_fn(address: str, actor_id: str, msg: Any) -> None:
-                            print(f"[DEBUG] cluster send_fn (non-leader): address={address}, actor={actor_id}, msg={type(msg).__name__}", flush=True)
                             host, port_str = address.rsplit(":", 1)
                             try:
                                 await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
                                 result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
                                 if result and result.ref:
                                     await result.ref.send(msg)
-                            except (TimeoutError, Exception) as e:
-                                print(f"[DEBUG] cluster send_fn (non-leader) failed: {type(e).__name__}: {e}", flush=True)
+                            except (TimeoutError, Exception):
+                                pass
 
                         async def ask_fn(address: str, actor_id: str, msg: Any) -> Any:
-                            print(f"[DEBUG] cluster ask_fn (non-leader): address={address}, actor={actor_id}, msg={type(msg).__name__}", flush=True)
                             host, port_str = address.rsplit(":", 1)
                             try:
                                 await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
                                 result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
                                 if result and result.ref:
                                     return await result.ref.ask(msg)
-                            except (TimeoutError, Exception) as e:
-                                print(f"[DEBUG] cluster ask_fn (non-leader) failed: {type(e).__name__}: {e}", flush=True)
+                            except (TimeoutError, Exception):
+                                pass
                             return None
 
                         sharded_ref = ShardedActorRef(
@@ -290,15 +286,13 @@ async def cluster(
                         )
                         await ctx.reply(sharded_ref)
                 else:
-                    print(f"[DEBUG] cluster CreateActor (non-replicated): {name}", flush=True)
                     for _, member_info in members.items():
                         try:
                             result = await remote_ref.ask(Lookup(name, peer=member_info.address), timeout=2.0)
                             if result and result.ref:
                                 await ctx.reply(result.ref)
                                 break
-                        except (TimeoutError, Exception) as e:
-                            print(f"[DEBUG] cluster lookup on {member_info.address} failed: {type(e).__name__}: {e}", flush=True)
+                        except (TimeoutError, Exception):
                             continue
                     else:
                         ref = await system.actor(behavior, name=name)
@@ -337,7 +331,6 @@ async def _connect_to_seed(
     local_address: str,
     seed_address: str,
 ):
-    print(f"[DEBUG] _connect_to_seed: node={node_id}, local={local_address}, seed={seed_address}", flush=True)
     try:
         host, port_str = seed_address.rsplit(":", 1)
         await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
@@ -348,6 +341,5 @@ async def _connect_to_seed(
             match response:
                 case Join(node_id=resp_node_id, address=resp_address):
                     await membership_ref.send(Join(node_id=resp_node_id, address=resp_address))
-        print(f"[DEBUG] _connect_to_seed: connected successfully", flush=True)
-    except (TimeoutError, Exception) as e:
-        print(f"[DEBUG] _connect_to_seed failed: {type(e).__name__}: {e}", flush=True)
+    except (TimeoutError, Exception):
+        pass

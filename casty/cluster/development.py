@@ -44,32 +44,23 @@ class ClusteredDevelopmentActorRef[M](ActorRef[M]):
         self._cluster = cluster
         self.actor_id = name
         self._behavior = behavior
-        self._cached_ref: ActorRef[M] | None = None
 
     async def _get_ref(self) -> ActorRef[M]:
         node = self._cluster._next_node(name=self.actor_id)
-        print(f"[DEBUG] ClusteredDevelopmentActorRef._get_ref: node={node._node_id}, actor={self.actor_id}", flush=True)
         ref = await node.actor(behavior=self._behavior, name=self.actor_id)
-        print(f"[DEBUG] ClusteredDevelopmentActorRef._get_ref: got ref type={type(ref).__name__}", flush=True)
         return ref
 
     async def send(self, msg: M, *, sender: ActorRef[Any] | None = None) -> None:
-        print(f"[DEBUG] ClusteredDevelopmentActorRef.send: msg={type(msg).__name__}", flush=True)
         ref = await self._get_ref()
-        print(f"[DEBUG] ClusteredDevelopmentActorRef.send: calling ref.send on {type(ref).__name__}", flush=True)
         await ref.send(msg=msg, sender=sender)
-        print(f"[DEBUG] ClusteredDevelopmentActorRef.send: done", flush=True)
 
     async def send_envelope(self, envelope: "Envelope[M]") -> None:
         ref = await self._get_ref()
         await ref.send_envelope(envelope)
 
     async def ask(self, msg: M, timeout: float | None = None) -> Any:
-        print(f"[DEBUG] ClusteredDevelopmentActorRef.ask: msg={type(msg).__name__}", flush=True)
         ref = await self._get_ref()
-        print(f"[DEBUG] ClusteredDevelopmentActorRef.ask: calling ref.ask on {type(ref).__name__}", flush=True)
         result = await ref.ask(msg=msg, timeout=timeout)
-        print(f"[DEBUG] ClusteredDevelopmentActorRef.ask: result={result}", flush=True)
         return result
 
     def __rshift__(self, msg: M) -> Awaitable[None]:
@@ -127,23 +118,18 @@ class DevelopmentCluster:
         return ClusteredDevelopmentActorRef(cluster=self, behavior=behavior, name=name)
 
     async def start(self) -> None:
-        print("Starting development cluster...", flush=True)
         first_system = ClusteredActorSystem(
             node_id="node-0",
             host="127.0.0.1",
             port=0,
             debug_filter=debug_filter("node-0") if self._debug else None,
         )
-        print("Initializing node #1...", flush=True)
         await first_system.start()
-        print("Node #1 is ready!", flush=True)
         self._systems.append(first_system)
 
         first_address = await first_system.address()
 
         for i in range(1, self._node_count):
-            print(f"Initializing node #{i}...", flush=True)
-
             node_id = f"node-{i}"
             system = ClusteredActorSystem(
                 node_id=node_id,
@@ -154,11 +140,8 @@ class DevelopmentCluster:
             )
             await system.start()
 
-            print(f"Node #{i} is ready!", flush=True)
-
             self._systems.append(system)
 
-        print("Waiting for node discovery...", flush=True)
         await self.wait_for(self._node_count)
 
     async def shutdown(self) -> None:

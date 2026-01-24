@@ -130,23 +130,6 @@ def get_positional_params(func: Callable) -> list[str]:
     return positional
 
 
-def get_positional_defaults(func: Callable) -> list[Any]:
-    sig = inspect.signature(func)
-    defaults = []
-
-    for name, param in sig.parameters.items():
-        if param.kind in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD
-        ):
-            if param.default is not inspect.Parameter.empty:
-                defaults.append(param.default)
-        elif param.kind == inspect.Parameter.KEYWORD_ONLY:
-            break
-
-    return defaults
-
-
 def get_defaults_for_params(func: Callable, param_names: list[str]) -> list[Any]:
     """Get default values for specific params, preserving order."""
     sig = inspect.signature(func)

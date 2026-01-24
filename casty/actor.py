@@ -23,7 +23,6 @@ def clear_actor_registry() -> None:
 
 # Aliases for backward compatibility
 get_behavior = get_registered_actor
-clear_registry = clear_actor_registry
 
 
 @dataclass
