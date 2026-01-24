@@ -28,6 +28,7 @@ class LocalActorSystem(System):
         self._actors: dict[str, ActorRef[Any]] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._mailboxes: dict[str, ActorMailbox[Any]] = {}
+        self._children: dict[str, list[str]] = {}
         self._scheduled_tasks: list[asyncio.Task[None]] = []
 
     @property
@@ -79,6 +80,18 @@ class LocalActorSystem(System):
 
         return ref
 
+    async def _stop_children(self, parent_id: str) -> None:
+        children = self._children.pop(parent_id, [])
+        for child_id in children:
+            if child_id in self._mailboxes:
+                logger.debug("stopping child", parent_id=parent_id, child_id=child_id)
+                await self._mailboxes[child_id].put(Envelope(Stop()))
+
+    async def _cleanup_actor(self, actor_id: str) -> None:
+        self._actors.pop(actor_id, None)
+        self._tasks.pop(actor_id, None)
+        self._mailboxes.pop(actor_id, None)
+
     async def _run_supervised_actor[M](
         self,
         actor_id: str,
@@ -96,31 +109,35 @@ class LocalActorSystem(System):
         stateful = Stateful()
         mailbox._stateful = stateful
 
-        while True:
-            try:
-                with stateful:
-                    if behavior.state_param:
-                        kwargs[behavior.state_param] = state
-                    await behavior.func(mailbox=mailbox, **kwargs)
-                break
-            except StopAsyncIteration:
-                break
-            except Exception as e:
-                if behavior.supervision is None:
-                    raise
-
-                decision = behavior.supervision.strategy.decide(e, retries)
-
-                match decision.type:
-                    case DecisionType.RESTART:
-                        retries += 1
-                        logger.warn("actor restarting", actor_id=actor_id, retry=retries, error=str(e))
-                        continue
-                    case DecisionType.STOP:
-                        logger.error("actor stopped due to error", actor_id=actor_id, error=str(e))
-                        break
-                    case _:
+        try:
+            while True:
+                try:
+                    with stateful:
+                        if behavior.state_param:
+                            kwargs[behavior.state_param] = state
+                        await behavior.func(mailbox=mailbox, **kwargs)
+                    break
+                except StopAsyncIteration:
+                    break
+                except Exception as e:
+                    if behavior.supervision is None:
                         raise
+
+                    decision = behavior.supervision.strategy.decide(e, retries)
+
+                    match decision.type:
+                        case DecisionType.RESTART:
+                            retries += 1
+                            logger.warn("actor restarting", actor_id=actor_id, retry=retries, error=str(e))
+                            continue
+                        case DecisionType.STOP:
+                            logger.error("actor stopped due to error", actor_id=actor_id, error=str(e))
+                            break
+                        case _:
+                            raise
+        finally:
+            await self._stop_children(actor_id)
+            await self._cleanup_actor(actor_id)
 
     @overload
     async def actor[M](
@@ -164,6 +181,9 @@ class LocalActorSystem(System):
         name: str,
     ) -> ActorRef[M]:
         actor_id = f"{parent_id}/{name}"
+        if parent_id not in self._children:
+            self._children[parent_id] = []
+        self._children[parent_id].append(actor_id)
         return await self._spawn_actor(actor_id, behavior)
 
     async def ask[M, R](
