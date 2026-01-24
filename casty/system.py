@@ -6,7 +6,7 @@ import uuid
 from typing import Any, Callable, Coroutine, overload
 
 from .actor import Behavior
-from .logger import debug as log_debug, warn as log_warn, error as log_error
+from . import logger
 from .state import State
 from .envelope import Envelope
 from .mailbox import ActorMailbox, Stop, Filter
@@ -41,10 +41,10 @@ class LocalActorSystem(System):
         filters: list[Filter] | None = None,
     ) -> ActorRef[M]:
         if actor_id in self._actors:
-            log_debug("Actor already exists", actor_id, node=self._node_id)
+            logger.debug("actor already exists", actor_id=actor_id, node=self._node_id)
             return self._actors[actor_id]
 
-        log_debug("Spawning actor", actor_id, node=self._node_id, behavior=behavior.__name__)
+        logger.debug("spawning actor", actor_id=actor_id, node=self._node_id, behavior=behavior.__name__)
 
         state = behavior.state_initial
         if isinstance(state, State):
@@ -111,10 +111,10 @@ class LocalActorSystem(System):
                 match decision.type:
                     case DecisionType.RESTART:
                         retries += 1
-                        log_warn("Actor restarting", actor_id, retry=retries, error=str(e))
+                        logger.warn("actor restarting", actor_id=actor_id, retry=retries, error=str(e))
                         continue
                     case DecisionType.STOP:
-                        log_error("Actor stopped due to error", actor_id, error=str(e))
+                        logger.error("actor stopped due to error", actor_id=actor_id, error=str(e))
                         break
                     case _:
                         raise

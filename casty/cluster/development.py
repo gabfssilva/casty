@@ -58,7 +58,7 @@ class ClusteredDevelopmentActorRef[M](ActorRef[M]):
         ref = await self._get_ref()
         await ref.send_envelope(envelope)
 
-    async def ask(self, msg: M, timeout: float | None = None) -> Any:
+    async def ask(self, msg: M, timeout: float = 10.0) -> Any:
         ref = await self._get_ref()
         result = await ref.ask(msg=msg, timeout=timeout)
         return result

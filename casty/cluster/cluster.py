@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from casty import actor, Mailbox
 from casty.actor import Behavior
-from ..logger import debug as log_debug, info as log_info, warn as log_warn, error as log_error
+from .. import logger
 from casty.envelope import Envelope
 from casty.protocols import System
 from casty.remote import remote, Listen, Connect, Expose, Lookup
@@ -117,15 +117,15 @@ async def cluster(
                 replication_config = behavior.__replication_config__
                 replicas = replication_config.replicas if replication_config else None
 
-                log_debug("CreateActor received", f"cluster/{node_id}", actor=name, replicas=replicas)
+                logger.debug("CreateActor received", actor=name, replicas=replicas)
 
-                log_debug("Getting alive members", f"cluster/{node_id}")
+                logger.debug("Getting alive members")
                 members = await membership_ref.ask(GetAliveMembers())
-                log_debug("Got alive members", f"cluster/{node_id}", count=len(members))
+                logger.debug("Got alive members", count=len(members))
 
                 local_ref = await system.actor(name=name)
                 if local_ref:
-                    log_debug("Actor already exists locally", f"cluster/{node_id}", actor=name)
+                    logger.debug("Actor already exists locally", actor=name)
                     await ctx.reply(local_ref)
                     continue
 
@@ -148,10 +148,10 @@ async def cluster(
                     responsible_nodes = shard_coordinator.get_responsible_nodes(name, effective_replicas)
                     is_leader = shard_coordinator.is_leader(name, effective_replicas)
 
-                    log_debug("Shard calculated", f"cluster/{node_id}", actor=name, is_leader=is_leader, responsible=responsible_nodes)
+                    logger.debug("Shard calculated", actor=name, is_leader=is_leader, responsible=responsible_nodes)
 
                     if is_leader:
-                        log_debug("I am leader, creating actor", f"cluster/{node_id}", actor=name)
+                        logger.debug("I am leader, creating actor", actor=name)
                         register_behavior(func_name, behavior)
 
                         other_replicas = shard_coordinator.get_replica_ids(name, effective_replicas)
@@ -184,11 +184,11 @@ async def cluster(
                         rep_filter = replication_filter(states_refs, write_quorum=quorum_count)
                         lead_filter = leadership_filter(shard_coordinator, name, effective_replicas)
 
-                        log_debug("Spawning actor locally", f"cluster/{node_id}", actor=name)
+                        logger.debug("Spawning actor locally", actor=name)
                         local_ref = await system.actor(behavior, name=name, filters=[lead_filter, rep_filter])
-                        log_debug("Actor spawned, exposing", f"cluster/{node_id}", actor=name)
+                        logger.debug("Actor spawned, exposing", actor=name)
                         await remote_ref.ask(Expose(ref=local_ref, name=name))
-                        log_debug("Actor exposed", f"cluster/{node_id}", actor=name)
+                        logger.debug("Actor exposed", actor=name)
 
                         all_members = dict(members)
                         all_members[node_id] = MemberInfo(
@@ -205,7 +205,7 @@ async def cluster(
                         )
 
                         async def send_fn(address: str, actor_id: str, msg: Any) -> None:
-                            log_debug("ShardedRef send_fn called", f"cluster/{node_id}", target=address, actor=actor_id)
+                            logger.debug("ShardedRef send_fn called", target=address, actor=actor_id)
                             host, port_str = address.rsplit(":", 1)
                             if address == local_address:
                                 await local_ref.send(msg)
@@ -216,10 +216,10 @@ async def cluster(
                                 if result and result.ref:
                                     await result.ref.send(msg)
                             except (TimeoutError, Exception) as e:
-                                log_warn("ShardedRef send_fn failed", f"cluster/{node_id}", error=str(e))
+                                logger.warn("ShardedRef send_fn failed", error=str(e))
 
                         async def ask_fn(address: str, actor_id: str, msg: Any) -> Any:
-                            log_debug("ShardedRef ask_fn called", f"cluster/{node_id}", target=address, actor=actor_id)
+                            logger.debug("ShardedRef ask_fn called", target=address, actor=actor_id)
                             host, port_str = address.rsplit(":", 1)
                             if address == local_address:
                                 return await local_ref.ask(msg)
@@ -229,7 +229,7 @@ async def cluster(
                                 if result and result.ref:
                                     return await result.ref.ask(msg)
                             except (TimeoutError, Exception) as e:
-                                log_warn("ShardedRef ask_fn failed", f"cluster/{node_id}", error=str(e))
+                                logger.warn("ShardedRef ask_fn failed", error=str(e))
                             return None
 
                         sharded_ref = ShardedActorRef(
@@ -239,30 +239,30 @@ async def cluster(
                             ask_fn=ask_fn,
                             known_leader_id=node_id,
                         )
-                        log_debug("Replying with sharded ref (leader)", f"cluster/{node_id}", actor=name)
+                        logger.debug("Replying with sharded ref (leader)", actor=name)
                         await ctx.reply(sharded_ref)
                     else:
                         leader_id = shard_coordinator.get_leader_id(name, effective_replicas)
                         leader_address = members[leader_id].address if leader_id in members else None
-                        log_debug("I am NOT leader, forwarding to leader", f"cluster/{node_id}", actor=name, leader=leader_id, leader_address=leader_address)
+                        logger.debug("I am NOT leader, forwarding to leader", actor=name, leader=leader_id, leader_address=leader_address)
 
                         if leader_address:
-                            log_debug("Preparing to forward to leader", f"cluster/{node_id}", leader=leader_id, remote_ref_ok=remote_ref is not None)
+                            logger.debug("Preparing to forward to leader", leader=leader_id, remote_ref_ok=remote_ref is not None)
                             register_behavior(func_name, behavior)
                             host, port_str = leader_address.rsplit(":", 1)
                             initial_state_bytes = None
                             if behavior.state_initial is not None:
                                 from casty.serializable import serialize
-                                log_debug("Serializing initial state", f"cluster/{node_id}")
+                                logger.debug("Serializing initial state")
                                 initial_state_bytes = serialize(behavior.state_initial)
-                            log_debug("About to connect to leader", f"cluster/{node_id}", leader=leader_id, host=host, port=port_str)
+                            logger.debug("About to connect to leader", leader=leader_id, host=host, port=port_str)
                             try:
-                                log_debug("Connecting to leader", f"cluster/{node_id}", leader=leader_id)
+                                logger.debug("Connecting to leader", leader=leader_id)
                                 await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
-                                log_debug("Looking up cluster on leader", f"cluster/{node_id}", leader=leader_id)
+                                logger.debug("Looking up cluster on leader", leader=leader_id)
                                 result = await remote_ref.ask(Lookup("cluster", peer=leader_address), timeout=2.0)
                                 if result and result.ref:
-                                    log_debug("Sending _RemoteCreateActor to leader", f"cluster/{node_id}", actor=name, leader=leader_id)
+                                    logger.debug("Sending _RemoteCreateActor to leader", actor=name, leader=leader_id)
                                     await result.ref.ask(
                                         _RemoteCreateActor(
                                             behavior_name=func_name,
@@ -271,9 +271,9 @@ async def cluster(
                                         ),
                                         timeout=5.0
                                     )
-                                    log_debug("_RemoteCreateActor completed", f"cluster/{node_id}", actor=name)
+                                    logger.debug("_RemoteCreateActor completed", actor=name)
                             except (TimeoutError, Exception) as e:
-                                log_warn("Failed to forward to leader", f"cluster/{node_id}", actor=name, error=str(e))
+                                logger.warn("Failed to forward to leader", actor=name, error=str(e))
 
                         all_members = dict(members)
                         all_members[node_id] = MemberInfo(
@@ -317,10 +317,10 @@ async def cluster(
                             ask_fn=ask_fn,
                             known_leader_id=leader_id,
                         )
-                        log_debug("Replying with sharded ref (non-leader)", f"cluster/{node_id}", actor=name)
+                        logger.debug("Replying with sharded ref (non-leader)", actor=name)
                         await ctx.reply(sharded_ref)
                 else:
-                    log_debug("Non-replicated actor, looking up or creating", f"cluster/{node_id}", actor=name)
+                    logger.debug("Non-replicated actor, looking up or creating", actor=name)
                     for _, member_info in members.items():
                         try:
                             result = await remote_ref.ask(Lookup(name, peer=member_info.address), timeout=2.0)
@@ -335,7 +335,7 @@ async def cluster(
                         await ctx.reply(ref)
 
             case _RemoteCreateActor(behavior_name, actor_name, initial_state):
-                log_debug("_RemoteCreateActor received", f"cluster/{node_id}", actor=actor_name, behavior=behavior_name)
+                logger.debug("_RemoteCreateActor received", actor=actor_name, behavior=behavior_name)
                 behavior = get_registered_actor(behavior_name)
                 if behavior:
                     if initial_state is not None:
@@ -347,17 +347,17 @@ async def cluster(
 
                     local_ref = await system.actor(name=actor_name)
                     if local_ref:
-                        log_debug("Actor already exists for _RemoteCreateActor", f"cluster/{node_id}", actor=actor_name)
+                        logger.debug("Actor already exists for _RemoteCreateActor", actor=actor_name)
                         await ctx.reply(True)
                         continue
 
-                    log_debug("Creating actor directly for _RemoteCreateActor", f"cluster/{node_id}", actor=actor_name)
+                    logger.debug("Creating actor directly for _RemoteCreateActor", actor=actor_name)
                     local_ref = await system.actor(configured_behavior, name=actor_name)
                     await remote_ref.ask(Expose(ref=local_ref, name=actor_name))
-                    log_debug("Actor created and exposed for _RemoteCreateActor", f"cluster/{node_id}", actor=actor_name)
+                    logger.debug("Actor created and exposed for _RemoteCreateActor", actor=actor_name)
                     await ctx.reply(True)
                 else:
-                    log_warn("Behavior not found for _RemoteCreateActor", f"cluster/{node_id}", behavior=behavior_name)
+                    logger.warn("Behavior not found for _RemoteCreateActor", behavior=behavior_name)
                     await ctx.reply(None)
 
             case WaitFor(nodes):

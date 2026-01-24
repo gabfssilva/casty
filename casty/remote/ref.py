@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, TYPE_CHECKING
 
-from ..logger import debug as log_debug
+from .. import logger
 
 if TYPE_CHECKING:
     from casty.ref import ActorRef
@@ -36,7 +36,7 @@ class RemoteRef[M]:
     behavior_name: str | None = None
 
     async def send(self, msg: M, *, sender: "ActorRef[Any] | None" = None) -> None:
-        log_debug("remote send", self.actor_id, msg_type=type(msg).__name__, target=self.name, sender=sender.actor_id if sender else None)
+        logger.debug("remote send", actor_id=self.actor_id, msg_type=type(msg).__name__, target=self.name, sender=sender.actor_id if sender else None)
         payload = self._serializer.encode(msg)
         sender_name = sender.actor_id if sender else None
         await self._session.send(SendDeliver(
@@ -50,14 +50,14 @@ class RemoteRef[M]:
         await self.send(envelope.payload, sender=sender)
 
     async def ask[R](self, msg: M, timeout: float | None = None) -> R:
-        log_debug("remote ask", self.actor_id, msg_type=type(msg).__name__, target=self.name, timeout=timeout)
+        logger.debug("remote ask", actor_id=self.actor_id, msg_type=type(msg).__name__, target=self.name, timeout=timeout)
         payload = self._serializer.encode(msg)
         correlation_id = uuid.uuid4().hex
         response = await self._session.ask(
             SendAsk(target=self.name, payload=payload, correlation_id=correlation_id),
             timeout=timeout or self.default_timeout,
         )
-        log_debug("remote ask response", self.actor_id, target=self.name)
+        logger.debug("remote ask response", actor_id=self.actor_id, target=self.name)
         return self._serializer.decode(response)
 
     def __rshift__(self, msg: M) -> Awaitable[None]:

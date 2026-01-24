@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from casty import actor, Mailbox
-from casty.logger import debug as log_debug, info as log_info, warn as log_warn, error as log_error
+from casty import logger
 from casty.io import tcp
 from casty.io.messages import (
     Bound, BindFailed, Connected as TcpConnected, ConnectFailed as TcpConnectFailed,
@@ -64,20 +64,20 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
         match msg:
             case Listen(port, host, ser):
                 s = ser or serializer
-                log_debug("Starting listener", "remote", host=host, port=port)
+                logger.debug("Starting listener", host=host, port=port)
                 try:
                     await ctx.actor(
                         _remote_listener(tcp_mgr, host, port, s, mailbox.ref(), ctx.sender),
                         name=f"listener-{port}"
                     )
                 except Exception as e:
-                    log_error("Listen failed", "remote", host=host, port=port, error=str(e))
+                    logger.error("Listen failed", host=host, port=port, error=str(e))
                     await ctx.reply(ListenFailed(str(e)))
 
             case Connect(host, port, ser):
                 peer_addr = f"{host}:{port}"
                 if peer_addr in sessions:
-                    log_debug("Already connected to peer", "remote", peer=peer_addr)
+                    logger.debug("Already connected to peer", peer=peer_addr)
                     await ctx.reply(Connected(
                         remote_address=(host, port),
                         peer_id=peer_addr,
@@ -85,19 +85,19 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                     continue
 
                 s = ser or serializer
-                log_debug("Connecting to peer", "remote", host=host, port=port)
+                logger.debug("Connecting to peer", host=host, port=port)
                 try:
                     await ctx.actor(
                         _remote_connector(tcp_mgr, host, port, s, mailbox.ref(), ctx.sender),
                         name=f"connector-{host}-{port}"
                     )
                 except Exception as e:
-                    log_error("Connect failed", "remote", host=host, port=port, error=str(e))
+                    logger.error("Connect failed", host=host, port=port, error=str(e))
                     await ctx.reply(ConnectFailed(str(e)))
 
             case Expose(ref, name):
                 exposed[name] = ref
-                log_debug("Exposed actor", "remote", name=name)
+                logger.debug("Exposed actor", name=name)
                 await ctx.reply(Exposed(name))
 
             case Unexpose(name):
@@ -105,19 +105,19 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                 await ctx.reply(Unexposed(name))
 
             case Lookup(name, peer=None, ensure=ensure, initial_state=initial_state, behavior=behavior):
-                log_debug("Lookup without peer", "remote", name=name)
+                logger.debug("Lookup without peer", name=name)
                 if name in exposed:
-                    log_debug("Found in exposed", "remote", name=name)
+                    logger.debug("Found in exposed", name=name)
                     await ctx.reply(LookupResult(ref=exposed[name], peer=None))
                 else:
                     found = False
-                    log_debug("Searching in sessions", "remote", name=name, sessions=list(sessions.keys()))
+                    logger.debug("Searching in sessions", name=name, sessions=list(sessions.keys()))
                     for peer_id, session in sessions.items():
                         try:
                             correlation_id = uuid.uuid4().hex
-                            log_debug("Sending SendLookup to session", "remote", name=name, peer=peer_id)
+                            logger.debug("Sending SendLookup to session", name=name, peer=peer_id)
                             exists = await session.ask(SendLookup(name=name, correlation_id=correlation_id, ensure=ensure, initial_state=initial_state, behavior=behavior))
-                            log_debug("SendLookup result", "remote", name=name, peer=peer_id, exists=exists)
+                            logger.debug("SendLookup result", name=name, peer=peer_id, exists=exists)
                             if exists:
                                 ref = RemoteRef(
                                     actor_id=f"remote/{name}",
@@ -129,21 +129,21 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                                 found = True
                                 break
                         except (TimeoutError, OSError, KeyError) as e:
-                            log_debug("SendLookup failed", "remote", name=name, peer=peer_id, error=str(e))
+                            logger.debug("SendLookup failed", name=name, peer=peer_id, error=str(e))
                             continue
                     if not found:
-                        log_debug("Not found anywhere", "remote", name=name)
+                        logger.debug("Not found anywhere", name=name)
                         await ctx.reply(LookupResult(ref=None, peer=None))
 
             case Lookup(name, peer=peer_id, ensure=ensure, initial_state=initial_state, behavior=behavior) if peer_id is not None:
-                log_debug("Lookup with peer", "remote", name=name, peer=peer_id)
+                logger.debug("Lookup with peer", name=name, peer=peer_id)
                 if peer_id in sessions:
                     session = sessions[peer_id]
                     try:
                         correlation_id = uuid.uuid4().hex
-                        log_debug("Sending SendLookup to peer session", "remote", name=name, peer=peer_id)
+                        logger.debug("Sending SendLookup to peer session", name=name, peer=peer_id)
                         exists = await session.ask(SendLookup(name=name, correlation_id=correlation_id, ensure=ensure, initial_state=initial_state, behavior=behavior))
-                        log_debug("SendLookup result from peer", "remote", name=name, peer=peer_id, exists=exists)
+                        logger.debug("SendLookup result from peer", name=name, peer=peer_id, exists=exists)
                         if exists:
                             ref = RemoteRef(
                                 actor_id=f"remote/{name}",
@@ -155,33 +155,33 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                         else:
                             await ctx.reply(LookupResult(ref=None, peer=peer_id))
                     except (TimeoutError, OSError, KeyError) as e:
-                        log_warn("SendLookup to peer failed", "remote", name=name, peer=peer_id, error=str(e))
+                        logger.warn("SendLookup to peer failed", name=name, peer=peer_id, error=str(e))
                         await ctx.reply(LookupResult(ref=None, peer=peer_id))
                 else:
-                    log_warn("Peer not in sessions", "remote", name=name, peer=peer_id, known_sessions=list(sessions.keys()))
+                    logger.warn("Peer not in sessions", name=name, peer=peer_id, known_sessions=list(sessions.keys()))
                     await ctx.reply(LookupResult(ref=None, peer=peer_id))
 
             case _SessionConnected(peer_id, session):
                 sessions[peer_id] = session
-                log_debug("Session connected", "remote", peer=peer_id)
+                logger.debug("Session connected", peer=peer_id)
 
             case _SessionDisconnected(peer_id):
                 sessions.pop(peer_id, None)
-                log_debug("Session disconnected", "remote", peer=peer_id)
+                logger.debug("Session disconnected", peer=peer_id)
 
             case _LocalLookup(name):
-                log_debug("_LocalLookup", "remote", name=name)
+                logger.debug("_LocalLookup", name=name)
                 if name in exposed:
-                    log_debug("_LocalLookup found in exposed", "remote", name=name)
+                    logger.debug("_LocalLookup found in exposed", name=name)
                     await ctx.reply(exposed[name])
                 else:
                     # Also check system for actors (e.g., lazily created replicas)
                     ref = await ctx._system.actor(name=name)
                     if ref:
-                        log_debug("_LocalLookup found in system", "remote", name=name)
+                        logger.debug("_LocalLookup found in system", name=name)
                         exposed[name] = ref
                     else:
-                        log_debug("_LocalLookup not found", "remote", name=name)
+                        logger.debug("_LocalLookup not found", name=name)
                     await ctx.reply(ref)
 
 

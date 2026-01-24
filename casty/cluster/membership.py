@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from casty import actor, Mailbox
-from ..logger import debug as log_debug, info as log_info, warn as log_warn
+from .. import logger
 from .messages import Join, MergeMembership, MarkDown, MarkAlive, MemberSnapshot, GetAliveMembers, GetAllMembers, GetResponsibleNodes, SetLocalAddress, GetAddress
 from .hash_ring import HashRing
 
@@ -55,7 +55,7 @@ async def membership_actor(
                 hash_ring.add_node(joined_node_id)
 
                 if is_new:
-                    log_info("Member joined", f"membership/{node_id}", member=joined_node_id, address=address)
+                    logger.info("Member joined", member=joined_node_id, address=address)
                     if local_address:
                         await ctx.reply(Join(node_id=node_id, address=local_address))
 
@@ -94,7 +94,7 @@ async def membership_actor(
                         member.state = MemberState.DOWN
                         member.incarnation += 1
                         hash_ring.remove_node(target_node_id)
-                        log_warn("Member marked down", f"membership/{node_id}", member=target_node_id)
+                        logger.warn("Member marked down", member=target_node_id)
 
             case MarkAlive(target_node_id, address):
                 if target_node_id in members:
@@ -104,7 +104,7 @@ async def membership_actor(
                         member.incarnation += 1
                         member.address = address
                         hash_ring.add_node(target_node_id)
-                        log_info("Member recovered", f"membership/{node_id}", member=target_node_id)
+                        logger.info("Member recovered", member=target_node_id)
                 else:
                     members[target_node_id] = MemberInfo(
                         node_id=target_node_id,
@@ -113,7 +113,7 @@ async def membership_actor(
                         incarnation=0,
                     )
                     hash_ring.add_node(target_node_id)
-                    log_info("New member discovered", f"membership/{node_id}", member=target_node_id, address=address)
+                    logger.info("New member discovered", member=target_node_id, address=address)
 
             case GetAliveMembers():
                 result = {

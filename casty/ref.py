@@ -5,7 +5,7 @@ from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING, Awaitable
 
 from .envelope import Envelope
 from .serializable import serializable
-from .logger import debug as log_debug
+from . import logger
 
 if TYPE_CHECKING:
     from .mailbox import Mailbox
@@ -20,7 +20,7 @@ class ActorRef[M](Protocol):
 
     async def send_envelope(self, envelope: "Envelope[M]") -> None: ...
 
-    async def ask(self, msg: M, timeout: float | None = None) -> Any: ...
+    async def ask(self, msg: M, timeout: float = 10.0) -> Any: ...
 
     def __rshift__(self, msg: M) -> Awaitable[None]: ...
 
@@ -45,15 +45,15 @@ class LocalActorRef[M](ActorRef[M]):
     default_timeout: float = 30.0
 
     async def send(self, msg: M, *, sender: "ActorRef[Any] | None" = None) -> None:
-        log_debug("send", self.actor_id, msg_type=type(msg).__name__, sender=sender.actor_id if sender else None)
+        logger.debug("send", actor_id=self.actor_id, msg_type=type(msg).__name__, sender=sender.actor_id if sender else None)
         envelope = Envelope(payload=msg, sender=sender)
         await self.mailbox.put(envelope)
 
     async def send_envelope(self, envelope: Envelope[M]) -> None:
         await self.mailbox.put(envelope)
 
-    async def ask[R](self, msg: M, timeout: float | None = None) -> R:
-        log_debug("ask", self.actor_id, msg_type=type(msg).__name__, timeout=timeout)
+    async def ask[R](self, msg: M, timeout: float = 10.0) -> R:
+        logger.debug("ask", actor_id=self.actor_id, msg_type=type(msg).__name__, timeout=timeout)
         if self._system is None:
             raise RuntimeError("ActorRef not bound to system")
         return await self._system.ask(self, msg, timeout or self.default_timeout)

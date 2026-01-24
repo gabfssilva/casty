@@ -7,7 +7,7 @@ from typing import Any
 from casty import actor, Mailbox
 from casty.protocols import System
 from casty.serializable import serializable
-from ..logger import debug as log_debug
+from .. import logger
 from casty.reply import Reply
 from casty.remote import Connect, Connected, Lookup, LookupResult
 from .constants import REMOTE_ACTOR_ID, MEMBERSHIP_ACTOR_ID, GOSSIP_NAME
@@ -94,10 +94,10 @@ async def gossip_actor(
                 if version == 0:
                     new_version = current_version + 1
                     store[key] = (value, new_version)
-                    log_debug("Gossip put", f"gossip/{node_id}", key=key, version=new_version)
+                    logger.debug("Gossip put", key=key, version=new_version)
                 elif version > current_version:
                     store[key] = (value, version)
-                    log_debug("Gossip replicated", f"gossip/{node_id}", key=key, version=version)
+                    logger.debug("Gossip replicated", key=key, version=version)
 
             case Get(key):
                 entry = store.get(key)
