@@ -19,7 +19,7 @@ class ActorReplicationConfig:
                 raise ValueError("replicas must be > 0")
             self.clustered = True
         if self.clustered and self.replicas is None:
-            self.replicas = 2
+            self.replicas = 1
 
     def resolve_write_quorum(self) -> int:
         match self.write_quorum:

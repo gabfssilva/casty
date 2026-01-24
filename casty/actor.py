@@ -30,12 +30,8 @@ class Behavior[**P]:
     func: Callable[..., Coroutine[Any, Any, None]]
     initial_kwargs: dict[str, Any] = field(default_factory=dict)
     supervision: Any = None
-    state_params: list[str] = field(default_factory=list)
-    state_defaults: list[Any] = field(default_factory=list)
-    state_initials: list[Any] = field(default_factory=list)
-    config_params: list[str] = field(default_factory=list)
-    config_defaults: list[Any] = field(default_factory=list)
-    config_values: list[Any] = field(default_factory=list)
+    state_param: str | None = None
+    state_initial: Any = None
     system_param: str | None = None
     __replication_config__: "ActorReplicationConfig | None" = None
 
@@ -43,39 +39,32 @@ class Behavior[**P]:
     def __name__(self) -> str:
         return self.func.__name__
 
-    @property
-    def state_param(self) -> str | None:
-        return self.state_params[0] if self.state_params else None
-
-    @property
-    def state_initial(self) -> Any:
-        return self.state_initials[0] if self.state_initials else None
-
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> "Behavior[()]":
-        total_positional = len(self.state_params) + len(self.config_params)
-        all_args = list(args)
+        import inspect
+        sig = inspect.signature(self.func)
+        positional_params = [
+            name for name, param in sig.parameters.items()
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD
+            )
+        ]
 
-        # Fill missing args from defaults (state defaults then config defaults)
-        all_defaults = self.state_defaults + self.config_defaults
-        if len(all_args) < total_positional:
-            missing = total_positional - len(all_args)
-            defaults_start = len(all_defaults) - missing
-            all_args.extend(all_defaults[defaults_start:])
+        bound_kwargs = dict(kwargs)
+        for i, arg in enumerate(args):
+            if i < len(positional_params):
+                bound_kwargs[positional_params[i]] = arg
 
-        # Split args between state and config
-        state_initials = all_args[:len(self.state_params)]
-        config_values = all_args[len(self.state_params):]
+        state_initial = None
+        if self.state_param and self.state_param in bound_kwargs:
+            state_initial = bound_kwargs.pop(self.state_param)
 
         return Behavior(
             func=self.func,
-            initial_kwargs=kwargs,
+            initial_kwargs=bound_kwargs,
             supervision=self.supervision,
-            state_params=self.state_params,
-            state_defaults=self.state_defaults,
-            state_initials=state_initials,
-            config_params=self.config_params,
-            config_defaults=self.config_defaults,
-            config_values=config_values,
+            state_param=self.state_param,
+            state_initial=state_initial,
             system_param=self.system_param,
             __replication_config__=self.__replication_config__,
         )
@@ -113,12 +102,7 @@ def actor[**P](
 ) -> Behavior[P] | Callable[[Callable[P, Coroutine[Any, Any, None]]], Behavior[P]]:
     def decorator(f: Callable[P, Coroutine[Any, Any, None]]) -> Behavior[P]:
         from .protocols import System
-        from .transform import (
-            transform_actor_function,
-            get_positional_params,
-            get_defaults_for_params,
-            find_assigned_params,
-        )
+        from .state import State
 
         replication_config = None
         if clustered or replicas is not None:
@@ -128,23 +112,14 @@ def actor[**P](
                 write_quorum=write_quorum,
             )
 
-        positional_params = get_positional_params(f)
-        state_params = find_assigned_params(f, positional_params)
-        config_params = [p for p in positional_params if p not in state_params]
-        state_defaults = get_defaults_for_params(f, state_params)
-        config_defaults = get_defaults_for_params(f, config_params)
+        explicit_state_param = _find_param(f, State, generic=True)
         system_param = _find_param(f, System)
         supervision = getattr(f, "__supervision__", None)
 
-        transformed = transform_actor_function(f, state_params) if state_params else f
-
         behavior: Behavior[P] = Behavior(
-            func=transformed,
+            func=f,
             supervision=supervision,
-            state_params=state_params,
-            state_defaults=state_defaults,
-            config_params=config_params,
-            config_defaults=config_defaults,
+            state_param=explicit_state_param,
             system_param=system_param,
             __replication_config__=replication_config,
         )

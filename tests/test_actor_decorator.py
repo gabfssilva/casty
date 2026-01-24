@@ -20,7 +20,7 @@ def test_actor_clustered_true():
     config = clustered_actor.__replication_config__
     assert config is not None
     assert config.clustered is True
-    assert config.replicas == 2
+    assert config.replicas == 1
     assert config.write_quorum == "async"
 
 

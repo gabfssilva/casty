@@ -7,6 +7,7 @@ from typing import Any
 
 from casty import actor, Mailbox
 from casty.protocols import System
+from ..logger import debug as log_debug, info as log_info, warn as log_warn, error as log_error
 from casty.remote import Connect, Lookup, Connected, LookupResult
 from casty.reply import Reply
 from .constants import REMOTE_ACTOR_ID, MEMBERSHIP_ACTOR_ID, SWIM_NAME
@@ -115,11 +116,13 @@ async def swim_actor(
                 if target not in pending_probes:
                     continue
 
+                log_debug("Probe timeout", f"swim/{node_id}", target=target)
                 members = await membership_ref.ask(GetAliveMembers())
                 other_members = [m for m in members if m != node_id and m != target]
 
                 if not other_members:
                     del pending_probes[target]
+                    log_warn("Marking node down", f"swim/{node_id}", target=target)
                     await membership_ref.send(MarkDown(target))
                     continue
 
@@ -173,6 +176,7 @@ async def swim_actor(
             case PingReqTimeout(target):
                 if target in pending_probes:
                     del pending_probes[target]
+                    log_warn("Marking node down after ping-req timeout", f"swim/{node_id}", target=target)
                     await membership_ref.send(MarkDown(target))
 
             case Reply(result=Connected()):

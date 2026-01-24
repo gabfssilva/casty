@@ -5,6 +5,7 @@ from typing import Any, Callable, Coroutine
 
 from casty.system import LocalActorSystem
 from casty.actor import Behavior
+from ..logger import debug as log_debug, info as log_info, warn as log_warn, error as log_error
 from casty.mailbox import Filter
 from casty.protocols import System
 from casty.ref import ActorRef
@@ -43,6 +44,7 @@ class ClusteredActorSystem(System):
         return f"{self._host}:{self._port}"
 
     async def start(self) -> None:
+        log_info("Starting clustered system", f"cluster/{self._node_id}", host=self._host, port=self._port)
         async with asyncio.timeout(self._start_timeout):
             self._cluster_ref = await self._system.actor(
                 cluster(self._node_id, self._host, self._port, self._seeds),
@@ -58,6 +60,7 @@ class ClusteredActorSystem(System):
                 await asyncio.sleep(0.01)
 
             self._address = await self._cluster_ref.ask(GetClusterAddress())
+            log_info("Clustered system started", f"cluster/{self._node_id}", address=self._address)
 
     async def actor[M](
         self,
@@ -117,6 +120,7 @@ class ClusteredActorSystem(System):
         return await self._system.schedule(msg, to=to, delay=delay, every=every, sender=sender)
 
     async def shutdown(self) -> None:
+        log_info("Shutting down clustered system", f"cluster/{self._node_id}")
         await self._system.shutdown()
 
     async def __aenter__(self) -> "ClusteredActorSystem":

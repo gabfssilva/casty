@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from unittest.mock import Mock, AsyncMock
-from casty.state import Stateful, state
+from casty.state import Stateful, State
 from casty.context import Context
 from casty.cluster.replication.filter import replication_filter
 from casty.cluster.states import StoreState, StoreAck, ReplicationQuorumError
@@ -30,7 +30,8 @@ async def test_replication_filter_sends_to_states():
     mock_ref.ask = capture_ask
 
     with Stateful() as stateful:
-        counter = state("count", 0)
+        counter = State(value=0)
+        stateful.register("count", counter)
 
         filter_fn = replication_filter([mock_ref], write_quorum=1)
         stream = filter_fn(stateful, make_stream(["a", "b"], stateful))
@@ -46,7 +47,8 @@ async def test_replication_filter_sends_to_states():
 @pytest.mark.asyncio
 async def test_replication_filter_no_states_refs():
     with Stateful() as stateful:
-        counter = state("count", 0)
+        counter = State(value=0)
+        stateful.register("count", counter)
 
         filter_fn = replication_filter([], write_quorum=0)
         stream = filter_fn(stateful, make_stream(["a", "b"], stateful))
@@ -68,7 +70,8 @@ async def test_replication_filter_quorum_not_met():
     mock_ref.ask = fail_ask
 
     with Stateful() as stateful:
-        counter = state("count", 0)
+        counter = State(value=0)
+        stateful.register("count", counter)
 
         filter_fn = replication_filter([mock_ref], write_quorum=1)
         stream = filter_fn(stateful, make_stream(["a"], stateful))
@@ -87,7 +90,8 @@ async def test_replication_filter_zero_quorum_doesnt_fail():
     mock_ref.ask = fail_ask
 
     with Stateful() as stateful:
-        counter = state("count", 0)
+        counter = State(value=0)
+        stateful.register("count", counter)
 
         filter_fn = replication_filter([mock_ref], write_quorum=0)
         stream = filter_fn(stateful, make_stream(["a"], stateful))
@@ -118,7 +122,8 @@ async def test_replication_filter_quorum_partial_success():
     mock_ref_fail.ask = fail_ask
 
     with Stateful() as stateful:
-        counter = state("count", 0)
+        counter = State(value=0)
+        stateful.register("count", counter)
 
         filter_fn = replication_filter([mock_ref_ok, mock_ref_fail], write_quorum=1)
         stream = filter_fn(stateful, make_stream(["a"], stateful))

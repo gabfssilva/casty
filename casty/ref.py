@@ -5,6 +5,7 @@ from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING, Awaitable
 
 from .envelope import Envelope
 from .serializable import serializable
+from .logger import debug as log_debug
 
 if TYPE_CHECKING:
     from .mailbox import Mailbox
@@ -44,6 +45,7 @@ class LocalActorRef[M](ActorRef[M]):
     default_timeout: float = 30.0
 
     async def send(self, msg: M, *, sender: "ActorRef[Any] | None" = None) -> None:
+        log_debug("send", self.actor_id, msg_type=type(msg).__name__, sender=sender.actor_id if sender else None)
         envelope = Envelope(payload=msg, sender=sender)
         await self.mailbox.put(envelope)
 
@@ -51,6 +53,7 @@ class LocalActorRef[M](ActorRef[M]):
         await self.mailbox.put(envelope)
 
     async def ask[R](self, msg: M, timeout: float | None = None) -> R:
+        log_debug("ask", self.actor_id, msg_type=type(msg).__name__, timeout=timeout)
         if self._system is None:
             raise RuntimeError("ActorRef not bound to system")
         return await self._system.ask(self, msg, timeout or self.default_timeout)

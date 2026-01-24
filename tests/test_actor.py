@@ -37,7 +37,7 @@ class TestActorReplicationConfig:
         behavior = clustered_actor()
         config = behavior.__replication_config__
         assert config.clustered is True
-        assert config.replicas == 2  # defaults to 2 when clustered
+        assert config.replicas == 1  # defaults to 1 when clustered
 
     def test_actor_replicated(self):
         @actor(replicas=3)
@@ -52,20 +52,21 @@ class TestActorReplicationConfig:
 def test_actor_decorator_creates_behavior():
     from casty.actor import actor, Behavior
     from casty.mailbox import Mailbox
+    from casty.state import State
 
     @actor
-    async def counter(count: int, *, mailbox: Mailbox[Increment | Get]):
+    async def counter(state: State[int], *, mailbox: Mailbox[Increment | Get]):
         async for msg, ctx in mailbox:
             match msg:
                 case Increment(amount):
-                    count += amount
+                    state.value += amount
                 case Get():
-                    await ctx.reply(count)
+                    await ctx.reply(state.value)
 
-    # Calling counter(0) returns a Behavior, not a coroutine
-    behavior = counter(0)
+    behavior = counter(State(0))
     assert isinstance(behavior, Behavior)
-    assert behavior.state_initials == [0]
+    assert behavior.state_initial is not None
+    assert behavior.state_initial.value == 0
     assert behavior.initial_kwargs == {}
 
 
@@ -85,25 +86,25 @@ def test_behavior_stores_function():
 
 @pytest.mark.asyncio
 async def test_behavior_can_be_started():
-    from types import SimpleNamespace
     from casty.actor import actor
     from casty.mailbox import Mailbox, ActorMailbox, Stop
     from casty.envelope import Envelope
+    from casty.state import State
 
     results = []
 
     @actor
-    async def collector(count: int, *, mailbox: Mailbox[str]):
+    async def collector(state: State[int], *, mailbox: Mailbox[str]):
         async for msg, ctx in mailbox:
-            count += 1
-            results.append(f"{count}:{msg}")
+            state.value += 1
+            results.append(f"{state.value}:{msg}")
 
-    behavior = collector(0)
+    behavior = collector(State(0))
 
     mailbox = ActorMailbox(self_id="collector/c1")
-    state_ns = SimpleNamespace(count=0)
+    state = behavior.state_initial
 
-    task = asyncio.create_task(behavior.func(state_ns, mailbox=mailbox))
+    task = asyncio.create_task(behavior.func(state=state, mailbox=mailbox))
 
     await mailbox.put(Envelope("hello"))
     await mailbox.put(Envelope("world"))
@@ -112,5 +113,18 @@ async def test_behavior_can_be_started():
     await task
 
     assert results == ["1:hello", "2:world"]
+
+
+def test_actor_with_explicit_state():
+    from casty import actor, Mailbox
+    from casty.state import State
+
+    @actor
+    async def counter(state: State[int], *, mailbox: Mailbox[str]):
+        pass
+
+    behavior = counter(State(0))
+    assert behavior.state_initial is not None
+    assert behavior.state_initial.value == 0
 
 

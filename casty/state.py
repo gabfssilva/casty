@@ -5,7 +5,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from .serializable import serialize, deserialize
+from .serializable import serialize, deserialize, serializable
 
 if TYPE_CHECKING:
     from .cluster.snapshot import Snapshot
@@ -39,14 +39,7 @@ class Stateful:
                 self._states[name].set(value)
 
 
-def state[T](name: str, initial: T) -> "State[T]":
-    s = State(value=initial)
-    ctx = _current_stateful.get()
-    if ctx:
-        ctx.register(name, s)
-    return s
-
-
+@serializable
 @dataclass
 class State[T]:
     value: T

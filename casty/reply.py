@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from . import actor
 from .message import message
+from .state import State
 
 if TYPE_CHECKING:
     from .mailbox import Mailbox
@@ -29,6 +30,7 @@ async def reply[M, R](
     promise: Future[R],
     timeout: float,
     *,
+    state: State[None],
     mailbox: Mailbox[Reply[R] | Cancel]
 ):
     timeout_task = mailbox.schedule(Cancel(reason=TimeoutError()), delay=timeout)

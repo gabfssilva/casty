@@ -4,7 +4,7 @@ Demonstrates:
 - @actor decorator and Mailbox
 - Dataclass messages with pattern matching
 - send() (fire-and-forget) vs ask() (request-response)
-- AST-transformed state management
+- Explicit State[T] for state management
 
 Run with:
     uv run python examples/01-counter.py
@@ -14,6 +14,7 @@ import asyncio
 from dataclasses import dataclass
 
 from casty import actor, ActorSystem, Mailbox
+from casty.state import State
 
 
 @dataclass
@@ -35,24 +36,24 @@ type CounterMsg = Increment | Decrement | Get
 
 
 @actor
-async def counter(count: int, *, mailbox: Mailbox[CounterMsg]):
+async def counter(state: State[int], *, mailbox: Mailbox[CounterMsg]):
     async for msg, ctx in mailbox:
         match msg:
             case Increment(amount):
-                count += amount
-                print(f"Incremented by {amount} -> {count}")
+                state.value += amount
+                print(f"Incremented by {amount} -> {state.value}")
 
             case Decrement(amount):
-                count -= amount
-                print(f"Decremented by {amount} -> {count}")
+                state.value -= amount
+                print(f"Decremented by {amount} -> {state.value}")
 
             case Get():
-                await ctx.reply(count)
+                await ctx.reply(state.value)
 
 
 async def main():
     async with ActorSystem() as system:
-        ref = await system.actor(counter(0), name="counter")
+        ref = await system.actor(counter(State(0)), name="counter")
 
         # send() - fire and forget
         await ref.send(Increment(10))

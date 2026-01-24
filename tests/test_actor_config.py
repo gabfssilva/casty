@@ -29,7 +29,7 @@ def test_replicas_implies_clustered():
 
 def test_default_replicas_when_clustered():
     config = ActorReplicationConfig(clustered=True)
-    assert config.replicas == 2
+    assert config.replicas == 1
 
 
 def test_default_write_quorum():

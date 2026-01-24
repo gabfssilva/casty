@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import uuid
 from typing import Any, Callable, Coroutine, overload
 
 from .actor import Behavior
+from .logger import debug as log_debug, warn as log_warn, error as log_error
+from .state import State
 from .envelope import Envelope
-from .mailbox import Mailbox, ActorMailbox, Stop, Filter
+from .mailbox import ActorMailbox, Stop, Filter
 from .protocols import System
 from .ref import ActorRef, LocalActorRef
 from .reply import reply
@@ -37,19 +40,22 @@ class LocalActorSystem(System):
         behavior: Behavior,
         filters: list[Filter] | None = None,
     ) -> ActorRef[M]:
-        from .transform import make_state_namespace
-
         if actor_id in self._actors:
+            log_debug("Actor already exists", actor_id, node=self._node_id)
             return self._actors[actor_id]
 
-        state_ns = make_state_namespace(behavior.state_params, behavior.state_initials) if behavior.state_params else None
+        log_debug("Spawning actor", actor_id, node=self._node_id, behavior=behavior.__name__)
+
+        state = behavior.state_initial
+        if isinstance(state, State):
+            state = State(copy.deepcopy(state.value))
 
         all_filters = [self._debug_filter] if self._debug_filter else []
         if filters:
             all_filters.extend(filters)
 
         mailbox: ActorMailbox[M] = ActorMailbox(
-            state=state_ns,
+            state=state,
             self_id=actor_id,
             node_id=self._node_id,
             is_leader=True,
@@ -61,7 +67,7 @@ class LocalActorSystem(System):
         mailbox.set_self_ref(ref)
 
         task = asyncio.create_task(
-            self._run_supervised_actor(actor_id, behavior, mailbox, ref, state_ns)
+            self._run_supervised_actor(actor_id, behavior, mailbox, ref, state)
         )
 
         self._actors[actor_id] = ref
@@ -76,13 +82,9 @@ class LocalActorSystem(System):
         behavior: Behavior,
         mailbox: ActorMailbox[M],
         ref: ActorRef[M],
-        state_ns: Any = None,
+        state: Any = None,
     ) -> None:
         kwargs = dict(behavior.initial_kwargs)
-
-        for name, value in zip(behavior.config_params, behavior.config_values):
-            if name not in kwargs:
-                kwargs[name] = value
 
         if behavior.system_param is not None:
             kwargs[behavior.system_param] = self
@@ -94,17 +96,9 @@ class LocalActorSystem(System):
         while True:
             try:
                 with stateful:
-                    if state_ns is not None:
-                        await behavior.func(
-                            state_ns,
-                            mailbox=mailbox,
-                            **kwargs,
-                        )
-                    else:
-                        await behavior.func(
-                            mailbox=mailbox,
-                            **kwargs,
-                        )
+                    if behavior.state_param:
+                        kwargs[behavior.state_param] = state
+                    await behavior.func(mailbox=mailbox, **kwargs)
                 break
             except StopAsyncIteration:
                 break
@@ -117,8 +111,10 @@ class LocalActorSystem(System):
                 match decision.type:
                     case DecisionType.RESTART:
                         retries += 1
+                        log_warn("Actor restarting", actor_id, retry=retries, error=str(e))
                         continue
                     case DecisionType.STOP:
+                        log_error("Actor stopped due to error", actor_id, error=str(e))
                         break
                     case _:
                         raise

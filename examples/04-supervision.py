@@ -14,6 +14,7 @@ import asyncio
 from dataclasses import dataclass
 
 from casty import actor, ActorSystem, Mailbox
+from casty.state import State
 from casty.supervision import supervised, Restart, OneForOne
 
 
@@ -37,15 +38,15 @@ type WorkerMsg = DoWork | Crash | GetStats
 
 @supervised(strategy=Restart(max_retries=3), scope=OneForOne())
 @actor
-async def resilient_worker(processed: int, *, mailbox: Mailbox[WorkerMsg]):
+async def resilient_worker(state: State[int], *, mailbox: Mailbox[WorkerMsg]):
     print("Worker started")
 
     async for msg, ctx in mailbox:
         match msg:
             case DoWork(value):
-                processed += 1
+                state.value += 1
                 result = value * 2
-                print(f"Processed {value} -> {result} (total: {processed})")
+                print(f"Processed {value} -> {result} (total: {state.value})")
                 await ctx.reply(result)
 
             case Crash():
@@ -53,12 +54,12 @@ async def resilient_worker(processed: int, *, mailbox: Mailbox[WorkerMsg]):
                 raise RuntimeError("Intentional crash")
 
             case GetStats():
-                await ctx.reply({"processed": processed})
+                await ctx.reply({"processed": state.value})
 
 
 async def main():
     async with ActorSystem() as system:
-        worker = await system.actor(resilient_worker(0), name="worker")
+        worker = await system.actor(resilient_worker(State(0)), name="worker")
 
         # Normal work
         print("--- Normal operations ---")

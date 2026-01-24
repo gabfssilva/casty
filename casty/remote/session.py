@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from casty import actor, Mailbox
+from casty.logger import debug as log_debug, info as log_info, warn as log_warn, error as log_error
 from casty.io.messages import Received, Write, PeerClosed, ErrorClosed, Aborted
 from .protocol import RemoteEnvelope, RemoteError
 from .ref import SendDeliver, SendAsk, RemoteRef
@@ -92,11 +93,13 @@ async def session_actor(
         match msg:
             case Received(data):
                 envelope = RemoteEnvelope.from_dict(serializer.decode(data))
+                log_debug("Received envelope", f"session/{peer_id}", type=envelope.type, target=envelope.target, name=envelope.name)
                 await _handle_envelope(
                     envelope, remote_ref, connection, pending, serializer, mailbox.ref(), ctx._system
                 )
 
             case PeerClosed() | ErrorClosed(_) | Aborted():
+                log_debug("Connection closed", f"session/{peer_id}")
                 await remote_ref.send(_SessionDisconnected(peer_id=peer_id))
                 for _, reply_to in pending.values():
                     if reply_to:
@@ -124,6 +127,7 @@ async def session_actor(
                 await connection.send(Write(serializer.encode(envelope.to_dict())))
 
             case SendLookup(name, correlation_id, ensure, initial_state, behavior):
+                log_debug("SendLookup, sending over wire", f"session/{peer_id}", name=name, correlation_id=correlation_id)
                 pending[correlation_id] = ("lookup", ctx.sender)
                 envelope = RemoteEnvelope(
                     type="lookup",
@@ -159,6 +163,7 @@ async def _handle_envelope(
 
     match envelope.type:
         case "deliver":
+            log_debug("_handle_envelope: deliver", "session", target=envelope.target)
             local_ref = await remote_ref.ask(_LocalLookup(envelope.target))
             if local_ref:
                 msg = serializer.decode(envelope.payload)
@@ -171,8 +176,11 @@ async def _handle_envelope(
                         _serializer=serializer,
                     )
                 await local_ref.send(msg, sender=sender)
+            else:
+                log_warn("_handle_envelope: deliver target not found", "session", target=envelope.target)
 
         case "ask":
+            log_debug("_handle_envelope: ask", "session", target=envelope.target)
             local_ref = await remote_ref.ask(_LocalLookup(envelope.target))
 
             # Lazy replication: create replica if this node is responsible
@@ -221,7 +229,9 @@ async def _handle_envelope(
                     await reply_to.send(Reply(result=RemoteError(envelope.error)))
 
         case "lookup":
+            log_debug("_handle_envelope: lookup", "session", name=envelope.name, ensure=envelope.ensure)
             local_ref = await remote_ref.ask(_LocalLookup(envelope.name))
+            log_debug("_handle_envelope: lookup _LocalLookup result", "session", name=envelope.name, found=local_ref is not None)
 
             # Ensure-create: if ensure=True and actor doesn't exist, create it
             if not local_ref and envelope.ensure and envelope.name and envelope.behavior and system:
@@ -242,6 +252,7 @@ async def _handle_envelope(
                 )
 
             exists = local_ref is not None
+            log_debug("_handle_envelope: lookup replying", "session", name=envelope.name, exists=exists)
             reply = RemoteEnvelope(
                 type="lookup_result",
                 name=envelope.name,
@@ -252,11 +263,15 @@ async def _handle_envelope(
 
         case "lookup_result":
             exists = envelope.payload == b"1"
+            log_debug("_handle_envelope: lookup_result received", "session", name=envelope.name, exists=exists, correlation_id=envelope.correlation_id)
             if envelope.correlation_id in pending:
                 _, reply_to = pending.pop(envelope.correlation_id)
                 if reply_to:
+                    log_debug("_handle_envelope: lookup_result replying to pending", "session")
                     from casty.reply import Reply
                     await reply_to.send(Reply(result=exists))
+            else:
+                log_warn("_handle_envelope: lookup_result no pending for correlation_id", "session", correlation_id=envelope.correlation_id)
 
         case "replicate":
             if system and envelope.target and envelope.payload:

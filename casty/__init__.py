@@ -1,3 +1,4 @@
+from . import logger
 from .actor import actor, Behavior
 from .mailbox import Mailbox, ActorMailbox, Stop, Filter, MessageStream
 from .context import Context
@@ -18,12 +19,11 @@ from .supervision import (
 )
 from .cluster import HashRing
 from .message import message
-from .state import State, state
+from .state import State
 from .actor_config import ActorReplicationConfig
 
 __all__ = [
     "actor",
-    "state",
     "Behavior",
     "Mailbox",
     "ActorMailbox",

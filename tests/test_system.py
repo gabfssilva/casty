@@ -64,3 +64,26 @@ async def test_system_get_or_create():
         # Value should still be 0 (first creation)
         result = await ref1.ask(Get())
         assert result == 0
+
+
+@pytest.mark.asyncio
+async def test_actor_with_explicit_state():
+    from casty import ActorSystem, actor, Mailbox
+    from casty.state import State
+
+    @dataclass
+    class GetState:
+        pass
+
+    @actor
+    async def state_counter(state: State[int], *, mailbox: Mailbox[GetState]):
+        async for msg, ctx in mailbox:
+            match msg:
+                case GetState():
+                    await ctx.reply(state.value)
+
+    async with asyncio.timeout(5):
+        async with ActorSystem() as system:
+            ref = await system.actor(state_counter(State(42)), name="counter")
+            result = await ref.ask(GetState())
+            assert result == 42
