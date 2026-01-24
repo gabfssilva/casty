@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Protocol, TYPE_CHECKING
 
+from ..ref import ActorRef
+
 if TYPE_CHECKING:
-    from casty.ref import ActorRef
     from casty.envelope import Envelope
     from .shard import ShardCoordinator
     from .membership import MemberInfo
@@ -31,11 +32,11 @@ class ClusterShardResolver:
 
 
 @dataclass
-class ShardedActorRef[M]:
+class ShardedActorRef[M](ActorRef[M]):
     actor_id: str
     resolver: ShardResolver
     send_fn: Callable[[str, str, M], Awaitable[None]]
-    ask_fn: Callable[[str, str, M], Awaitable[Any]]
+    ask_fn: Callable[[str, str, M, float], Awaitable[Any]]
     known_leader_id: str | None = None
 
     def _get_target_address(self) -> str:
@@ -50,9 +51,9 @@ class ShardedActorRef[M]:
     async def send_envelope(self, envelope: "Envelope[M]") -> None:
         await self.send(envelope.payload, sender=envelope.sender)
 
-    async def ask[R](self, msg: M, timeout: float | None = None) -> R:
+    async def ask[R](self, msg: M, timeout: float = 10.0) -> R:
         address = self._get_target_address()
-        return await self.ask_fn(address, self.actor_id, msg)
+        return await self.ask_fn(address, self.actor_id, msg, timeout)
 
     def __rshift__(self, msg: M) -> Awaitable[None]:
         return self.send(msg)

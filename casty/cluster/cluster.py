@@ -299,13 +299,13 @@ async def cluster(
                             except (TimeoutError, Exception):
                                 pass
 
-                        async def ask_fn(address: str, actor_id: str, msg: Any) -> Any:
+                        async def ask_fn(address: str, actor_id: str, msg: Any, timeout: float) -> Any:
                             host, port_str = address.rsplit(":", 1)
                             try:
                                 await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
                                 result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
                                 if result and result.ref:
-                                    return await result.ref.ask(msg)
+                                    return await result.ref.ask(msg, timeout)
                             except (TimeoutError, Exception):
                                 pass
                             return None
