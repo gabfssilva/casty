@@ -1,12 +1,17 @@
-import pytest
 import asyncio
+import pytest
 from dataclasses import dataclass
 
-from casty import actor, Mailbox
+from casty import ActorSystem, actor, Mailbox
 
 
 @dataclass
-class Increment:
+class Ping:
+    value: int = 0
+
+
+@dataclass
+class Inc:
     amount: int
 
 
@@ -15,116 +20,135 @@ class Get:
     pass
 
 
-@dataclass
-class Put:
-    pass
-
-
-class TestActorReplicationConfig:
-    def test_actor_default_no_replication(self):
-        @actor
-        async def simple(*, mailbox: Mailbox[str]):
-            pass
-
-        behavior = simple()
-        assert not hasattr(behavior.func, "__replication_config__")
-
-    def test_actor_clustered_only(self):
-        @actor(clustered=True)
-        async def clustered_actor(*, mailbox: Mailbox[str]):
-            pass
-
-        behavior = clustered_actor()
-        config = behavior.__replication_config__
-        assert config.clustered is True
-        assert config.replicas == 1  # defaults to 1 when clustered
-
-    def test_actor_replicated(self):
-        @actor(replicas=3)
-        async def replicated_actor(*, mailbox: Mailbox[str]):
-            pass
-
-        behavior = replicated_actor()
-        config = behavior.__replication_config__
-        assert config.replicas == 3
-        assert config.clustered is True  # implied
-
-def test_actor_decorator_creates_behavior():
-    from casty.actor import actor, Behavior
-    from casty.mailbox import Mailbox
-    from casty.state import State
+@pytest.mark.asyncio
+async def test_actor_receives_messages_in_order():
+    """Messages sent to an actor are delivered in FIFO order"""
+    received: list[int] = []
 
     @actor
-    async def counter(state: State[int], *, mailbox: Mailbox[Increment | Get]):
+    async def collector(*, mailbox: Mailbox[Ping]):
         async for msg, ctx in mailbox:
-            match msg:
-                case Increment(amount):
-                    state.value += amount
-                case Get():
-                    await ctx.reply(state.value)
+            received.append(msg.value)
 
-    behavior = counter(State(0))
-    assert isinstance(behavior, Behavior)
-    assert behavior.state_initial is not None
-    assert behavior.state_initial.value == 0
-    assert behavior.initial_kwargs == {}
+    async with asyncio.timeout(5):
+        async with ActorSystem() as system:
+            ref = await system.actor(collector(), name="collector")
 
+            await ref.send(Ping(1))
+            await ref.send(Ping(2))
+            await ref.send(Ping(3))
 
-def test_behavior_stores_function():
-    from casty.actor import actor, Behavior
-    from casty.mailbox import Mailbox
+            await asyncio.sleep(0.05)
 
-    @actor
-    async def simple(*, mailbox: Mailbox[str]):
-        async for msg, ctx in mailbox:
-            pass
-
-    behavior = simple()
-    assert behavior.func is not None
-    assert callable(behavior.func)
+    assert received == [1, 2, 3]
 
 
 @pytest.mark.asyncio
-async def test_behavior_can_be_started():
-    from casty.actor import actor
-    from casty.mailbox import Mailbox, ActorMailbox, Stop
-    from casty.envelope import Envelope
-    from casty.state import State
-
-    results = []
+async def test_send_is_fire_and_forget():
+    """send() returns immediately without waiting for processing"""
+    processed = False
 
     @actor
-    async def collector(state: State[int], *, mailbox: Mailbox[str]):
+    async def slow(*, mailbox: Mailbox[Ping]):
+        nonlocal processed
         async for msg, ctx in mailbox:
-            state.value += 1
-            results.append(f"{state.value}:{msg}")
+            await asyncio.sleep(0.1)
+            processed = True
 
-    behavior = collector(State(0))
+    async with asyncio.timeout(5):
+        async with ActorSystem() as system:
+            ref = await system.actor(slow(), name="slow")
 
-    mailbox = ActorMailbox(self_id="collector/c1")
-    state = behavior.state_initial
+            await ref.send(Ping())
 
-    task = asyncio.create_task(behavior.func(state=state, mailbox=mailbox))
-
-    await mailbox.put(Envelope("hello"))
-    await mailbox.put(Envelope("world"))
-    await mailbox.put(Envelope(Stop()))
-
-    await task
-
-    assert results == ["1:hello", "2:world"]
+            assert not processed
 
 
-def test_actor_with_explicit_state():
-    from casty import actor, Mailbox
+@pytest.mark.asyncio
+async def test_ask_waits_for_response():
+    """ask() sends message and waits for reply from actor"""
+
+    @actor
+    async def echo(*, mailbox: Mailbox[Ping]):
+        async for msg, ctx in mailbox:
+            await ctx.reply(f"pong:{msg.value}")
+
+    async with asyncio.timeout(5):
+        async with ActorSystem() as system:
+            ref = await system.actor(echo(), name="echo")
+
+            result = await ref.ask(Ping(42))
+
+            assert result == "pong:42"
+
+
+@pytest.mark.asyncio
+async def test_ask_times_out():
+    """ask() raises TimeoutError if no reply within timeout"""
+
+    @actor
+    async def silent(*, mailbox: Mailbox[Ping]):
+        async for msg, ctx in mailbox:
+            pass  # Never replies
+
+    async with asyncio.timeout(5):
+        async with ActorSystem() as system:
+            ref = await system.actor(silent(), name="silent")
+
+            with pytest.raises(TimeoutError):
+                await ref.ask(Ping(), timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_reply_sends_to_sender():
+    """ctx.reply() sends response back to the original sender"""
+    from casty.reply import Reply
+
+    responses: list[str] = []
+
+    @actor
+    async def responder(*, mailbox: Mailbox[Ping]):
+        async for msg, ctx in mailbox:
+            await ctx.reply("response")
+
+    @actor
+    async def requester(*, mailbox: Mailbox[Reply[str]]):
+        async for msg, ctx in mailbox:
+            responses.append(msg.result)
+
+    async with asyncio.timeout(5):
+        async with ActorSystem() as system:
+            responder_ref = await system.actor(responder(), name="responder")
+            requester_ref = await system.actor(requester(), name="requester")
+
+            await responder_ref.send(Ping(), sender=requester_ref)
+
+            await asyncio.sleep(0.05)
+
+    assert responses == ["response"]
+
+
+@pytest.mark.asyncio
+async def test_actor_with_initial_state():
+    """Actor can be initialized with State[T] that persists across messages"""
     from casty.state import State
 
     @actor
-    async def counter(state: State[int], *, mailbox: Mailbox[str]):
-        pass
+    async def counter(state: State[int], *, mailbox: Mailbox[Inc | Get]):
+        async for msg, ctx in mailbox:
+            match msg:
+                case Inc(amount):
+                    state.set(state.value + amount)
+                case Get():
+                    await ctx.reply(state.value)
 
-    behavior = counter(State(0))
-    assert behavior.state_initial is not None
-    assert behavior.state_initial.value == 0
+    async with asyncio.timeout(5):
+        async with ActorSystem() as system:
+            ref = await system.actor(counter(State(10)), name="counter")
 
+            await ref.send(Inc(5))
+            await ref.send(Inc(3))
 
+            result = await ref.ask(Get())
+
+            assert result == 18

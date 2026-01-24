@@ -1,1 +1,0 @@
-"""Casty test suite."""

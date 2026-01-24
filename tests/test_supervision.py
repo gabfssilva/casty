@@ -1,51 +1,117 @@
-# tests/test_supervision.py
+import asyncio
 import pytest
 from dataclasses import dataclass
 
-
-def test_decision_types():
-    from casty.supervision import Decision
-
-    assert Decision.restart() is not None
-    assert Decision.stop() is not None
-    assert Decision.resume() is not None
-    assert Decision.escalate() is not None
+from casty import ActorSystem, actor, Mailbox
+from casty.supervision import supervised, Restart, OneForOne
+from casty.state import State
 
 
-def test_decision_equality():
-    from casty.supervision import Decision
-
-    assert Decision.restart() == Decision.restart()
-    assert Decision.stop() != Decision.restart()
+@dataclass
+class Crash:
+    pass
 
 
-def test_restart_strategy():
-    from casty.supervision import Restart, Decision
-
-    strategy = Restart(max_retries=3, within=60.0)
-
-    # First failure -> restart
-    decision = strategy.decide(ValueError("test"), retries=0)
-    assert decision == Decision.restart()
-
-    # Under limit -> restart
-    decision = strategy.decide(ValueError("test"), retries=2)
-    assert decision == Decision.restart()
-
-    # At limit -> stop
-    decision = strategy.decide(ValueError("test"), retries=3)
-    assert decision == Decision.stop()
+@dataclass
+class Ping:
+    pass
 
 
-def test_one_for_one():
-    from casty.supervision import OneForOne
-
-    scope = OneForOne()
-    assert scope.affects_siblings is False
+@dataclass
+class Get:
+    pass
 
 
-def test_all_for_one():
-    from casty.supervision import AllForOne
+@dataclass
+class Inc:
+    pass
 
-    scope = AllForOne()
-    assert scope.affects_siblings is True
+
+@pytest.mark.asyncio
+async def test_supervised_actor_restarts_after_crash():
+    """Actor with Restart strategy restarts after exception"""
+    crash_count = 0
+
+    @supervised(strategy=Restart(max_retries=3), scope=OneForOne())
+    @actor
+    async def crasher(*, mailbox: Mailbox[Crash | Ping]):
+        nonlocal crash_count
+        async for msg, ctx in mailbox:
+            match msg:
+                case Crash():
+                    crash_count += 1
+                    raise ValueError("intentional crash")
+                case Ping():
+                    await ctx.reply("pong")
+
+    async with asyncio.timeout(5):
+        async with ActorSystem() as system:
+            ref = await system.actor(crasher(), name="crasher")
+
+            await ref.send(Crash())
+            await asyncio.sleep(0.1)
+
+            result = await ref.ask(Ping())
+
+            assert result == "pong"
+            assert crash_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_actor_stops_after_max_retries():
+    """Actor stops permanently after exceeding max_retries"""
+    crash_count = 0
+
+    @supervised(strategy=Restart(max_retries=2, within=1.0), scope=OneForOne())
+    @actor
+    async def crasher(*, mailbox: Mailbox[Crash]):
+        nonlocal crash_count
+        async for msg, ctx in mailbox:
+            crash_count += 1
+            raise ValueError("crash")
+
+    async with asyncio.timeout(5):
+        async with ActorSystem() as system:
+            ref = await system.actor(crasher(), name="crasher")
+
+            for _ in range(5):
+                await ref.send(Crash())
+                await asyncio.sleep(0.05)
+
+            await asyncio.sleep(0.2)
+
+            assert crash_count <= 3  # max_retries + 1 initial
+
+
+@pytest.mark.asyncio
+async def test_state_preserved_after_restart():
+    """Actor state is preserved across restarts (not reset)"""
+
+    @supervised(strategy=Restart(max_retries=3), scope=OneForOne())
+    @actor
+    async def counter(state: State[int], *, mailbox: Mailbox[Inc | Crash | Get]):
+        async for msg, ctx in mailbox:
+            match msg:
+                case Inc():
+                    state.set(state.value + 1)
+                case Crash():
+                    raise ValueError("crash")
+                case Get():
+                    await ctx.reply(state.value)
+
+    async with asyncio.timeout(5):
+        async with ActorSystem() as system:
+            ref = await system.actor(counter(State(0)), name="counter")
+
+            await ref.send(Inc())
+            await ref.send(Inc())
+            await ref.send(Inc())
+
+            before_crash = await ref.ask(Get())
+            assert before_crash == 3
+
+            await ref.send(Crash())
+            await asyncio.sleep(0.1)
+
+            after_crash = await ref.ask(Get())
+            assert after_crash == 3  # State preserved across restart
