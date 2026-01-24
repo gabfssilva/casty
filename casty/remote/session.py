@@ -13,6 +13,44 @@ if TYPE_CHECKING:
     from .serializer import Serializer
 
 
+async def _ensure_actor_replica(
+    system: Any,
+    behavior_name: str | None,
+    actor_name: str,
+    remote_ref: "ActorRef",
+    initial_state: bytes | None = None,
+    check_replicas: bool = True,
+) -> "ActorRef | None":
+    if not behavior_name or not system:
+        return None
+
+    try:
+        from casty.actor import get_behavior
+        behavior = get_behavior(behavior_name)
+        if not behavior:
+            return None
+
+        if check_replicas:
+            config = behavior.__replication_config__
+            replicas = config.replicas if config else None
+            if not replicas or replicas <= 1:
+                return None
+
+        if initial_state:
+            from casty.serializable import deserialize
+            state = deserialize(initial_state)
+            behavior = behavior(state)
+
+        ref = await system.actor(behavior, name=actor_name)
+
+        from .messages import Expose
+        await remote_ref.send(Expose(ref=ref, name=actor_name))
+
+        return ref
+    except (KeyError, RuntimeError, TypeError, AttributeError):
+        return None
+
+
 @dataclass
 class SendLookup:
     name: str
@@ -138,19 +176,10 @@ async def _handle_envelope(
             local_ref = await remote_ref.ask(_LocalLookup(envelope.target))
 
             # Lazy replication: create replica if this node is responsible
-            if not local_ref and envelope.target and envelope.behavior and system:
-                try:
-                    from casty.actor import get_behavior
-                    behavior = get_behavior(envelope.behavior)
-                    if behavior:
-                        replication_config = behavior.__replication_config__
-                        replicas = replication_config.replicas if replication_config else None
-                        if replicas and replicas > 1:
-                            local_ref = await system.actor(behavior, name=envelope.target)
-                            from .messages import Expose
-                            await remote_ref.send(Expose(ref=local_ref, name=envelope.target))
-                except (KeyError, RuntimeError, TypeError, AttributeError):
-                    pass
+            if not local_ref and envelope.target:
+                local_ref = await _ensure_actor_replica(
+                    system, envelope.behavior, envelope.target, remote_ref
+                )
 
             if local_ref:
                 msg = serializer.decode(envelope.payload)
@@ -207,26 +236,10 @@ async def _handle_envelope(
                     pass
 
             # Lazy replication for lookup: create actor if behavior is registered
-            if not local_ref and envelope.name and envelope.behavior and system:
-                try:
-                    from casty.actor import get_behavior
-                    from casty.serializable import deserialize
-                    behavior = get_behavior(envelope.behavior)
-                    if behavior:
-                        replication_config = behavior.__replication_config__
-                        replicas = replication_config.replicas if replication_config else None
-                        if replicas and replicas > 1:
-                            # Use initial_state from envelope if provided
-                            if envelope.initial_state:
-                                initial_state = deserialize(envelope.initial_state)
-                                behavior_with_state = behavior(initial_state)
-                                local_ref = await system.actor(behavior_with_state, name=envelope.name)
-                            else:
-                                local_ref = await system.actor(behavior, name=envelope.name)
-                            from .messages import Expose
-                            await remote_ref.send(Expose(ref=local_ref, name=envelope.name))
-                except (KeyError, RuntimeError, TypeError, AttributeError):
-                    pass
+            if not local_ref and envelope.name:
+                local_ref = await _ensure_actor_replica(
+                    system, envelope.behavior, envelope.name, remote_ref, envelope.initial_state
+                )
 
             exists = local_ref is not None
             reply = RemoteEnvelope(
@@ -251,16 +264,12 @@ async def _handle_envelope(
 
                 mailbox = system._mailboxes.get(envelope.target)
                 if not mailbox and envelope.behavior:
-                    try:
-                        from casty.actor import get_behavior
-                        behavior = get_behavior(envelope.behavior)
-                        if behavior:
-                            await system.actor(behavior, name=envelope.target)
-                            from .messages import Expose
-                            await remote_ref.send(Expose(ref=system._actors.get(envelope.target), name=envelope.target))
-                            mailbox = system._mailboxes.get(envelope.target)
-                    except (KeyError, RuntimeError, TypeError, AttributeError):
-                        pass
+                    ref = await _ensure_actor_replica(
+                        system, envelope.behavior, envelope.target, remote_ref,
+                        check_replicas=False
+                    )
+                    if ref:
+                        mailbox = system._mailboxes.get(envelope.target)
 
                 if mailbox and mailbox.state is not None:
                     remote_state = deserialize(envelope.payload)
