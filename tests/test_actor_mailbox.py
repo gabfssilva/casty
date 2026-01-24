@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 import asyncio
+from types import SimpleNamespace
 from casty.mailbox import ActorMailbox, Stop
 from casty.envelope import Envelope
-from casty.state import State
 
 
 @pytest.mark.asyncio
@@ -24,21 +24,21 @@ async def test_actor_mailbox_basic_iteration():
 
 @pytest.mark.asyncio
 async def test_actor_mailbox_with_state():
-    state: State[int] = State(0)
+    state = SimpleNamespace(count=0)
     mailbox: ActorMailbox[str] = ActorMailbox(state=state)
 
     await mailbox.put(Envelope(payload="msg"))
     await mailbox.put(Envelope(payload=Stop()))
 
     async for msg, ctx in mailbox:
-        state.set(42)
+        state.count = 42
 
-    assert state.value == 42
+    assert state.count == 42
 
 
 @pytest.mark.asyncio
 async def test_actor_mailbox_with_filter():
-    state: State[int] = State(0)
+    state = SimpleNamespace(count=0)
     calls: list[str] = []
 
     async def tracking_filter(s, inner):
@@ -122,7 +122,7 @@ async def test_actor_mailbox_set_is_leader():
 
 @pytest.mark.asyncio
 async def test_actor_mailbox_state_property():
-    state: State[int] = State(100)
+    state = SimpleNamespace(value=100)
     mailbox: ActorMailbox[str] = ActorMailbox(state=state)
 
     assert mailbox.state is state
@@ -141,3 +141,5 @@ async def test_actor_mailbox_set_self_ref():
     mock_ref = object()
     mailbox.set_self_ref(mock_ref)
     assert mailbox._self_ref is mock_ref
+
+

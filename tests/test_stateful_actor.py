@@ -6,7 +6,6 @@ import pytest
 from dataclasses import dataclass
 from casty import actor, Mailbox, ActorSystem
 from casty.cluster.development import debug_filter
-from casty.state import State
 
 
 @dataclass
@@ -20,16 +19,16 @@ class Increment:
 
 
 @pytest.mark.asyncio
-async def test_actor_with_state_injection():
+async def test_actor_with_state():
     async with asyncio.timeout(5):
         @actor
-        async def counter(state: State[int], *, mailbox: Mailbox[Get | Increment]):
+        async def counter(count: int, *, mailbox: Mailbox[Get | Increment]):
             async for msg, ctx in mailbox:
                 match msg:
                     case Get():
-                        await ctx.reply(state.value)
+                        await ctx.reply(count)
                     case Increment(amount):
-                        state.set(state.value + amount)
+                        count += amount
 
         async with ActorSystem() as system:
             ref = await system.actor(counter(0), name="test")
@@ -59,13 +58,13 @@ async def test_actor_state_with_dataclass():
             value: int
 
         @actor
-        async def stateful(state: State[CounterState], *, mailbox: Mailbox[GetState | SetCount]):
+        async def stateful(state: CounterState, *, mailbox: Mailbox[GetState | SetCount]):
             async for msg, ctx in mailbox:
                 match msg:
                     case GetState():
-                        await ctx.reply(state.value)
+                        await ctx.reply(state)
                     case SetCount(value):
-                        state.set(CounterState(count=value, name=state.value.name))
+                        state = CounterState(count=value, name=state.name)
 
         async with ActorSystem(filters=[debug_filter("main")]) as system:
             ref = await system.actor(stateful(CounterState(count=0, name="test")), name="s")
@@ -77,25 +76,6 @@ async def test_actor_state_with_dataclass():
             await ref.send(SetCount(10))
             result = await ref.ask(GetState())
             assert result.count == 10
-
-
-@pytest.mark.asyncio
-async def test_actor_state_with_keyword_arg():
-    async with asyncio.timeout(5):
-        @actor
-        async def counter(state: State[int], *, mailbox: Mailbox[Get | Increment]):
-            async for msg, ctx in mailbox:
-                match msg:
-                    case Get():
-                        await ctx.reply(state.value)
-                    case Increment(amount):
-                        state.set(state.value + amount)
-
-        async with ActorSystem() as system:
-            ref = await system.actor(counter(state=100), name="kwarg")
-
-            result = await ref.ask(Get())
-            assert result == 100
 
 
 @pytest.mark.asyncio
@@ -119,32 +99,39 @@ async def test_actor_without_state_still_works():
 
 
 @pytest.mark.asyncio
-async def test_state_version_increments():
+async def test_multiple_state_params():
     async with asyncio.timeout(5):
         @dataclass
-        class GetVersion:
+        class GetBoth:
             pass
 
+        @dataclass
+        class IncrementCount:
+            pass
+
+        @dataclass
+        class SetName:
+            name: str
+
         @actor
-        async def versioned(state: State[int], *, mailbox: Mailbox[GetVersion | Increment]):
+        async def multi_state(count: int, name: str, *, mailbox: Mailbox[GetBoth | IncrementCount | SetName]):
             async for msg, ctx in mailbox:
                 match msg:
-                    case GetVersion():
-                        await ctx.reply(state.version)
-                    case Increment(amount):
-                        state.set(state.value + amount)
+                    case GetBoth():
+                        await ctx.reply((count, name))
+                    case IncrementCount():
+                        count += 1
+                    case SetName(n):
+                        name = n
 
         async with ActorSystem() as system:
-            ref = await system.actor(versioned(0), name="v")
+            ref = await system.actor(multi_state(0, "initial"), name="multi")
 
-            version = await ref.ask(GetVersion())
-            assert version == 0
+            result = await ref.ask(GetBoth())
+            assert result == (0, "initial")
 
-            await ref.send(Increment(1))
-            version = await ref.ask(GetVersion())
-            assert version == 1
+            await ref.send(IncrementCount())
+            await ref.send(SetName("updated"))
 
-            await ref.send(Increment(1))
-            await ref.send(Increment(1))
-            version = await ref.ask(GetVersion())
-            assert version == 3
+            result = await ref.ask(GetBoth())
+            assert result == (1, "updated")

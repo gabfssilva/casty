@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from casty import actor, Mailbox, State
+from casty import actor, Mailbox
 from casty.serializable import serializable
 
 
@@ -38,11 +38,11 @@ CacheMsg = Set | Get | Delete | Exists | Expire
 
 
 @actor
-async def cache_entry(state: State[bytes | None], mailbox: Mailbox[CacheMsg]):
+async def cache_entry(data: bytes | None, *, mailbox: Mailbox[CacheMsg]):
     async for msg, ctx in mailbox:
         match msg:
             case Set(new_value, ttl):
-                state.set(new_value)
+                data = new_value
 
                 if ttl is not None:
                     await ctx.schedule(Expire(), delay=ttl)
@@ -50,13 +50,13 @@ async def cache_entry(state: State[bytes | None], mailbox: Mailbox[CacheMsg]):
                 await ctx.reply(True)
 
             case Get():
-                await ctx.reply(state.value)
+                await ctx.reply(data)
 
             case Delete():
-                state.set(None)
+                data = None
 
             case Exists():
-                await ctx.reply(state.value is not None)
+                await ctx.reply(data is not None)
 
             case Expire():
-                state.set(None)
+                data = None

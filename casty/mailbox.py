@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, AsyncIterator, Callable, Protocol, TYPE_CHECKING
+from typing import Any, AsyncGenerator, AsyncIterator, Callable, Protocol
 
 from .context import Context
 from .envelope import Envelope
 from .ref import ActorRef, UnresolvedActorRef
 
-if TYPE_CHECKING:
-    from .state import State
-
 type MessageStream[M] = AsyncGenerator[tuple[M, Context], None]
-type Filter[M] = Callable[["State[Any] | None", MessageStream[M]], MessageStream[M]]
+type Filter[M] = Callable[[Any, MessageStream[M]], MessageStream[M]]
 
 
 @dataclass
@@ -45,7 +42,7 @@ class Mailbox[M](Protocol):
 class ActorMailbox[M](Mailbox[M]):
     def __init__(
         self,
-        state: "State[Any] | None" = None,
+        state: Any = None,
         filters: list[Filter[M]] | None = None,
         self_id: str = "",
         node_id: str = "local",
@@ -53,6 +50,8 @@ class ActorMailbox[M](Mailbox[M]):
         system: Any = None,
         self_ref: Any = None,
     ) -> None:
+        from .state import Stateful
+
         self._queue: asyncio.Queue[Envelope[M | Stop]] = asyncio.Queue()
         self._state = state
         self._filters = filters or []
@@ -62,6 +61,7 @@ class ActorMailbox[M](Mailbox[M]):
         self._system = system
         self._self_ref = self_ref
         self._stream: MessageStream[M] | None = None
+        self._stateful: Stateful | None = None
 
     async def _resolve_sender(self, sender: UnresolvedActorRef | ActorRef[Any] | None) -> ActorRef[Any] | None:
         match sender:
@@ -96,10 +96,13 @@ class ActorMailbox[M](Mailbox[M]):
 
         return stream()
 
+    def _apply_filter(self, f: Filter[M], stream: MessageStream[M]) -> MessageStream[M]:
+        return f(self._state, stream)
+
     def _build_stream(self) -> MessageStream[M]:
         stream = self._base_stream()
         for f in self._filters:
-            stream = f(self._state, stream)
+            stream = self._apply_filter(f, stream)
         return stream
 
     def __aiter__(self) -> AsyncIterator[tuple[M, Context]]:
@@ -124,7 +127,7 @@ class ActorMailbox[M](Mailbox[M]):
         self._is_leader = value
 
     @property
-    def state(self) -> "State[Any] | None":
+    def state(self) -> Any:
         return self._state
 
     async def schedule[T](

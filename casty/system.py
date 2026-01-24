@@ -10,6 +10,7 @@ from .mailbox import Mailbox, ActorMailbox, Stop, Filter
 from .protocols import System
 from .ref import ActorRef, LocalActorRef
 from .reply import reply
+from .state import Stateful
 from .supervision import DecisionType
 
 
@@ -24,6 +25,7 @@ class LocalActorSystem(System):
         self._actors: dict[str, ActorRef[Any]] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._mailboxes: dict[str, ActorMailbox[Any]] = {}
+        self._scheduled_tasks: list[asyncio.Task[None]] = []
 
     @property
     def node_id(self) -> str:
@@ -35,30 +37,31 @@ class LocalActorSystem(System):
         behavior: Behavior,
         filters: list[Filter] | None = None,
     ) -> ActorRef[M]:
-        from .state import State
+        from .transform import make_state_namespace
 
         if actor_id in self._actors:
             return self._actors[actor_id]
 
-        state = State(behavior.state_initial, node_id=self._node_id) if behavior.state_param else None
+        state_ns = make_state_namespace(behavior.state_params, behavior.state_initials) if behavior.state_params else None
 
         all_filters = [self._debug_filter] if self._debug_filter else []
         if filters:
             all_filters.extend(filters)
 
         mailbox: ActorMailbox[M] = ActorMailbox(
-            state=state,
+            state=state_ns,
             self_id=actor_id,
             node_id=self._node_id,
             is_leader=True,
             system=self,
             filters=all_filters,
         )
+
         ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, mailbox=mailbox, _system=self)
         mailbox.set_self_ref(ref)
 
         task = asyncio.create_task(
-            self._run_supervised_actor(actor_id, behavior, mailbox, ref, state)
+            self._run_supervised_actor(actor_id, behavior, mailbox, ref, state_ns)
         )
 
         self._actors[actor_id] = ref
@@ -71,26 +74,37 @@ class LocalActorSystem(System):
         self,
         actor_id: str,
         behavior: Behavior,
-        mailbox: Mailbox[M],
+        mailbox: ActorMailbox[M],
         ref: ActorRef[M],
-        state: Any = None,
+        state_ns: Any = None,
     ) -> None:
         kwargs = dict(behavior.initial_kwargs)
 
-        if behavior.state_param is not None and state is not None:
-            kwargs[behavior.state_param] = state
+        for name, value in zip(behavior.config_params, behavior.config_values):
+            if name not in kwargs:
+                kwargs[name] = value
 
-        retries = 0
         if behavior.system_param is not None:
             kwargs[behavior.system_param] = self
 
+        retries = 0
+        stateful = Stateful()
+        mailbox._stateful = stateful
+
         while True:
             try:
-                await behavior.func(
-                    *behavior.initial_args,
-                    mailbox=mailbox,
-                    **kwargs,
-                )
+                with stateful:
+                    if state_ns is not None:
+                        await behavior.func(
+                            state_ns,
+                            mailbox=mailbox,
+                            **kwargs,
+                        )
+                    else:
+                        await behavior.func(
+                            mailbox=mailbox,
+                            **kwargs,
+                        )
                 break
             except StopAsyncIteration:
                 break
@@ -188,7 +202,8 @@ class LocalActorSystem(System):
                 await asyncio.sleep(delay)
                 await to.send(msg, sender=sender)
 
-            asyncio.create_task(delayed_send())
+            task = asyncio.create_task(delayed_send())
+            self._scheduled_tasks.append(task)
             return None
 
         if every is not None:
@@ -202,6 +217,7 @@ class LocalActorSystem(System):
                         await to.send(msg, sender=sender)
 
             task = asyncio.create_task(periodic_send())
+            self._scheduled_tasks.append(task)
 
             async def cancel() -> None:
                 nonlocal cancelled
@@ -217,11 +233,26 @@ class LocalActorSystem(System):
         raise ValueError("Must specify either delay or every")
 
     async def shutdown(self) -> None:
+        for task in self._scheduled_tasks:
+            task.cancel()
+        for task in self._scheduled_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._scheduled_tasks.clear()
+
         for mailbox in self._mailboxes.values():
             await mailbox.put(Envelope(Stop()))
 
         if self._tasks:
-            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+            try:
+                async with asyncio.timeout(2.0):
+                    await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+            except TimeoutError:
+                for task in self._tasks.values():
+                    task.cancel()
+                await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
         self._actors.clear()
         self._tasks.clear()

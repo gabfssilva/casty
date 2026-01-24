@@ -2,7 +2,7 @@
 import asyncio
 import pytest
 from casty import ActorSystem
-from casty.cluster.cluster import cluster
+from casty.cluster.cluster import cluster, WaitFor
 from casty.cluster.messages import GetAliveMembers
 
 
@@ -38,28 +38,39 @@ async def test_two_node_cluster_join():
 async def test_two_nodes_with_seed():
     """Test two nodes where node-2 joins node-1 via seed."""
     async with ActorSystem(node_id="node-1") as system1:
-        # Start node-1 cluster on fixed port
+        # Start node-1 cluster with dynamic port
         cluster1 = await system1.actor(
-            cluster("node-1", host="127.0.0.1", port=9101),
+            cluster("node-1", host="127.0.0.1", port=0),
             name="cluster"
         )
-        await asyncio.sleep(0.2)
+
+        # Get node-1's actual address
+        from casty.cluster.cluster import GetClusterAddress
+        node1_address = await cluster1.ask(GetClusterAddress())
+        print(f"Node-1 address: {node1_address}")
 
         membership1 = await system1.actor(name="membership")
         print(f"Membership1 ref: {membership1}")
 
         async with ActorSystem(node_id="node-2") as system2:
-            # Start node-2 with node-1 as seed
+            # Start node-2 with node-1 as seed using actual address
             cluster2 = await system2.actor(
                 cluster(
                     "node-2",
                     host="127.0.0.1",
-                    port=9102,
-                    seeds=[("node-1", "127.0.0.1:9101")]
+                    port=0,
+                    seeds=[("node-1", node1_address)]
                 ),
                 name="cluster"
             )
+
+            # Give time for _connect_to_seed background task
             await asyncio.sleep(0.5)
+
+            await asyncio.gather(
+                cluster1.ask(WaitFor(nodes=2), timeout=5.0),
+                cluster2.ask(WaitFor(nodes=2), timeout=5.0),
+            )
 
             membership2 = await system2.actor(name="membership")
             print(f"Membership2 ref: {membership2}")

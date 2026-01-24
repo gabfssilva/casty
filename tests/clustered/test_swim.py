@@ -38,9 +38,9 @@ async def test_swim_no_ping_when_no_members():
         await swim_ref.send(SwimTick())
         await asyncio.sleep(0.1)
 
-        # Verify still no members
+        # Verify still no members (only self)
         members = await membership_ref.ask(GetAliveMembers())
-        assert len(members) == 0
+        assert len(members) == 1
 
 
 @pytest.mark.asyncio
@@ -97,9 +97,9 @@ async def test_swim_merges_membership_from_ping():
             name="swim"
         )
 
-        # Initially no members
+        # Initially no members (only self)
         members = await membership_ref.ask(GetAliveMembers())
-        assert len(members) == 0
+        assert len(members) == 1
 
         # Send Ping with member info
         ping = Ping(

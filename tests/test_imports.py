@@ -21,6 +21,5 @@ def test_import_state():
 
 
 def test_import_replication():
-    from casty import Routing, ReplicationConfig
-    assert Routing.LEADER.value == "leader"
-    assert ReplicationConfig is not None
+    from casty import ActorReplicationConfig
+    assert ActorReplicationConfig is not None

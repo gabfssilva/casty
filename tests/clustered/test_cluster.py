@@ -2,8 +2,6 @@
 import asyncio
 import pytest
 from casty import actor, Mailbox
-from casty.state import State
-from casty.actor_config import Routing
 from casty.cluster import DevelopmentCluster
 from casty.serializable import serializable
 from dataclasses import dataclass
@@ -24,12 +22,6 @@ class Get:
 @serializable
 @dataclass
 class GetNodeId:
-    pass
-
-
-@serializable
-@dataclass
-class WhoHandled:
     pass
 
 
@@ -77,46 +69,23 @@ async def test_global_actor_lookup():
 
 
 @actor
-async def state_actor(*, mailbox: Mailbox[GetNodeId], state: State[int]):
+async def node_id_actor(*, mailbox: Mailbox[GetNodeId]):
     async for msg, ctx in mailbox:
         match msg:
             case GetNodeId():
-                await ctx.reply(state.node_id)
-
-
-@pytest.mark.asyncio
-async def test_state_has_node_id():
-    """State should have node_id set for VectorClock increments."""
-    async with DevelopmentCluster(1) as cluster:
-        node = cluster[0]
-
-        ref = await node.actor(state_actor(state=0), name="stateful")
-        node_id = await ref.ask(GetNodeId())
-
-        assert node_id, "State.node_id should not be empty"
-        assert node_id == node.node_id, f"Expected {node.node_id}, got {node_id}"
-
-
-@actor(replicated=3, routing={WhoHandled: Routing.ANY})
-async def routing_actor(*, mailbox: Mailbox[WhoHandled]):
-    async for msg, ctx in mailbox:
-        match msg:
-            case WhoHandled():
                 await ctx.reply(ctx.node_id)
 
 
 @pytest.mark.asyncio
-async def test_routing_any_distributes():
-    """Routing.ANY should distribute messages across nodes."""
-    async with asyncio.timeout(10):
-        async with DevelopmentCluster(3) as cluster:
-            node0 = cluster[0]
+async def test_context_has_node_id():
+    """Context should have node_id set for tracking which node handles messages."""
+    async with DevelopmentCluster(1) as cluster:
+        node = cluster[0]
 
-            ref = await node0.actor(routing_actor(), name="routed")
+        ref = await node.actor(node_id_actor(), name="stateful")
+        node_id = await ref.ask(GetNodeId())
 
-            handlers = set()
-            for _ in range(6):
-                node_id = await ref.ask(WhoHandled())
-                handlers.add(node_id)
+        assert node_id, "ctx.node_id should not be empty"
+        assert node_id == node.node_id, f"Expected {node.node_id}, got {node_id}"
 
-            assert len(handlers) > 1, f"Expected multiple handlers, got {handlers}"
+

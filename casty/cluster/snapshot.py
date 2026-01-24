@@ -6,20 +6,18 @@ from pathlib import Path
 from typing import Protocol
 
 from casty.serializable import serializable, serialize, deserialize
-from .vector_clock import VectorClock
 
 
 @serializable
 @dataclass
 class Snapshot:
     data: bytes
-    clock: VectorClock
+    version: int = 0
 
 
 class SnapshotBackend(Protocol):
     async def save(self, snapshot: Snapshot) -> None: ...
     async def load_latest(self) -> Snapshot | None: ...
-    async def find_base(self, clock_a: VectorClock, clock_b: VectorClock) -> Snapshot | None: ...
     async def prune(self, keep: int) -> None: ...
 
 
@@ -35,15 +33,6 @@ class InMemory:
             return None
         return self._history[-1]
 
-    async def find_base(self, clock_a: VectorClock, clock_b: VectorClock) -> Snapshot | None:
-        meet = clock_a.meet(clock_b)
-
-        for snapshot in reversed(self._history):
-            if snapshot.clock.is_before_or_equal(meet):
-                return snapshot
-
-        return None
-
     async def prune(self, keep: int) -> None:
         if len(self._history) > keep:
             self._history = self._history[-keep:]
@@ -52,7 +41,7 @@ class InMemory:
 @dataclass
 class FileBackend:
     path: str
-    _index: list[tuple[str, VectorClock]] = field(default_factory=list, repr=False)
+    _index: list[tuple[str, int]] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
         Path(self.path).mkdir(parents=True, exist_ok=True)
@@ -66,7 +55,7 @@ class FileBackend:
             try:
                 data = file.read_bytes()
                 snapshot = deserialize(data)
-                self._index.append((file.name, snapshot.clock))
+                self._index.append((file.name, snapshot.version))
             except (OSError, TypeError, KeyError, ValueError):
                 pass
 
@@ -80,7 +69,7 @@ class FileBackend:
         data = serialize(snapshot)
         filepath.write_bytes(data)
 
-        self._index.append((filename, snapshot.clock.copy()))
+        self._index.append((filename, snapshot.version))
 
     async def load_latest(self) -> Snapshot | None:
         if not self._index:
@@ -94,18 +83,6 @@ class FileBackend:
 
         data = filepath.read_bytes()
         return deserialize(data)
-
-    async def find_base(self, clock_a: VectorClock, clock_b: VectorClock) -> Snapshot | None:
-        meet = clock_a.meet(clock_b)
-
-        for filename, clock in reversed(self._index):
-            if clock.is_before_or_equal(meet):
-                filepath = self._snapshot_path(filename)
-                if filepath.exists():
-                    data = filepath.read_bytes()
-                    return deserialize(data)
-
-        return None
 
     async def prune(self, keep: int) -> None:
         if len(self._index) <= keep:

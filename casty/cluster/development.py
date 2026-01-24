@@ -8,17 +8,22 @@ from typing import Any, Awaitable
 from casty.actor import Behavior
 from casty.ref import ActorRef
 from casty.mailbox import Filter, MessageStream
-from casty.state import State
 from .clustered_system import ClusteredActorSystem
 
 
 def debug_filter[M](node_id: str) -> Filter[M]:
-    def filter_fn(state: State[Any] | None, stream: MessageStream[M]) -> MessageStream[M]:
+    def filter_fn(
+        state: Any,
+        stream: MessageStream[M],
+        meta: Any = None,
+    ) -> MessageStream[M]:
         async def filtered() -> MessageStream[M]:
             async for msg, ctx in stream:
                 print(f"[{node_id}] {ctx.self_id} <- {type(msg).__name__}: {msg}", flush=True)
                 yield msg, ctx
+
         return filtered()
+
     return filter_fn
 
 
@@ -26,6 +31,7 @@ class DistributionStrategy(Enum):
     RANDOM = "random"
     ROUND_ROBIN = "round-robin"
     CONSISTENT = "consistent"
+
 
 class ClusteredDevelopmentActorRef[M](ActorRef[M]):
     def __init__(
@@ -41,30 +47,37 @@ class ClusteredDevelopmentActorRef[M](ActorRef[M]):
         self._cached_ref: ActorRef[M] | None = None
 
     async def _get_ref(self) -> ActorRef[M]:
-        if self._cached_ref is None:
-            node = self._cluster._next_node(name=self.actor_id)
-            self._cached_ref = await node.actor(behavior=self._behavior, name=self.actor_id)
-            if self._cached_ref is None:
-                raise RuntimeError(f"Failed to get actor ref for {self.actor_id}")
-        return self._cached_ref
+        node = self._cluster._next_node(name=self.actor_id)
+        print(f"[DEBUG] ClusteredDevelopmentActorRef._get_ref: node={node._node_id}, actor={self.actor_id}", flush=True)
+        ref = await node.actor(behavior=self._behavior, name=self.actor_id)
+        print(f"[DEBUG] ClusteredDevelopmentActorRef._get_ref: got ref type={type(ref).__name__}", flush=True)
+        return ref
 
     async def send(self, msg: M, *, sender: ActorRef[Any] | None = None) -> None:
+        print(f"[DEBUG] ClusteredDevelopmentActorRef.send: msg={type(msg).__name__}", flush=True)
         ref = await self._get_ref()
+        print(f"[DEBUG] ClusteredDevelopmentActorRef.send: calling ref.send on {type(ref).__name__}", flush=True)
         await ref.send(msg=msg, sender=sender)
+        print(f"[DEBUG] ClusteredDevelopmentActorRef.send: done", flush=True)
 
     async def send_envelope(self, envelope: "Envelope[M]") -> None:
         ref = await self._get_ref()
         await ref.send_envelope(envelope)
 
     async def ask(self, msg: M, timeout: float | None = None) -> Any:
+        print(f"[DEBUG] ClusteredDevelopmentActorRef.ask: msg={type(msg).__name__}", flush=True)
         ref = await self._get_ref()
-        return await ref.ask(msg=msg, timeout=timeout)
+        print(f"[DEBUG] ClusteredDevelopmentActorRef.ask: calling ref.ask on {type(ref).__name__}", flush=True)
+        result = await ref.ask(msg=msg, timeout=timeout)
+        print(f"[DEBUG] ClusteredDevelopmentActorRef.ask: result={result}", flush=True)
+        return result
 
     def __rshift__(self, msg: M) -> Awaitable[None]:
         return self.send(msg)
 
     def __lshift__[R](self, msg: M) -> Awaitable[R]:
         return self.ask(msg)
+
 
 class DevelopmentCluster:
     def __init__(
@@ -111,7 +124,7 @@ class DevelopmentCluster:
         *,
         name: str,
     ) -> ActorRef[M] | None:
-        return ClusteredDevelopmentActorRef(cluster=self,behavior=behavior,name=name)
+        return ClusteredDevelopmentActorRef(cluster=self, behavior=behavior, name=name)
 
     async def start(self) -> None:
         print("Starting development cluster...", flush=True)
@@ -162,8 +175,8 @@ class DevelopmentCluster:
 
     async def wait_for(self, nodes: int):
         from casty.cluster import WaitFor
-        cluster = await self._next_node().actor(name="cluster")
-        await cluster.ask(WaitFor(nodes=nodes))
+        clusters = [ await s.actor(name="cluster") for s in self._systems ]
+        await asyncio.gather(*[ c.ask(WaitFor(nodes=nodes)) for c in clusters ])
 
     async def gossip(self) -> ActorRef:
         node = self._next_node()

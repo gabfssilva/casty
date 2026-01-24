@@ -13,7 +13,7 @@ from .constants import REMOTE_ACTOR_ID, MEMBERSHIP_ACTOR_ID, SWIM_NAME
 from .messages import (
     Ping, Ack, PingReq, PingReqAck,
     MemberSnapshot, SwimTick, ProbeTimeout, PingReqTimeout,
-    GetAliveMembers, GetAllMembers, MergeMembership, MarkDown,
+    GetAliveMembers, GetAllMembers, MergeMembership, MarkDown, MarkAlive,
 )
 from .membership import MemberInfo
 
@@ -34,7 +34,7 @@ class _PendingSend:
 async def swim_actor(
     node_id: str,
     probe_interval: float = 1.0,
-    probe_timeout: float = 0.5,
+    probe_timeout: float = 2.0,
     ping_req_fanout: int = 3,
     *,
     mailbox: Mailbox[SwimTick | Ping | Ack | PingReq | PingReqAck | ProbeTimeout | PingReqTimeout | Reply],
@@ -85,6 +85,10 @@ async def swim_actor(
                 await ctx.schedule(ProbeTimeout(target), delay=probe_timeout)
 
             case Ping(sender=ping_sender, members=remote_members):
+                for m in remote_members:
+                    if m.node_id == ping_sender and m.state == "alive":
+                        await membership_ref.send(MarkAlive(ping_sender, m.address))
+                        break
                 await membership_ref.send(MergeMembership(remote_members))
 
                 snapshots = await get_member_snapshots()
@@ -101,6 +105,10 @@ async def swim_actor(
             case Ack(sender=ack_sender, members=remote_members):
                 if ack_sender in pending_probes:
                     del pending_probes[ack_sender]
+                for m in remote_members:
+                    if m.node_id == ack_sender and m.state == "alive":
+                        await membership_ref.send(MarkAlive(ack_sender, m.address))
+                        break
                 await membership_ref.send(MergeMembership(remote_members))
 
             case ProbeTimeout(target):
@@ -128,6 +136,10 @@ async def swim_actor(
                 await ctx.schedule(PingReqTimeout(target), delay=probe_timeout)
 
             case PingReq(sender=req_sender, target=req_target, members=remote_members):
+                for m in remote_members:
+                    if m.node_id == req_sender and m.state == "alive":
+                        await membership_ref.send(MarkAlive(req_sender, m.address))
+                        break
                 await membership_ref.send(MergeMembership(remote_members))
 
                 members = await membership_ref.ask(GetAliveMembers())
@@ -152,6 +164,10 @@ async def swim_actor(
             case PingReqAck(sender=_, target=ack_target, success=success, members=remote_members):
                 if success and ack_target in pending_probes:
                     del pending_probes[ack_target]
+                    for m in remote_members:
+                        if m.node_id == ack_target and m.state == "alive":
+                            await membership_ref.send(MarkAlive(ack_target, m.address))
+                            break
                 await membership_ref.send(MergeMembership(remote_members))
 
             case PingReqTimeout(target):
@@ -162,10 +178,33 @@ async def swim_actor(
             case Reply(result=Connected()):
                 pass
 
+            case Reply(result=Ack() as ack_msg):
+                ack_sender = ack_msg.sender
+                remote_members = ack_msg.members
+                if ack_sender in pending_probes:
+                    del pending_probes[ack_sender]
+                for m in remote_members:
+                    if m.node_id == ack_sender and m.state == "alive":
+                        await membership_ref.send(MarkAlive(ack_sender, m.address))
+                        break
+                await membership_ref.send(MergeMembership(remote_members))
+
+            case Reply(result=PingReqAck() as ack_msg):
+                ack_target = ack_msg.target
+                success = ack_msg.success
+                remote_members = ack_msg.members
+                if success and ack_target in pending_probes:
+                    del pending_probes[ack_target]
+                    for m in remote_members:
+                        if m.node_id == ack_target and m.state == "alive":
+                            await membership_ref.send(MarkAlive(ack_target, m.address))
+                            break
+                await membership_ref.send(MergeMembership(remote_members))
+
             case Reply(result=LookupResult(ref=ref, peer=peer)) if ref is not None and peer is not None:
                 pending = pending_sends.pop(peer, None)
                 if pending:
-                    await ref.send(pending.message)
+                    await ref.send(pending.message, sender=mailbox.ref())
 
             case Reply(result=LookupResult(ref=None, peer=peer)) if peer is not None:
                 pending_sends.pop(peer, None)

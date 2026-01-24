@@ -121,30 +121,25 @@ async def test_remote_bidirectional():
         remote_a = await system_a.actor(remote(), name="remote")
         remote_b = await system_b.actor(remote(), name="remote")
 
-        # A listens, B connects
         listen_result = await remote_a.ask(Listen(port=0))
         port = listen_result.address[1]
 
         await remote_b.ask(Connect(host="127.0.0.1", port=port))
 
-        # A exposes actor
         echo_a = await system_a.actor(echo_actor("A"), name="echo-a")
         await remote_a.ask(Expose(ref=echo_a, name="echo-a"))
 
-        # B exposes actor
         echo_b = await system_b.actor(echo_actor("B"), name="echo-b")
         await remote_b.ask(Expose(ref=echo_b, name="echo-b"))
 
         await asyncio.sleep(0.1)
 
-        # B looks up A's actor (client -> server)
         result_a = await remote_b.ask(Lookup("echo-a"))
         assert result_a.ref is not None
         response_a = await result_a.ref.ask(Ping(message="from B"))
         assert response_a.message == "A: from B"
 
-        # A looks up B's actor (server -> client) - TRUE BIDIRECTIONAL TEST
         result_b = await remote_a.ask(Lookup("echo-b"))
-        assert result_b.ref is not None, "Server could not lookup client's actor - bidirectional failed!"
+        assert result_b.ref is not None
         response_b = await result_b.ref.ask(Ping(message="from A"))
         assert response_b.message == "B: from A"

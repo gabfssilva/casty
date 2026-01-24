@@ -1,7 +1,4 @@
 from .hash_ring import HashRing
-from .vector_clock import VectorClock
-from .snapshot import Snapshot, SnapshotBackend, InMemory, FileBackend
-from .merge import Merge
 from .messages import (
     MemberSnapshot,
     Ping,
@@ -21,25 +18,25 @@ from .messages import (
 from .membership import membership_actor, MemberInfo, MemberState
 from .swim import swim_actor
 from .gossip import gossip_actor, Put, Get
-from .conflict import detect_conflict, ConflictResult
 from .cluster import cluster, CreateActor, WaitFor
-from .replica_manager import ReplicaManager, ReplicaInfo
-from .replicated_ref import ReplicatedActorRef
 from .clustered_system import ClusteredActorSystem
 from .development import DevelopmentCluster, DistributionStrategy
+from .shard import ShardCoordinator
+from .sharded_ref import ShardedActorRef, ClusterShardResolver
+from .states import (
+    states,
+    StoreState,
+    StoreAck,
+    GetState,
+    DeleteState,
+    StateBackend,
+    MemoryBackend,
+    ReplicationQuorumError,
+)
 
 __all__ = [
     # Hash ring
     "HashRing",
-    # Vector clock
-    "VectorClock",
-    # Merge
-    "Merge",
-    # Snapshot
-    "Snapshot",
-    "SnapshotBackend",
-    "InMemory",
-    "FileBackend",
     # Messages
     "MemberSnapshot",
     "Ping",
@@ -69,16 +66,21 @@ __all__ = [
     "gossip_actor",
     "Put",
     "Get",
-    # Conflict detection
-    "detect_conflict",
-    "ConflictResult",
-    # Replica manager
-    "ReplicaManager",
-    "ReplicaInfo",
-    # Replicated ref
-    "ReplicatedActorRef",
     # Systems
     "ClusteredActorSystem",
     "DevelopmentCluster",
     "DistributionStrategy",
+    # Sharding
+    "ShardCoordinator",
+    "ShardedActorRef",
+    "ClusterShardResolver",
+    # States
+    "states",
+    "StoreState",
+    "StoreAck",
+    "GetState",
+    "DeleteState",
+    "StateBackend",
+    "MemoryBackend",
+    "ReplicationQuorumError",
 ]

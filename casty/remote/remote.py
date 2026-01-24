@@ -98,6 +98,7 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                 await ctx.reply(Unexposed(name))
 
             case Lookup(name, peer=None, ensure=ensure, initial_state=initial_state, behavior=behavior):
+                print(f"[DEBUG] remote Lookup (broadcast): name={name}", flush=True)
                 if name in exposed:
                     await ctx.reply(LookupResult(ref=exposed[name], peer=None))
                 else:
@@ -116,17 +117,21 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                                 await ctx.reply(LookupResult(ref=ref, peer=peer_id))
                                 found = True
                                 break
-                        except (TimeoutError, OSError, KeyError):
+                        except (TimeoutError, OSError, KeyError) as e:
+                            print(f"[DEBUG] remote Lookup broadcast to {peer_id} failed: {type(e).__name__}: {e}", flush=True)
                             continue
                     if not found:
+                        print(f"[DEBUG] remote Lookup broadcast: not found", flush=True)
                         await ctx.reply(LookupResult(ref=None, peer=None))
 
             case Lookup(name, peer=peer_id, ensure=ensure, initial_state=initial_state, behavior=behavior) if peer_id is not None:
+                print(f"[DEBUG] remote Lookup (targeted): name={name}, peer={peer_id}", flush=True)
                 if peer_id in sessions:
                     session = sessions[peer_id]
                     try:
                         correlation_id = uuid.uuid4().hex
                         exists = await session.ask(SendLookup(name=name, correlation_id=correlation_id, ensure=ensure, initial_state=initial_state, behavior=behavior))
+                        print(f"[DEBUG] remote Lookup (targeted): exists={exists}", flush=True)
                         if exists:
                             ref = RemoteRef(
                                 actor_id=f"remote/{name}",
@@ -137,9 +142,11 @@ async def remote(*, mailbox: Mailbox[RemoteMessage]):
                             await ctx.reply(LookupResult(ref=ref, peer=peer_id))
                         else:
                             await ctx.reply(LookupResult(ref=None, peer=peer_id))
-                    except (TimeoutError, OSError, KeyError):
+                    except (TimeoutError, OSError, KeyError) as e:
+                        print(f"[DEBUG] remote Lookup (targeted) failed: {type(e).__name__}: {e}", flush=True)
                         await ctx.reply(LookupResult(ref=None, peer=peer_id))
                 else:
+                    print(f"[DEBUG] remote Lookup (targeted): no session for {peer_id}", flush=True)
                     await ctx.reply(LookupResult(ref=None, peer=peer_id))
 
             case _SessionConnected(peer_id, session):

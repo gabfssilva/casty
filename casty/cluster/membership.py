@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from casty import actor, Mailbox
-from .messages import Join, MergeMembership, MarkDown, MemberSnapshot, GetAliveMembers, GetAllMembers, GetResponsibleNodes, SetLocalAddress, GetAddress
+from .messages import Join, MergeMembership, MarkDown, MarkAlive, MemberSnapshot, GetAliveMembers, GetAllMembers, GetResponsibleNodes, SetLocalAddress, GetAddress
 from .hash_ring import HashRing
 
 
@@ -27,7 +27,7 @@ async def membership_actor(
     node_id: str,
     initial_members: dict[str, MemberInfo] | None = None,
     *,
-    mailbox: Mailbox[Join | MergeMembership | MarkDown | GetAliveMembers | GetAllMembers | GetResponsibleNodes | SetLocalAddress | GetAddress],
+    mailbox: Mailbox[Join | MergeMembership | MarkDown | MarkAlive | GetAliveMembers | GetAllMembers | GetResponsibleNodes | SetLocalAddress | GetAddress],
 ):
     members = dict(initial_members or {})
     hash_ring = HashRing()
@@ -92,14 +92,47 @@ async def membership_actor(
                         member.incarnation += 1
                         hash_ring.remove_node(target_node_id)
 
+            case MarkAlive(target_node_id, address):
+                if target_node_id in members:
+                    member = members[target_node_id]
+                    if member.state == MemberState.DOWN:
+                        member.state = MemberState.ALIVE
+                        member.incarnation += 1
+                        member.address = address
+                        hash_ring.add_node(target_node_id)
+                else:
+                    members[target_node_id] = MemberInfo(
+                        node_id=target_node_id,
+                        address=address,
+                        state=MemberState.ALIVE,
+                        incarnation=0,
+                    )
+                    hash_ring.add_node(target_node_id)
+
             case GetAliveMembers():
-                await ctx.reply({
+                result = {
                     mid: info for mid, info in members.items()
                     if info.state == MemberState.ALIVE
-                })
+                }
+                if local_address:
+                    result[node_id] = MemberInfo(
+                        node_id=node_id,
+                        address=local_address,
+                        state=MemberState.ALIVE,
+                        incarnation=0,
+                    )
+                await ctx.reply(result)
 
             case GetAllMembers():
-                await ctx.reply(dict(members))
+                result = dict(members)
+                if local_address:
+                    result[node_id] = MemberInfo(
+                        node_id=node_id,
+                        address=local_address,
+                        state=MemberState.ALIVE,
+                        incarnation=0,
+                    )
+                await ctx.reply(result)
 
             case GetResponsibleNodes(actor_id, count):
                 try:

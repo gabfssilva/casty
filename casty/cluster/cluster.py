@@ -6,20 +6,21 @@ from typing import TYPE_CHECKING, Any
 
 from casty import actor, Mailbox
 from casty.actor import Behavior
-from casty.actor_config import Routing
+from casty.envelope import Envelope
 from casty.protocols import System
 from casty.remote import remote, Listen, Connect, Expose, Lookup
-from casty.remote.session import SendReplicate
-from casty.serializable import serialize
+from casty.serializable import serializable
 
 from .membership import membership_actor, MemberInfo, MemberState
 from .swim import swim_actor
 from .gossip import gossip_actor
-from .messages import Join, SetLocalAddress, GetAliveMembers, GetResponsibleNodes, GetAddress
-from .replica_manager import ReplicaManager
-from .replicated_ref import ReplicatedActorRef
-from casty.actor import register_behavior
-from .replication import Replicator, ReplicationConfig, replication_filter
+from .messages import Join, SetLocalAddress, GetAliveMembers, GetAddress
+from casty.actor import register_behavior, get_registered_actor
+from .replication import replication_filter, leadership_filter
+from .hash_ring import HashRing
+from .shard import ShardCoordinator
+from .sharded_ref import ShardedActorRef, ClusterShardResolver
+from .states import states, StoreState, GetState
 
 if TYPE_CHECKING:
     from casty.ref import ActorRef
@@ -29,6 +30,13 @@ if TYPE_CHECKING:
 class CreateActor:
     behavior: Behavior
     name: str
+
+
+@serializable
+@dataclass
+class _RemoteCreateActor:
+    behavior_name: str
+    actor_name: str
 
 
 @dataclass
@@ -41,7 +49,15 @@ class WaitFor:
     nodes: int
 
 
-type ClusterMessage = CreateActor | GetClusterAddress | WaitFor
+type ClusterMessage = CreateActor | GetClusterAddress | WaitFor | _RemoteCreateActor
+
+
+class _MembershipAdapter:
+    def __init__(self, alive_members: dict[str, MemberInfo]):
+        self._alive = set(alive_members.keys())
+
+    def is_alive(self, node_id: str) -> bool:
+        return node_id in self._alive
 
 
 @actor
@@ -54,12 +70,12 @@ async def cluster(
     mailbox: Mailbox[ClusterMessage],
     system: System,
 ):
-    # 1. Create remote and listen
     remote_ref = await system.actor(remote(), name="remote")
     result = await remote_ref.ask(Listen(port=port, host=host))
     local_address = f"{host}:{result.address[1]}"
 
-    # 2. Create membership with seeds as initial members
+    states_ref = await system.actor(states(), name="states")
+
     initial_members: dict[str, MemberInfo] = {}
     for seed_node_id, seed_address in (seeds or []):
         initial_members[seed_node_id] = MemberInfo(
@@ -75,25 +91,20 @@ async def cluster(
     )
     await membership_ref.send(SetLocalAddress(local_address))
 
-    # 3. Create SWIM and gossip
     swim_ref = await system.actor(swim_actor(node_id), name="swim")
     gossip_ref = await system.actor(gossip_actor(node_id), name="gossip")
 
-    # 4. Create replica manager
-    replica_manager = ReplicaManager()
-
-    # 5. Expose for other nodes to find
     await remote_ref.ask(Expose(ref=swim_ref, name="swim"))
     await remote_ref.ask(Expose(ref=gossip_ref, name="gossip"))
     await remote_ref.ask(Expose(ref=membership_ref, name="membership"))
+    await remote_ref.ask(Expose(ref=mailbox.ref(), name="cluster"))
+    await remote_ref.ask(Expose(ref=states_ref, name="states"))
 
-    # 6. Connect to seeds
     for seed_node_id, seed_address in (seeds or []):
         asyncio.create_task(_connect_to_seed(
             remote_ref, membership_ref, node_id, local_address, seed_address
         ))
 
-    # 7. Process cluster messages
     async for msg, ctx in mailbox:
         match msg:
             case GetClusterAddress():
@@ -102,154 +113,212 @@ async def cluster(
             case CreateActor(behavior, name):
                 func_name = behavior.func.__name__
                 replication_config = behavior.__replication_config__
-                replicated = replication_config.replicated if replication_config else None
-
-                # Check if already exists locally
-                local_ref = await system.actor(name=name)
-                if local_ref:
-                    info = replica_manager.get(name)
-                    if info and replication_config:
-                        await ctx.reply(ReplicatedActorRef(
-                            actor_id=name,
-                            manager=replica_manager,
-                            node_refs={node_id: local_ref},
-                            routing=replication_config.routing,
-                            local_node=node_id,
-                        ))
-                    else:
-                        await ctx.reply(local_ref)
-                    continue
+                replicas = replication_config.replicas if replication_config else None
 
                 members = await membership_ref.ask(GetAliveMembers())
 
-                if replicated and replicated > 1:
-                    # Get responsible nodes via HashRing in membership
-                    responsible_nodes = await membership_ref.ask(
-                        GetResponsibleNodes(name, replicated)
+                local_ref = await system.actor(name=name)
+                if local_ref:
+                    await ctx.reply(local_ref)
+                    continue
+
+                if replicas and replicas > 1:
+                    hash_ring = HashRing()
+                    hash_ring.add_node(node_id)
+                    for member_id in members:
+                        hash_ring.add_node(member_id)
+
+                    membership_adapter = _MembershipAdapter(members)
+                    membership_adapter._alive.add(node_id)
+
+                    shard_coordinator = ShardCoordinator(
+                        node_id=node_id,
+                        hash_ring=hash_ring,
+                        membership=membership_adapter,
                     )
 
-                    if node_id in responsible_nodes:
-                        # Register behavior for lazy replication on other nodes
+                    responsible_nodes = shard_coordinator.get_responsible_nodes(name, replicas)
+                    is_leader = shard_coordinator.is_leader(name, replicas)
+
+                    if is_leader:
                         register_behavior(func_name, behavior)
 
-                        # Get other replica nodes (excluding self)
-                        other_replicas = [n for n in responsible_nodes if n != node_id]
+                        other_replicas = shard_coordinator.get_replica_ids(name, replicas)
+                        states_refs: list[ActorRef] = []
 
-                        # Create send function that uses remote module
-                        sessions: dict[str, ActorRef] = {}
-
-                        async def send_to_node(target_node: str, msg: Any) -> None:
-                            if target_node not in sessions:
-                                address = await membership_ref.ask(GetAddress(target_node))
-                                if address:
-                                    host, port_str = address.rsplit(":", 1)
-                                    try:
-                                        await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
-                                        initial_state = serialize(behavior.state_initial) if behavior.state_param else None
-                                        result = await remote_ref.ask(Lookup(name, peer=address, initial_state=initial_state), timeout=2.0)
-                                        if result and result.ref and hasattr(result.ref, '_session'):
-                                            sessions[target_node] = result.ref._session
-                                    except (TimeoutError, Exception):
-                                        pass
-
-                            session = sessions.get(target_node)
-                            if session:
-                                await session.send(SendReplicate(
-                                    actor_id=name,
-                                    snapshot=msg.snapshot,
-                                    version=msg.version,
-                                ))
-
-                        # Create replicator and filter with fire-and-forget replication
-                        rep_config = ReplicationConfig(
-                            factor=replicated,
-                            write_quorum=1,  # No ack required for now
-                            routing=Routing.LEADER,
-                        )
-                        replicator = Replicator(
-                            actor_id=name,
-                            config=rep_config,
-                            replica_nodes=other_replicas,
-                            send_fn=send_to_node,
-                            node_id=node_id,
-                        )
-                        rep_filter = replication_filter(replicator)
-
-                        # Create local replica with replication filter
-                        local_ref = await system.actor(behavior, name=name, filters=[rep_filter])
-                        await remote_ref.ask(Expose(ref=local_ref, name=name))
-
-                        # Build refs for all responsible nodes (replicas created lazily)
-                        node_refs: dict[str, Any] = {node_id: local_ref}
-
-                        initial_state = serialize(behavior.state_initial) if behavior.state_param else None
-                        for resp_node in responsible_nodes:
-                            if resp_node != node_id and resp_node in members:
-                                member_info = members[resp_node]
-                                host, port_str = member_info.address.rsplit(":", 1)
-                                try:
-                                    await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
-                                    result = await remote_ref.ask(Lookup(name, peer=member_info.address, initial_state=initial_state, behavior=behavior.__name__), timeout=2.0)
-                                    if result and result.ref:
-                                        node_refs[resp_node] = result.ref
-                                except (TimeoutError, Exception):
-                                    pass
-
-                        replica_manager.register(name, list(node_refs.keys()), node_id)
-                        await ctx.reply(ReplicatedActorRef(
-                            actor_id=name,
-                            manager=replica_manager,
-                            node_refs=node_refs,
-                            routing=replication_config.routing,
-                            local_node=node_id,
-                        ))
-                    else:
-                        # Not responsible - check if already exists on responsible node
-                        found_ref = None
-                        initial_state = serialize(behavior.state_initial) if behavior.state_param else None
-                        for resp_node in responsible_nodes:
+                        for resp_node in other_replicas:
                             if resp_node in members:
                                 member_info = members[resp_node]
-                                host, port_str = member_info.address.rsplit(":", 1)
+                                host_part, port_str = member_info.address.rsplit(":", 1)
                                 try:
-                                    await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
-                                    result = await remote_ref.ask(Lookup(
-                                        name,
-                                        peer=member_info.address,
-                                        initial_state=initial_state,
-                                    ), timeout=2.0)
+                                    await remote_ref.ask(Connect(host=host_part, port=int(port_str)), timeout=2.0)
+                                    result = await remote_ref.ask(Lookup("states", peer=member_info.address), timeout=2.0)
                                     if result and result.ref:
-                                        found_ref = result.ref
-                                        break
-                                except (TimeoutError, Exception):
-                                    continue
+                                        states_refs.append(result.ref)
+                                except (TimeoutError, Exception) as e:
+                                    print(f"[DEBUG] cluster states lookup for {resp_node} failed: {type(e).__name__}: {e}", flush=True)
 
-                        if found_ref:
-                            await ctx.reply(found_ref)
-                        else:
-                            # Create locally with full behavior (includes initial state)
-                            # Replication will sync to responsible nodes
-                            local_ref = await system.actor(behavior, name=name)
-                            await remote_ref.ask(Expose(ref=local_ref, name=name))
-                            await ctx.reply(local_ref)
+                        write_quorum = replication_config.write_quorum if replication_config else 1
+                        quorum_count = 1
+                        match write_quorum:
+                            case "async":
+                                quorum_count = 0
+                            case "all":
+                                quorum_count = len(states_refs)
+                            case "quorum":
+                                quorum_count = (len(states_refs) // 2) + 1
+                            case int(n):
+                                quorum_count = min(n, len(states_refs))
+
+                        rep_filter = replication_filter(states_refs, write_quorum=quorum_count)
+                        lead_filter = leadership_filter(shard_coordinator, name, replicas)
+
+                        local_ref = await system.actor(behavior, name=name, filters=[lead_filter, rep_filter])
+                        await remote_ref.ask(Expose(ref=local_ref, name=name))
+
+                        all_members = dict(members)
+                        all_members[node_id] = MemberInfo(
+                            node_id=node_id,
+                            address=local_address,
+                            state=MemberState.ALIVE,
+                            incarnation=0,
+                        )
+
+                        resolver = ClusterShardResolver(
+                            shard_coordinator=shard_coordinator,
+                            members=all_members,
+                            replicas=replicas,
+                        )
+
+                        async def send_fn(address: str, actor_id: str, msg: Any) -> None:
+                            print(f"[DEBUG] cluster send_fn (leader): address={address}, actor={actor_id}, msg={type(msg).__name__}", flush=True)
+                            host, port_str = address.rsplit(":", 1)
+                            if address == local_address:
+                                await local_ref.send(msg)
+                                return
+                            try:
+                                await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
+                                result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
+                                if result and result.ref:
+                                    await result.ref.send(msg)
+                            except (TimeoutError, Exception) as e:
+                                print(f"[DEBUG] cluster send_fn (leader) failed: {type(e).__name__}: {e}", flush=True)
+
+                        async def ask_fn(address: str, actor_id: str, msg: Any) -> Any:
+                            print(f"[DEBUG] cluster ask_fn (leader): address={address}, actor={actor_id}, msg={type(msg).__name__}", flush=True)
+                            host, port_str = address.rsplit(":", 1)
+                            if address == local_address:
+                                return await local_ref.ask(msg)
+                            try:
+                                await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
+                                result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
+                                if result and result.ref:
+                                    return await result.ref.ask(msg)
+                            except (TimeoutError, Exception) as e:
+                                print(f"[DEBUG] cluster ask_fn (leader) failed: {type(e).__name__}: {e}", flush=True)
+                            return None
+
+                        sharded_ref = ShardedActorRef(
+                            actor_id=name,
+                            resolver=resolver,
+                            send_fn=send_fn,
+                            ask_fn=ask_fn,
+                            known_leader_id=node_id,
+                        )
+                        await ctx.reply(sharded_ref)
+                    else:
+                        leader_id = shard_coordinator.get_leader_id(name, replicas)
+                        leader_address = members[leader_id].address if leader_id in members else None
+
+                        if leader_address:
+                            register_behavior(func_name, behavior)
+                            host, port_str = leader_address.rsplit(":", 1)
+                            try:
+                                await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
+                                result = await remote_ref.ask(Lookup("cluster", peer=leader_address), timeout=2.0)
+                                if result and result.ref:
+                                    await result.ref.ask(
+                                        _RemoteCreateActor(behavior_name=func_name, actor_name=name),
+                                        timeout=5.0
+                                    )
+                            except (TimeoutError, Exception) as e:
+                                print(f"[DEBUG] cluster non-leader forward to leader failed: {type(e).__name__}: {e}", flush=True)
+
+                        all_members = dict(members)
+                        all_members[node_id] = MemberInfo(
+                            node_id=node_id,
+                            address=local_address,
+                            state=MemberState.ALIVE,
+                            incarnation=0,
+                        )
+
+                        resolver = ClusterShardResolver(
+                            shard_coordinator=shard_coordinator,
+                            members=all_members,
+                            replicas=replicas,
+                        )
+
+                        async def send_fn(address: str, actor_id: str, msg: Any) -> None:
+                            print(f"[DEBUG] cluster send_fn (non-leader): address={address}, actor={actor_id}, msg={type(msg).__name__}", flush=True)
+                            host, port_str = address.rsplit(":", 1)
+                            try:
+                                await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
+                                result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
+                                if result and result.ref:
+                                    await result.ref.send(msg)
+                            except (TimeoutError, Exception) as e:
+                                print(f"[DEBUG] cluster send_fn (non-leader) failed: {type(e).__name__}: {e}", flush=True)
+
+                        async def ask_fn(address: str, actor_id: str, msg: Any) -> Any:
+                            print(f"[DEBUG] cluster ask_fn (non-leader): address={address}, actor={actor_id}, msg={type(msg).__name__}", flush=True)
+                            host, port_str = address.rsplit(":", 1)
+                            try:
+                                await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
+                                result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
+                                if result and result.ref:
+                                    return await result.ref.ask(msg)
+                            except (TimeoutError, Exception) as e:
+                                print(f"[DEBUG] cluster ask_fn (non-leader) failed: {type(e).__name__}: {e}", flush=True)
+                            return None
+
+                        sharded_ref = ShardedActorRef(
+                            actor_id=name,
+                            resolver=resolver,
+                            send_fn=send_fn,
+                            ask_fn=ask_fn,
+                            known_leader_id=leader_id,
+                        )
+                        await ctx.reply(sharded_ref)
                 else:
-                    # Non-replicated: global lookup then create
+                    print(f"[DEBUG] cluster CreateActor (non-replicated): {name}", flush=True)
                     for _, member_info in members.items():
                         try:
                             result = await remote_ref.ask(Lookup(name, peer=member_info.address), timeout=2.0)
                             if result and result.ref:
                                 await ctx.reply(result.ref)
                                 break
-                        except (TimeoutError, Exception):
+                        except (TimeoutError, Exception) as e:
+                            print(f"[DEBUG] cluster lookup on {member_info.address} failed: {type(e).__name__}: {e}", flush=True)
                             continue
                     else:
                         ref = await system.actor(behavior, name=name)
                         await remote_ref.ask(Expose(ref=ref, name=name))
                         await ctx.reply(ref)
 
+            case _RemoteCreateActor(behavior_name, actor_name):
+                behavior = get_registered_actor(behavior_name)
+                if behavior:
+                    envelope = Envelope(
+                        payload=CreateActor(behavior(), actor_name),
+                        sender=ctx.sender,
+                    )
+                    await mailbox.put(envelope)
+                else:
+                    await ctx.reply(None)
+
             case WaitFor(nodes):
                 members = await membership_ref.ask(GetAliveMembers())
-                count = len(members) + 1  # +1 for self
+                count = len(members)
 
                 if count >= nodes:
                     await ctx.reply(True)
@@ -268,6 +337,7 @@ async def _connect_to_seed(
     local_address: str,
     seed_address: str,
 ):
+    print(f"[DEBUG] _connect_to_seed: node={node_id}, local={local_address}, seed={seed_address}", flush=True)
     try:
         host, port_str = seed_address.rsplit(":", 1)
         await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)
@@ -278,5 +348,6 @@ async def _connect_to_seed(
             match response:
                 case Join(node_id=resp_node_id, address=resp_address):
                     await membership_ref.send(Join(node_id=resp_node_id, address=resp_address))
-    except (TimeoutError, Exception):
-        pass
+        print(f"[DEBUG] _connect_to_seed: connected successfully", flush=True)
+    except (TimeoutError, Exception) as e:
+        print(f"[DEBUG] _connect_to_seed failed: {type(e).__name__}: {e}", flush=True)

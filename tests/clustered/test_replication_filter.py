@@ -1,116 +1,144 @@
+from __future__ import annotations
+
 import pytest
-from casty.state import State
+from unittest.mock import Mock, AsyncMock
+from casty.state import Stateful, state
 from casty.context import Context
 from casty.cluster.replication.filter import replication_filter
-from casty.cluster.replication.replicator import Replicator
-from casty.cluster.replication import ReplicationConfig
+from casty.cluster.states import StoreState, StoreAck, ReplicationQuorumError
 
 
-async def make_stream(messages):
-    """Helper to create message stream"""
+async def make_stream(messages, stateful=None):
     for msg in messages:
-        ctx = Context(self_id="test", sender=None, node_id="local")
+        ctx = Mock()
+        ctx.self_id = "test-actor"
+        ctx._mailbox = Mock()
+        ctx._mailbox._stateful = stateful
         yield msg, ctx
 
 
 @pytest.mark.asyncio
-async def test_replication_filter_detects_change():
-    state: State[int] = State(0)
-    replicated_snapshots = []
+async def test_replication_filter_sends_to_states():
+    stored_states = []
+    mock_ref = AsyncMock()
+    mock_ref.ask = AsyncMock(return_value=StoreAck("test-actor"))
 
-    async def mock_send(node_id, msg):
-        replicated_snapshots.append(msg.snapshot)
+    async def capture_ask(msg):
+        stored_states.append(msg)
+        return StoreAck("test-actor")
 
-    replicator = Replicator(
-        actor_id="test/actor",
-        config=ReplicationConfig(factor=2, write_quorum=1),
-        replica_nodes=["node-2"],
-        send_fn=mock_send,
-        node_id="node-1",
-    )
+    mock_ref.ask = capture_ask
 
-    filter_fn = replication_filter(replicator)
-    stream = filter_fn(state, make_stream(["a", "b", "c"]))
+    with Stateful() as stateful:
+        counter = state("count", 0)
 
-    messages = []
-    async for msg, ctx in stream:
-        messages.append(msg)
-        if msg == "b":
-            state.set(42)
+        filter_fn = replication_filter([mock_ref], write_quorum=1)
+        stream = filter_fn(stateful, make_stream(["a", "b"], stateful))
 
-    assert messages == ["a", "b", "c"]
-    assert len(replicated_snapshots) == 1
+        async for msg, ctx in stream:
+            counter.set(counter.value + 1)
+
+    assert len(stored_states) == 2
+    assert all(isinstance(s, StoreState) for s in stored_states)
+    assert stored_states[0].actor_id == "test-actor"
 
 
 @pytest.mark.asyncio
-async def test_replication_filter_no_change_no_replicate():
-    state: State[int] = State(0)
-    replicated_snapshots = []
+async def test_replication_filter_no_states_refs():
+    with Stateful() as stateful:
+        counter = state("count", 0)
 
-    async def mock_send(node_id, msg):
-        replicated_snapshots.append(msg.snapshot)
+        filter_fn = replication_filter([], write_quorum=0)
+        stream = filter_fn(stateful, make_stream(["a", "b"], stateful))
 
-    replicator = Replicator(
-        actor_id="test/actor",
-        config=ReplicationConfig(factor=2, write_quorum=1),
-        replica_nodes=["node-2"],
-        send_fn=mock_send,
-        node_id="node-1",
-    )
+        messages = []
+        async for msg, ctx in stream:
+            messages.append(msg)
+            counter.set(counter.value + 1)
 
-    filter_fn = replication_filter(replicator)
-    stream = filter_fn(state, make_stream(["a", "b"]))
-
-    async for msg, ctx in stream:
-        pass
-
-    assert replicated_snapshots == []
+        assert messages == ["a", "b"]
 
 
 @pytest.mark.asyncio
-async def test_replication_filter_no_state():
-    """Filter should work even without state"""
-    async def mock_send(node_id, msg):
-        pass
+async def test_replication_filter_quorum_not_met():
+    async def fail_ask(msg):
+        raise TimeoutError("Connection failed")
 
-    replicator = Replicator(
-        actor_id="test/actor",
-        config=ReplicationConfig(factor=2, write_quorum=1),
-        replica_nodes=["node-2"],
-        send_fn=mock_send,
-        node_id="node-1",
-    )
+    mock_ref = Mock()
+    mock_ref.ask = fail_ask
 
-    filter_fn = replication_filter(replicator)
-    stream = filter_fn(None, make_stream(["a", "b"]))
+    with Stateful() as stateful:
+        counter = state("count", 0)
+
+        filter_fn = replication_filter([mock_ref], write_quorum=1)
+        stream = filter_fn(stateful, make_stream(["a"], stateful))
+
+        with pytest.raises(ReplicationQuorumError):
+            async for msg, ctx in stream:
+                counter.set(counter.value + 1)
+
+
+@pytest.mark.asyncio
+async def test_replication_filter_zero_quorum_doesnt_fail():
+    async def fail_ask(msg):
+        raise TimeoutError("Connection failed")
+
+    mock_ref = Mock()
+    mock_ref.ask = fail_ask
+
+    with Stateful() as stateful:
+        counter = state("count", 0)
+
+        filter_fn = replication_filter([mock_ref], write_quorum=0)
+        stream = filter_fn(stateful, make_stream(["a"], stateful))
+
+        messages = []
+        async for msg, ctx in stream:
+            messages.append(msg)
+            counter.set(counter.value + 1)
+
+        assert messages == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_replication_filter_quorum_partial_success():
+    stored = []
+
+    async def succeed_ask(msg):
+        stored.append(msg)
+        return StoreAck("test-actor")
+
+    async def fail_ask(msg):
+        raise TimeoutError("Connection failed")
+
+    mock_ref_ok = Mock()
+    mock_ref_ok.ask = succeed_ask
+
+    mock_ref_fail = Mock()
+    mock_ref_fail.ask = fail_ask
+
+    with Stateful() as stateful:
+        counter = state("count", 0)
+
+        filter_fn = replication_filter([mock_ref_ok, mock_ref_fail], write_quorum=1)
+        stream = filter_fn(stateful, make_stream(["a"], stateful))
+
+        messages = []
+        async for msg, ctx in stream:
+            messages.append(msg)
+            counter.set(counter.value + 1)
+
+        assert messages == ["a"]
+        assert len(stored) == 1
+
+
+@pytest.mark.asyncio
+async def test_replication_filter_no_stateful():
+    filter_fn = replication_filter([], write_quorum=0)
+    stream = filter_fn(None, make_stream(["a", "b"], None))
 
     messages = []
     async for msg, ctx in stream:
         messages.append(msg)
 
     assert messages == ["a", "b"]
-
-
-@pytest.mark.asyncio
-async def test_replication_filter_multiple_changes():
-    state: State[int] = State(0)
-    replicated_versions = []
-
-    async def mock_send(node_id, msg):
-        replicated_versions.append(msg.version)
-
-    replicator = Replicator(
-        actor_id="test/actor",
-        config=ReplicationConfig(factor=2, write_quorum=1),
-        replica_nodes=["node-2"],
-        send_fn=mock_send,
-        node_id="node-1",
-    )
-
-    filter_fn = replication_filter(replicator)
-    stream = filter_fn(state, make_stream(["a", "b", "c"]))
-
-    async for msg, ctx in stream:
-        state.set(state.value + 1)
-
-    assert len(replicated_versions) == 3

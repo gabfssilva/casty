@@ -119,9 +119,12 @@ async def _handle_envelope(
 ):
     from .remote import _LocalLookup
 
+    print(f"[DEBUG] session _handle_envelope: type={envelope.type}, target={envelope.target}", flush=True)
+
     match envelope.type:
         case "deliver":
             local_ref = await remote_ref.ask(_LocalLookup(envelope.target))
+            print(f"[DEBUG] session deliver: local_ref={local_ref}", flush=True)
             if local_ref:
                 msg = serializer.decode(envelope.payload)
                 sender = None
@@ -136,6 +139,7 @@ async def _handle_envelope(
 
         case "ask":
             local_ref = await remote_ref.ask(_LocalLookup(envelope.target))
+            print(f"[DEBUG] session ask: target={envelope.target}, local_ref={local_ref}", flush=True)
 
             # Lazy replication: create replica if this node is responsible
             if not local_ref and envelope.target and envelope.behavior and system:
@@ -144,18 +148,20 @@ async def _handle_envelope(
                     behavior = get_behavior(envelope.behavior)
                     if behavior:
                         replication_config = behavior.__replication_config__
-                        replicated = replication_config.replicated if replication_config else None
-                        if replicated and replicated > 1:
+                        replicas = replication_config.replicas if replication_config else None
+                        if replicas and replicas > 1:
                             local_ref = await system.actor(behavior, name=envelope.target)
                             from .messages import Expose
                             await remote_ref.send(Expose(ref=local_ref, name=envelope.target))
-                except (KeyError, RuntimeError, TypeError, AttributeError):
-                    pass
+                except (KeyError, RuntimeError, TypeError, AttributeError) as e:
+                    print(f"[DEBUG] session ask lazy replication failed: {type(e).__name__}: {e}", flush=True)
 
             if local_ref:
                 msg = serializer.decode(envelope.payload)
+                print(f"[DEBUG] session ask: sending msg={type(msg).__name__} to {envelope.target}", flush=True)
                 try:
                     response = await local_ref.ask(msg)
+                    print(f"[DEBUG] session ask: got response={response}", flush=True)
                     reply = RemoteEnvelope(
                         type="reply",
                         correlation_id=envelope.correlation_id,
@@ -163,6 +169,7 @@ async def _handle_envelope(
                     )
                     await connection.send(Write(serializer.encode(reply.to_dict())))
                 except Exception as e:
+                    print(f"[DEBUG] session ask: exception {type(e).__name__}: {e}", flush=True)
                     error = RemoteEnvelope(
                         type="error",
                         correlation_id=envelope.correlation_id,
@@ -170,6 +177,7 @@ async def _handle_envelope(
                     )
                     await connection.send(Write(serializer.encode(error.to_dict())))
             else:
+                print(f"[DEBUG] session ask: actor not found: {envelope.target}", flush=True)
                 error = RemoteEnvelope(
                     type="error",
                     correlation_id=envelope.correlation_id,
@@ -178,20 +186,27 @@ async def _handle_envelope(
                 await connection.send(Write(serializer.encode(error.to_dict())))
 
         case "reply":
+            print(f"[DEBUG] session reply: correlation_id={envelope.correlation_id}", flush=True)
             if envelope.correlation_id in pending:
                 _, reply_to = pending.pop(envelope.correlation_id)
                 if reply_to:
                     from casty.reply import Reply
                     await reply_to.send(Reply(result=envelope.payload))
+            else:
+                print(f"[DEBUG] session reply: correlation_id not found in pending!", flush=True)
 
         case "error":
+            print(f"[DEBUG] session error: correlation_id={envelope.correlation_id}, error={envelope.error}", flush=True)
             if envelope.correlation_id in pending:
                 _, reply_to = pending.pop(envelope.correlation_id)
                 if reply_to:
                     from casty.reply import Reply
                     await reply_to.send(Reply(result=RemoteError(envelope.error)))
+            else:
+                print(f"[DEBUG] session error: correlation_id not found in pending!", flush=True)
 
         case "lookup":
+            print(f"[DEBUG] session lookup: name={envelope.name}, ensure={envelope.ensure}, behavior={envelope.behavior}", flush=True)
             local_ref = await remote_ref.ask(_LocalLookup(envelope.name))
 
             # Ensure-create: if ensure=True and actor doesn't exist, create it
@@ -203,8 +218,8 @@ async def _handle_envelope(
                         local_ref = await system.actor(actor_fn(), name=envelope.name)
                         from .messages import Expose
                         await remote_ref.send(Expose(ref=local_ref, name=envelope.name))
-                except (KeyError, RuntimeError, TypeError, AttributeError):
-                    pass
+                except (KeyError, RuntimeError, TypeError, AttributeError) as e:
+                    print(f"[DEBUG] session lookup ensure-create failed: {type(e).__name__}: {e}", flush=True)
 
             # Lazy replication for lookup: create actor if behavior is registered
             if not local_ref and envelope.name and envelope.behavior and system:
@@ -214,8 +229,8 @@ async def _handle_envelope(
                     behavior = get_behavior(envelope.behavior)
                     if behavior:
                         replication_config = behavior.__replication_config__
-                        replicated = replication_config.replicated if replication_config else None
-                        if replicated and replicated > 1:
+                        replicas = replication_config.replicas if replication_config else None
+                        if replicas and replicas > 1:
                             # Use initial_state from envelope if provided
                             if envelope.initial_state:
                                 initial_state = deserialize(envelope.initial_state)
@@ -225,10 +240,11 @@ async def _handle_envelope(
                                 local_ref = await system.actor(behavior, name=envelope.name)
                             from .messages import Expose
                             await remote_ref.send(Expose(ref=local_ref, name=envelope.name))
-                except (KeyError, RuntimeError, TypeError, AttributeError):
-                    pass
+                except (KeyError, RuntimeError, TypeError, AttributeError) as e:
+                    print(f"[DEBUG] session lookup lazy replication failed: {type(e).__name__}: {e}", flush=True)
 
             exists = local_ref is not None
+            print(f"[DEBUG] session lookup result: name={envelope.name}, exists={exists}", flush=True)
             reply = RemoteEnvelope(
                 type="lookup_result",
                 name=envelope.name,
@@ -238,18 +254,19 @@ async def _handle_envelope(
             await connection.send(Write(serializer.encode(reply.to_dict())))
 
         case "lookup_result":
+            exists = envelope.payload == b"1"
+            print(f"[DEBUG] session lookup_result: name={envelope.name}, exists={exists}", flush=True)
             if envelope.correlation_id in pending:
                 _, reply_to = pending.pop(envelope.correlation_id)
                 if reply_to:
                     from casty.reply import Reply
-                    exists = envelope.payload == b"1"
                     await reply_to.send(Reply(result=exists))
 
         case "replicate":
+            print(f"[DEBUG] session replicate: target={envelope.target}", flush=True)
             if system and envelope.target and envelope.payload:
                 from casty.serializable import deserialize
 
-                # Get or create the actor if it doesn't exist
                 mailbox = system._mailboxes.get(envelope.target)
                 if not mailbox and envelope.behavior:
                     try:
@@ -260,9 +277,13 @@ async def _handle_envelope(
                             from .messages import Expose
                             await remote_ref.send(Expose(ref=system._actors.get(envelope.target), name=envelope.target))
                             mailbox = system._mailboxes.get(envelope.target)
-                    except (KeyError, RuntimeError, TypeError, AttributeError):
-                        pass
+                    except (KeyError, RuntimeError, TypeError, AttributeError) as e:
+                        print(f"[DEBUG] session replicate create failed: {type(e).__name__}: {e}", flush=True)
 
                 if mailbox and mailbox.state is not None:
-                    snapshot = deserialize(envelope.payload)
-                    mailbox.state.restore(snapshot)
+                    remote_state = deserialize(envelope.payload)
+                    print(f"[DEBUG] session replicate applying state: {remote_state}", flush=True)
+                    for key, value in remote_state.items():
+                        setattr(mailbox.state, key, value)
+                else:
+                    print(f"[DEBUG] session replicate: no mailbox or state for {envelope.target}", flush=True)

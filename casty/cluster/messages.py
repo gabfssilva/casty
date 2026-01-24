@@ -82,6 +82,12 @@ class MarkDown:
     node_id: str
 
 
+@dataclass
+class MarkAlive:
+    node_id: str
+    address: str
+
+
 @message
 class SwimTick:
     pass
