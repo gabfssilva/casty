@@ -63,7 +63,10 @@ class LocalActorSystem(System):
             filters=all_filters,
         )
 
-        ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, mailbox=mailbox, _system=self)
+        async def deliver(envelope: Envelope[M]) -> None:
+            await mailbox.put(envelope)
+
+        ref: LocalActorRef[M] = LocalActorRef(actor_id=actor_id, _deliver=deliver, _system=self)
         mailbox.set_self_ref(ref)
 
         task = asyncio.create_task(

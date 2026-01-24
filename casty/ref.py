@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING, Awaitable
+from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING, Awaitable, Callable
 
 from .envelope import Envelope
 from .serializable import serializable
 from . import logger
 
 if TYPE_CHECKING:
-    from .mailbox import Mailbox
     from .protocols import System
+
+type DeliverFn[M] = Callable[[Envelope[M]], Awaitable[None]]
 
 
 @runtime_checkable
@@ -40,17 +41,17 @@ class UnresolvedActorRef:
 @dataclass
 class LocalActorRef[M](ActorRef[M]):
     actor_id: str
-    mailbox: "Mailbox[M]"
+    _deliver: DeliverFn[M]
     _system: "System | None" = field(default=None, repr=False)
     default_timeout: float = 30.0
 
     async def send(self, msg: M, *, sender: "ActorRef[Any] | None" = None) -> None:
         logger.debug("send", actor_id=self.actor_id, msg_type=type(msg).__name__, sender=sender.actor_id if sender else None)
         envelope = Envelope(payload=msg, sender=sender)
-        await self.mailbox.put(envelope)
+        await self._deliver(envelope)
 
     async def send_envelope(self, envelope: Envelope[M]) -> None:
-        await self.mailbox.put(envelope)
+        await self._deliver(envelope)
 
     async def ask[R](self, msg: M, timeout: float = 10.0) -> R:
         logger.debug("ask", actor_id=self.actor_id, msg_type=type(msg).__name__, timeout=timeout)

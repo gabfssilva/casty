@@ -12,9 +12,14 @@ class Ping:
 async def test_local_ref_send():
     from casty.ref import LocalActorRef
     from casty.mailbox import ActorMailbox
+    from casty.envelope import Envelope
 
     mailbox: ActorMailbox[Ping] = ActorMailbox(self_id="test/t1")
-    ref: LocalActorRef[Ping] = LocalActorRef(actor_id="test/t1", mailbox=mailbox)
+
+    async def deliver(envelope: Envelope[Ping]) -> None:
+        await mailbox.put(envelope)
+
+    ref: LocalActorRef[Ping] = LocalActorRef(actor_id="test/t1", _deliver=deliver)
 
     await ref.send(Ping(42))
 
@@ -42,9 +47,14 @@ async def test_local_ref_ask():
 async def test_local_ref_operators():
     from casty.ref import LocalActorRef
     from casty.mailbox import ActorMailbox
+    from casty.envelope import Envelope
 
     mailbox: ActorMailbox[Ping] = ActorMailbox(self_id="test/t1")
-    ref: LocalActorRef[Ping] = LocalActorRef(actor_id="test/t1", mailbox=mailbox)
+
+    async def deliver(envelope: Envelope[Ping]) -> None:
+        await mailbox.put(envelope)
+
+    ref: LocalActorRef[Ping] = LocalActorRef(actor_id="test/t1", _deliver=deliver)
 
     await (ref >> Ping(1))
     envelope = await mailbox._queue.get()

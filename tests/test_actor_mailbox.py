@@ -99,7 +99,8 @@ async def test_actor_mailbox_context_fields():
         is_leader=False,
     )
 
-    sender_ref = LocalActorRef[str](actor_id="other-actor", mailbox=ActorMailbox())
+    sender_mailbox: ActorMailbox[str] = ActorMailbox()
+    sender_ref = LocalActorRef[str](actor_id="other-actor", _deliver=sender_mailbox.put)
 
     await mailbox.put(Envelope(payload="msg", sender=sender_ref))
     await mailbox.put(Envelope(payload=Stop()))
