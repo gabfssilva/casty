@@ -15,12 +15,10 @@ from casty.serializable import serializable
 from .membership import membership_actor, MemberInfo, MemberState
 from .swim import swim_actor
 from .gossip import gossip_actor
-from .messages import Join, SetLocalAddress, GetAliveMembers, GetAddress
+from .messages import Join, SetLocalAddress, GetAliveMembers, GetAddress, GetLeaderId, IsLeader, GetReplicaIds, GetResponsibleNodes
 from casty.actor import register_behavior, get_registered_actor
 from .replication import replication_filter, leadership_filter
-from .hash_ring import HashRing
-from .shard import ShardCoordinator
-from .sharded_ref import ShardedActorRef, ClusterShardResolver
+from .sharded_ref import ShardedActorRef, MembershipShardResolver
 from .states import states, StoreState, GetState
 
 if TYPE_CHECKING:
@@ -52,14 +50,6 @@ class WaitFor:
 
 
 type ClusterMessage = CreateActor | GetClusterAddress | WaitFor | _RemoteCreateActor
-
-
-class _MembershipAdapter:
-    def __init__(self, alive_members: dict[str, MemberInfo]):
-        self._alive = set(alive_members.keys())
-
-    def is_alive(self, node_id: str) -> bool:
-        return node_id in self._alive
 
 
 @actor
@@ -131,22 +121,9 @@ async def cluster(
 
                 if replication_config:
                     effective_replicas = replicas if replicas else 1
-                    hash_ring = HashRing()
-                    hash_ring.add_node(node_id)
-                    for member_id in members:
-                        hash_ring.add_node(member_id)
 
-                    membership_adapter = _MembershipAdapter(members)
-                    membership_adapter._alive.add(node_id)
-
-                    shard_coordinator = ShardCoordinator(
-                        node_id=node_id,
-                        hash_ring=hash_ring,
-                        membership=membership_adapter,
-                    )
-
-                    responsible_nodes = shard_coordinator.get_responsible_nodes(name, effective_replicas)
-                    is_leader = shard_coordinator.is_leader(name, effective_replicas)
+                    responsible_nodes = await membership_ref.ask(GetResponsibleNodes(actor_id=name, count=effective_replicas))
+                    is_leader = await membership_ref.ask(IsLeader(actor_id=name, replicas=effective_replicas))
 
                     logger.debug("Shard calculated", actor=name, is_leader=is_leader, responsible=responsible_nodes)
 
@@ -154,7 +131,7 @@ async def cluster(
                         logger.debug("I am leader, creating actor", actor=name)
                         register_behavior(func_name, behavior)
 
-                        other_replicas = shard_coordinator.get_replica_ids(name, effective_replicas)
+                        other_replicas = await membership_ref.ask(GetReplicaIds(actor_id=name, replicas=effective_replicas))
                         states_refs: list[ActorRef] = []
 
                         for resp_node in other_replicas:
@@ -182,7 +159,7 @@ async def cluster(
                                 quorum_count = min(n, len(states_refs))
 
                         rep_filter = replication_filter(states_refs, write_quorum=quorum_count)
-                        lead_filter = leadership_filter(shard_coordinator, name, effective_replicas)
+                        lead_filter = leadership_filter(membership_ref, name, effective_replicas)
 
                         logger.debug("Spawning actor locally", actor=name)
                         local_ref = await system.actor(behavior, name=name, filters=[lead_filter, rep_filter])
@@ -198,8 +175,8 @@ async def cluster(
                             incarnation=0,
                         )
 
-                        resolver = ClusterShardResolver(
-                            shard_coordinator=shard_coordinator,
+                        resolver = MembershipShardResolver(
+                            membership_ref=membership_ref,
                             members=all_members,
                             replicas=effective_replicas,
                         )
@@ -218,7 +195,7 @@ async def cluster(
                             except (TimeoutError, Exception) as e:
                                 logger.warn("ShardedRef send_fn failed", error=str(e))
 
-                        async def ask_fn(address: str, actor_id: str, msg: Any) -> Any:
+                        async def ask_fn(address: str, actor_id: str, msg: Any, timeout: float = 10.0) -> Any:
                             logger.debug("ShardedRef ask_fn called", target=address, actor=actor_id)
                             host, port_str = address.rsplit(":", 1)
                             if address == local_address:
@@ -242,7 +219,7 @@ async def cluster(
                         logger.debug("Replying with sharded ref (leader)", actor=name)
                         await ctx.reply(sharded_ref)
                     else:
-                        leader_id = shard_coordinator.get_leader_id(name, effective_replicas)
+                        leader_id = await membership_ref.ask(GetLeaderId(actor_id=name, replicas=effective_replicas))
                         leader_address = members[leader_id].address if leader_id in members else None
                         logger.debug("I am NOT leader, forwarding to leader", actor=name, leader=leader_id, leader_address=leader_address)
 
@@ -283,8 +260,8 @@ async def cluster(
                             incarnation=0,
                         )
 
-                        resolver = ClusterShardResolver(
-                            shard_coordinator=shard_coordinator,
+                        resolver = MembershipShardResolver(
+                            membership_ref=membership_ref,
                             members=all_members,
                             replicas=effective_replicas,
                         )
@@ -299,7 +276,7 @@ async def cluster(
                             except (TimeoutError, Exception):
                                 pass
 
-                        async def ask_fn(address: str, actor_id: str, msg: Any, timeout: float) -> Any:
+                        async def ask_fn(address: str, actor_id: str, msg: Any, timeout: float = 10.0) -> Any:
                             host, port_str = address.rsplit(":", 1)
                             try:
                                 await remote_ref.ask(Connect(host=host, port=int(port_str)), timeout=2.0)

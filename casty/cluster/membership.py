@@ -6,7 +6,11 @@ from enum import Enum
 
 from casty import actor, Mailbox
 from .. import logger
-from .messages import Join, MergeMembership, MarkDown, MarkAlive, MemberSnapshot, GetAliveMembers, GetAllMembers, GetResponsibleNodes, SetLocalAddress, GetAddress
+from .messages import (
+    Join, MergeMembership, MarkDown, MarkAlive, MemberSnapshot,
+    GetAliveMembers, GetAllMembers, GetResponsibleNodes, SetLocalAddress, GetAddress,
+    GetLeaderId, IsLeader, GetReplicaIds,
+)
 from .hash_ring import HashRing
 
 
@@ -23,12 +27,28 @@ class MemberInfo:
     incarnation: int
 
 
+type MembershipMessage = (
+    Join |
+    MergeMembership |
+    MarkDown |
+    MarkAlive |
+    GetAliveMembers |
+    GetAllMembers |
+    GetResponsibleNodes |
+    SetLocalAddress |
+    GetAddress |
+    GetLeaderId |
+    IsLeader |
+    GetReplicaIds
+)
+
+
 @actor
 async def membership_actor(
     node_id: str,
     initial_members: dict[str, MemberInfo] | None = None,
     *,
-    mailbox: Mailbox[Join | MergeMembership | MarkDown | MarkAlive | GetAliveMembers | GetAllMembers | GetResponsibleNodes | SetLocalAddress | GetAddress],
+    mailbox: Mailbox[MembershipMessage],
 ):
     members = dict(initial_members or {})
     hash_ring = HashRing()
@@ -140,14 +160,31 @@ async def membership_actor(
                     )
                 await ctx.reply(result)
 
-            case GetResponsibleNodes(actor_id, count):
+            case GetResponsibleNodes(actor_id=aid, count=cnt):
                 try:
-                    await ctx.reply(hash_ring.get_nodes(actor_id, count))
+                    await ctx.reply(hash_ring.get_nodes(aid, cnt))
                 except RuntimeError:
                     await ctx.reply([])
 
-            case GetAddress(target_node_id):
+            case GetAddress(node_id=target_node_id):
                 if target_node_id in members:
                     await ctx.reply(members[target_node_id].address)
                 else:
                     await ctx.reply(None)
+
+            case GetLeaderId(actor_id=aid, replicas=reps):
+                nodes = hash_ring.get_n_nodes(aid, reps)
+                alive = [n for n in nodes if n == node_id or (n in members and members[n].state == MemberState.ALIVE)]
+                await ctx.reply(alive[0] if alive else None)
+
+            case IsLeader(actor_id=aid, replicas=reps):
+                nodes = hash_ring.get_n_nodes(aid, reps)
+                alive = [n for n in nodes if n == node_id or (n in members and members[n].state == MemberState.ALIVE)]
+                leader = alive[0] if alive else None
+                await ctx.reply(leader == node_id)
+
+            case GetReplicaIds(actor_id=aid, replicas=reps):
+                nodes = hash_ring.get_n_nodes(aid, reps)
+                alive = [n for n in nodes if n == node_id or (n in members and members[n].state == MemberState.ALIVE)]
+                leader = alive[0] if alive else None
+                await ctx.reply([n for n in alive if n != leader])

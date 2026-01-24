@@ -111,6 +111,21 @@ async def bank_account(*, mailbox: Mailbox[BankMsg]):
                 balance -= amount
             case GetBalance():
                 await ctx.reply(balance)
+
+# For explicit state management with persistence support:
+from casty import State
+
+@actor
+async def counter(state: State[int], *, mailbox: Mailbox[Increment | Get]):
+    async for msg, ctx in mailbox:
+        match msg:
+            case Increment(n):
+                state.value += n
+            case Get():
+                await ctx.reply(state.value)
+
+# Create with initial state
+ref = await system.actor(counter(State(0)), name="counter")
 ```
 
 ### Actor References
@@ -206,12 +221,24 @@ Strategies:
 
 | Strategy | Behavior |
 |----------|----------|
-| `Restart(max_retries=n)` | Restart the actor up to n times |
+| `Restart(max_retries=n, within=60)` | Restart the actor up to n times within time window |
 | `Stop()` | Stop the actor permanently |
+| `Escalate()` | Escalate to parent supervisor |
+
+Scopes:
+
+| Scope | Behavior |
+|-------|----------|
+| `OneForOne()` | Only restart the failed actor (default) |
+| `AllForOne()` | Restart all siblings when one fails |
 
 ## Going Distributed
 
-Same actors, multiple machines. Casty uses the SWIM protocol for cluster membership and gossip for state propagation.
+Same actors, multiple machines. Casty uses production-grade distributed systems protocols:
+
+- **SWIM** — Scalable failure detection with direct probes, indirect probes, and piggybacked membership gossip
+- **Consistent Hashing** — Actors distributed across nodes with virtual nodes for even distribution
+- **Quorum Replication** — Configurable write consistency (async, quorum, all)
 
 ### Local Development
 
@@ -259,39 +286,43 @@ async with ActorSystem.clustered(
 
 Actors are distributed using consistent hashing. Messages are routed automatically — you don't need to know where an actor lives.
 
+### Replicated Actors
+
+For fault tolerance and high availability, replicate actors across nodes:
+
+```python
+@actor(clustered=True, replicas=3, write_quorum="quorum")
+async def replicated_service(state: State[int], *, mailbox: Mailbox[Msg]):
+    async for msg, ctx in mailbox:
+        if ctx.is_leader:  # Only leader modifies state
+            state.value += 1
+        await ctx.reply(state.value)
+```
+
+Write quorum options:
+- `"async"` — Fire-and-forget (no consistency guarantee)
+- `"quorum"` — Wait for majority of replicas
+- `"all"` — Wait for all replicas
+- `int(n)` — Wait for exactly N acknowledgments
+
+The framework automatically elects a leader using consistent hashing. Only the leader processes writes; replicas receive state updates.
+
 ## Examples
 
-The [examples/](examples/) folder contains runnable examples organized by complexity:
+The [examples/](examples/) folder contains runnable examples:
 
-**Basics** — Start here
-- [Ping-Pong](examples/basics/01-ping-pong.py) — Two actors exchanging messages
-- [Ask Pattern](examples/basics/02-ask-pattern.py) — Request-response communication
-- [Parent-Child](examples/basics/03-parent-child.py) — Spawning child actors
-- [State Machine](examples/basics/04-state-machine.py) — Actor with state transitions
-
-**Patterns** — Common actor patterns
-- [Router](examples/patterns/01-router.py) — Distribute work across actors
-- [Aggregator](examples/patterns/02-aggregator.py) — Collect responses from multiple actors
-- [Circuit Breaker](examples/patterns/03-circuit-breaker.py) — Fault tolerance pattern
-- [Saga](examples/patterns/04-saga.py) — Distributed transactions
-
-**Practical** — Real-world use cases
-- [Chat Room](examples/practical/01-chat-room.py) — Multi-user chat
-- [Job Queue](examples/practical/02-job-queue.py) — Background job processing
-- [Cache with TTL](examples/practical/03-cache-ttl.py) — Expiring cache entries
-- [Session Manager](examples/practical/04-session-manager.py) — User session handling
-- [CQRS](examples/practical/06-cqrs.py) — Command Query Responsibility Segregation
-
-**Distributed** — Clustering examples
-- [Distributed Counter](examples/distributed/01-distributed-counter.py) — Shared state across nodes
-- [Service Registry](examples/distributed/02-service-registry.py) — Service discovery
-- [Sharded Cache](examples/distributed/03-sharded-cache.py) — Partitioned data
-- [Leader Election](examples/distributed/04-leader-election.py) — Consensus pattern
+| Example | Description |
+|---------|-------------|
+| [01-counter.py](examples/01-counter.py) | Basic counter with `State[int]`, pattern matching, `send()` vs `ask()` |
+| [02-workers.py](examples/02-workers.py) | Parent-child delegation, work distribution, result aggregation |
+| [03-scheduling.py](examples/03-scheduling.py) | Traffic light state machine with delayed self-scheduling |
+| [04-supervision.py](examples/04-supervision.py) | Fault-tolerant worker with `@supervised`, crash recovery |
+| [05-cluster.py](examples/05-cluster.py) | Distributed counter across multiple nodes with `@actor(clustered=True)` |
 
 Run any example with:
 
 ```bash
-uv run python examples/basics/01-ping-pong.py
+uv run python examples/01-counter.py
 ```
 
 ## Contributing

@@ -89,6 +89,24 @@ class MarkAlive:
 
 
 @message
+class GetLeaderId:
+    actor_id: str
+    replicas: int = 3
+
+
+@message
+class IsLeader:
+    actor_id: str
+    replicas: int = 3
+
+
+@message
+class GetReplicaIds:
+    actor_id: str
+    replicas: int = 3
+
+
+@message
 class SwimTick:
     pass
 

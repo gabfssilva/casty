@@ -9,6 +9,10 @@ from .messages import (
     GetAliveMembers,
     GetAllMembers,
     GetAddress,
+    GetLeaderId,
+    IsLeader,
+    GetReplicaIds,
+    GetResponsibleNodes,
     MergeMembership,
     MarkDown,
     SwimTick,
@@ -21,8 +25,7 @@ from .gossip import gossip_actor, Put, Get
 from .cluster import cluster, CreateActor, WaitFor
 from .clustered_system import ClusteredActorSystem
 from .development import DevelopmentCluster, DistributionStrategy
-from .shard import ShardCoordinator
-from .sharded_ref import ShardedActorRef, ClusterShardResolver
+from .sharded_ref import ShardedActorRef, MembershipShardResolver
 from .states import (
     states,
     StoreState,
@@ -47,6 +50,10 @@ __all__ = [
     "GetAliveMembers",
     "GetAllMembers",
     "GetAddress",
+    "GetLeaderId",
+    "IsLeader",
+    "GetReplicaIds",
+    "GetResponsibleNodes",
     "MergeMembership",
     "MarkDown",
     "SwimTick",
@@ -71,9 +78,8 @@ __all__ = [
     "DevelopmentCluster",
     "DistributionStrategy",
     # Sharding
-    "ShardCoordinator",
     "ShardedActorRef",
-    "ClusterShardResolver",
+    "MembershipShardResolver",
     # States
     "states",
     "StoreState",

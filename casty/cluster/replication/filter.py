@@ -5,28 +5,29 @@ from typing import TYPE_CHECKING, AsyncGenerator, Callable, Any
 
 from casty.state import Stateful
 from ..states import StoreState, StoreAck, ReplicationQuorumError
+from ..messages import IsLeader
 
 if TYPE_CHECKING:
     from casty.context import Context
     from casty.ref import ActorRef
-    from casty.cluster.shard import ShardCoordinator
 
 type MessageStream[M] = AsyncGenerator[tuple[M, Context], None]
 type Filter[M] = Callable[[Any, MessageStream[M]], MessageStream[M]]
 
 
 def leadership_filter[M](
-    shard_coordinator: "ShardCoordinator",
+    membership_ref: "ActorRef",
     actor_id: str,
     replicas: int,
 ) -> Filter[M]:
 
     async def apply(
-        state: Any,
+        _state: Any,
         inner: MessageStream[M],
     ) -> MessageStream[M]:
         async for msg, ctx in inner:
-            if not shard_coordinator.is_leader(actor_id, replicas):
+            is_leader = await membership_ref.ask(IsLeader(actor_id=actor_id, replicas=replicas))
+            if not is_leader:
                 continue
             yield msg, ctx
 
