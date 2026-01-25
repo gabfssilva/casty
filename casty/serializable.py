@@ -37,7 +37,7 @@ def _is_serializable_value(value: Any) -> bool:
 
 
 def _to_dict(obj: Any) -> Any:
-    from .ref import ActorRef, UnresolvedActorRef
+    from .core import ActorRef, UnresolvedActorRef
 
     match obj:
         case None | bool() | int() | float() | str() | bytes():

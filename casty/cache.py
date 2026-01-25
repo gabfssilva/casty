@@ -1,8 +1,34 @@
+from __future__ import annotations
+
 from typing import Any
 
 import msgpack
 
-from .entry import cache_entry, Get, Set, Delete, Exists
+from .core import actor, Mailbox
+from .messages import CacheSet, CacheGet, CacheDelete, CacheExists, CacheExpire, CacheMessage
+
+
+@actor
+async def cache_entry(data: bytes | None, *, mailbox: Mailbox[CacheMessage]):
+    async for msg, ctx in mailbox:
+        match msg:
+            case CacheSet(new_value, ttl):
+                data = new_value
+                if ttl is not None:
+                    await ctx.schedule(CacheExpire(), delay=ttl)
+                await ctx.reply(True)
+
+            case CacheGet():
+                await ctx.reply(data)
+
+            case CacheDelete():
+                data = None
+
+            case CacheExists():
+                await ctx.reply(data is not None)
+
+            case CacheExpire():
+                data = None
 
 
 class DistributedCache:
@@ -35,17 +61,17 @@ class DistributedCache:
 
     async def get(self, key: str) -> Any | None:
         entry = await self._entry(key)
-        value = await entry.ask(Get())
+        value = await entry.ask(CacheGet())
         return msgpack.unpackb(value) if value is not None else None
 
     async def set(self, key: str, value: Any, ttl: float | None = None) -> None:
         entry = await self._entry(key)
-        await entry.ask(Set(msgpack.packb(value), ttl))
+        await entry.ask(CacheSet(msgpack.packb(value), ttl))
 
     async def delete(self, key: str) -> None:
         entry = await self._entry(key)
-        await entry.send(Delete())
+        await entry.send(CacheDelete())
 
     async def exists(self, key: str) -> bool:
         entry = await self._entry(key)
-        return await entry.ask(Exists())
+        return await entry.ask(CacheExists())

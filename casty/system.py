@@ -5,15 +5,19 @@ import copy
 import uuid
 from typing import Any, Callable, Coroutine, overload
 
-from .actor import Behavior
 from . import logger
-from .state import State
-from .envelope import Envelope
-from .mailbox import ActorMailbox, Stop, Filter
-from .protocols import System
-from .ref import ActorRef, LocalActorRef
-from .reply import reply
-from .state import Stateful
+from .core import (
+    Behavior,
+    Envelope,
+    ActorMailbox,
+    Stop,
+    Filter,
+    System,
+    ActorRef,
+    LocalActorRef,
+    reply,
+)
+from .state import State, Stateful
 from .supervision import DecisionType
 
 
@@ -301,9 +305,9 @@ class ActorSystem(System):
         port: int = 0,
         seeds: list[str] | None = None,
     ) -> "ActorSystem":
-        from .cluster.clustered_system import ClusteredActorSystem
-
         instance = cls.__new__(cls)
+        from casty.cluster import ClusteredActorSystem
+
         instance._inner = ClusteredActorSystem(
             node_id=node_id,
             host=host,

@@ -1,11 +1,28 @@
 from . import logger
-from .actor import actor, Behavior
-from .mailbox import Mailbox, ActorMailbox, Stop, Filter, MessageStream
-from .context import Context
-from .ref import ActorRef, LocalActorRef
-from .envelope import Envelope
+from .core import (
+    actor,
+    Behavior,
+    Mailbox,
+    ActorMailbox,
+    Stop,
+    Filter,
+    MessageStream,
+    Context,
+    ActorRef,
+    LocalActorRef,
+    UnresolvedActorRef,
+    Envelope,
+    System,
+    message,
+    ActorReplicationConfig,
+    get_registered_actor,
+    register_behavior,
+    clear_actor_registry,
+    get_behavior,
+    Reply,
+    Cancel,
+)
 from .system import ActorSystem, LocalActorSystem
-from .protocols import System
 from .supervision import (
     Decision,
     SupervisionStrategy,
@@ -17,10 +34,8 @@ from .supervision import (
     supervised,
     SupervisionConfig,
 )
+from .state import State, Stateful, Snapshot, StateBackend, MemoryStateBackend
 from .cluster import HashRing
-from .message import message
-from .state import State
-from .actor_config import ActorReplicationConfig
 
 __all__ = [
     "actor",
@@ -33,6 +48,7 @@ __all__ = [
     "Context",
     "ActorRef",
     "LocalActorRef",
+    "UnresolvedActorRef",
     "Envelope",
     "ActorSystem",
     "LocalActorSystem",
@@ -49,5 +65,15 @@ __all__ = [
     "HashRing",
     "message",
     "State",
+    "Stateful",
+    "Snapshot",
+    "StateBackend",
+    "MemoryStateBackend",
     "ActorReplicationConfig",
+    "get_registered_actor",
+    "register_behavior",
+    "clear_actor_registry",
+    "get_behavior",
+    "Reply",
+    "Cancel",
 ]

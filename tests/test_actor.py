@@ -102,7 +102,7 @@ async def test_ask_times_out():
 @pytest.mark.asyncio
 async def test_reply_sends_to_sender():
     """ctx.reply() sends response back to the original sender"""
-    from casty.reply import Reply
+    from casty import Reply
 
     responses: list[str] = []
 
