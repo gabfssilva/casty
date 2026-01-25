@@ -160,7 +160,7 @@ class _CastyFormatter(logging.Formatter):
 
 
 _logger = logging.getLogger("casty")
-_logger.setLevel(logging.DEBUG)
+_logger.setLevel(logging.INFO)
 _logger.propagate = False
 
 _handler = logging.StreamHandler(sys.stderr)

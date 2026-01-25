@@ -37,11 +37,13 @@ async def main():
 
             iterations = 10
 
+            print('sending...')
             for _ in range(iterations):
                 await ref.send(Inc())
-
+            print('done.')
             await asyncio.sleep(0.5)
 
+            print('asking...')
             result = await ref.ask(Get())
             print(f"Counter value: {result}. Expected: {iterations}")
 

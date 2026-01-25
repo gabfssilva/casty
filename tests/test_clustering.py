@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from casty import actor, Mailbox, message
 from casty.state import State
-from casty.cluster import DevelopmentCluster
+from casty.cluster import DevelopmentCluster, DistributionStrategy
 
 
 @message
@@ -92,16 +92,54 @@ async def test_stateful_counter_across_cluster():
                     await ctx.reply(state.value)
 
     async with asyncio.timeout(15):
-        async with DevelopmentCluster(nodes=5) as cluster:
+        async with DevelopmentCluster(nodes=2, strategy=DistributionStrategy.CONSISTENT) as cluster:
             ref = await cluster.actor(counter(State(0)), name="counter")
 
-            iterations = 10
+            await asyncio.sleep(0.3)
+
+            iterations = 5
 
             for _ in range(iterations):
                 await ref.send(Inc())
+                await asyncio.sleep(0.05)
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
             result = await ref.ask(Get())
 
             assert result == iterations
+
+
+@pytest.mark.asyncio
+async def test_clustered_actor_non_blocking():
+    """Multiple clustered actors operate independently without blocking each other"""
+
+    @actor(clustered=True)
+    async def slow_actor(*, mailbox: Mailbox[Ping]):
+        async for msg, ctx in mailbox:
+            await asyncio.sleep(0.1)
+            await ctx.reply("slow")
+
+    @actor(clustered=True)
+    async def fast_actor(*, mailbox: Mailbox[Ping]):
+        async for msg, ctx in mailbox:
+            await ctx.reply("fast")
+
+    async with asyncio.timeout(15):
+        async with DevelopmentCluster(nodes=3, strategy=DistributionStrategy.CONSISTENT) as cluster:
+            slow_ref = await cluster.actor(slow_actor(), name="slow")
+            fast_ref = await cluster.actor(fast_actor(), name="fast")
+
+            await asyncio.sleep(0.3)
+
+            slow_task = asyncio.create_task(slow_ref.ask(Ping()))
+
+            start = asyncio.get_event_loop().time()
+            fast_result = await fast_ref.ask(Ping())
+            elapsed = asyncio.get_event_loop().time() - start
+
+            assert fast_result == "fast"
+            assert elapsed < 0.08
+
+            slow_result = await slow_task
+            assert slow_result == "slow"

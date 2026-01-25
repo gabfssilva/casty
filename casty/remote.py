@@ -147,6 +147,16 @@ class _SessionDisconnected:
 
 
 @dataclass
+class _PendingLookup:
+    name: str
+    peer: str
+    sender: "ActorRef | None"
+    ensure: bool = False
+    initial_state: bytes | None = None
+    behavior: str | None = None
+
+
+@dataclass
 class _LocalLookup:
     name: str
 
@@ -213,8 +223,6 @@ async def session_actor(
     mailbox: Mailbox[SessionMessage],
 ):
     pending: dict[str, tuple[str, ActorRef | None]] = {}
-
-    await remote_ref.send(_SessionConnected(peer_id=peer_id, session=mailbox.ref()))
 
     async for msg, ctx in mailbox:
         match msg:
@@ -359,7 +367,11 @@ async def _handle_envelope(
                     from .core import get_registered_actor
                     actor_fn = get_registered_actor(envelope.behavior)
                     if actor_fn:
-                        local_ref = await system.actor(actor_fn(), name=envelope.name)
+                        if envelope.initial_state:
+                            state = deserialize(envelope.initial_state)
+                            local_ref = await system.actor(actor_fn(state), name=envelope.name)
+                        else:
+                            local_ref = await system.actor(actor_fn(), name=envelope.name)
                         await remote_ref.send(Expose(ref=local_ref, name=envelope.name))
                 except (KeyError, RuntimeError, TypeError, AttributeError):
                     pass
@@ -420,6 +432,7 @@ async def remote_actor(*, mailbox: Mailbox[RemoteMessage]):
     serializer: Serializer = MsgPackSerializer()
     exposed: dict[str, ActorRef] = {}
     sessions: dict[str, ActorRef] = {}
+    pending_connections: dict[str, list[_PendingLookup]] = {}
 
     async for msg, ctx in mailbox:
         if tcp_mgr is None:
@@ -447,7 +460,12 @@ async def remote_actor(*, mailbox: Mailbox[RemoteMessage]):
                     ))
                     continue
 
+                if peer_addr in pending_connections:
+                    logger.debug("Connection already pending to peer", peer=peer_addr)
+                    continue
+
                 logger.debug("Connecting to peer", host=host, port=port)
+                pending_connections[peer_addr] = []
                 try:
                     await ctx.actor(
                         _remote_connector(tcp_mgr, host, port, serializer, mailbox.ref(), ctx.sender),
@@ -455,6 +473,7 @@ async def remote_actor(*, mailbox: Mailbox[RemoteMessage]):
                     )
                 except Exception as e:
                     logger.error("Connect failed", host=host, port=port, error=str(e))
+                    pending_connections.pop(peer_addr, None)
                     await ctx.reply(ConnectFailed(str(e)))
 
             case Expose(ref, name):
@@ -519,6 +538,16 @@ async def remote_actor(*, mailbox: Mailbox[RemoteMessage]):
                     except (TimeoutError, OSError, KeyError) as e:
                         logger.warn("SendLookup to peer failed", name=name, peer=peer_id, error=str(e))
                         await ctx.reply(LookupResult(ref=None, peer=peer_id))
+                elif peer_id in pending_connections:
+                    logger.debug("Queueing lookup for pending connection", name=name, peer=peer_id)
+                    pending_connections[peer_id].append(_PendingLookup(
+                        name=name,
+                        peer=peer_id,
+                        sender=ctx.sender,
+                        ensure=ensure,
+                        initial_state=initial_state,
+                        behavior=behavior,
+                    ))
                 else:
                     logger.warn("Peer not in sessions", name=name, peer=peer_id, known_sessions=list(sessions.keys()))
                     await ctx.reply(LookupResult(ref=None, peer=peer_id))
@@ -526,6 +555,19 @@ async def remote_actor(*, mailbox: Mailbox[RemoteMessage]):
             case _SessionConnected(peer_id, session):
                 sessions[peer_id] = session
                 logger.debug("Session connected", peer=peer_id)
+                queued = pending_connections.pop(peer_id, [])
+                for pending in queued:
+                    logger.debug("Re-dispatching queued lookup", name=pending.name, peer=peer_id)
+                    await mailbox.ref().send(
+                        Lookup(
+                            name=pending.name,
+                            peer=pending.peer,
+                            ensure=pending.ensure,
+                            initial_state=pending.initial_state,
+                            behavior=pending.behavior,
+                        ),
+                        sender=pending.sender,
+                    )
 
             case _SessionDisconnected(peer_id):
                 sessions.pop(peer_id, None)
@@ -588,6 +630,7 @@ async def _remote_listener(
                     name=f"session-{peer_id}"
                 )
                 await connection.send(Register(session))
+                await remote_ref.send(_SessionConnected(peer_id=peer_id, session=session))
 
 
 @actor
@@ -619,6 +662,7 @@ async def _remote_connector(
                     name="session"
                 )
                 await connection.send(Register(session))
+                await remote_ref.send(_SessionConnected(peer_id=peer_id, session=session))
                 if reply_to and not replied:
                     replied = True
                     await reply_to.send(Reply(result=RemoteConnected(

@@ -369,3 +369,31 @@ type OutboundEvent = Register | Write | Close
 type GossipMessage = GossipPut | GossipGet | GossipTick
 
 type StatesMessage = StoreState | GetState | DeleteState
+
+
+# === Clustered Actor Messages ===
+
+@message
+class Subscribe:
+    pattern: str
+    subscriber: "ActorRef"
+
+
+@message
+class Unsubscribe:
+    pattern: str
+    subscriber: "ActorRef"
+
+
+@message
+class Forward:
+    payload: bytes
+    original_sender_id: str | None = None
+
+
+@message
+class MembershipChanged:
+    actor_id: str
+    leader_id: str | None
+    replica_nodes: list[str]
+    addresses: dict[str, str]

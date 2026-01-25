@@ -105,6 +105,7 @@ from .messages import (
     SwimTick, ProbeTimeout, PingReqTimeout,
     GossipPut, GossipGet, GossipTick, GossipMessage,
     StoreState, StoreAck, StatesMessage,
+    Subscribe, Unsubscribe, Forward, MembershipChanged,
 )
 
 
@@ -122,6 +123,7 @@ async def membership_actor(
     initial_members: dict[str, MemberInfo] | None = None,
     *,
     mailbox: Mailbox[MembershipMessage],
+    system: System,
 ):
     members = dict(initial_members or {})
     hash_ring = HashRing()
@@ -131,6 +133,15 @@ async def membership_actor(
     for member_id, info in members.items():
         if info.state == MemberState.ALIVE:
             hash_ring.add_node(member_id)
+
+    async def publish_membership():
+        gossip_ref = await system.actor(name=GOSSIP_NAME)
+        if gossip_ref:
+            all_members = dict(members)
+            if local_address:
+                all_members[node_id] = MemberInfo(node_id=node_id, address=local_address, state=MemberState.ALIVE, incarnation=0)
+            addresses = {m: info.address for m, info in all_members.items() if info.state == MemberState.ALIVE}
+            await gossip_ref.send(GossipPut(key="membership", value=serialize(addresses), version=0))
 
     async for msg, ctx in mailbox:
         match msg:
@@ -150,6 +161,7 @@ async def membership_actor(
                     logger.info("Member joined", member=joined_node_id, address=address)
                     if local_address:
                         await ctx.reply(Join(node_id=node_id, address=local_address))
+                    await publish_membership()
 
             case MergeMembership(remote_members):
                 for snapshot in remote_members:
@@ -185,6 +197,7 @@ async def membership_actor(
                         member.incarnation += 1
                         hash_ring.remove_node(target_node_id)
                         logger.warn("Member marked down", member=target_node_id)
+                        await publish_membership()
 
             case MarkAlive(target_node_id, address):
                 if target_node_id in members:
@@ -195,6 +208,7 @@ async def membership_actor(
                         member.address = address
                         hash_ring.add_node(target_node_id)
                         logger.info("Member recovered", member=target_node_id)
+                        await publish_membership()
                 else:
                     members[target_node_id] = MemberInfo(
                         node_id=target_node_id,
@@ -204,6 +218,7 @@ async def membership_actor(
                     )
                     hash_ring.add_node(target_node_id)
                     logger.info("New member discovered", member=target_node_id, address=address)
+                    await publish_membership()
 
             case GetAliveMembers():
                 result = {mid: info for mid, info in members.items() if info.state == MemberState.ALIVE}
@@ -427,13 +442,14 @@ async def gossip_actor(
     fanout: int = 3,
     tick_interval: float = 0.5,
     *,
-    mailbox: Mailbox[GossipMessage | Reply[Any]],
+    mailbox: Mailbox[GossipMessage | Subscribe | Unsubscribe | Reply[Any]],
     system: System,
 ):
     from .messages import Connect, Lookup, LookupResult
     from .remote import RemoteConnected
 
     store: dict[str, tuple[bytes, int]] = {}
+    subscribers: dict[str, list[ActorRef]] = {}
 
     membership_ref = await system.actor(name=MEMBERSHIP_ACTOR_ID)
     remote_ref = await system.actor(name=REMOTE_ACTOR_ID)
@@ -442,6 +458,16 @@ async def gossip_actor(
 
     async for msg, ctx in mailbox:
         match msg:
+            case Subscribe(pattern=pattern, subscriber=subscriber):
+                if pattern not in subscribers:
+                    subscribers[pattern] = []
+                if subscriber not in subscribers[pattern]:
+                    subscribers[pattern].append(subscriber)
+
+            case Unsubscribe(pattern=pattern, subscriber=subscriber):
+                if pattern in subscribers:
+                    subscribers[pattern] = [s for s in subscribers[pattern] if s != subscriber]
+
             case GossipTick():
                 if not store or membership_ref is None:
                     continue
@@ -473,13 +499,28 @@ async def gossip_actor(
             case GossipPut(key, value, version):
                 current = store.get(key)
                 current_version = current[1] if current else 0
+                updated = False
                 if version == 0:
                     new_version = current_version + 1
                     store[key] = (value, new_version)
                     logger.debug("Gossip put", key=key, version=new_version)
+                    updated = True
                 elif version > current_version:
                     store[key] = (value, version)
                     logger.debug("Gossip replicated", key=key, version=version)
+                    updated = True
+
+                if updated:
+                    for pattern, subs in list(subscribers.items()):
+                        if pattern == key or pattern == "*":
+                            addresses = deserialize(value) if key == "membership" else {}
+                            for sub in subs:
+                                await sub.send(MembershipChanged(
+                                    actor_id=key,
+                                    leader_id=None,
+                                    replica_nodes=[],
+                                    addresses=addresses,
+                                ))
 
             case GossipGet(key):
                 entry = store.get(key)
@@ -540,6 +581,159 @@ class ShardedActorRef[M](ActorRef[M]):
         return self.ask(msg)
 
 
+@dataclass
+class ClusteredActorRef[M](ActorRef[M]):
+    actor_id: str
+    _clustered_ref: ActorRef = field(repr=False)
+
+    async def send(self, msg: M, *, sender: ActorRef[Any] | None = None) -> None:
+        await self._clustered_ref.send(msg, sender=sender)
+
+    async def send_envelope(self, envelope: "Envelope[M]") -> None:
+        await self._clustered_ref.send_envelope(envelope)
+
+    async def ask[R](self, msg: M, timeout: float = 10.0) -> R:
+        return await self._clustered_ref.ask(msg, timeout=timeout)
+
+    def __rshift__(self, msg: M) -> Awaitable[None]:
+        return self.send(msg)
+
+    def __lshift__[R](self, msg: M) -> Awaitable[R]:
+        return self.ask(msg)
+
+
+@dataclass
+class _ClusteredState:
+    actor_id: str
+    behavior: Behavior
+    initial_state_bytes: bytes | None = None
+    local_ref: ActorRef | None = None
+    leader_id: str | None = None
+    replica_nodes: list[str] = field(default_factory=list)
+    node_addresses: dict[str, str] = field(default_factory=dict)
+    pending: list[Any] = field(default_factory=list)
+    ready: bool = False
+
+
+@actor
+async def clustered_actor(
+    actor_id: str,
+    behavior: Behavior,
+    replicas: int = 1,
+    *,
+    mailbox: Mailbox[MembershipChanged | Forward | Any],
+    system: System,
+):
+    from .messages import Expose
+
+    initial_state_bytes = None
+    if behavior.state_initial is not None:
+        initial_state_bytes = serialize(behavior.state_initial)
+
+    state = _ClusteredState(actor_id=actor_id, behavior=behavior, initial_state_bytes=initial_state_bytes)
+    node_id = system.node_id
+
+    gossip_ref = await system.actor(name=GOSSIP_NAME)
+    remote_ref = await system.actor(name=REMOTE_ACTOR_ID)
+    membership_ref = await system.actor(name=MEMBERSHIP_ACTOR_ID)
+
+    if gossip_ref:
+        await gossip_ref.send(Subscribe(pattern="membership", subscriber=mailbox.ref()))
+
+    if membership_ref:
+        members = await membership_ref.ask(GetAliveMembers())
+        responsible = await membership_ref.ask(GetResponsibleNodes(actor_id=actor_id, count=replicas))
+        leader = await membership_ref.ask(GetLeaderId(actor_id=actor_id, replicas=replicas))
+
+        state.leader_id = leader
+        state.replica_nodes = responsible
+        state.node_addresses = {m: info.address for m, info in members.items()}
+
+        if leader == node_id:
+            state.local_ref = await system.actor(behavior, name=actor_id)
+            if remote_ref and state.local_ref:
+                await remote_ref.send(Expose(ref=state.local_ref, name=actor_id))
+            state.ready = True
+            for env in state.pending:
+                await state.local_ref.send_envelope(env)
+            state.pending.clear()
+
+    async for msg, ctx in mailbox:
+        match msg:
+            case MembershipChanged(actor_id=aid, leader_id=lid, replica_nodes=rn, addresses=addrs) if aid == actor_id or aid == "membership":
+                old_leader = state.leader_id
+                if lid:
+                    state.leader_id = lid
+                if rn:
+                    state.replica_nodes = rn
+                state.node_addresses.update(addrs)
+
+                if state.leader_id == node_id and old_leader != node_id and not state.local_ref:
+                    state.local_ref = await system.actor(behavior, name=actor_id)
+                    if remote_ref and state.local_ref:
+                        await remote_ref.send(Expose(ref=state.local_ref, name=actor_id))
+                    state.ready = True
+                    for env in state.pending:
+                        await state.local_ref.send_envelope(env)
+                    state.pending.clear()
+                elif state.leader_id and state.leader_id != node_id and state.leader_id in state.node_addresses and state.pending:
+                    leader_addr = state.node_addresses[state.leader_id]
+                    if remote_ref:
+                        from .messages import Lookup, Connect
+                        host, port = leader_addr.rsplit(":", 1)
+                        try:
+                            await remote_ref.send(Connect(host=host, port=int(port)))
+                            result = await remote_ref.ask(Lookup(
+                                actor_id,
+                                peer=leader_addr,
+                                ensure=True,
+                                behavior=behavior.func.__name__,
+                                initial_state=state.initial_state_bytes
+                            ), timeout=5.0)
+                            if result and result.ref:
+                                for env in state.pending:
+                                    await result.ref.send(env.payload, sender=env.sender)
+                                state.pending.clear()
+                        except (TimeoutError, Exception):
+                            pass
+
+            case Forward(payload=payload, original_sender_id=_):
+                if state.leader_id == node_id and state.ready and state.local_ref:
+                    decoded = deserialize(payload)
+                    await state.local_ref.send(decoded)
+
+            case _ if state.leader_id == node_id:
+                if state.ready and state.local_ref:
+                    await state.local_ref.send(msg, sender=ctx.sender)
+                else:
+                    from .core import Envelope
+                    state.pending.append(Envelope(payload=msg, sender=ctx.sender))
+
+            case _:
+                if state.leader_id and state.leader_id in state.node_addresses:
+                    leader_addr = state.node_addresses[state.leader_id]
+                    if remote_ref:
+                        from .messages import Lookup, Connect
+                        host, port = leader_addr.rsplit(":", 1)
+                        try:
+                            await remote_ref.send(Connect(host=host, port=int(port)))
+                            result = await remote_ref.ask(Lookup(
+                                actor_id,
+                                peer=leader_addr,
+                                ensure=True,
+                                behavior=behavior.func.__name__,
+                                initial_state=state.initial_state_bytes
+                            ), timeout=5.0)
+                            if result and result.ref:
+                                await result.ref.send(msg, sender=ctx.sender)
+                        except (TimeoutError, Exception):
+                            from .core import Envelope
+                            state.pending.append(Envelope(payload=msg, sender=ctx.sender))
+                else:
+                    from .core import Envelope
+                    state.pending.append(Envelope(payload=msg, sender=ctx.sender))
+
+
 def leadership_filter[M](
     membership_ref: ActorRef,
     actor_id: str,
@@ -594,20 +788,6 @@ def replication_filter[M](
 
 
 @dataclass
-class CreateActor:
-    behavior: Behavior
-    name: str
-
-
-@serializable
-@dataclass
-class _RemoteCreateActor:
-    behavior_name: str
-    actor_name: str
-    initial_state: bytes | None = None
-
-
-@dataclass
 class GetClusterAddress:
     pass
 
@@ -617,7 +797,7 @@ class WaitFor:
     nodes: int
 
 
-type ClusterMessage = CreateActor | GetClusterAddress | WaitFor | _RemoteCreateActor
+type ClusterMessage = GetClusterAddress | WaitFor
 
 
 @actor
@@ -630,7 +810,7 @@ async def cluster_actor(
     mailbox: Mailbox[ClusterMessage],
     system: System,
 ):
-    from .remote import remote_actor, Listen, Connect, Expose, Lookup
+    from .remote import remote_actor, Listen, Expose
     from .state import states
 
     remote_ref = await system.actor(remote_actor(), name="remote")
@@ -663,184 +843,14 @@ async def cluster_actor(
     for seed_node_id, seed_address in (seeds or []):
         asyncio.create_task(_connect_to_seed(remote_ref, membership_ref, node_id, local_address, seed_address))
 
-    async def route_message(address: str, actor_id: str, msg: Any, ask: bool = False, timeout: float = 10.0) -> Any:
-        host_part, port_str = address.rsplit(":", 1)
-        if address == local_address:
-            local_ref = await system.actor(name=actor_id)
-            if local_ref:
-                if ask:
-                    return await local_ref.ask(msg, timeout)
-                await local_ref.send(msg)
-                return None
-        try:
-            await remote_ref.ask(Connect(host=host_part, port=int(port_str)), timeout=2.0)
-            result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
-            if result and result.ref:
-                if ask:
-                    return await result.ref.ask(msg, timeout)
-                await result.ref.send(msg)
-        except (TimeoutError, Exception) as e:
-            logger.warn("route_message failed", error=str(e))
-        return None
-
     async for msg, ctx in mailbox:
         match msg:
             case GetClusterAddress():
                 await ctx.reply(local_address)
 
-            case CreateActor(behavior, name):
-                func_name = behavior.func.__name__
-                replication_config = behavior.__replication_config__
-                replicas = replication_config.replicas if replication_config else None
-
-                logger.debug("CreateActor received", actor=name, replicas=replicas)
-
-                members = await membership_ref.ask(GetAliveMembers())
-
-                local_ref = await system.actor(name=name)
-                if local_ref:
-                    logger.debug("Actor already exists locally", actor=name)
-                    await ctx.reply(local_ref)
-                    continue
-
-                if replication_config:
-                    effective_replicas = replicas if replicas else 1
-                    responsible_nodes = await membership_ref.ask(GetResponsibleNodes(actor_id=name, count=effective_replicas))
-                    is_leader = await membership_ref.ask(IsLeader(actor_id=name, replicas=effective_replicas))
-
-                    logger.debug("Shard calculated", actor=name, is_leader=is_leader, responsible=responsible_nodes)
-
-                    if is_leader:
-                        logger.debug("I am leader, creating actor", actor=name)
-                        register_behavior(func_name, behavior)
-
-                        other_replicas = await membership_ref.ask(GetReplicaIds(actor_id=name, replicas=effective_replicas))
-                        states_refs: list[ActorRef] = []
-
-                        for resp_node in other_replicas:
-                            if resp_node in members:
-                                member_info = members[resp_node]
-                                host_part, port_str = member_info.address.rsplit(":", 1)
-                                try:
-                                    await remote_ref.ask(Connect(host=host_part, port=int(port_str)), timeout=2.0)
-                                    result = await remote_ref.ask(Lookup("states", peer=member_info.address), timeout=2.0)
-                                    if result and result.ref:
-                                        states_refs.append(result.ref)
-                                except (TimeoutError, Exception):
-                                    pass
-
-                        write_quorum = replication_config.write_quorum if replication_config else 1
-                        quorum_count = 1
-                        match write_quorum:
-                            case "async":
-                                quorum_count = 0
-                            case "all":
-                                quorum_count = len(states_refs)
-                            case "quorum":
-                                quorum_count = (len(states_refs) // 2) + 1
-                            case int(n):
-                                quorum_count = min(n, len(states_refs))
-
-                        rep_filter = replication_filter(states_refs, write_quorum=quorum_count)
-                        lead_filter = leadership_filter(membership_ref, name, effective_replicas)
-
-                        logger.debug("Spawning actor locally", actor=name)
-                        local_ref = await system.actor(behavior, name=name, filters=[lead_filter, rep_filter])
-                        logger.debug("Actor spawned, exposing", actor=name)
-                        await remote_ref.ask(Expose(ref=local_ref, name=name))
-
-                        all_members = dict(members)
-                        all_members[node_id] = MemberInfo(node_id=node_id, address=local_address, state=MemberState.ALIVE, incarnation=0)
-
-                        resolver = MembershipShardResolver(membership_ref=membership_ref, members=all_members, replicas=effective_replicas)
-
-                        async def send_fn(address: str, actor_id: str, msg: Any) -> None:
-                            await route_message(address, actor_id, msg, ask=False)
-
-                        async def ask_fn(address: str, actor_id: str, msg: Any, timeout: float = 10.0) -> Any:
-                            return await route_message(address, actor_id, msg, ask=True, timeout=timeout)
-
-                        sharded_ref = ShardedActorRef(actor_id=name, resolver=resolver, send_fn=send_fn, ask_fn=ask_fn, known_leader_id=node_id)
-                        logger.debug("Replying with sharded ref (leader)", actor=name)
-                        await ctx.reply(sharded_ref)
-                    else:
-                        leader_id = await membership_ref.ask(GetLeaderId(actor_id=name, replicas=effective_replicas))
-                        leader_address = members[leader_id].address if leader_id in members else None
-                        logger.debug("I am NOT leader, forwarding to leader", actor=name, leader=leader_id)
-
-                        if leader_address:
-                            register_behavior(func_name, behavior)
-                            host_part, port_str = leader_address.rsplit(":", 1)
-                            initial_state_bytes = None
-                            if behavior.state_initial is not None:
-                                logger.debug("Serializing initial state")
-                                initial_state_bytes = serialize(behavior.state_initial)
-                            try:
-                                await remote_ref.ask(Connect(host=host_part, port=int(port_str)), timeout=2.0)
-                                result = await remote_ref.ask(Lookup("cluster", peer=leader_address), timeout=2.0)
-                                if result and result.ref:
-                                    await result.ref.ask(_RemoteCreateActor(behavior_name=func_name, actor_name=name, initial_state=initial_state_bytes), timeout=5.0)
-                            except (TimeoutError, Exception) as e:
-                                logger.warn("Failed to forward to leader", actor=name, error=str(e))
-
-                        all_members = dict(members)
-                        all_members[node_id] = MemberInfo(node_id=node_id, address=local_address, state=MemberState.ALIVE, incarnation=0)
-
-                        resolver = MembershipShardResolver(membership_ref=membership_ref, members=all_members, replicas=effective_replicas)
-
-                        async def send_fn(address: str, actor_id: str, msg: Any) -> None:
-                            await route_message(address, actor_id, msg, ask=False)
-
-                        async def ask_fn(address: str, actor_id: str, msg: Any, timeout: float = 10.0) -> Any:
-                            return await route_message(address, actor_id, msg, ask=True, timeout=timeout)
-
-                        sharded_ref = ShardedActorRef(actor_id=name, resolver=resolver, send_fn=send_fn, ask_fn=ask_fn, known_leader_id=leader_id)
-                        logger.debug("Replying with sharded ref (non-leader)", actor=name)
-                        await ctx.reply(sharded_ref)
-                else:
-                    logger.debug("Non-replicated actor, looking up or creating", actor=name)
-                    for _, member_info in members.items():
-                        try:
-                            result = await remote_ref.ask(Lookup(name, peer=member_info.address), timeout=2.0)
-                            if result and result.ref:
-                                await ctx.reply(result.ref)
-                                break
-                        except (TimeoutError, Exception):
-                            continue
-                    else:
-                        ref = await system.actor(behavior, name=name)
-                        await remote_ref.ask(Expose(ref=ref, name=name))
-                        await ctx.reply(ref)
-
-            case _RemoteCreateActor(behavior_name, actor_name, initial_state):
-                logger.debug("_RemoteCreateActor received", actor=actor_name, behavior=behavior_name)
-                behavior = get_registered_actor(behavior_name)
-                if behavior:
-                    if initial_state is not None:
-                        state = deserialize(initial_state)
-                        configured_behavior = behavior(state)
-                    else:
-                        configured_behavior = behavior()
-
-                    local_ref = await system.actor(name=actor_name)
-                    if local_ref:
-                        logger.debug("Actor already exists for _RemoteCreateActor", actor=actor_name)
-                        await ctx.reply(True)
-                        continue
-
-                    logger.debug("Creating actor directly for _RemoteCreateActor", actor=actor_name)
-                    local_ref = await system.actor(configured_behavior, name=actor_name)
-                    await remote_ref.ask(Expose(ref=local_ref, name=actor_name))
-                    logger.debug("Actor created and exposed for _RemoteCreateActor", actor=actor_name)
-                    await ctx.reply(True)
-                else:
-                    logger.warn("Behavior not found for _RemoteCreateActor", behavior=behavior_name)
-                    await ctx.reply(None)
-
             case WaitFor(nodes):
                 members = await membership_ref.ask(GetAliveMembers())
-                count = len(members)
-                if count >= nodes:
+                if len(members) >= nodes:
                     await ctx.reply(True)
                 else:
                     await mailbox.schedule(WaitFor(nodes), delay=0.2, sender=ctx.sender)
@@ -928,7 +938,141 @@ class ClusteredActorSystem(System):
         if self._cluster_ref is None:
             raise RuntimeError("ClusteredActorSystem not started")
 
-        return await self._cluster_ref.ask(CreateActor(behavior, name))
+        replication_config = behavior.__replication_config__
+        if replication_config:
+            effective_replicas = replication_config.replicas or 1
+            func_name = behavior.func.__name__
+            register_behavior(func_name, behavior)
+
+            membership_ref = await self._system.actor(name=MEMBERSHIP_ACTOR_ID)
+            remote_ref = await self._system.actor(name=REMOTE_ACTOR_ID)
+
+            if not membership_ref or not remote_ref:
+                raise RuntimeError("Cluster not ready")
+
+            is_leader = await membership_ref.ask(IsLeader(actor_id=name, replicas=effective_replicas))
+            members = await membership_ref.ask(GetAliveMembers())
+
+            initial_state_bytes = None
+            if behavior.state_initial is not None:
+                initial_state_bytes = serialize(behavior.state_initial)
+
+            if is_leader:
+                local_ref = await self._system.actor(behavior, name=name, filters=filters)
+                from .messages import Expose
+                await remote_ref.send(Expose(ref=local_ref, name=name))
+
+                all_members = dict(members)
+                all_members[self._node_id] = MemberInfo(
+                    node_id=self._node_id,
+                    address=self._address,
+                    state=MemberState.ALIVE,
+                    incarnation=0
+                )
+                resolver = MembershipShardResolver(
+                    membership_ref=membership_ref,
+                    members=all_members,
+                    replicas=effective_replicas
+                )
+
+                async def send_fn(address: str, actor_id: str, msg: Any) -> None:
+                    if address == self._address:
+                        ref = await self._system.actor(name=actor_id)
+                        if ref:
+                            await ref.send(msg)
+                    else:
+                        host, port = address.rsplit(":", 1)
+                        from .messages import Connect, Lookup
+                        await remote_ref.send(Connect(host=host, port=int(port)))
+                        result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
+                        if result and result.ref:
+                            await result.ref.send(msg)
+
+                async def ask_fn(address: str, actor_id: str, msg: Any, timeout: float = 10.0) -> Any:
+                    if address == self._address:
+                        ref = await self._system.actor(name=actor_id)
+                        if ref:
+                            return await ref.ask(msg, timeout)
+                    else:
+                        host, port = address.rsplit(":", 1)
+                        from .messages import Connect, Lookup
+                        await remote_ref.send(Connect(host=host, port=int(port)))
+                        result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
+                        if result and result.ref:
+                            return await result.ref.ask(msg, timeout)
+                    return None
+
+                return ShardedActorRef(
+                    actor_id=name,
+                    resolver=resolver,
+                    send_fn=send_fn,
+                    ask_fn=ask_fn,
+                    known_leader_id=self._node_id
+                )
+            else:
+                leader_id = await membership_ref.ask(GetLeaderId(actor_id=name, replicas=effective_replicas))
+                if leader_id and leader_id in members:
+                    leader_addr = members[leader_id].address
+                    host, port = leader_addr.rsplit(":", 1)
+                    from .messages import Connect, Lookup
+                    await remote_ref.send(Connect(host=host, port=int(port)))
+                    await remote_ref.ask(Lookup(
+                        name,
+                        peer=leader_addr,
+                        ensure=True,
+                        behavior=func_name,
+                        initial_state=initial_state_bytes
+                    ), timeout=5.0)
+
+                all_members = dict(members)
+                all_members[self._node_id] = MemberInfo(
+                    node_id=self._node_id,
+                    address=self._address,
+                    state=MemberState.ALIVE,
+                    incarnation=0
+                )
+                resolver = MembershipShardResolver(
+                    membership_ref=membership_ref,
+                    members=all_members,
+                    replicas=effective_replicas
+                )
+
+                async def send_fn(address: str, actor_id: str, msg: Any) -> None:
+                    if address == self._address:
+                        ref = await self._system.actor(name=actor_id)
+                        if ref:
+                            await ref.send(msg)
+                    else:
+                        host, port = address.rsplit(":", 1)
+                        from .messages import Connect, Lookup
+                        await remote_ref.send(Connect(host=host, port=int(port)))
+                        result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
+                        if result and result.ref:
+                            await result.ref.send(msg)
+
+                async def ask_fn(address: str, actor_id: str, msg: Any, timeout: float = 10.0) -> Any:
+                    if address == self._address:
+                        ref = await self._system.actor(name=actor_id)
+                        if ref:
+                            return await ref.ask(msg, timeout)
+                    else:
+                        host, port = address.rsplit(":", 1)
+                        from .messages import Connect, Lookup
+                        await remote_ref.send(Connect(host=host, port=int(port)))
+                        result = await remote_ref.ask(Lookup(actor_id, peer=address), timeout=2.0)
+                        if result and result.ref:
+                            return await result.ref.ask(msg, timeout)
+                    return None
+
+                return ShardedActorRef(
+                    actor_id=name,
+                    resolver=resolver,
+                    send_fn=send_fn,
+                    ask_fn=ask_fn,
+                    known_leader_id=leader_id
+                )
+        else:
+            return await self._system.actor(behavior, name=name, filters=filters)
 
     async def _lookup_remote[M](self, name: str, node_id: str) -> ActorRef[M] | None:
         membership_ref = await self._system.actor(name=MEMBERSHIP_ACTOR_ID)
