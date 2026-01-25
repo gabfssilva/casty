@@ -198,7 +198,7 @@ class Context:
             raise RuntimeError("Context not bound to system")
 
         target = to if to is not None else self._self_ref
-        return await self._system.schedule(msg, to=target, delay=delay, every=every, sender=sender)
+        return await self._system.schedule(msg, to=target, delay=delay, every=every, sender=sender, owner=self.self_id)
 
 
 class Mailbox[M](Protocol):

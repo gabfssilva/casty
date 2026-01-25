@@ -34,6 +34,7 @@ class LocalActorSystem(System):
         self._mailboxes: dict[str, ActorMailbox[Any]] = {}
         self._children: dict[str, list[str]] = {}
         self._scheduled_tasks: list[asyncio.Task[None]] = []
+        self._actor_scheduled: dict[str, list[asyncio.Task[None]]] = {}
 
     @property
     def node_id(self) -> str:
@@ -92,8 +93,25 @@ class LocalActorSystem(System):
                 await self._mailboxes[child_id].put(Envelope(Stop()))
 
     async def _cleanup_actor(self, actor_id: str) -> None:
+        scheduled = self._actor_scheduled.pop(actor_id, [])
+        for task in scheduled:
+            if not task.done():
+                task.cancel()
+        for task in scheduled:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        main_task = self._tasks.pop(actor_id, None)
+        if main_task is not None and not main_task.done():
+            main_task.cancel()
+            try:
+                await main_task
+            except asyncio.CancelledError:
+                pass
+
         self._actors.pop(actor_id, None)
-        self._tasks.pop(actor_id, None)
         self._mailboxes.pop(actor_id, None)
 
     async def _run_supervised_actor[M](
@@ -213,6 +231,7 @@ class LocalActorSystem(System):
         delay: float | None = None,
         every: float | None = None,
         sender: ActorRef | None = None,
+        owner: str | None = None,
     ) -> Callable[[], Coroutine[Any, Any, None]] | None:
         if delay is not None and every is not None:
             raise ValueError("Cannot specify both delay and every")
@@ -220,13 +239,20 @@ class LocalActorSystem(System):
         if to is None:
             raise ValueError("Must specify 'to' target")
 
+        def track_task(task: asyncio.Task[None]) -> None:
+            self._scheduled_tasks.append(task)
+            if owner is not None:
+                if owner not in self._actor_scheduled:
+                    self._actor_scheduled[owner] = []
+                self._actor_scheduled[owner].append(task)
+
         if delay is not None:
             async def delayed_send() -> None:
                 await asyncio.sleep(delay)
                 await to.send(msg, sender=sender)
 
             task = asyncio.create_task(delayed_send())
-            self._scheduled_tasks.append(task)
+            track_task(task)
             return None
 
         if every is not None:
@@ -240,7 +266,7 @@ class LocalActorSystem(System):
                         await to.send(msg, sender=sender)
 
             task = asyncio.create_task(periodic_send())
-            self._scheduled_tasks.append(task)
+            track_task(task)
 
             async def cancel() -> None:
                 nonlocal cancelled
@@ -347,8 +373,9 @@ class ActorSystem(System):
         delay: float | None = None,
         every: float | None = None,
         sender: ActorRef | None = None,
+        owner: str | None = None,
     ) -> Callable[[], Coroutine[Any, Any, None]] | None:
-        return await self._inner.schedule(msg, to=to, delay=delay, every=every, sender=sender)
+        return await self._inner.schedule(msg, to=to, delay=delay, every=every, sender=sender, owner=owner)
 
     async def shutdown(self) -> None:
         await self._inner.shutdown()
