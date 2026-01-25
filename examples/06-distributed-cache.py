@@ -1,11 +1,50 @@
+"""Distributed Cache Example
+
+Demonstrates building a distributed cache on top of the actor framework.
+Uses replicated actors for fault tolerance and consistent hashing for
+key distribution.
+
+Run with:
+    uv run python examples/06-distributed-cache.py
+"""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import msgpack
 
-from .core import actor, Mailbox
-from .messages import CacheSet, CacheGet, CacheDelete, CacheExists, CacheExpire, CacheMessage
+from casty import actor, Mailbox
+from casty.cluster import DevelopmentCluster
+
+
+@dataclass
+class CacheSet:
+    value: bytes
+    ttl: float | None = None
+
+
+@dataclass
+class CacheGet:
+    pass
+
+
+@dataclass
+class CacheDelete:
+    pass
+
+
+@dataclass
+class CacheExists:
+    pass
+
+
+@dataclass
+class CacheExpire:
+    pass
+
+
+type CacheMessage = CacheSet | CacheGet | CacheDelete | CacheExists | CacheExpire
 
 
 @actor
@@ -75,3 +114,33 @@ class DistributedCache:
     async def exists(self, key: str) -> bool:
         entry = await self._entry(key)
         return await entry.ask(CacheExists())
+
+
+async def main():
+    import asyncio
+
+    async with DevelopmentCluster(nodes=3) as cluster:
+        cache = DistributedCache(cluster, replicas=3, write_quorum=2)
+
+        await cache.set("user:1", {"name": "Alice", "age": 30})
+        await cache.set("user:2", {"name": "Bob", "age": 25})
+
+        user1 = await cache.get("user:1")
+        print(f"user:1 = {user1}")
+
+        exists = await cache.exists("user:2")
+        print(f"user:2 exists = {exists}")
+
+        await cache.delete("user:2")
+        exists = await cache.exists("user:2")
+        print(f"user:2 exists after delete = {exists}")
+
+        await cache.set("temp", "expires soon", ttl=1.0)
+        print(f"temp = {await cache.get('temp')}")
+        await asyncio.sleep(1.5)
+        print(f"temp after TTL = {await cache.get('temp')}")
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())

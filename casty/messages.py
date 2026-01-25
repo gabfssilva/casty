@@ -355,34 +355,6 @@ class DeleteState:
     actor_id: str
 
 
-# === Cache Messages ===
-
-@message
-class CacheSet:
-    value: bytes
-    ttl: float | None = None
-
-
-@message
-class CacheGet:
-    pass
-
-
-@message
-class CacheDelete:
-    pass
-
-
-@message
-class CacheExists:
-    pass
-
-
-@message
-class CacheExpire:
-    pass
-
-
 # === Type Aliases ===
 
 type InboundEvent = (
@@ -397,5 +369,3 @@ type OutboundEvent = Register | Write | Close
 type GossipMessage = GossipPut | GossipGet | GossipTick
 
 type StatesMessage = StoreState | GetState | DeleteState
-
-type CacheMessage = CacheSet | CacheGet | CacheDelete | CacheExists | CacheExpire
