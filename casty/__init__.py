@@ -21,6 +21,7 @@ from .core import (
     get_behavior,
     Reply,
     Cancel,
+    slow_message_filter,
 )
 from .system import ActorSystem, LocalActorSystem
 from .supervision import (
@@ -76,4 +77,5 @@ __all__ = [
     "get_behavior",
     "Reply",
     "Cancel",
+    "slow_message_filter",
 ]

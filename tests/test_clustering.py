@@ -117,29 +117,32 @@ async def test_clustered_actor_non_blocking():
     @actor(clustered=True)
     async def slow_actor(*, mailbox: Mailbox[Ping]):
         async for msg, ctx in mailbox:
-            await asyncio.sleep(0.1)
+            print('initializing slow...')
+            await asyncio.sleep(2)
             await ctx.reply("slow")
+            print('slow done!')
 
     @actor(clustered=True)
     async def fast_actor(*, mailbox: Mailbox[Ping]):
         async for msg, ctx in mailbox:
+            print('initializing fast...')
             await ctx.reply("fast")
+            print('fast done!')
 
     async with asyncio.timeout(15):
-        async with DevelopmentCluster(nodes=3, strategy=DistributionStrategy.CONSISTENT) as cluster:
+        async with DevelopmentCluster(nodes=3) as cluster:
             slow_ref = await cluster.actor(slow_actor(), name="slow")
             fast_ref = await cluster.actor(fast_actor(), name="fast")
-
-            await asyncio.sleep(0.3)
 
             slow_task = asyncio.create_task(slow_ref.ask(Ping()))
 
             start = asyncio.get_event_loop().time()
+
             fast_result = await fast_ref.ask(Ping())
             elapsed = asyncio.get_event_loop().time() - start
 
             assert fast_result == "fast"
-            assert elapsed < 0.08
+            assert elapsed < 0.03
 
             slow_result = await slow_task
             assert slow_result == "slow"

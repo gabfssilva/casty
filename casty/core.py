@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from asyncio import Future
 from dataclasses import dataclass, field
 from typing import (
@@ -29,6 +30,26 @@ type MessageStream[M] = AsyncGenerator[tuple[M, Context], None]
 type Filter[M] = Callable[[Any, MessageStream[M]], MessageStream[M]]
 type DeliverFn[M] = Callable[[Envelope[M]], Awaitable[None]]
 type WriteQuorum = int | Literal["async", "all", "quorum"]
+
+
+def slow_message_filter[M](threshold: float = 1.0) -> Filter[M]:
+    """Filter that warns when message processing exceeds threshold (in seconds)."""
+    def apply(_state: Any, stream: MessageStream[M]) -> MessageStream[M]:
+        async def filtered() -> MessageStream[M]:
+            async for msg, ctx in stream:
+                start = time.monotonic()
+                yield msg, ctx
+                elapsed = time.monotonic() - start
+                if elapsed >= threshold:
+                    logger.warn(
+                        "Slow message detected",
+                        actor_id=ctx.self_id,
+                        msg_type=type(msg).__name__,
+                        elapsed=f"{elapsed:.2f}s",
+                        threshold=f"{threshold:.2f}s",
+                    )
+        return filtered()
+    return apply
 
 
 @dataclass

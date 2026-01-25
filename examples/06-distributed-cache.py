@@ -93,8 +93,6 @@ class DistributedCache:
             self._entries[cache_key] = await self._cluster.actor(
                 cache_entry(None),
                 name=cache_key,
-                write_quorum=self._write_quorum,
-                replicas=self._replicas,
             )
         return self._entries[cache_key]
 
@@ -120,7 +118,7 @@ async def main():
     import asyncio
 
     async with DevelopmentCluster(nodes=3) as cluster:
-        cache = DistributedCache(cluster, replicas=3, write_quorum=2)
+        cache = DistributedCache(cluster)
 
         await cache.set("user:1", {"name": "Alice", "age": 30})
         await cache.set("user:2", {"name": "Bob", "age": 25})

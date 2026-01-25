@@ -16,6 +16,7 @@ from .core import (
     ActorRef,
     LocalActorRef,
     reply,
+    slow_message_filter,
 )
 from .state import State, Stateful
 from .supervision import DecisionType
@@ -26,9 +27,11 @@ class LocalActorSystem(System):
         self,
         node_id: str = "local",
         debug_filter: Any = None,
+        slow_threshold: float | None = 1.0,
     ) -> None:
         self._node_id = node_id
         self._debug_filter = debug_filter
+        self._slow_threshold = slow_threshold
         self._actors: dict[str, ActorRef[Any]] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._mailboxes: dict[str, ActorMailbox[Any]] = {}
@@ -56,7 +59,11 @@ class LocalActorSystem(System):
         if isinstance(state, State):
             state = State(copy.deepcopy(state.value))
 
-        all_filters = [self._debug_filter] if self._debug_filter else []
+        all_filters = []
+        if self._slow_threshold is not None:
+            all_filters.append(slow_message_filter(self._slow_threshold))
+        if self._debug_filter:
+            all_filters.append(self._debug_filter)
         if filters:
             all_filters.extend(filters)
 
@@ -319,8 +326,12 @@ class ActorSystem(System):
         self,
         node_id: str = "local",
         filters: list[Filter] | None = None,
+        slow_threshold: float | None = 1.0,
     ) -> None:
-        self._inner: LocalActorSystem | Any = LocalActorSystem(node_id=node_id)
+        self._inner: LocalActorSystem | Any = LocalActorSystem(
+            node_id=node_id,
+            slow_threshold=slow_threshold,
+        )
         self._filters = filters or []
 
     @classmethod
