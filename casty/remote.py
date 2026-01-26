@@ -147,6 +147,12 @@ class _SessionDisconnected:
 
 
 @dataclass
+class _ConnectFailed:
+    peer_id: str
+    reason: str
+
+
+@dataclass
 class _PendingLookup:
     name: str
     peer: str
@@ -422,7 +428,7 @@ async def _handle_envelope(
 type RemoteMessage = (
     Listen | Connect |
     Expose | Unexpose | Lookup |
-    _SessionConnected | _SessionDisconnected | _LocalLookup
+    _SessionConnected | _SessionDisconnected | _ConnectFailed | _LocalLookup
 )
 
 
@@ -573,6 +579,10 @@ async def remote_actor(*, mailbox: Mailbox[RemoteMessage]):
                 sessions.pop(peer_id, None)
                 logger.debug("Session disconnected", peer=peer_id)
 
+            case _ConnectFailed(peer_id, reason):
+                pending_connections.pop(peer_id, None)
+                logger.debug("Connection failed, cleaned pending", peer=peer_id, reason=reason)
+
             case _LocalLookup(name):
                 logger.debug("_LocalLookup", name=name)
                 if name in exposed:
@@ -645,6 +655,7 @@ async def _remote_connector(
     mailbox: Mailbox[InboundEvent],
 ):
     replied = False
+    peer_id = f"{host}:{port}"
 
     await tcp_mgr.send(IoConnect(
         handler=mailbox.ref(),
@@ -671,9 +682,10 @@ async def _remote_connector(
                     )))
 
             case IoConnectFailed(reason):
+                await remote_ref.send(_ConnectFailed(peer_id=peer_id, reason=reason))
                 if reply_to and not replied:
                     replied = True
-                    await reply_to.send(Reply(result=ConnectFailed(reason)))
+                    await reply_to.send(Reply(result=ConnectFailed(reason, peer=peer_id)))
                 break
 
             case PeerClosed() | ErrorClosed(_) | Aborted():

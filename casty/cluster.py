@@ -104,7 +104,7 @@ from .messages import (
     Join, SetLocalAddress, GetAliveMembers, GetAllMembers,
     GetResponsibleNodes, GetAddress, MergeMembership, MarkDown, MarkAlive,
     GetLeaderId, IsLeader, GetReplicaIds,
-    SwimTick, ProbeTimeout, PingReqTimeout,
+    SwimTick, ProbeTimeout, PingReqTimeout, IndirectProbeTimeout,
     GossipPut, GossipGet, GossipTick, GossipMessage,
     StoreState, StoreAck, StatesMessage,
     Subscribe, Unsubscribe, Forward, MembershipChanged,
@@ -326,6 +326,15 @@ class _PendingSend:
     message: Any
 
 
+@dataclass
+class _IndirectProbeState:
+    target: str
+    requester: str
+    requester_address: str | None
+    reply_to: "ActorRef | None"
+    cancel_timeout: Callable[[], Coroutine[Any, Any, None]] | None = None
+
+
 from .messages import RemoteConnected, ConnectFailed, LookupResult
 
 
@@ -336,7 +345,7 @@ async def swim_actor(
     probe_timeout: float = 5.0,
     ping_req_fanout: int = 3,
     *,
-    mailbox: Mailbox[SwimTick | Ping | Ack | PingReq | PingReqAck | ProbeTimeout | PingReqTimeout | Reply],
+    mailbox: Mailbox[SwimTick | Ping | Ack | PingReq | PingReqAck | ProbeTimeout | PingReqTimeout | IndirectProbeTimeout | Reply],
     system: System,
 ):
     from .messages import Connect, Lookup
@@ -346,6 +355,7 @@ async def swim_actor(
     pending_probes: dict[str, _ProbeState] = {}
     pending_connects: dict[str, list[_PendingSend]] = {}
     pending_lookups: dict[str, list[_PendingSend]] = {}
+    indirect_probes: dict[str, _IndirectProbeState] = {}
 
     membership_ref = await system.actor(name=MEMBERSHIP_ACTOR_ID)
     remote_ref = await system.actor(name=REMOTE_ACTOR_ID)
@@ -410,6 +420,20 @@ async def swim_actor(
 
             case Ack(sender=ack_sender, members=remote_members):
                 logger.debug("swim_actor received Ack", sender=ack_sender)
+
+                if ack_sender in indirect_probes:
+                    state = indirect_probes.pop(ack_sender)
+                    if state.cancel_timeout:
+                        await state.cancel_timeout()
+                    snapshots = await get_member_snapshots()
+                    ack = PingReqAck(sender=node_id, target=ack_sender, success=True, members=snapshots)
+                    if state.reply_to:
+                        logger.debug("swim_actor sending PingReqAck success via reply", target=ack_sender, to=state.requester)
+                        await state.reply_to.send(ack)
+                    elif state.requester_address:
+                        logger.debug("swim_actor sending PingReqAck success via initiate_send", target=ack_sender, to=state.requester)
+                        await initiate_send(state.requester_address, SWIM_NAME, ack)
+
                 if ack_sender in pending_probes:
                     probe_state = pending_probes.pop(ack_sender)
                     if probe_state.cancel_timeout:
@@ -417,6 +441,7 @@ async def swim_actor(
                     if probe_state.cancel_ping_req_timeout:
                         await probe_state.cancel_ping_req_timeout()
                     logger.debug("swim_actor probe succeeded", target=ack_sender)
+
                 for m in remote_members:
                     if m.node_id == ack_sender and m.state == "alive":
                         await membership_ref.send(MarkAlive(ack_sender, m.address))
@@ -452,20 +477,42 @@ async def swim_actor(
                         break
                 await membership_ref.send(MergeMembership(remote_members))
                 members = await membership_ref.ask(GetAliveMembers())
+
+                req_sender_address = members[req_sender].address if req_sender in members else None
+
+                if req_target in indirect_probes:
+                    logger.debug("swim_actor already probing target for PingReq", target=req_target)
+                    continue
+
+                cancel_fn = await ctx.schedule(
+                    IndirectProbeTimeout(target=req_target, requester=req_sender),
+                    delay=probe_timeout
+                )
+
+                indirect_probes[req_target] = _IndirectProbeState(
+                    target=req_target,
+                    requester=req_sender,
+                    requester_address=req_sender_address,
+                    reply_to=ctx.reply_to or ctx.sender,
+                    cancel_timeout=cancel_fn,
+                )
+
                 if req_target in members:
                     target_info = members[req_target]
                     snapshots = await get_member_snapshots()
                     logger.debug("swim_actor forwarding Ping for PingReq", target=req_target)
                     await initiate_send(target_info.address, SWIM_NAME, Ping(sender=node_id, members=snapshots))
-                snapshots = await get_member_snapshots()
-                ack = PingReqAck(sender=node_id, target=req_target, success=True, members=snapshots)
-                if ctx.reply_to is not None or ctx.sender is not None:
-                    logger.debug("swim_actor replying PingReqAck", to=req_sender)
-                    await ctx.reply(ack)
-                elif req_sender in members:
-                    sender_info = members[req_sender]
-                    logger.debug("swim_actor sending PingReqAck via initiate_send", to=req_sender)
-                    await initiate_send(sender_info.address, SWIM_NAME, ack)
+                else:
+                    logger.debug("swim_actor PingReq target not in members", target=req_target)
+                    snapshots = await get_member_snapshots()
+                    ack = PingReqAck(sender=node_id, target=req_target, success=False, members=snapshots)
+                    state = indirect_probes.pop(req_target)
+                    if state.cancel_timeout:
+                        await state.cancel_timeout()
+                    if state.reply_to:
+                        await state.reply_to.send(ack)
+                    elif req_sender_address:
+                        await initiate_send(req_sender_address, SWIM_NAME, ack)
 
             case PingReqAck(sender=_, target=ack_target, success=success, members=remote_members):
                 logger.debug("swim_actor received PingReqAck", target=ack_target, success=success)
@@ -488,10 +535,37 @@ async def swim_actor(
                 else:
                     logger.debug("swim_actor PingReqTimeout - already resolved", target=target)
 
+            case IndirectProbeTimeout(target=target, requester=requester):
+                if target in indirect_probes:
+                    state = indirect_probes.pop(target)
+                    logger.debug("swim_actor IndirectProbeTimeout, sending failure", target=target, to=requester)
+                    snapshots = await get_member_snapshots()
+                    ack = PingReqAck(sender=node_id, target=target, success=False, members=snapshots)
+                    if state.reply_to:
+                        await state.reply_to.send(ack)
+                    elif state.requester_address:
+                        await initiate_send(state.requester_address, SWIM_NAME, ack)
+                else:
+                    logger.debug("swim_actor IndirectProbeTimeout - already resolved", target=target)
+
             case Reply(result=Ack() as ack_msg):
                 ack_sender = ack_msg.sender
                 remote_members = ack_msg.members
                 logger.debug("swim_actor received Ack via Reply", sender=ack_sender)
+
+                if ack_sender in indirect_probes:
+                    state = indirect_probes.pop(ack_sender)
+                    if state.cancel_timeout:
+                        await state.cancel_timeout()
+                    snapshots = await get_member_snapshots()
+                    ping_req_ack = PingReqAck(sender=node_id, target=ack_sender, success=True, members=snapshots)
+                    if state.reply_to:
+                        logger.debug("swim_actor sending PingReqAck success via Reply path", target=ack_sender, to=state.requester)
+                        await state.reply_to.send(ping_req_ack)
+                    elif state.requester_address:
+                        logger.debug("swim_actor sending PingReqAck success via initiate_send (Reply path)", target=ack_sender, to=state.requester)
+                        await initiate_send(state.requester_address, SWIM_NAME, ping_req_ack)
+
                 if ack_sender in pending_probes:
                     probe_state = pending_probes.pop(ack_sender)
                     if probe_state.cancel_timeout:
@@ -499,6 +573,7 @@ async def swim_actor(
                     if probe_state.cancel_ping_req_timeout:
                         await probe_state.cancel_ping_req_timeout()
                     logger.debug("swim_actor probe succeeded via Reply", target=ack_sender)
+
                 for m in remote_members:
                     if m.node_id == ack_sender and m.state == "alive":
                         await membership_ref.send(MarkAlive(ack_sender, m.address))
@@ -533,8 +608,12 @@ async def swim_actor(
                         await remote_ref.send(Lookup(pending.actor_name, peer=address), sender=mailbox.ref())
                     logger.debug("swim_actor RemoteConnected, sent lookups", peer=peer, count=len(pending_list))
 
-            case Reply(result=ConnectFailed(reason=reason)):
-                logger.debug("swim_actor ConnectFailed", reason=reason)
+            case Reply(result=ConnectFailed(reason=reason, peer=peer)):
+                if peer and peer in pending_connects:
+                    pending_connects.pop(peer)
+                    logger.debug("swim_actor ConnectFailed, cleared pending", peer=peer, reason=reason)
+                else:
+                    logger.debug("swim_actor ConnectFailed", reason=reason)
 
             case Reply(result=LookupResult(ref=lookup_ref, peer=peer)) if lookup_ref is not None:
                 if peer and peer in pending_lookups:
@@ -648,8 +727,12 @@ async def gossip_actor(
                     await remote_ref.send(Lookup(GOSSIP_NAME, peer=address), sender=mailbox.ref())
                     logger.debug("gossip_actor RemoteConnected, sent lookup", peer=peer)
 
-            case Reply(result=ConnectFailed(reason=reason)):
-                logger.debug("gossip_actor ConnectFailed", reason=reason)
+            case Reply(result=ConnectFailed(reason=reason, peer=peer)):
+                if peer and peer in pending_connects:
+                    pending_connects.remove(peer)
+                    logger.debug("gossip_actor ConnectFailed, cleared pending", peer=peer, reason=reason)
+                else:
+                    logger.debug("gossip_actor ConnectFailed", reason=reason)
 
             case Reply(result=LookupResult(ref=lookup_ref, peer=peer)) if lookup_ref is not None:
                 if peer and peer in pending_lookups:
@@ -703,16 +786,35 @@ class ShardedActorRef[M](ActorRef[M]):
             self.known_leader_id = await self.resolver.get_leader_id(self.actor_id)
         return await self.resolver.resolve_address(self.known_leader_id)
 
+    def _invalidate_leader(self) -> None:
+        self.known_leader_id = None
+
     async def send(self, msg: M, *, sender: "ActorRef[Any] | None" = None) -> None:
-        address = await self._get_target_address()
-        await self.send_fn(address, self.actor_id, msg)
+        for attempt in range(3):
+            try:
+                address = await self._get_target_address()
+                await self.send_fn(address, self.actor_id, msg)
+                return
+            except (TimeoutError, ConnectionError, OSError) as e:
+                logger.debug("ShardedActorRef send failed, retrying", actor_id=self.actor_id, attempt=attempt, error=str(e))
+                self._invalidate_leader()
+                if attempt == 2:
+                    raise
 
     async def send_envelope(self, envelope: "Envelope[M]") -> None:
         await self.send(envelope.payload, sender=envelope.sender)
 
     async def ask[R](self, msg: M, timeout: float = 10.0) -> R:
-        address = await self._get_target_address()
-        return await self.ask_fn(address, self.actor_id, msg, timeout)
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                address = await self._get_target_address()
+                return await self.ask_fn(address, self.actor_id, msg, timeout)
+            except (TimeoutError, ConnectionError, OSError) as e:
+                logger.debug("ShardedActorRef ask failed, retrying", actor_id=self.actor_id, attempt=attempt, error=str(e))
+                self._invalidate_leader()
+                last_error = e
+        raise last_error or TimeoutError("All retry attempts failed")
 
     def __rshift__(self, msg: M) -> Awaitable[None]:
         return self.send(msg)
@@ -892,12 +994,17 @@ async def clustered_actor(
                     ), sender=mailbox.ref())
                     logger.debug("clustered_actor RemoteConnected, sent lookup", actor_id=actor_id, peer=peer)
 
-            case Reply(result=ConnectFailed(reason=reason)):
-                logger.debug("clustered_actor ConnectFailed", actor_id=actor_id, reason=reason)
-                for pending_list in pending_forward_connects.values():
+            case Reply(result=ConnectFailed(reason=reason, peer=peer)):
+                logger.debug("clustered_actor ConnectFailed", actor_id=actor_id, reason=reason, peer=peer)
+                if peer and peer in pending_forward_connects:
+                    pending_list = pending_forward_connects.pop(peer)
                     for pending in pending_list:
                         state.pending.append(pending.envelope)
-                pending_forward_connects.clear()
+                else:
+                    for pending_list in pending_forward_connects.values():
+                        for pending in pending_list:
+                            state.pending.append(pending.envelope)
+                    pending_forward_connects.clear()
 
             case Reply(result=LookupResult(ref=lookup_ref, peer=peer)) if lookup_ref is not None:
                 if peer and peer in pending_forward_lookups:
@@ -953,12 +1060,19 @@ def replication_filter[M](
     states_refs: list[ActorRef],
     write_quorum: int = 1,
 ) -> Filter[M]:
+    from .state import State
+
     async def apply(state: Any, inner: MessageStream[M]) -> MessageStream[M]:
         async for msg, ctx in inner:
             yield msg, ctx
 
             if states_refs and state is not None:
-                if isinstance(state, Stateful):
+                if isinstance(state, State):
+                    snapshot = {
+                        "value": serialize(state.value),
+                        "version": state.version,
+                    }
+                elif isinstance(state, Stateful):
                     snapshot = state.snapshot()
                 elif hasattr(state, 'snapshot'):
                     snapshot = state.snapshot()
@@ -966,6 +1080,7 @@ def replication_filter[M](
                     snapshot = vars(state) if hasattr(state, '__dict__') else {}
 
                 actor_id = ctx.self_id
+                logger.debug("replication_filter storing state", actor_id=actor_id, version=snapshot.get("version"))
                 tasks = [states_ref.ask(StoreState(actor_id, snapshot)) for states_ref in states_refs]
 
                 done = 0
@@ -1003,6 +1118,8 @@ async def cluster_actor(
     host: str = "127.0.0.1",
     port: int = 0,
     seeds: list[tuple[str, str]] | None = None,
+    probe_interval: float = 2.0,
+    probe_timeout: float = 5.0,
     *,
     mailbox: Mailbox[ClusterMessage],
     system: System,
@@ -1031,7 +1148,7 @@ async def cluster_actor(
     membership_ref = await system.actor(membership_actor(node_id, initial_members), name="membership")
     await membership_ref.send(SetLocalAddress(local_address))
 
-    swim_ref = await system.actor(swim_actor(node_id), name="swim")
+    swim_ref = await system.actor(swim_actor(node_id, probe_interval, probe_timeout), name="swim")
     gossip_ref = await system.actor(gossip_actor(node_id), name="gossip")
 
     await remote_ref.ask(Expose(ref=swim_ref, name="swim"))
@@ -1177,7 +1294,50 @@ class ClusteredActorSystem(System):
 
             if is_leader:
                 logger.info("ClusteredActorSystem spawning as leader", name=name)
-                local_ref = await self._system.actor(behavior, name=name, filters=filters)
+
+                states_refs: list[ActorRef] = []
+
+                local_states = await self._system.actor(name="states")
+                if local_states:
+                    states_refs.append(local_states)
+
+                replica_nodes = await membership_ref.ask(GetReplicaIds(actor_id=name, replicas=effective_replicas))
+                for replica_node_id in replica_nodes:
+                    if replica_node_id in members:
+                        replica_addr = members[replica_node_id].address
+                        try:
+                            host, port = replica_addr.rsplit(":", 1)
+                            from .messages import Connect, Lookup
+                            await remote_ref.ask(Connect(host=host, port=int(port)), timeout=2.0)
+                            result = await remote_ref.ask(Lookup("states", peer=replica_addr), timeout=2.0)
+                            if result and result.ref:
+                                states_refs.append(result.ref)
+                                logger.debug("ClusteredActorSystem got states ref", name=name, replica=replica_node_id)
+                        except (TimeoutError, Exception) as e:
+                            logger.debug("ClusteredActorSystem failed to get states ref", name=name, replica=replica_node_id, error=str(e))
+
+                recovered_state = await self._try_recover_state(name, members, remote_ref)
+                if recovered_state is not None and behavior.state_initial is not None:
+                    from .state import State
+                    if isinstance(behavior.state_initial, State):
+                        behavior.state_initial.value = recovered_state["value"]
+                        behavior.state_initial._version = recovered_state["version"]
+                        logger.info("ClusteredActorSystem recovered state", name=name, version=recovered_state["version"])
+
+                write_quorum_value = replication_config.write_quorum or 1
+                if isinstance(write_quorum_value, str):
+                    if write_quorum_value == "all":
+                        write_quorum_value = len(states_refs)
+                    elif write_quorum_value == "quorum":
+                        write_quorum_value = (len(states_refs) // 2) + 1
+                    else:
+                        write_quorum_value = 1
+
+                actor_filters = list(filters) if filters else []
+                if states_refs:
+                    actor_filters.append(replication_filter(states_refs, write_quorum_value))
+
+                local_ref = await self._system.actor(behavior, name=name, filters=actor_filters if actor_filters else None)
                 from .messages import Expose
                 await remote_ref.send(Expose(ref=local_ref, name=name))
 
@@ -1293,6 +1453,51 @@ class ClusteredActorSystem(System):
                 )
         else:
             return await self._system.actor(behavior, name=name, filters=filters)
+
+    async def _try_recover_state(
+        self,
+        actor_name: str,
+        members: dict[str, MemberInfo],
+        remote_ref: ActorRef,
+    ) -> dict[str, Any] | None:
+        from .messages import Connect, Lookup, GetState
+
+        best_state: dict[str, Any] | None = None
+        best_version = -1
+
+        local_states = await self._system.actor(name="states")
+        if local_states:
+            try:
+                local_result = await local_states.ask(GetState(actor_name), timeout=2.0)
+                if local_result and isinstance(local_result, dict) and "version" in local_result:
+                    if local_result["version"] > best_version:
+                        best_state = local_result
+                        best_version = local_result["version"]
+                        logger.debug("ClusteredActorSystem found local state", name=actor_name, version=best_version)
+            except (TimeoutError, Exception):
+                pass
+
+        for member_id, member_info in members.items():
+            if member_id == self._node_id:
+                continue
+            try:
+                host, port = member_info.address.rsplit(":", 1)
+                await remote_ref.ask(Connect(host=host, port=int(port)), timeout=2.0)
+                result = await remote_ref.ask(Lookup("states", peer=member_info.address), timeout=2.0)
+                if result and result.ref:
+                    state_result = await result.ref.ask(GetState(actor_name), timeout=2.0)
+                    if state_result and isinstance(state_result, dict) and "version" in state_result:
+                        if state_result["version"] > best_version:
+                            best_state = state_result
+                            best_version = state_result["version"]
+                            logger.debug("ClusteredActorSystem found remote state", name=actor_name, node=member_id, version=best_version)
+            except (TimeoutError, Exception) as e:
+                logger.debug("ClusteredActorSystem failed to get state from node", name=actor_name, node=member_id, error=str(e))
+
+        if best_state:
+            best_state["value"] = deserialize(best_state["value"])
+
+        return best_state
 
     async def _lookup_remote[M](self, name: str, node_id: str) -> ActorRef[M] | None:
         membership_ref = await self._system.actor(name=MEMBERSHIP_ACTOR_ID)
@@ -1470,3 +1675,38 @@ class DevelopmentCluster:
     async def gossip(self) -> ActorRef:
         node = self._next_node()
         return await node._system.actor(name="gossip")
+
+    async def decluster(self, node_id: str) -> None:
+        system = next((s for s in self._systems if s.node_id == node_id), None)
+        if not system:
+            raise ValueError(f"Node {node_id} not found")
+
+        await system.shutdown()
+        self._systems.remove(system)
+
+    async def add_node(self, node_id: str | None = None) -> ClusteredActorSystem:
+        if node_id is None:
+            existing_ids = {s.node_id for s in self._systems}
+            i = 0
+            while f"node-{i}" in existing_ids:
+                i += 1
+            node_id = f"node-{i}"
+
+        if not self._systems:
+            raise RuntimeError("No nodes in cluster to use as seed")
+
+        seed_system = self._systems[0]
+        seed_address = await seed_system.address()
+
+        system = ClusteredActorSystem(
+            node_id=node_id,
+            host="127.0.0.1",
+            port=0,
+            seeds=[(seed_system.node_id, seed_address)],
+            debug_filter=debug_filter(node_id) if self._debug else None,
+        )
+
+        await system.start()
+        self._systems.append(system)
+
+        return system

@@ -46,6 +46,7 @@ class ListenFailed:
 @message
 class ConnectFailed:
     reason: str
+    peer: str | None = None
 
 
 @message
@@ -202,6 +203,12 @@ class ProbeTimeout:
 @message
 class PingReqTimeout:
     target: str
+
+
+@message
+class IndirectProbeTimeout:
+    target: str
+    requester: str
 
 
 # === Replication Messages ===
