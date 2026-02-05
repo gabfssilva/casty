@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
     from casty.supervision import SupervisionStrategy
+
+
+@dataclass(frozen=True)
+class ShardedBehavior[M]:
+    entity_factory: Callable[[str], Behavior[M]]
+    num_shards: int = 100
 
 
 @dataclass(frozen=True)
@@ -112,3 +118,11 @@ class Behaviors:
         strategy: SupervisionStrategy,
     ) -> SupervisedBehavior[M]:
         return SupervisedBehavior(behavior, strategy)
+
+    @staticmethod
+    def sharded[M](
+        entity_factory: Callable[[str], Behavior[M]],
+        *,
+        num_shards: int = 100,
+    ) -> ShardedBehavior[M]:
+        return ShardedBehavior(entity_factory=entity_factory, num_shards=num_shards)

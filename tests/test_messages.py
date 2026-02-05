@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from casty.address import ActorAddress
 from casty.messages import Terminated
 from casty.ref import ActorRef
+from casty.transport import LocalTransport
+
+
+def _dummy_ref() -> ActorRef[str]:
+    transport = LocalTransport()
+    addr = ActorAddress(system="test", path="/dummy")
+    return ActorRef(address=addr, _transport=transport)
 
 
 async def test_terminated_holds_ref() -> None:
-    ref: ActorRef[str] = ActorRef(_send=lambda m: None)
+    ref = _dummy_ref()
     t = Terminated(ref=ref)
     assert t.ref is ref
 
@@ -13,7 +21,7 @@ async def test_terminated_holds_ref() -> None:
 async def test_terminated_is_frozen() -> None:
     import pytest
 
-    ref: ActorRef[str] = ActorRef(_send=lambda m: None)
+    ref = _dummy_ref()
     t = Terminated(ref=ref)
     with pytest.raises(AttributeError):
         t.ref = ref  # type: ignore[misc]

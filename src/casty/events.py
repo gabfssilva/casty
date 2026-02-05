@@ -4,9 +4,12 @@ import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from casty.ref import ActorRef
+
+if TYPE_CHECKING:
+    from casty.cluster_state import Member
 
 
 # --- Event types ---
@@ -40,6 +43,26 @@ class UnhandledMessage:
     ref: ActorRef[Any]
 
 
+@dataclass(frozen=True)
+class MemberUp:
+    member: Member
+
+
+@dataclass(frozen=True)
+class MemberLeft:
+    member: Member
+
+
+@dataclass(frozen=True)
+class UnreachableMember:
+    member: Member
+
+
+@dataclass(frozen=True)
+class ReachableMember:
+    member: Member
+
+
 # --- EventStream ---
 
 type EventHandler[E] = Callable[[E], Awaitable[None] | None]
@@ -52,12 +75,12 @@ class EventStream:
     def subscribe[E](self, event_type: type[E], handler: EventHandler[E]) -> None:
         self._subscribers[event_type].append(handler)
 
-    def unsubscribe[E](self, event_type: type[E], handler: EventHandler[E]) -> None:
+    def unsubscribe(self, event_type: type[object], handler: EventHandler[object]) -> None:
         handlers = self._subscribers.get(event_type)
         if handlers:
             handlers.remove(handler)
 
-    async def publish[E](self, event: E) -> None:
+    async def publish(self, event: object) -> None:
         handlers = self._subscribers.get(type(event), [])
         for handler in handlers:
             result = handler(event)

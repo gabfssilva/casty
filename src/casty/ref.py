@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
+
+from casty.address import ActorAddress
+from casty.transport import MessageTransport
 
 
 @dataclass(frozen=True)
 class ActorRef[M]:
-    _send: Callable[[M], None]
+    address: ActorAddress
+    _transport: MessageTransport
 
     def tell(self, msg: M) -> None:
-        self._send(msg)
+        self._transport.deliver(self.address, msg)

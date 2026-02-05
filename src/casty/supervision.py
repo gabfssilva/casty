@@ -14,7 +14,7 @@ class Directive(Enum):
 
 
 class SupervisionStrategy(Protocol):
-    def decide(self, exception: Exception, **kwargs: object) -> Directive: ...
+    def decide(self, exception: Exception, *, child_id: str = ..., **kwargs: object) -> Directive: ...
 
 
 class OneForOneStrategy(SupervisionStrategy):

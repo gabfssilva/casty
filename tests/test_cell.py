@@ -12,6 +12,7 @@ from casty.mailbox import Mailbox
 from casty.messages import Terminated
 from casty.ref import ActorRef
 from casty.supervision import Directive, OneForOneStrategy
+from casty.transport import LocalTransport
 from casty._cell import ActorCell
 
 
@@ -34,8 +35,10 @@ async def test_cell_processes_messages() -> None:
 
     behavior = Behaviors.receive(handler)
     event_stream = EventStream()
+    transport = LocalTransport()
     cell: ActorCell[Ping] = ActorCell(
         behavior=behavior, name="test", parent=None, event_stream=event_stream,
+        system_name="test", local_transport=transport,
     )
     await cell.start()
 
@@ -58,8 +61,10 @@ async def test_cell_behavior_state_transition() -> None:
         return Behaviors.receive(handler)
 
     event_stream = EventStream()
+    transport = LocalTransport()
     cell: ActorCell[Ping] = ActorCell(
         behavior=counter(), name="counter", parent=None, event_stream=event_stream,
+        system_name="test", local_transport=transport,
     )
     await cell.start()
 
@@ -82,8 +87,10 @@ async def test_cell_setup_behavior() -> None:
 
     behavior = Behaviors.setup(setup)
     event_stream = EventStream()
+    transport = LocalTransport()
     cell: ActorCell[str] = ActorCell(
         behavior=behavior, name="setup-test", parent=None, event_stream=event_stream,
+        system_name="test", local_transport=transport,
     )
     await cell.start()
     await asyncio.sleep(0.05)
@@ -97,11 +104,14 @@ async def test_cell_stopped_behavior_stops_actor() -> None:
         return Behaviors.stopped()
 
     event_stream = EventStream()
+    transport = LocalTransport()
     cell: ActorCell[str] = ActorCell(
         behavior=Behaviors.receive(handler),
         name="stopper",
         parent=None,
         event_stream=event_stream,
+        system_name="test",
+        local_transport=transport,
     )
     await cell.start()
     cell.ref.tell("stop")
@@ -125,8 +135,10 @@ async def test_cell_lifecycle_hooks() -> None:
         post_stop=post_stop,
     )
     event_stream = EventStream()
+    transport = LocalTransport()
     cell: ActorCell[str] = ActorCell(
         behavior=behavior, name="lifecycle", parent=None, event_stream=event_stream,
+        system_name="test", local_transport=transport,
     )
     await cell.start()
     await asyncio.sleep(0.05)
@@ -152,11 +164,14 @@ async def test_cell_spawns_children() -> None:
         return Behaviors.receive(lambda ctx, msg: Behaviors.same())
 
     event_stream = EventStream()
+    transport = LocalTransport()
     cell: ActorCell[str] = ActorCell(
         behavior=Behaviors.setup(parent_setup),
         name="parent",
         parent=None,
         event_stream=event_stream,
+        system_name="test",
+        local_transport=transport,
     )
     await cell.start()
     await asyncio.sleep(0.05)
@@ -175,11 +190,14 @@ async def test_cell_parent_stop_stops_children() -> None:
         return Behaviors.receive(lambda ctx, msg: Behaviors.same())
 
     event_stream = EventStream()
+    transport = LocalTransport()
     parent = ActorCell(
         behavior=Behaviors.setup(parent_setup),
         name="parent",
         parent=None,
         event_stream=event_stream,
+        system_name="test",
+        local_transport=transport,
     )
     await parent.start()
     await asyncio.sleep(0.05)
@@ -205,17 +223,22 @@ async def test_cell_watch_receives_terminated() -> None:
         return Behaviors.stopped()
 
     event_stream = EventStream()
+    transport = LocalTransport()
     watcher = ActorCell(
         behavior=Behaviors.receive(watcher_handler),
         name="watcher",
         parent=None,
         event_stream=event_stream,
+        system_name="test",
+        local_transport=transport,
     )
     watched = ActorCell(
         behavior=Behaviors.receive(watched_handler),
         name="watched",
         parent=None,
         event_stream=event_stream,
+        system_name="test",
+        local_transport=transport,
     )
     await watcher.start()
     await watched.start()
@@ -242,8 +265,10 @@ async def test_cell_supervision_restarts_on_failure() -> None:
     behavior = Behaviors.supervise(Behaviors.receive(failing_handler), strategy)
 
     event_stream = EventStream()
+    transport = LocalTransport()
     cell: ActorCell[str] = ActorCell(
         behavior=behavior, name="restartable", parent=None, event_stream=event_stream,
+        system_name="test", local_transport=transport,
     )
     await cell.start()
 
@@ -260,11 +285,14 @@ async def test_cell_publishes_events_to_stream() -> None:
     event_stream.subscribe(ActorStarted, lambda e: events.append(e))
     event_stream.subscribe(ActorStopped, lambda e: events.append(e))
 
+    transport = LocalTransport()
     cell: ActorCell[str] = ActorCell(
         behavior=Behaviors.receive(lambda ctx, msg: Behaviors.same()),
         name="observable",
         parent=None,
         event_stream=event_stream,
+        system_name="test",
+        local_transport=transport,
     )
     await cell.start()
     await asyncio.sleep(0.05)
@@ -281,11 +309,14 @@ async def test_cell_dead_letter_on_tell_after_stop() -> None:
     event_stream = EventStream()
     event_stream.subscribe(DeadLetter, lambda e: dead.append(e))
 
+    transport = LocalTransport()
     cell: ActorCell[str] = ActorCell(
         behavior=Behaviors.receive(lambda ctx, msg: Behaviors.same()),
         name="dead",
         parent=None,
         event_stream=event_stream,
+        system_name="test",
+        local_transport=transport,
     )
     await cell.start()
     await asyncio.sleep(0.05)

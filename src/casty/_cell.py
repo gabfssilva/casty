@@ -7,7 +7,6 @@ from typing import Any
 
 from casty.actor import (
     Behavior,
-    Behaviors,
     LifecycleBehavior,
     ReceiveBehavior,
     RestartBehavior,
@@ -23,12 +22,13 @@ from casty.events import (
     ActorStopped,
     DeadLetter,
     EventStream,
-    UnhandledMessage,
 )
+from casty.address import ActorAddress
 from casty.mailbox import Mailbox
 from casty.messages import Terminated
 from casty.ref import ActorRef
 from casty.supervision import Directive, SupervisionStrategy
+from casty.transport import LocalTransport
 
 
 class _CellContext[M]:
@@ -43,7 +43,7 @@ class _CellContext[M]:
 
     @property
     def log(self) -> logging.Logger:
-        return self._cell._logger
+        return self._cell.logger
 
     def spawn[C](
         self,
@@ -54,44 +54,46 @@ class _CellContext[M]:
     ) -> ActorRef[C]:
         child: ActorCell[C] = ActorCell(
             behavior=behavior,
-            name=f"{self._cell._name}/{name}",
+            name=f"{self._cell.cell_name}/{name}",
             parent=self._cell,
-            event_stream=self._cell._event_stream,
+            event_stream=self._cell.event_stream,
+            system_name=self._cell.system_name,
+            local_transport=self._cell.local_transport,
         )
         if mailbox is not None:
-            child._mailbox = mailbox
-        self._cell._children[name] = child
+            child.mailbox = mailbox
+        self._cell.children[name] = child
         asyncio.get_running_loop().create_task(child.start())
         return child.ref
 
     def stop(self, ref: ActorRef[Any]) -> None:
-        for name, child in self._cell._children.items():
+        for _name, child in self._cell.children.items():
             if child.ref is ref:
                 asyncio.get_running_loop().create_task(child.stop())
                 return
 
     def watch(self, ref: ActorRef[Any]) -> None:
         # Search children and siblings for the cell matching this ref
-        for child in self._cell._children.values():
+        for child in self._cell.children.values():
             if child.ref is ref:
-                child._watchers.add(self._cell)
+                child.watchers.add(self._cell)
                 return
         # Search parent's children (siblings)
-        if self._cell._parent is not None:
-            for sibling in self._cell._parent._children.values():
+        if self._cell.parent is not None:
+            for sibling in self._cell.parent.children.values():
                 if sibling.ref is ref:
-                    sibling._watchers.add(self._cell)
+                    sibling.watchers.add(self._cell)
                     return
 
     def unwatch(self, ref: ActorRef[Any]) -> None:
-        for child in self._cell._children.values():
+        for child in self._cell.children.values():
             if child.ref is ref:
-                child._watchers.discard(self._cell)
+                child.watchers.discard(self._cell)
                 return
-        if self._cell._parent is not None:
-            for sibling in self._cell._parent._children.values():
+        if self._cell.parent is not None:
+            for sibling in self._cell.parent.children.values():
                 if sibling.ref is ref:
-                    sibling._watchers.discard(self._cell)
+                    sibling.watchers.discard(self._cell)
                     return
 
 
@@ -109,11 +111,15 @@ class ActorCell[M]:
         name: str,
         parent: ActorCell[Any] | None,
         event_stream: EventStream,
+        system_name: str,
+        local_transport: LocalTransport,
     ) -> None:
         self._initial_behavior: Behavior[M] = behavior
         self._name = name
         self._parent = parent
         self._event_stream = event_stream
+        self._system_name = system_name
+        self._local_transport = local_transport
         self._mailbox: Mailbox[Any] = Mailbox()
         self._logger = logging.getLogger(f"casty.actor.{name}")
 
@@ -134,8 +140,10 @@ class ActorCell[M]:
         # Context
         self._ctx: _CellContext[M] = _CellContext(self)
 
-        # Create the ref with the _deliver callback
-        self._ref: ActorRef[M] = ActorRef(_send=self._deliver)
+        # Create the ref with address + transport
+        addr = ActorAddress(system=system_name, path=f"/{name}")
+        self._ref: ActorRef[M] = ActorRef(address=addr, _transport=local_transport)
+        local_transport.register(f"/{name}", self._deliver)
 
     @property
     def ref(self) -> ActorRef[M]:
@@ -144,6 +152,46 @@ class ActorCell[M]:
     @property
     def is_stopped(self) -> bool:
         return self._stopped
+
+    @property
+    def cell_name(self) -> str:
+        return self._name
+
+    @property
+    def event_stream(self) -> EventStream:
+        return self._event_stream
+
+    @property
+    def system_name(self) -> str:
+        return self._system_name
+
+    @property
+    def local_transport(self) -> LocalTransport:
+        return self._local_transport
+
+    @property
+    def logger(self) -> logging.Logger:
+        return self._logger
+
+    @property
+    def children(self) -> dict[str, ActorCell[Any]]:
+        return self._children
+
+    @property
+    def watchers(self) -> set[ActorCell[Any]]:
+        return self._watchers
+
+    @property
+    def parent(self) -> ActorCell[Any] | None:
+        return self._parent
+
+    @property
+    def mailbox(self) -> Mailbox[Any]:
+        return self._mailbox
+
+    @mailbox.setter
+    def mailbox(self, value: Mailbox[Any]) -> None:
+        self._mailbox = value
 
     def _deliver(self, msg: M) -> None:
         """Delivery callback for ActorRef. Puts into mailbox or publishes DeadLetter."""
@@ -332,7 +380,7 @@ class ActorCell[M]:
             try:
                 await child.stop()
             except Exception:
-                self._logger.exception("Error stopping child %s", child._name)
+                self._logger.exception("Error stopping child %s", child.cell_name)
 
         # Notify watchers with Terminated
         for watcher in self._watchers:
@@ -364,4 +412,4 @@ class ActorCell[M]:
 
         When the other cell stops, this cell will receive a Terminated message.
         """
-        other._watchers.add(self)
+        other.watchers.add(self)

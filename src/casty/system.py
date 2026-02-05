@@ -7,9 +7,21 @@ from typing import Any
 
 from casty.actor import Behavior
 from casty._cell import ActorCell
+from casty.address import ActorAddress
 from casty.events import EventStream
 from casty.mailbox import Mailbox
 from casty.ref import ActorRef
+from casty.transport import LocalTransport
+
+
+class _CallbackTransport:
+    """Lightweight transport for temporary ask refs."""
+
+    def __init__(self, callback: Callable[[Any], None]) -> None:
+        self._callback = callback
+
+    def deliver(self, address: ActorAddress, msg: Any) -> None:
+        self._callback(msg)
 
 
 class ActorSystem:
@@ -17,6 +29,7 @@ class ActorSystem:
         self._name = name
         self._event_stream = EventStream()
         self._root_cells: dict[str, ActorCell[Any]] = {}
+        self._local_transport = LocalTransport()
 
     @property
     def name(self) -> str:
@@ -47,9 +60,11 @@ class ActorSystem:
             name=name,
             parent=None,
             event_stream=self._event_stream,
+            system_name=self._name,
+            local_transport=self._local_transport,
         )
         if mailbox is not None:
-            cell._mailbox = mailbox
+            cell.mailbox = mailbox
         self._root_cells[name] = cell
         asyncio.get_running_loop().create_task(cell.start())
         return cell.ref
@@ -67,11 +82,20 @@ class ActorSystem:
             if not future.done():
                 future.set_result(msg)
 
-        temp_ref: ActorRef[R] = ActorRef(_send=on_reply)
+        temp_ref: ActorRef[R] = ActorRef(
+            address=ActorAddress(system=self._name, path=f"/_temp/{id(future)}"),
+            _transport=_CallbackTransport(on_reply),
+        )
         message = msg_factory(temp_ref)
         ref.tell(message)
 
         return await asyncio.wait_for(future, timeout=timeout)
+
+    def resolve(self, address: ActorAddress) -> ActorRef[Any] | None:
+        """Resolve an ActorAddress to a local ActorRef, or None if not found."""
+        if address.is_local or address.host is None:
+            return self.lookup(address.path)
+        return None
 
     def lookup(self, path: str) -> ActorRef[Any] | None:
         # Strip leading slash
@@ -86,7 +110,7 @@ class ActorSystem:
 
         # Navigate children for nested paths
         for part in parts[1:]:
-            child = cell._children.get(part)
+            child = cell.children.get(part)
             if child is None:
                 return None
             cell = child
