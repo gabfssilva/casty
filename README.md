@@ -34,6 +34,7 @@ Casty is an actor framework inspired by [Akka Typed](https://doc.akka.io/librari
 - **Type-safe** — Fully typed with `ActorRef[M]`, `Behavior[M]`, and Pyright strict mode.
 - **Zero dependencies** — Pure Python, stdlib only. Nothing to install beyond Casty itself.
 - **Built on asyncio** — Native async/await, no custom event loop needed.
+- **Cluster-ready** — Distribute actors across nodes with `ClusteredActorSystem` and `Behaviors.sharded()`.
 
 ## Quick Start
 
@@ -104,6 +105,7 @@ Behaviors define how an actor handles messages. They are **values**, not classes
 | `Behaviors.restart()` | Explicitly restart the actor |
 | `Behaviors.supervise(behavior, strategy)` | Wrap with a supervision strategy |
 | `Behaviors.with_lifecycle(behavior, ...)` | Attach lifecycle hooks |
+| `Behaviors.sharded(entity_factory, num_shards=100)` | Create sharded entities distributed across cluster nodes |
 
 ### Functional State
 
@@ -266,6 +268,41 @@ ref = system.spawn(
 ```
 
 Overflow strategies: `drop_new` (default), `drop_oldest`, `backpressure`.
+
+### Cluster Sharding
+
+Distribute actors across multiple nodes with `ClusteredActorSystem` and `Behaviors.sharded()`. Entities are automatically partitioned into shards and routed to the correct node — the API feels identical to local spawning:
+
+```python
+from casty import Behaviors, ShardEnvelope
+from casty.sharding import ClusteredActorSystem
+
+async with (
+    ClusteredActorSystem(
+        name="bank", host="127.0.0.1", port=25520,
+        seed_nodes=[("127.0.0.1", 25521)],
+    ) as node1,
+    ClusteredActorSystem(
+        name="bank", host="127.0.0.1", port=25521,
+        seed_nodes=[("127.0.0.1", 25520)],
+    ) as node2,
+):
+    # spawn returns ActorRef[ShardEnvelope[AccountMsg]]
+    accounts1 = node1.spawn(Behaviors.sharded(account_entity, num_shards=10), "accounts")
+    accounts2 = node2.spawn(Behaviors.sharded(account_entity, num_shards=10), "accounts")
+
+    # send messages — routing is transparent
+    accounts1.tell(ShardEnvelope("alice", Deposit(100)))
+
+    # ask works the same way
+    balance = await node1.ask(
+        accounts1,
+        lambda r: ShardEnvelope("alice", GetBalance(reply_to=r)),
+        timeout=2.0,
+    )
+```
+
+Each entity (e.g. `"alice"`) is hashed to a shard, and the coordinator assigns shards to nodes using a least-shard-first strategy. Messages to remote entities are forwarded automatically via peer region discovery.
 
 ## State Machines
 
