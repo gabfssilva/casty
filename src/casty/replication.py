@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,16 +19,14 @@ class ReplicationConfig:
 @dataclass(frozen=True)
 class ShardAllocation:
     primary: NodeAddress
-    replicas: list[NodeAddress] = field(
-        default_factory=lambda: list[NodeAddress]()
-    )
+    replicas: tuple[NodeAddress, ...] = ()
 
 
 @dataclass(frozen=True)
 class ReplicateEvents:
     entity_id: str
     shard_id: int
-    events: list[PersistedEvent[Any]]
+    events: tuple[PersistedEvent[Any], ...]
     reply_to: ActorRef[Any] | None = None
 
 

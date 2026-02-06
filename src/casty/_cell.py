@@ -75,31 +75,31 @@ class _CellContext[M]:
 
     def stop(self, ref: ActorRef[Any]) -> None:
         for _name, child in self._cell.children.items():
-            if child.ref is ref:
+            if child.ref == ref:
                 asyncio.get_running_loop().create_task(child.stop())
                 return
 
     def watch(self, ref: ActorRef[Any]) -> None:
         # Search children and siblings for the cell matching this ref
         for child in self._cell.children.values():
-            if child.ref is ref:
+            if child.ref == ref:
                 child.watchers.add(self._cell)
                 return
         # Search parent's children (siblings)
         if self._cell.parent is not None:
             for sibling in self._cell.parent.children.values():
-                if sibling.ref is ref:
+                if sibling.ref == ref:
                     sibling.watchers.add(self._cell)
                     return
 
     def unwatch(self, ref: ActorRef[Any]) -> None:
         for child in self._cell.children.values():
-            if child.ref is ref:
+            if child.ref == ref:
                 child.watchers.discard(self._cell)
                 return
         if self._cell.parent is not None:
             for sibling in self._cell.parent.children.values():
-                if sibling.ref is ref:
+                if sibling.ref == ref:
                     sibling.watchers.discard(self._cell)
                     return
 
@@ -159,8 +159,9 @@ class ActorCell[M]:
         self._es_sequence_nr: int = 0
         self._es_snapshot_policy: Any = None
         self._es_events_since_snapshot: int = 0
-        self._es_replica_refs: list[Any] = []
+        self._es_replica_refs: tuple[Any, ...] = ()
         self._es_replication: Any = None
+        self._ack_queue: asyncio.Queue[Any] = asyncio.Queue()
 
         # Context
         self._ctx: _CellContext[M] = _CellContext(self)
@@ -236,6 +237,8 @@ class ActorCell[M]:
 
     def _deliver(self, msg: M) -> None:
         """Delivery callback for ActorRef. Puts into mailbox or publishes DeadLetter."""
+        from casty.replication import ReplicateEventsAck
+
         if self._stopped:
             try:
                 loop = asyncio.get_running_loop()
@@ -247,6 +250,10 @@ class ActorCell[M]:
             except RuntimeError:
                 # No running event loop — silently drop
                 pass
+            return
+        # Route ack messages to the dedicated queue to avoid polluting the main mailbox
+        if isinstance(msg, ReplicateEventsAck):
+            self._ack_queue.put_nowait(msg)
             return
         self._mailbox.put(msg)
 
@@ -306,7 +313,7 @@ class ActorCell[M]:
                 self._es_state = b.initial_state
                 self._es_sequence_nr = 0
                 self._es_events_since_snapshot = 0
-                self._es_replica_refs = list(b.replica_refs) if b.replica_refs else []
+                self._es_replica_refs = b.replica_refs if b.replica_refs else ()
                 self._es_replication = b.replication
                 # Set handler so loop knows to run (it checks _current_handler is not None)
                 self._current_handler = b.on_command  # type: ignore[assignment]
@@ -448,7 +455,7 @@ class ActorCell[M]:
             replication_msg = ReplicateEvents(
                 entity_id=self._es_entity_id,
                 shard_id=0,
-                events=wrapped,
+                events=tuple(wrapped),
                 reply_to=self._ref if (self._es_replication is not None and hasattr(self._es_replication, 'min_acks') and self._es_replication.min_acks > 0) else None,
             )
             for replica_ref in self._es_replica_refs:
@@ -456,25 +463,21 @@ class ActorCell[M]:
 
         # Wait for acks if required
         if self._es_replica_refs:
-            from casty.replication import ReplicateEventsAck, ReplicationConfig
+            from casty.replication import ReplicationConfig
             match self._es_replication:
                 case ReplicationConfig(min_acks=min_acks, ack_timeout=ack_timeout) if min_acks > 0:
                     acks_needed = min(min_acks, len(self._es_replica_refs))
                     ack_count = 0
-                    deadline = _time.time() + ack_timeout
+                    deadline = _time.monotonic() + ack_timeout
 
-                    while ack_count < acks_needed and _time.time() < deadline:
+                    while ack_count < acks_needed and _time.monotonic() < deadline:
                         try:
-                            remaining_time = max(0.001, deadline - _time.time())
-                            ack_msg = await asyncio.wait_for(
-                                self._mailbox.get(),
+                            remaining_time = max(0.001, deadline - _time.monotonic())
+                            await asyncio.wait_for(
+                                self._ack_queue.get(),
                                 timeout=remaining_time,
                             )
-                            match ack_msg:
-                                case ReplicateEventsAck():
-                                    ack_count += 1
-                                case _:
-                                    self._mailbox.put(ack_msg)
+                            ack_count += 1
                         except asyncio.TimeoutError:
                             self._logger.warning(
                                 "Replication ack timeout for %s: got %d/%d acks",

@@ -22,19 +22,19 @@ def test_shard_allocation_with_replicas() -> None:
     primary = NodeAddress(host="10.0.0.1", port=25520)
     replica1 = NodeAddress(host="10.0.0.2", port=25520)
     replica2 = NodeAddress(host="10.0.0.3", port=25520)
-    alloc = ShardAllocation(primary=primary, replicas=[replica1, replica2])
+    alloc = ShardAllocation(primary=primary, replicas=(replica1, replica2))
     assert alloc.primary == primary
     assert len(alloc.replicas) == 2
 
 
 def test_shard_allocation_no_replicas() -> None:
     primary = NodeAddress(host="10.0.0.1", port=25520)
-    alloc = ShardAllocation(primary=primary, replicas=[])
-    assert alloc.replicas == []
+    alloc = ShardAllocation(primary=primary, replicas=())
+    assert alloc.replicas == ()
 
 
 def test_replicate_events_message() -> None:
-    events = [PersistedEvent(sequence_nr=1, event="deposited", timestamp=1.0)]
+    events = (PersistedEvent(sequence_nr=1, event="deposited", timestamp=1.0),)
     msg = ReplicateEvents(entity_id="acc-1", shard_id=3, events=events)
     assert msg.entity_id == "acc-1"
     assert msg.shard_id == 3

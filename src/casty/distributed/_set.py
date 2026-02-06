@@ -95,6 +95,9 @@ def _apply_event(state: frozenset[Any], event: _SetEvent) -> frozenset[Any]:
             return state | {value}
         case _ItemRemoved(value):
             return state - {value}
+        case _:
+            msg = f"Unknown set event: {type(event)}"
+            raise TypeError(msg)
 
 
 def persistent_set_entity(

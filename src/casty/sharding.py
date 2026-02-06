@@ -168,22 +168,26 @@ class ClusteredActorSystem(ActorSystem):
             self._port = actual_port
             self._self_node = NodeAddress(host=self._host, port=actual_port)
             self._remote_transport._local_port = actual_port  # pyright: ignore[reportPrivateUsage]
-        await super().__aenter__()
+        try:
+            await super().__aenter__()
 
-        # Start cluster membership (gossip, heartbeat, failure detection)
-        cluster_config = ClusterConfig(
-            host=self._host,
-            port=self._port,
-            seed_nodes=self._seed_nodes,
-        )
-        self._cluster = Cluster(
-            self,
-            cluster_config,
-            remote_transport=self._remote_transport,
-            system_name=self._name,
-            coordinator_refs=self._coordinators,
-        )
-        await self._cluster.start()
+            # Start cluster membership (gossip, heartbeat, failure detection)
+            cluster_config = ClusterConfig(
+                host=self._host,
+                port=self._port,
+                seed_nodes=self._seed_nodes,
+            )
+            self._cluster = Cluster(
+                self,
+                cluster_config,
+                remote_transport=self._remote_transport,
+                system_name=self._name,
+                coordinator_refs=self._coordinators,
+            )
+            await self._cluster.start()
+        except BaseException:
+            await self._remote_transport.stop()
+            raise
 
         return self
 

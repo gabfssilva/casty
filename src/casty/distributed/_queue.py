@@ -101,6 +101,9 @@ def _apply_event(state: tuple[Any, ...], event: _QueueEvent) -> tuple[Any, ...]:
             return (*state, value)
         case _ItemDequeued():
             return state[1:] if state else state
+        case _:
+            msg = f"Unknown queue event: {type(event)}"
+            raise TypeError(msg)
 
 
 def persistent_queue_entity(

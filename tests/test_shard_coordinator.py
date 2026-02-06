@@ -155,4 +155,4 @@ async def test_coordinator_no_replication_has_empty_replicas() -> None:
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
             timeout=2.0,
         )
-        assert location.replicas == []
+        assert location.replicas == ()

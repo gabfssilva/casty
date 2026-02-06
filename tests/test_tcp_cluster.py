@@ -154,7 +154,7 @@ async def test_cross_system_sharded_entity() -> None:
             host="127.0.0.1",
             port=0,
             seed_nodes=[("127.0.0.1", port_a)],
-        ) as system_b:
+        ) as _system_b:  # noqa: F841
             # Spawn sharded entity on system A (which is first seed = coordinator)
             proxy_a = system_a.spawn(
                 Behaviors.sharded(entity_factory=counter_entity, num_shards=10),

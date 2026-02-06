@@ -137,6 +137,15 @@ def cluster_actor(
         tick_tasks.append(loop.create_task(_heartbeat_tick_loop()))
         tick_tasks.append(loop.create_task(_availability_check_loop()))
 
+        async def _cancel_ticks(ctx: ActorContext[ClusterCmd]) -> None:
+            for task in tick_tasks:
+                task.cancel()
+            for task in tick_tasks:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
         # Send join requests to seed nodes
         if remote_transport is not None:
             for seed_host, seed_port in config.seed_nodes:
@@ -183,7 +192,10 @@ def cluster_actor(
                         heartbeat_ref.tell(HeartbeatTick(members=members))
                     return Behaviors.same()
 
-        return Behaviors.receive(receive)
+        return Behaviors.with_lifecycle(
+            Behaviors.receive(receive),
+            post_stop=_cancel_ticks,
+        )
 
     return Behaviors.setup(setup)
 

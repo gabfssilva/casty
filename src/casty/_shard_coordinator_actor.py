@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from casty.actor import Behavior, Behaviors
@@ -21,9 +21,7 @@ class GetShardLocation:
 class ShardLocation:
     shard_id: int
     node: NodeAddress
-    replicas: list[NodeAddress] = field(
-        default_factory=lambda: list[NodeAddress]()
-    )
+    replicas: tuple[NodeAddress, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -83,7 +81,7 @@ def shard_coordinator_actor(
                             ShardLocation(
                                 shard_id=shard_id,
                                 node=alloc.primary,
-                                replicas=list(alloc.replicas),
+                                replicas=alloc.replicas,
                             )
                         )
                         return Behaviors.same()
@@ -93,7 +91,7 @@ def shard_coordinator_actor(
                     }
                     primary = strategy.allocate(shard_id, primary_allocs, nodes)
 
-                    replica_nodes: list[NodeAddress] = []
+                    replica_nodes_list: list[NodeAddress] = []
                     remaining = nodes - {primary}
                     for _ in range(min(num_replicas, len(remaining))):
                         replica = min(
@@ -102,9 +100,10 @@ def shard_coordinator_actor(
                                 1 for a in allocations.values() if n in a.replicas
                             ),
                         )
-                        replica_nodes.append(replica)
+                        replica_nodes_list.append(replica)
                         remaining = remaining - {replica}
 
+                    replica_nodes = tuple(replica_nodes_list)
                     new_alloc = ShardAllocation(
                         primary=primary, replicas=replica_nodes
                     )
@@ -127,11 +126,11 @@ def shard_coordinator_actor(
                         if alloc.primary == failed_node:
                             if alloc.replicas:
                                 new_primary = alloc.replicas[0]
-                                new_replicas = [
+                                new_replicas = tuple(
                                     r
                                     for r in alloc.replicas[1:]
                                     if r != failed_node
-                                ]
+                                )
                                 new_allocations[shard_id] = ShardAllocation(
                                     primary=new_primary,
                                     replicas=new_replicas,
@@ -139,12 +138,12 @@ def shard_coordinator_actor(
                             else:
                                 del new_allocations[shard_id]
                         else:
-                            new_replicas = [
+                            new_replicas = tuple(
                                 r
                                 for r in alloc.replicas
                                 if r != failed_node
-                            ]
-                            if new_replicas != list(alloc.replicas):
+                            )
+                            if new_replicas != alloc.replicas:
                                 new_allocations[shard_id] = ShardAllocation(
                                     primary=alloc.primary,
                                     replicas=new_replicas,

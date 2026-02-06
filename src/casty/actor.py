@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -74,7 +74,7 @@ type SnapshotPolicy = SnapshotEvery
 
 @dataclass(frozen=True)
 class PersistedBehavior[M, E]:
-    events: list[E]
+    events: tuple[E, ...]
     then: Behavior[M]
 
 
@@ -86,7 +86,7 @@ class EventSourcedBehavior[M, E, S]:
     on_event: Callable[[S, E], S]
     on_command: Callable[[ActorContext[M], S, M], Awaitable[Behavior[M]]]
     snapshot_policy: SnapshotPolicy | None = None
-    replica_refs: list[ActorRef[Any]] = field(default_factory=lambda: list[ActorRef[Any]]())
+    replica_refs: tuple[ActorRef[Any], ...] = ()
     replication: ReplicationConfig | None = None
 
 
@@ -176,7 +176,7 @@ class Behaviors:
         on_event: Callable[[S, E], S],
         on_command: Callable[[ActorContext[M], S, M], Awaitable[Behavior[M]]],
         snapshot_policy: SnapshotPolicy | None = None,
-        replica_refs: list[ActorRef[Any]] | None = None,
+        replica_refs: tuple[ActorRef[Any], ...] | None = None,
         replication: ReplicationConfig | None = None,
     ) -> EventSourcedBehavior[M, E, S]:
         return EventSourcedBehavior(
@@ -186,15 +186,15 @@ class Behaviors:
             on_event=on_event,
             on_command=on_command,
             snapshot_policy=snapshot_policy,
-            replica_refs=replica_refs if replica_refs is not None else [],
+            replica_refs=replica_refs if replica_refs is not None else (),
             replication=replication,
         )
 
     @staticmethod
     def persisted[M, E](
-        events: list[E],
+        events: Sequence[E],
         then: Behavior[M] | None = None,
     ) -> PersistedBehavior[M, E]:
         return PersistedBehavior(
-            events=events, then=then if then is not None else SameBehavior()
+            events=tuple(events), then=then if then is not None else SameBehavior()
         )

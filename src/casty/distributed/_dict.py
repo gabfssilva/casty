@@ -88,6 +88,9 @@ def _apply_event(state: Any, event: _MapEntryEvent) -> Any:
             return value
         case _ValueDeleted():
             return None
+        case _:
+            msg = f"Unknown map entry event: {type(event)}"
+            raise TypeError(msg)
 
 
 def persistent_map_entity(

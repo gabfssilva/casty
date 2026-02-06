@@ -82,6 +82,9 @@ def _apply_event(state: int, event: _CounterEvent) -> int:
             return state + amount
         case _Decremented(amount):
             return state - amount
+        case _:
+            msg = f"Unknown counter event: {type(event)}"
+            raise TypeError(msg)
 
 
 def persistent_counter_entity(
