@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 from casty.actor import (
     Behavior,
+    EventSourcedBehavior,
     LifecycleBehavior,
+    PersistedBehavior,
     ReceiveBehavior,
     RestartBehavior,
     SameBehavior,
@@ -16,6 +19,7 @@ from casty.actor import (
     SupervisedBehavior,
     UnhandledBehavior,
 )
+from casty.journal import PersistedEvent, Snapshot
 from casty.events import (
     ActorRestarted,
     ActorStarted,
@@ -137,6 +141,18 @@ class ActorCell[M]:
         self._pre_restart: Callable[..., Awaitable[None]] | None = None
         self._post_restart: Callable[..., Awaitable[None]] | None = None
 
+        # Event sourcing state
+        self._es_entity_id: str | None = None
+        self._es_journal: Any = None
+        self._es_on_event: Any = None
+        self._es_on_command: Any = None
+        self._es_state: Any = None
+        self._es_sequence_nr: int = 0
+        self._es_snapshot_policy: Any = None
+        self._es_events_since_snapshot: int = 0
+        self._es_replica_refs: list[Any] = []
+        self._es_replication: Any = None
+
         # Context
         self._ctx: _CellContext[M] = _CellContext(self)
 
@@ -212,6 +228,8 @@ class ActorCell[M]:
     async def start(self) -> None:
         """Initialize the behavior and start the message loop."""
         await self._initialize_behavior(self._initial_behavior)
+        if self._es_entity_id is not None:
+            await self._recover_event_sourced()
         self._loop_task = asyncio.get_running_loop().create_task(self._run_loop())
         await self._event_stream.publish(ActorStarted(ref=self._ref))
 
@@ -254,9 +272,44 @@ class ActorCell[M]:
                 if self._pre_start is not None:
                     await self._pre_start(self._ctx)
 
+            case b if isinstance(b, EventSourcedBehavior):
+                self._es_entity_id = b.entity_id
+                self._es_journal = b.journal
+                self._es_on_event = b.on_event
+                self._es_on_command = b.on_command
+                self._es_snapshot_policy = b.snapshot_policy
+                self._es_state = b.initial_state
+                self._es_sequence_nr = 0
+                self._es_events_since_snapshot = 0
+                self._es_replica_refs = list(b.replica_refs) if b.replica_refs else []
+                self._es_replication = b.replication
+                # Set handler so loop knows to run (it checks _current_handler is not None)
+                self._current_handler = b.on_command  # type: ignore[assignment]
+                if self._pre_start is not None:
+                    await self._pre_start(self._ctx)
+
             case _:
                 msg = f"Cannot initialize with behavior type: {type(behavior)}"
                 raise TypeError(msg)
+
+    async def _recover_event_sourced(self) -> None:
+        """Replay events from journal to reconstruct state."""
+        if self._es_journal is None or self._es_entity_id is None:
+            return
+
+        # Load snapshot
+        snapshot = await self._es_journal.load_snapshot(self._es_entity_id)
+        if snapshot is not None:
+            self._es_state = snapshot.state
+            self._es_sequence_nr = snapshot.sequence_nr
+
+        # Load and replay events after snapshot
+        events = await self._es_journal.load(
+            self._es_entity_id, from_sequence_nr=self._es_sequence_nr + 1
+        )
+        for persisted in events:
+            self._es_state = self._es_on_event(self._es_state, persisted.event)
+            self._es_sequence_nr = persisted.sequence_nr
 
     async def _run_loop(self) -> None:
         """Main message processing loop."""
@@ -270,12 +323,23 @@ class ActorCell[M]:
                     continue
 
                 try:
-                    next_behavior = await self._current_handler(self._ctx, msg)
+                    if self._es_on_command is not None:
+                        next_behavior = await self._es_on_command(
+                            self._ctx, self._es_state, msg
+                        )
+                    else:
+                        next_behavior = await self._current_handler(self._ctx, msg)
                 except Exception as exc:
                     await self._handle_failure(exc)
                     continue
 
-                await self._apply_behavior(next_behavior)
+                # Handle PersistedBehavior for event-sourced actors
+                if isinstance(next_behavior, PersistedBehavior):
+                    await self._handle_persisted(
+                        cast(PersistedBehavior[M, Any], next_behavior)
+                    )
+                else:
+                    await self._apply_behavior(next_behavior)
 
             except asyncio.CancelledError:
                 break
@@ -309,11 +373,91 @@ class ActorCell[M]:
             case _:
                 pass
 
+    async def _handle_persisted(
+        self, persisted_behavior: PersistedBehavior[M, Any]
+    ) -> None:
+        """Persist events, apply to state, check snapshot policy."""
+        from casty.actor import SnapshotEvery
+
+        if self._es_journal is None or self._es_entity_id is None:
+            return
+
+        # Wrap raw events as PersistedEvent
+        wrapped: list[PersistedEvent[Any]] = []
+        for event in persisted_behavior.events:
+            self._es_sequence_nr += 1
+            wrapped.append(
+                PersistedEvent(
+                    sequence_nr=self._es_sequence_nr,
+                    event=event,
+                    timestamp=_time.time(),
+                )
+            )
+
+        # Persist to journal
+        await self._es_journal.persist(self._es_entity_id, wrapped)
+
+        # Apply events to state
+        for persisted_event in wrapped:
+            self._es_state = self._es_on_event(self._es_state, persisted_event.event)
+
+        # Snapshot policy
+        self._es_events_since_snapshot += len(wrapped)
+        if isinstance(self._es_snapshot_policy, SnapshotEvery):
+            if self._es_events_since_snapshot >= self._es_snapshot_policy.n_events:
+                snapshot = Snapshot(
+                    sequence_nr=self._es_sequence_nr,
+                    state=self._es_state,
+                    timestamp=_time.time(),
+                )
+                await self._es_journal.save_snapshot(self._es_entity_id, snapshot)
+                self._es_events_since_snapshot = 0
+
+        # Push to replicas
+        if self._es_replica_refs:
+            from casty.replication import ReplicateEvents
+            replication_msg = ReplicateEvents(
+                entity_id=self._es_entity_id,
+                shard_id=0,
+                events=wrapped,
+                reply_to=self._ref if (self._es_replication is not None and hasattr(self._es_replication, 'min_acks') and self._es_replication.min_acks > 0) else None,
+            )
+            for replica_ref in self._es_replica_refs:
+                replica_ref.tell(replication_msg)
+
+        # Wait for acks if required
+        if self._es_replication is not None and self._es_replica_refs:
+            from casty.replication import ReplicateEventsAck, ReplicationConfig
+            if isinstance(self._es_replication, ReplicationConfig) and self._es_replication.min_acks > 0:
+                acks_needed = min(self._es_replication.min_acks, len(self._es_replica_refs))
+                ack_count = 0
+                deadline = _time.time() + self._es_replication.ack_timeout
+
+                while ack_count < acks_needed and _time.time() < deadline:
+                    try:
+                        remaining_time = max(0.001, deadline - _time.time())
+                        ack_msg = await asyncio.wait_for(
+                            self._mailbox.get(),
+                            timeout=remaining_time,
+                        )
+                        if isinstance(ack_msg, ReplicateEventsAck):
+                            ack_count += 1
+                        else:
+                            # Re-queue non-ack messages
+                            self._mailbox.put(ack_msg)
+                    except asyncio.TimeoutError:
+                        self._logger.warning(
+                            "Replication ack timeout for %s: got %d/%d acks",
+                            self._es_entity_id, ack_count, acks_needed,
+                        )
+                        break
+
+        # Apply the "then" behavior
+        await self._apply_behavior(persisted_behavior.then)
+
     async def _handle_failure(self, exception: Exception) -> None:
         """Handle an exception from the message handler using supervision."""
-        self._logger.error(
-            "Actor %s failed: %s", self._name, exception, exc_info=True
-        )
+        self._logger.error("Actor %s failed: %s", self._name, exception, exc_info=True)
 
         if self._strategy is None:
             # No strategy — stop the actor

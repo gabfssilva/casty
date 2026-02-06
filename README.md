@@ -106,6 +106,8 @@ Behaviors define how an actor handles messages. They are **values**, not classes
 | `Behaviors.supervise(behavior, strategy)` | Wrap with a supervision strategy |
 | `Behaviors.with_lifecycle(behavior, ...)` | Attach lifecycle hooks |
 | `Behaviors.sharded(entity_factory, num_shards=100)` | Create sharded entities distributed across cluster nodes |
+| `Behaviors.event_sourced(...)` | Persist actor state as a sequence of events |
+| `Behaviors.persisted(events)` | Return from command handler to persist events |
 
 ### Functional State
 
@@ -277,32 +279,115 @@ Distribute actors across multiple nodes with `ClusteredActorSystem` and `Behavio
 from casty import Behaviors, ShardEnvelope
 from casty.sharding import ClusteredActorSystem
 
-async with (
-    ClusteredActorSystem(
-        name="bank", host="127.0.0.1", port=25520,
-        seed_nodes=[("127.0.0.1", 25521)],
-    ) as node1,
-    ClusteredActorSystem(
-        name="bank", host="127.0.0.1", port=25521,
-        seed_nodes=[("127.0.0.1", 25520)],
-    ) as node2,
-):
+# Each node in the cluster runs the same code
+async with ClusteredActorSystem(
+    name="bank",
+    host="10.0.0.1",
+    port=25520,
+    seed_nodes=[("10.0.0.2", 25520), ("10.0.0.3", 25520)],
+) as system:
     # spawn returns ActorRef[ShardEnvelope[AccountMsg]]
-    accounts1 = node1.spawn(Behaviors.sharded(account_entity, num_shards=10), "accounts")
-    accounts2 = node2.spawn(Behaviors.sharded(account_entity, num_shards=10), "accounts")
+    accounts = system.spawn(Behaviors.sharded(account_entity, num_shards=10), "accounts")
 
     # send messages — routing is transparent
-    accounts1.tell(ShardEnvelope("alice", Deposit(100)))
+    accounts.tell(ShardEnvelope("alice", Deposit(100)))
 
     # ask works the same way
-    balance = await node1.ask(
-        accounts1,
+    balance = await system.ask(
+        accounts,
         lambda r: ShardEnvelope("alice", GetBalance(reply_to=r)),
         timeout=2.0,
     )
 ```
 
-Each entity (e.g. `"alice"`) is hashed to a shard, and the coordinator assigns shards to nodes using a least-shard-first strategy. Messages to remote entities are forwarded automatically via peer region discovery.
+Each entity (e.g. `"alice"`) is hashed to a shard, and the coordinator assigns shards to nodes using a least-shard-first strategy. Messages to remote entities are forwarded automatically. Every node in the cluster runs the same code — just change `host` per machine.
+
+### Event Sourcing
+
+Persist actor state as a sequence of events instead of storing state directly. On recovery, events are replayed from the journal to reconstruct state — no data loss, full audit trail:
+
+```python
+from casty import Behaviors
+from casty.journal import InMemoryJournal
+from casty.actor import SnapshotEvery
+
+@dataclass(frozen=True)
+class AccountState:
+    balance: int
+
+# Events — what gets persisted
+@dataclass(frozen=True)
+class Deposited:
+    amount: int
+
+@dataclass(frozen=True)
+class Withdrawn:
+    amount: int
+
+# Pure function: folds an event into state (used for replay too)
+def on_event(state: AccountState, event: Deposited | Withdrawn) -> AccountState:
+    match event:
+        case Deposited(amount):
+            return AccountState(balance=state.balance + amount)
+        case Withdrawn(amount):
+            return AccountState(balance=state.balance - amount)
+    return state
+
+# Async handler: decides what events to persist
+async def on_command(ctx, state: AccountState, cmd) -> Behavior:
+    match cmd:
+        case Deposit(amount):
+            return Behaviors.persisted(events=[Deposited(amount)])
+        case Withdraw(amount) if state.balance >= amount:
+            return Behaviors.persisted(events=[Withdrawn(amount)])
+        case GetBalance(reply_to):
+            reply_to.tell(state.balance)
+            return Behaviors.same()  # no events, no persistence
+
+journal = InMemoryJournal()
+
+def account(entity_id: str) -> Behavior:
+    return Behaviors.event_sourced(
+        entity_id=entity_id,
+        journal=journal,
+        initial_state=AccountState(balance=0),
+        on_event=on_event,
+        on_command=on_command,
+        snapshot_policy=SnapshotEvery(n_events=100),  # snapshot every 100 events
+    )
+```
+
+The key difference from a regular behavior: the command handler receives an explicit `state` parameter managed by the framework. This is necessary because event sourcing must replay events to reconstruct state — closures can't be replayed.
+
+The `EventJournal` protocol is storage-agnostic. `InMemoryJournal` is included for tests and development; implement the protocol for any database backend.
+
+### Shard Replication
+
+Add passive replicas to sharded entities for fault tolerance. The primary pushes persisted events to replicas after each command; replicas maintain their own journal copy and can be promoted on failover:
+
+```python
+from casty.replication import ReplicationConfig
+
+accounts = node.spawn(
+    Behaviors.sharded(
+        account,
+        num_shards=10,
+        replication=ReplicationConfig(
+            replicas=2,        # 2 passive replicas per entity
+            min_acks=1,        # wait for 1 replica ack before confirming
+            ack_timeout=5.0,   # seconds to wait for acks
+        ),
+    ),
+    "accounts",
+)
+```
+
+The coordinator allocates primary and replicas on different nodes and handles failover: when a primary's node goes down, the replica with the highest sequence number is promoted.
+
+| `min_acks` | Behavior |
+|------------|----------|
+| `0` | Fire-and-forget — lowest latency, eventual consistency |
+| `1+` | Wait for N acks — stronger durability guarantee |
 
 ## State Machines
 

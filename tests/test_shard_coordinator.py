@@ -12,6 +12,7 @@ from casty._shard_coordinator_actor import (
     UpdateTopology,
     LeastShardStrategy,
 )
+from casty.replication import ReplicationConfig
 
 
 async def test_coordinator_allocates_shard_to_node() -> None:
@@ -104,3 +105,54 @@ async def test_coordinator_topology_update() -> None:
             timeout=2.0,
         )
         assert loc.node == node_b
+
+
+async def test_coordinator_allocates_replicas() -> None:
+    """With replication configured, coordinator allocates primary + replicas."""
+    node_a = NodeAddress(host="10.0.0.1", port=25520)
+    node_b = NodeAddress(host="10.0.0.2", port=25520)
+    node_c = NodeAddress(host="10.0.0.3", port=25520)
+
+    async with ActorSystem(name="test") as system:
+        coord = system.spawn(
+            shard_coordinator_actor(
+                strategy=LeastShardStrategy(),
+                available_nodes=frozenset({node_a, node_b, node_c}),
+                replication=ReplicationConfig(replicas=2),
+            ),
+            "coord",
+        )
+        await asyncio.sleep(0.1)
+
+        location = await system.ask(
+            coord,
+            lambda r: GetShardLocation(shard_id=0, reply_to=r),
+            timeout=2.0,
+        )
+
+        assert location.node is not None
+        assert len(location.replicas) == 2
+        all_nodes = {location.node} | set(location.replicas)
+        assert len(all_nodes) == 3  # primary + 2 replicas on different nodes
+
+
+async def test_coordinator_no_replication_has_empty_replicas() -> None:
+    """Without replication config, ShardLocation.replicas is empty."""
+    node_a = NodeAddress(host="10.0.0.1", port=25520)
+
+    async with ActorSystem(name="test") as system:
+        coord = system.spawn(
+            shard_coordinator_actor(
+                strategy=LeastShardStrategy(),
+                available_nodes=frozenset({node_a}),
+            ),
+            "coord",
+        )
+        await asyncio.sleep(0.1)
+
+        location = await system.ask(
+            coord,
+            lambda r: GetShardLocation(shard_id=0, reply_to=r),
+            timeout=2.0,
+        )
+        assert location.replicas == []

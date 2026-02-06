@@ -164,6 +164,7 @@ class ClusteredActorSystem(ActorSystem):
                 shard_coordinator_actor(
                     strategy=LeastShardStrategy(),
                     available_nodes=available_nodes,
+                    replication=sharded.replication,
                 ),
                 f"_coord-{name}",
             )

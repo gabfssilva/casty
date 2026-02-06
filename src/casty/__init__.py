@@ -2,12 +2,16 @@ from casty.address import ActorAddress
 from casty.actor import (
     Behavior,
     Behaviors,
+    EventSourcedBehavior,
     LifecycleBehavior,
+    PersistedBehavior,
     ReceiveBehavior,
     RestartBehavior,
     SameBehavior,
     SetupBehavior,
     ShardedBehavior,
+    SnapshotEvery,
+    SnapshotPolicy,
     StoppedBehavior,
     SupervisedBehavior,
     UnhandledBehavior,
@@ -34,7 +38,15 @@ from casty.events import (
     UnreachableMember,
 )
 from casty.failure_detector import PhiAccrualFailureDetector
+from casty.journal import EventJournal, InMemoryJournal, PersistedEvent, Snapshot
 from casty.mailbox import Mailbox, MailboxOverflowStrategy
+from casty.replication import (
+    ReplicateEvents,
+    ReplicateEventsAck,
+    ReplicaPromoted,
+    ReplicationConfig,
+    ShardAllocation,
+)
 from casty.messages import Terminated
 from casty.ref import ActorRef
 from casty.remote_transport import MessageEnvelope, TcpTransport
@@ -59,6 +71,10 @@ __all__ = [
     "RestartBehavior",
     "LifecycleBehavior",
     "SupervisedBehavior",
+    "EventSourcedBehavior",
+    "PersistedBehavior",
+    "SnapshotEvery",
+    "SnapshotPolicy",
     # System
     "ActorSystem",
     # Supervision
@@ -92,6 +108,11 @@ __all__ = [
     "TypeRegistry",
     "JsonSerializer",
     "Serializer",
+    # Journal / Event Sourcing
+    "EventJournal",
+    "InMemoryJournal",
+    "PersistedEvent",
+    "Snapshot",
     # Failure Detection
     "PhiAccrualFailureDetector",
     # Cluster
@@ -102,6 +123,12 @@ __all__ = [
     "MemberStatus",
     "NodeAddress",
     "VectorClock",
+    # Replication
+    "ReplicationConfig",
+    "ShardAllocation",
+    "ReplicateEvents",
+    "ReplicateEventsAck",
+    "ReplicaPromoted",
     # Sharding
     "ClusteredActorSystem",
     "ShardedBehavior",
