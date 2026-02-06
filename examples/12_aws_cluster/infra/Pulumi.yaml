@@ -1,0 +1,6 @@
+name: casty-aws-cluster
+runtime:
+  name: python
+  options:
+    toolchain: uv
+description: 10-node Casty cluster on AWS EC2 with ALB
