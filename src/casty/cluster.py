@@ -18,6 +18,7 @@ from casty._gossip_actor import (
     GossipTick,
     GetClusterState,
     JoinRequest,
+    UpdateShardAllocations,
     gossip_actor,
 )
 from casty._heartbeat_actor import (
@@ -27,7 +28,13 @@ from casty._heartbeat_actor import (
     NodeUnreachable,
     heartbeat_actor,
 )
-from casty._shard_coordinator_actor import CoordinatorMsg, NodeDown
+from casty._shard_coordinator_actor import (
+    CoordinatorMsg,
+    NodeDown,
+    PublishAllocations,
+    SetRole,
+    SyncAllocations,
+)
 from casty.address import ActorAddress
 from casty.failure_detector import PhiAccrualFailureDetector
 from casty.ref import ActorRef
@@ -46,7 +53,14 @@ class GetState:
     reply_to: ActorRef[ClusterState]
 
 
-type ClusterCmd = GetState | NodeUnreachable
+@dataclass(frozen=True)
+class RegisterCoordinator:
+    """Registers a replicated coordinator with the cluster actor."""
+    shard_name: str
+    coord_ref: ActorRef[CoordinatorMsg]
+
+
+type ClusterCmd = GetState | NodeUnreachable | PublishAllocations | RegisterCoordinator
 
 
 # --- ClusterConfig ---
@@ -63,12 +77,100 @@ class ClusterConfig:
 # --- cluster_actor behavior ---
 
 
+def _send_role_and_sync(
+    coord_ref: ActorRef[CoordinatorMsg],
+    shard_name: str,
+    cluster_state: ClusterState,
+    self_node: NodeAddress,
+) -> None:
+    """Send SetRole + SyncAllocations to a replicated coordinator."""
+    is_leader = cluster_state.leader == self_node
+    coord_ref.tell(SetRole(
+        is_leader=is_leader,
+        leader_node=cluster_state.leader,
+    ))
+    allocs = cluster_state.shard_allocations.get(shard_name, {})
+    coord_ref.tell(SyncAllocations(
+        allocations=allocs,
+        epoch=cluster_state.allocation_epoch,
+    ))
+
+
+def _cluster_receive(
+    *,
+    gossip_ref: ActorRef[GossipMsg],
+    heartbeat_ref: ActorRef[HeartbeatMsg],
+    self_node: NodeAddress,
+    logger: logging.Logger,
+    coordinators: dict[str, ActorRef[CoordinatorMsg]],
+    cluster_state: ClusterState | None,
+) -> Behavior[ClusterCmd]:
+    """Pure receive behavior — all state in parameters, returns new behavior."""
+
+    def _next(
+        *,
+        new_coordinators: dict[str, ActorRef[CoordinatorMsg]] | None = None,
+        new_cluster_state: ClusterState | None = None,
+    ) -> Behavior[ClusterCmd]:
+        return _cluster_receive(
+            gossip_ref=gossip_ref,
+            heartbeat_ref=heartbeat_ref,
+            self_node=self_node,
+            logger=logger,
+            coordinators=new_coordinators if new_coordinators is not None else coordinators,
+            cluster_state=new_cluster_state if new_cluster_state is not None else cluster_state,
+        )
+
+    async def receive(
+        ctx: ActorContext[ClusterCmd], msg: ClusterCmd
+    ) -> Behavior[ClusterCmd]:
+        match msg:
+            case GetState(reply_to):
+                gossip_ref.tell(GetClusterState(reply_to=reply_to))
+                return Behaviors.same()
+
+            case NodeUnreachable(node):
+                logger.warning("Node unreachable: %s:%d", node.host, node.port)
+                for coord_ref in coordinators.values():
+                    coord_ref.tell(NodeDown(node=node))
+                return Behaviors.same()
+
+            case PublishAllocations(shard_type, allocations, epoch):
+                gossip_ref.tell(UpdateShardAllocations(
+                    shard_type=shard_type,
+                    allocations=allocations,
+                    epoch=epoch,
+                ))
+                return Behaviors.same()
+
+            case RegisterCoordinator(shard_name, coord_ref):
+                new_coords = {**coordinators, shard_name: coord_ref}
+                if cluster_state is not None:
+                    _send_role_and_sync(coord_ref, shard_name, cluster_state, self_node)
+                return _next(new_coordinators=new_coords)
+
+            case _:
+                if isinstance(msg, ClusterState):
+                    state: ClusterState = msg  # type: ignore[assignment]
+                    members = frozenset(
+                        m.address
+                        for m in state.members
+                        if m.status in (MemberStatus.up, MemberStatus.joining)
+                    )
+                    heartbeat_ref.tell(HeartbeatTick(members=members))
+                    for shard_name, coord_ref in coordinators.items():
+                        _send_role_and_sync(coord_ref, shard_name, state, self_node)
+                    return _next(new_cluster_state=state)
+                return Behaviors.same()
+
+    return Behaviors.receive(receive)
+
+
 def cluster_actor(
     *,
     config: ClusterConfig,
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
-    coordinator_refs: dict[str, ActorRef[CoordinatorMsg]] | None = None,
 ) -> Behavior[ClusterCmd]:
     async def setup(ctx: ActorContext[ClusterCmd]) -> Behavior[ClusterCmd]:
         self_node = NodeAddress(host=config.host, port=config.port)
@@ -98,7 +200,6 @@ def cluster_actor(
         )
 
         logger = logging.getLogger(f"casty.cluster.{system_name}")
-        coord_refs = coordinator_refs or {}
 
         # Schedule periodic ticks
         tick_tasks: list[asyncio.Task[None]] = []
@@ -115,7 +216,6 @@ def cluster_actor(
             try:
                 while True:
                     await asyncio.sleep(0.5)
-                    # Get current members from gossip state
                     gossip_ref.tell(
                         GetClusterState(reply_to=ctx.self)  # type: ignore[arg-type]
                     )
@@ -167,33 +267,21 @@ def cluster_actor(
                     )
                 )
 
-        async def receive(
-            ctx: ActorContext[ClusterCmd], msg: ClusterCmd
-        ) -> Behavior[ClusterCmd]:
-            match msg:
-                case GetState(reply_to):
-                    gossip_ref.tell(GetClusterState(reply_to=reply_to))
-                    return Behaviors.same()
-
-                case NodeUnreachable(node):
-                    logger.warning("Node unreachable: %s:%d", node.host, node.port)
-                    for coord_ref in coord_refs.values():
-                        coord_ref.tell(NodeDown(node=node))
-                    return Behaviors.same()
-
-                case _:
-                    # ClusterState arrives at runtime via gossip but isn't part of ClusterCmd
-                    if isinstance(msg, ClusterState):
-                        members = frozenset(
-                            m.address
-                            for m in msg.members  # type: ignore[union-attr]
-                            if m.status in (MemberStatus.up, MemberStatus.joining)
-                        )
-                        heartbeat_ref.tell(HeartbeatTick(members=members))
-                    return Behaviors.same()
+        # For single-node clusters (no seeds), initialize immediately so that
+        # coordinators registered before gossip produces state get activated.
+        # For multi-node clusters, wait for gossip to converge.
+        has_seeds = bool(config.seed_nodes)
+        initial_cluster_state = None if has_seeds else initial_state
 
         return Behaviors.with_lifecycle(
-            Behaviors.receive(receive),
+            _cluster_receive(
+                gossip_ref=gossip_ref,
+                heartbeat_ref=heartbeat_ref,
+                self_node=self_node,
+                logger=logger,
+                coordinators={},
+                cluster_state=initial_cluster_state,
+            ),
             post_stop=_cancel_ticks,
         )
 
@@ -211,13 +299,11 @@ class Cluster:
         *,
         remote_transport: RemoteTransport | None = None,
         system_name: str = "",
-        coordinator_refs: dict[str, ActorRef[CoordinatorMsg]] | None = None,
     ) -> None:
         self._system = system
         self._config = config
         self._remote_transport = remote_transport
         self._system_name = system_name
-        self._coordinator_refs = coordinator_refs
         self._ref: ActorRef[ClusterCmd] | None = None
 
     @property
@@ -233,7 +319,6 @@ class Cluster:
                 config=self._config,
                 remote_transport=self._remote_transport,
                 system_name=self._system_name,
-                coordinator_refs=self._coordinator_refs,
             ),
             "_cluster",
         )

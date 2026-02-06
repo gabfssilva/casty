@@ -5,43 +5,28 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from casty.actor import Behavior, Behaviors
-from casty.cluster_state import NodeAddress
 from casty.ref import ActorRef
 from casty.sharding import ShardEnvelope
-from casty._shard_coordinator_actor import CoordinatorMsg, ShardLocation
 
 
 def shard_region_actor(
     *,
-    self_node: NodeAddress,
-    coordinator: ActorRef[CoordinatorMsg],
     entity_factory: Callable[[str], Behavior[Any]],
-    num_shards: int,
+    **_kwargs: Any,
 ) -> Behavior[Any]:
+    """Region that delivers ShardEnvelopes to local entities.
+
+    Extra keyword arguments (self_node, coordinator, num_shards) are
+    accepted for caller compatibility but not used.
+    """
     async def setup(ctx: Any) -> Any:
         entities: dict[str, ActorRef[Any]] = {}
-        shard_locations: dict[int, NodeAddress] = {}
 
         async def receive(ctx: Any, msg: Any) -> Any:
             match msg:
                 case ShardEnvelope():
                     envelope = cast(ShardEnvelope[Any], msg)
-                    entity_id: str = envelope.entity_id
-                    inner_msg: Any = envelope.message
-                    shard_id = hash(entity_id) % num_shards
-
-                    # For single-node: assume local allocation
-                    if shard_id not in shard_locations:
-                        shard_locations[shard_id] = self_node
-
-                    node = shard_locations[shard_id]
-                    if node == self_node:
-                        _deliver_local(ctx, entities, entity_id, inner_msg, entity_factory)
-
-                    return Behaviors.same()
-
-                case ShardLocation(shard_id=sid, node=node):
-                    shard_locations[sid] = node
+                    _deliver_local(ctx, entities, envelope.entity_id, envelope.message, entity_factory)
                     return Behaviors.same()
 
                 case _:

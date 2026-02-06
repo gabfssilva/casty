@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import total_ordering
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from casty.replication import ShardAllocation
 
 
 class MemberStatus(Enum):
@@ -83,12 +87,18 @@ class ClusterState:
         default_factory=lambda: frozenset[NodeAddress]()
     )
     version: VectorClock = field(default_factory=VectorClock)
+    shard_allocations: dict[str, dict[int, ShardAllocation]] = field(
+        default_factory=lambda: {}  # noqa: C408
+    )
+    allocation_epoch: int = 0
 
     def add_member(self, member: Member) -> ClusterState:
         return ClusterState(
             members=self.members | {member},
             unreachable=self.unreachable,
             version=self.version,
+            shard_allocations=self.shard_allocations,
+            allocation_epoch=self.allocation_epoch,
         )
 
     def update_status(
@@ -104,6 +114,8 @@ class ClusterState:
             members=new_members,
             unreachable=self.unreachable,
             version=self.version,
+            shard_allocations=self.shard_allocations,
+            allocation_epoch=self.allocation_epoch,
         )
 
     def mark_unreachable(self, address: NodeAddress) -> ClusterState:
@@ -111,6 +123,8 @@ class ClusterState:
             members=self.members,
             unreachable=self.unreachable | {address},
             version=self.version,
+            shard_allocations=self.shard_allocations,
+            allocation_epoch=self.allocation_epoch,
         )
 
     def mark_reachable(self, address: NodeAddress) -> ClusterState:
@@ -118,6 +132,23 @@ class ClusterState:
             members=self.members,
             unreachable=self.unreachable - {address},
             version=self.version,
+            shard_allocations=self.shard_allocations,
+            allocation_epoch=self.allocation_epoch,
+        )
+
+    def with_allocations(
+        self,
+        shard_type: str,
+        allocations: dict[int, ShardAllocation],
+        epoch: int,
+    ) -> ClusterState:
+        new_shard_allocs = {**self.shard_allocations, shard_type: allocations}
+        return ClusterState(
+            members=self.members,
+            unreachable=self.unreachable,
+            version=self.version,
+            shard_allocations=new_shard_allocs,
+            allocation_epoch=epoch,
         )
 
     @property

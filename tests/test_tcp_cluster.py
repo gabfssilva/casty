@@ -160,7 +160,8 @@ async def test_cross_system_sharded_entity() -> None:
                 Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
                 "counters",
             )
-            await asyncio.sleep(0.2)
+            # Wait for gossip convergence → SetRole to activate coordinator
+            await asyncio.sleep(1.5)
 
             # Write from A
             proxy_a.tell(ShardEnvelope("test-entity", Increment(amount=42)))

@@ -17,6 +17,7 @@ from casty.ref import ActorRef
 
 if TYPE_CHECKING:
     from casty.remote_transport import RemoteTransport
+    from casty.replication import ShardAllocation
 
 
 @dataclass(frozen=True)
@@ -47,7 +48,15 @@ class GossipTick:
     """Periodic trigger to push gossip to a random peer."""
 
 
-type GossipMsg = GossipMessage | GetClusterState | JoinRequest | JoinAccepted | GossipTick
+@dataclass(frozen=True)
+class UpdateShardAllocations:
+    """Published by coordinator leader → gossip for cluster-wide propagation."""
+    shard_type: str
+    allocations: dict[int, ShardAllocation]
+    epoch: int
+
+
+type GossipMsg = GossipMessage | GetClusterState | JoinRequest | JoinAccepted | GossipTick | UpdateShardAllocations
 
 
 def gossip_actor(
@@ -84,10 +93,20 @@ def gossip_actor(
                         elif remote_m:
                             merged_members.add(remote_m)
 
+                    # Merge shard allocations: higher epoch wins
+                    if remote_state.allocation_epoch > state.allocation_epoch:
+                        merged_allocs = remote_state.shard_allocations
+                        merged_epoch = remote_state.allocation_epoch
+                    else:
+                        merged_allocs = state.shard_allocations
+                        merged_epoch = state.allocation_epoch
+
                     new_state = ClusterState(
                         members=frozenset(merged_members),
                         unreachable=state.unreachable | remote_state.unreachable,
                         version=merged_version.increment(self_node),
+                        shard_allocations=merged_allocs,
+                        allocation_epoch=merged_epoch,
                     )
                     return active(new_state)
 
@@ -105,23 +124,41 @@ def gossip_actor(
                         members=state.members | {new_member},
                         unreachable=state.unreachable,
                         version=state.version.increment(self_node),
+                        shard_allocations=state.shard_allocations,
+                        allocation_epoch=state.allocation_epoch,
                     )
                     if reply_to is not None:
                         reply_to.tell(JoinAccepted(state=new_state))
                     return active(new_state)
 
                 case JoinAccepted(accepted_state):
-                    # Merge accepted state from seed
+                    # Merge accepted state from seed — higher epoch wins
                     merged_version = state.version.merge(accepted_state.version)
+                    if accepted_state.allocation_epoch > state.allocation_epoch:
+                        merged_allocs = accepted_state.shard_allocations
+                        merged_epoch = accepted_state.allocation_epoch
+                    else:
+                        merged_allocs = state.shard_allocations
+                        merged_epoch = state.allocation_epoch
                     new_state = ClusterState(
                         members=state.members | accepted_state.members,
                         unreachable=state.unreachable,
                         version=merged_version.increment(self_node),
+                        shard_allocations=merged_allocs,
+                        allocation_epoch=merged_epoch,
                     )
                     return active(new_state)
 
                 case GossipTick():
                     _push_gossip(state, self_node, remote_transport, system_name)
+                    return Behaviors.same()
+
+                case UpdateShardAllocations(shard_type, allocations, epoch):
+                    if epoch > state.allocation_epoch:
+                        new_state = state.with_allocations(
+                            shard_type, allocations, epoch
+                        )
+                        return active(new_state)
                     return Behaviors.same()
 
                 case _:

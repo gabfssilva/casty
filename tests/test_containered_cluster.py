@@ -70,7 +70,6 @@ NODE_SCRIPT = textwrap.dedent("""\
         async with ClusteredActorSystem(
             name="test-cluster", host=host, port=port, bind_host=bind_host,
         ) as system:
-
             proxy = system.spawn(
                 Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
                 "counters",
@@ -96,7 +95,6 @@ NODE_SCRIPT = textwrap.dedent("""\
             name="test-cluster", host=host, port=port, bind_host=bind_host,
             seed_nodes=[(seed_host, seed_port)],
         ) as system:
-
             proxy = system.spawn(
                 Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
                 "counters",

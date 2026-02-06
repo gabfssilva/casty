@@ -216,6 +216,10 @@ class RemoteTransport:
         """ref_factory callback for deserializer."""
         return self.make_ref(address)
 
+    def set_local_port(self, port: int) -> None:
+        """Update local port after binding to OS-assigned port."""
+        self._local_port = port
+
     async def start(self) -> None:
         await self._tcp.start(self)
 
