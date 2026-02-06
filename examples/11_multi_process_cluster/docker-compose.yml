@@ -1,0 +1,15 @@
+services:
+  seed:
+    build:
+      context: ../..
+      dockerfile: examples/11_multi_process_cluster/Dockerfile
+    hostname: seed
+    command: ["1", "--host", "seed", "--bind-host", "0.0.0.0", "--port", "25520", "--auto"]
+
+  node:
+    build:
+      context: ../..
+      dockerfile: examples/11_multi_process_cluster/Dockerfile
+    command: ["2", "--host", "auto", "--bind-host", "0.0.0.0", "--port", "25520", "--seed-host", "seed", "--seed-port", "25520", "--auto"]
+    depends_on:
+      - seed

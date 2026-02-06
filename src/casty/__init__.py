@@ -25,6 +25,7 @@ from casty.cluster_state import (
     VectorClock,
 )
 from casty.context import ActorContext
+from casty.distributed import Counter, Dict, Distributed, Queue, Set
 from casty.events import (
     ActorRestarted,
     ActorStarted,
@@ -49,7 +50,7 @@ from casty.replication import (
 )
 from casty.messages import Terminated
 from casty.ref import ActorRef
-from casty.remote_transport import MessageEnvelope, TcpTransport
+from casty.remote_transport import MessageEnvelope, RemoteTransport, TcpTransport
 from casty.serialization import JsonSerializer, Serializer, TypeRegistry
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
 from casty.supervision import Directive, OneForOneStrategy, SupervisionStrategy
@@ -103,6 +104,7 @@ __all__ = [
     "LocalTransport",
     # Remoting
     "MessageEnvelope",
+    "RemoteTransport",
     "TcpTransport",
     # Serialization
     "TypeRegistry",
@@ -133,4 +135,10 @@ __all__ = [
     "ClusteredActorSystem",
     "ShardedBehavior",
     "ShardEnvelope",
+    # Distributed Data Structures
+    "Distributed",
+    "Counter",
+    "Dict",
+    "Queue",
+    "Set",
 ]

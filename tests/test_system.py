@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from casty.actor import Behaviors, Behavior
-from casty.events import ActorStarted, DeadLetter
+from casty.events import ActorStarted
 from casty.ref import ActorRef
 from casty.system import ActorSystem
 
@@ -29,7 +29,7 @@ type GreeterMsg = Greet | GetCount
 def greeter(count: int = 0) -> Behavior[GreeterMsg]:
     async def receive(ctx: Any, msg: GreeterMsg) -> Any:
         match msg:
-            case Greet(name):
+            case Greet():
                 return greeter(count + 1)
             case GetCount(reply_to):
                 reply_to.tell(count)

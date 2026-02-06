@@ -5,10 +5,9 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from casty import ActorSystem, Behaviors, ActorRef, Behavior
-from casty.journal import InMemoryJournal, PersistedEvent
+from casty import Behaviors, ActorRef, Behavior
+from casty.journal import InMemoryJournal
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
-from casty.cluster_state import NodeAddress
 
 
 @dataclass(frozen=True)

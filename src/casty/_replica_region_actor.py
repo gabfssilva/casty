@@ -26,29 +26,30 @@ def replica_region_actor[S, E](
         entity_sequence_nrs: dict[str, int] = {}
 
         async def receive(ctx: Any, msg: Any) -> Any:
-            if isinstance(msg, ReplicateEvents):
-                entity_id = msg.entity_id
-                state = entity_states.get(entity_id, initial_state)
+            match msg:
+                case ReplicateEvents(entity_id=entity_id, events=events, reply_to=reply_to):
+                    state = entity_states.get(entity_id, initial_state)
 
-                # Persist events to local journal
-                await journal.persist(entity_id, msg.events)
+                    # Persist events to local journal
+                    await journal.persist(entity_id, events)
 
-                # Apply events to state
-                for persisted in msg.events:
-                    state = on_event(state, persisted.event)
-                    entity_sequence_nrs[entity_id] = persisted.sequence_nr
+                    # Apply events to state
+                    for persisted in events:
+                        state = on_event(state, persisted.event)
+                        entity_sequence_nrs[entity_id] = persisted.sequence_nr
 
-                entity_states[entity_id] = state
+                    entity_states[entity_id] = state
 
-                # Send ack if requested
-                if msg.reply_to is not None:
-                    from casty.replication import ReplicateEventsAck
-                    highest_seq = entity_sequence_nrs.get(entity_id, 0)
-                    msg.reply_to.tell(ReplicateEventsAck(entity_id=entity_id, sequence_nr=highest_seq))
+                    # Send ack if requested
+                    if reply_to is not None:
+                        from casty.replication import ReplicateEventsAck
+                        highest_seq = entity_sequence_nrs.get(entity_id, 0)
+                        reply_to.tell(ReplicateEventsAck(entity_id=entity_id, sequence_nr=highest_seq))
 
-                return Behaviors.same()
+                    return Behaviors.same()
 
-            return Behaviors.same()
+                case _:
+                    return Behaviors.same()
 
         return Behaviors.receive(receive)
 

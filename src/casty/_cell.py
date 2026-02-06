@@ -32,7 +32,7 @@ from casty.mailbox import Mailbox
 from casty.messages import Terminated
 from casty.ref import ActorRef
 from casty.supervision import Directive, SupervisionStrategy
-from casty.transport import LocalTransport
+from casty.transport import LocalTransport, MessageTransport
 
 
 class _CellContext[M]:
@@ -63,6 +63,9 @@ class _CellContext[M]:
             event_stream=self._cell.event_stream,
             system_name=self._cell.system_name,
             local_transport=self._cell.local_transport,
+            ref_transport=self._cell.ref_transport,
+            ref_host=self._cell.ref_host,
+            ref_port=self._cell.ref_port,
         )
         if mailbox is not None:
             child.mailbox = mailbox
@@ -117,6 +120,9 @@ class ActorCell[M]:
         event_stream: EventStream,
         system_name: str,
         local_transport: LocalTransport,
+        ref_transport: MessageTransport | None = None,
+        ref_host: str | None = None,
+        ref_port: int | None = None,
     ) -> None:
         self._initial_behavior: Behavior[M] = behavior
         self._name = name
@@ -124,6 +130,9 @@ class ActorCell[M]:
         self._event_stream = event_stream
         self._system_name = system_name
         self._local_transport = local_transport
+        self._ref_transport = ref_transport
+        self._ref_host = ref_host
+        self._ref_port = ref_port
         self._mailbox: Mailbox[Any] = Mailbox()
         self._logger = logging.getLogger(f"casty.actor.{name}")
 
@@ -157,8 +166,12 @@ class ActorCell[M]:
         self._ctx: _CellContext[M] = _CellContext(self)
 
         # Create the ref with address + transport
-        addr = ActorAddress(system=system_name, path=f"/{name}")
-        self._ref: ActorRef[M] = ActorRef(address=addr, _transport=local_transport)
+        effective_transport: MessageTransport = ref_transport or local_transport
+        addr = ActorAddress(
+            system=system_name, path=f"/{name}", host=ref_host, port=ref_port
+        )
+        self._ref: ActorRef[M] = ActorRef(address=addr, _transport=effective_transport)
+        # Always register locally for TCP inbound delivery
         local_transport.register(f"/{name}", self._deliver)
 
     @property
@@ -184,6 +197,18 @@ class ActorCell[M]:
     @property
     def local_transport(self) -> LocalTransport:
         return self._local_transport
+
+    @property
+    def ref_transport(self) -> MessageTransport | None:
+        return self._ref_transport
+
+    @property
+    def ref_host(self) -> str | None:
+        return self._ref_host
+
+    @property
+    def ref_port(self) -> int | None:
+        return self._ref_port
 
     @property
     def logger(self) -> logging.Logger:
@@ -272,7 +297,7 @@ class ActorCell[M]:
                 if self._pre_start is not None:
                     await self._pre_start(self._ctx)
 
-            case b if isinstance(b, EventSourcedBehavior):
+            case EventSourcedBehavior() as b:
                 self._es_entity_id = b.entity_id
                 self._es_journal = b.journal
                 self._es_on_event = b.on_event
@@ -334,12 +359,13 @@ class ActorCell[M]:
                     continue
 
                 # Handle PersistedBehavior for event-sourced actors
-                if isinstance(next_behavior, PersistedBehavior):
-                    await self._handle_persisted(
-                        cast(PersistedBehavior[M, Any], next_behavior)
-                    )
-                else:
-                    await self._apply_behavior(next_behavior)
+                match next_behavior:
+                    case PersistedBehavior():
+                        await self._handle_persisted(
+                            cast(PersistedBehavior[M, Any], next_behavior)
+                        )
+                    case _:
+                        await self._apply_behavior(next_behavior)
 
             except asyncio.CancelledError:
                 break
@@ -403,15 +429,18 @@ class ActorCell[M]:
 
         # Snapshot policy
         self._es_events_since_snapshot += len(wrapped)
-        if isinstance(self._es_snapshot_policy, SnapshotEvery):
-            if self._es_events_since_snapshot >= self._es_snapshot_policy.n_events:
-                snapshot = Snapshot(
-                    sequence_nr=self._es_sequence_nr,
-                    state=self._es_state,
-                    timestamp=_time.time(),
-                )
-                await self._es_journal.save_snapshot(self._es_entity_id, snapshot)
-                self._es_events_since_snapshot = 0
+        match self._es_snapshot_policy:
+            case SnapshotEvery(n_events=n_events):
+                if self._es_events_since_snapshot >= n_events:
+                    snapshot = Snapshot(
+                        sequence_nr=self._es_sequence_nr,
+                        state=self._es_state,
+                        timestamp=_time.time(),
+                    )
+                    await self._es_journal.save_snapshot(self._es_entity_id, snapshot)
+                    self._es_events_since_snapshot = 0
+            case _:
+                pass
 
         # Push to replicas
         if self._es_replica_refs:
@@ -426,31 +455,34 @@ class ActorCell[M]:
                 replica_ref.tell(replication_msg)
 
         # Wait for acks if required
-        if self._es_replication is not None and self._es_replica_refs:
+        if self._es_replica_refs:
             from casty.replication import ReplicateEventsAck, ReplicationConfig
-            if isinstance(self._es_replication, ReplicationConfig) and self._es_replication.min_acks > 0:
-                acks_needed = min(self._es_replication.min_acks, len(self._es_replica_refs))
-                ack_count = 0
-                deadline = _time.time() + self._es_replication.ack_timeout
+            match self._es_replication:
+                case ReplicationConfig(min_acks=min_acks, ack_timeout=ack_timeout) if min_acks > 0:
+                    acks_needed = min(min_acks, len(self._es_replica_refs))
+                    ack_count = 0
+                    deadline = _time.time() + ack_timeout
 
-                while ack_count < acks_needed and _time.time() < deadline:
-                    try:
-                        remaining_time = max(0.001, deadline - _time.time())
-                        ack_msg = await asyncio.wait_for(
-                            self._mailbox.get(),
-                            timeout=remaining_time,
-                        )
-                        if isinstance(ack_msg, ReplicateEventsAck):
-                            ack_count += 1
-                        else:
-                            # Re-queue non-ack messages
-                            self._mailbox.put(ack_msg)
-                    except asyncio.TimeoutError:
-                        self._logger.warning(
-                            "Replication ack timeout for %s: got %d/%d acks",
-                            self._es_entity_id, ack_count, acks_needed,
-                        )
-                        break
+                    while ack_count < acks_needed and _time.time() < deadline:
+                        try:
+                            remaining_time = max(0.001, deadline - _time.time())
+                            ack_msg = await asyncio.wait_for(
+                                self._mailbox.get(),
+                                timeout=remaining_time,
+                            )
+                            match ack_msg:
+                                case ReplicateEventsAck():
+                                    ack_count += 1
+                                case _:
+                                    self._mailbox.put(ack_msg)
+                        except asyncio.TimeoutError:
+                            self._logger.warning(
+                                "Replication ack timeout for %s: got %d/%d acks",
+                                self._es_entity_id, ack_count, acks_needed,
+                            )
+                            break
+                case _:
+                    pass
 
         # Apply the "then" behavior
         await self._apply_behavior(persisted_behavior.then)

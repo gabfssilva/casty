@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 
 from casty import (
-    ActorContext,
     ActorRef,
     ActorSystem,
     Behavior,
@@ -18,7 +17,6 @@ from casty import (
     Mailbox,
     MailboxOverflowStrategy,
     OneForOneStrategy,
-    Terminated,
 )
 
 
@@ -55,7 +53,7 @@ type WorkerMsg = WorkItem | GetResults
 def greeter(count: int = 0) -> Behavior[GreeterMsg]:
     async def receive(ctx: Any, msg: GreeterMsg) -> Any:
         match msg:
-            case Greet(name):
+            case Greet():
                 return greeter(count + 1)
             case GetCount(reply_to):
                 reply_to.tell(count)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import pytest
+from typing import Any
 
 from casty.actor import (
     Behaviors,
@@ -55,8 +55,8 @@ async def test_restart_returns_singleton_type() -> None:
 
 async def test_with_lifecycle_wraps_behavior() -> None:
     inner = Behaviors.receive(lambda ctx, msg: Behaviors.same())
-    pre = lambda ctx: None
-    post = lambda ctx: None
+    def pre(ctx: Any) -> None: return None
+    def post(ctx: Any) -> None: return None
 
     b = Behaviors.with_lifecycle(inner, pre_start=pre, post_stop=post)
     assert isinstance(b, LifecycleBehavior)

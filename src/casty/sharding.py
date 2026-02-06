@@ -1,14 +1,29 @@
 # src/casty/sharding.py
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
-from typing import Any, ClassVar, cast, overload
+from typing import Any, TYPE_CHECKING, cast, overload
+from uuid import uuid4
 
 from casty.actor import Behavior, Behaviors, ShardedBehavior
+from casty.address import ActorAddress
 from casty.cluster_state import NodeAddress
 from casty.mailbox import Mailbox
 from casty.ref import ActorRef
+from casty.cluster import Cluster, ClusterConfig
+from casty.remote_transport import RemoteTransport, TcpTransport
+from casty.serialization import JsonSerializer, TypeRegistry
 from casty.system import ActorSystem
+from casty.transport import MessageTransport
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from casty.distributed import Distributed
+    from casty.journal import EventJournal
+
 from casty._shard_coordinator_actor import (
     CoordinatorMsg,
     GetShardLocation,
@@ -16,6 +31,8 @@ from casty._shard_coordinator_actor import (
     ShardLocation,
     shard_coordinator_actor,
 )
+
+
 @dataclass(frozen=True)
 class ShardEnvelope[M]:
     entity_id: str
@@ -34,12 +51,13 @@ def _shard_proxy_behavior(
     self_node: NodeAddress,
     shard_name: str,
     num_shards: int,
-    peer_regions: dict[tuple[str, NodeAddress], ActorRef[Any]],
+    remote_transport: RemoteTransport | None,
+    system_name: str,
 ) -> Behavior[Any]:
     """Proxy actor that routes ShardEnvelopes to the correct region.
 
     - Computes shard_id from entity_id
-    - Caches shard→node mappings
+    - Caches shard->node mappings
     - Buffers messages while waiting for coordinator response
     """
 
@@ -50,40 +68,46 @@ def _shard_proxy_behavior(
         def _route(envelope: ShardEnvelope[Any], node: NodeAddress) -> None:
             if node == self_node:
                 local_region.tell(envelope)
-            else:
-                peer = peer_regions.get((shard_name, node))
-                if peer is not None:
-                    peer.tell(envelope)
+            elif remote_transport is not None:
+                remote_addr = ActorAddress(
+                    system=system_name,
+                    path=f"/_region-{shard_name}",
+                    host=node.host,
+                    port=node.port,
+                )
+                remote_ref: ActorRef[Any] = remote_transport.make_ref(remote_addr)
+                remote_ref.tell(envelope)
 
         async def receive(ctx: Any, msg: Any) -> Any:
-            if isinstance(msg, ShardEnvelope):
-                envelope = cast(ShardEnvelope[Any], msg)
-                shard_id = hash(envelope.entity_id) % num_shards
+            match msg:
+                case ShardEnvelope():
+                    envelope = cast(ShardEnvelope[Any], msg)
+                    shard_id = hash(envelope.entity_id) % num_shards
 
-                if shard_id in shard_cache:
-                    _route(envelope, shard_cache[shard_id])
+                    if shard_id in shard_cache:
+                        _route(envelope, shard_cache[shard_id])
+                        return Behaviors.same()
+
+                    # Buffer and ask coordinator
+                    buf = buffer.setdefault(shard_id, [])
+                    buf.append(envelope)
+                    if len(buf) == 1:
+                        # First message for this shard — ask coordinator
+                        coordinator.tell(
+                            GetShardLocation(shard_id=shard_id, reply_to=ctx.self)
+                        )
                     return Behaviors.same()
 
-                # Buffer and ask coordinator
-                buf = buffer.setdefault(shard_id, [])
-                buf.append(envelope)
-                if len(buf) == 1:
-                    # First message for this shard — ask coordinator
-                    coordinator.tell(
-                        GetShardLocation(shard_id=shard_id, reply_to=ctx.self)
-                    )
-                return Behaviors.same()
+                case ShardLocation(shard_id=sid, node=node):
+                    shard_cache[sid] = node
+                    # Drain buffered messages
+                    buffered = buffer.pop(sid, [])
+                    for envelope in buffered:
+                        _route(envelope, node)
+                    return Behaviors.same()
 
-            if isinstance(msg, ShardLocation):
-                location = msg
-                shard_cache[location.shard_id] = location.node
-                # Drain buffered messages
-                buffered = buffer.pop(location.shard_id, [])
-                for envelope in buffered:
-                    _route(envelope, location.node)
-                return Behaviors.same()
-
-            return Behaviors.same()
+                case _:
+                    return Behaviors.same()
 
         return Behaviors.receive(receive)
 
@@ -96,9 +120,6 @@ def _shard_proxy_behavior(
 
 
 class ClusteredActorSystem(ActorSystem):
-    _peer_regions: ClassVar[dict[tuple[str, NodeAddress], ActorRef[Any]]] = {}
-    _coordinators: ClassVar[dict[str, ActorRef[CoordinatorMsg]]] = {}
-
     def __init__(
         self,
         *,
@@ -106,21 +127,74 @@ class ClusteredActorSystem(ActorSystem):
         host: str,
         port: int,
         seed_nodes: list[tuple[str, int]] | None = None,
+        bind_host: str | None = None,
     ) -> None:
         super().__init__(name=name)
         self._host = host
-        self._port = port
+        self._port: int = port
+        self._bind_host = bind_host or host
         self._seed_nodes = seed_nodes or []
         self._self_node = NodeAddress(host=host, port=port)
         self._shard_names: list[str] = []
+        self._coordinators: dict[str, ActorRef[CoordinatorMsg]] = {}
+        self._logger = logging.getLogger(f"casty.cluster.{name}")
+
+        # Serialization + transport
+        self._type_registry = TypeRegistry()
+        self._tcp_transport = TcpTransport(self._bind_host, port)
+        self._serializer = JsonSerializer(self._type_registry)
+        self._remote_transport = RemoteTransport(
+            local=self._local_transport,
+            tcp=self._tcp_transport,
+            serializer=self._serializer,
+            local_host=host,
+            local_port=port,
+            system_name=name,
+        )
 
     @property
     def self_node(self) -> NodeAddress:
         return self._self_node
 
+    @property
+    def type_registry(self) -> TypeRegistry:
+        return self._type_registry
+
     async def __aenter__(self) -> ClusteredActorSystem:
+        await self._remote_transport.start()
+        # Update actual port (handles port=0 for tests)
+        actual_port: int = self._tcp_transport.port
+        if actual_port != self._port:
+            self._port = actual_port
+            self._self_node = NodeAddress(host=self._host, port=actual_port)
+            self._remote_transport._local_port = actual_port  # pyright: ignore[reportPrivateUsage]
         await super().__aenter__()
+
+        # Start cluster membership (gossip, heartbeat, failure detection)
+        cluster_config = ClusterConfig(
+            host=self._host,
+            port=self._port,
+            seed_nodes=self._seed_nodes,
+        )
+        self._cluster = Cluster(
+            self,
+            cluster_config,
+            remote_transport=self._remote_transport,
+            system_name=self._name,
+            coordinator_refs=self._coordinators,
+        )
+        await self._cluster.start()
+
         return self
+
+    def _get_ref_transport(self) -> MessageTransport | None:
+        return self._remote_transport
+
+    def _get_ref_host(self) -> str | None:
+        return self._host
+
+    def _get_ref_port(self) -> int | None:
+        return self._port
 
     @overload
     def spawn[M](
@@ -143,9 +217,11 @@ class ClusteredActorSystem(ActorSystem):
         *,
         mailbox: Mailbox[M] | None = None,
     ) -> ActorRef[ShardEnvelope[M]] | ActorRef[M]:
-        if isinstance(behavior, ShardedBehavior):
-            return self._spawn_sharded(behavior, name)
-        return super().spawn(behavior, name, mailbox=mailbox)
+        match behavior:
+            case ShardedBehavior():
+                return self._spawn_sharded(behavior, name)
+            case _:
+                return super().spawn(behavior, name, mailbox=mailbox)
 
     def _spawn_sharded[M](
         self, sharded: ShardedBehavior[M], name: str
@@ -158,18 +234,10 @@ class ClusteredActorSystem(ActorSystem):
             | {NodeAddress(host=h, port=p) for h, p in self._seed_nodes}
         )
 
-        # Coordinator: shared across all systems for this shard group
-        if name not in ClusteredActorSystem._coordinators:
-            coord_ref = super().spawn(
-                shard_coordinator_actor(
-                    strategy=LeastShardStrategy(),
-                    available_nodes=available_nodes,
-                    replication=sharded.replication,
-                ),
-                f"_coord-{name}",
-            )
-            ClusteredActorSystem._coordinators[name] = coord_ref
-        coordinator = ClusteredActorSystem._coordinators[name]
+        # Coordinator: deterministic — lives on first seed node
+        coordinator = self._get_or_create_coordinator(
+            name, sharded, available_nodes
+        )
 
         # Local shard region
         region_ref = super().spawn(
@@ -182,8 +250,6 @@ class ClusteredActorSystem(ActorSystem):
             f"_region-{name}",
         )
 
-        # Register for peer discovery
-        ClusteredActorSystem._peer_regions[(name, self._self_node)] = region_ref
         self._shard_names.append(name)
 
         # Proxy — the ref users interact with
@@ -194,24 +260,100 @@ class ClusteredActorSystem(ActorSystem):
                 self_node=self._self_node,
                 shard_name=name,
                 num_shards=sharded.num_shards,
-                peer_regions=ClusteredActorSystem._peer_regions,
+                remote_transport=self._remote_transport,
+                system_name=self._name,
             ),
             name,
         )
 
         return cast(ActorRef[ShardEnvelope[M]], proxy_ref)
 
+    def _get_or_create_coordinator(
+        self,
+        name: str,
+        sharded: ShardedBehavior[Any],
+        available_nodes: frozenset[NodeAddress],
+    ) -> ActorRef[CoordinatorMsg]:
+        if name in self._coordinators:
+            return self._coordinators[name]
+
+        # Determine if this node is the coordinator host.
+        # Coordinator lives on the first seed node; if no seeds, self is it.
+        first_seed = self._first_seed_node()
+        if first_seed is None or first_seed == self._self_node:
+            # Spawn coordinator locally
+            coord_ref = super().spawn(
+                shard_coordinator_actor(
+                    strategy=LeastShardStrategy(),
+                    available_nodes=available_nodes,
+                    replication=sharded.replication,
+                ),
+                f"_coord-{name}",
+            )
+            self._coordinators[name] = coord_ref
+            return coord_ref
+
+        # Remote coordinator — create ref to coordinator on seed node
+        coord_addr = ActorAddress(
+            system=self._name,
+            path=f"/_coord-{name}",
+            host=first_seed.host,
+            port=first_seed.port,
+        )
+        coord_ref = cast(
+            ActorRef[CoordinatorMsg],
+            self._remote_transport.make_ref(coord_addr),
+        )
+        self._coordinators[name] = coord_ref
+        return coord_ref
+
+    def _first_seed_node(self) -> NodeAddress | None:
+        if not self._seed_nodes:
+            return None
+        host, port = self._seed_nodes[0]
+        return NodeAddress(host=host, port=port)
+
+    async def ask[M, R](
+        self,
+        ref: ActorRef[M],
+        msg_factory: Callable[[ActorRef[R]], M],
+        *,
+        timeout: float,
+    ) -> R:
+        """Ask with remote-addressable temp reply ref."""
+        future: asyncio.Future[R] = asyncio.get_running_loop().create_future()
+        ask_id = uuid4().hex
+        temp_path = f"/_ask/{ask_id}"
+
+        def on_reply(msg: Any) -> None:
+            if not future.done():
+                future.set_result(msg)
+
+        self._local_transport.register(temp_path, on_reply)
+        try:
+            temp_ref: ActorRef[R] = ActorRef(
+                address=ActorAddress(
+                    system=self._name,
+                    path=temp_path,
+                    host=self._host,
+                    port=self._port,
+                ),
+                _transport=self._remote_transport,
+            )
+            message = msg_factory(temp_ref)
+            ref.tell(message)
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            self._local_transport.unregister(temp_path)
+
+    def distributed(self, *, journal: EventJournal | None = None) -> Distributed:
+        """Create a :class:`Distributed` facade for this system."""
+        from casty.distributed import Distributed
+
+        return Distributed(self, journal=journal)
+
     async def shutdown(self) -> None:
-        # Cleanup peer region entries for this node
-        for shard_name in self._shard_names:
-            ClusteredActorSystem._peer_regions.pop(
-                (shard_name, self._self_node), None
-            )
-            # If no more peers for this shard group, remove coordinator
-            has_peers = any(
-                k[0] == shard_name for k in ClusteredActorSystem._peer_regions
-            )
-            if not has_peers:
-                ClusteredActorSystem._coordinators.pop(shard_name, None)
+        self._coordinators.clear()
         self._shard_names.clear()
         await super().shutdown()
+        await self._remote_transport.stop()

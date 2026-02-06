@@ -162,8 +162,9 @@ async def test_event_sourced_pushes_to_replicas() -> None:
     received_replications: list[Any] = []
 
     async def mock_replica_handler(ctx: Any, msg: Any) -> Any:
-        if isinstance(msg, ReplicateEvents):
-            received_replications.append(msg)
+        match msg:
+            case ReplicateEvents():
+                received_replications.append(msg)
         return Behaviors.same()
 
     async with ActorSystem(name="test") as system:
@@ -200,14 +201,13 @@ async def test_event_sourced_waits_for_acks() -> None:
     ack_events: list[Any] = []
 
     async def acking_replica_handler(ctx: Any, msg: Any) -> Any:
-        if isinstance(msg, ReplicateEvents):
-            # Persist to local journal
-            await replica_journal.persist(msg.entity_id, msg.events)
-            ack_events.append(msg)
-            # Send ack back if reply_to provided
-            if msg.reply_to is not None:
-                highest_seq = msg.events[-1].sequence_nr if msg.events else 0
-                msg.reply_to.tell(ReplicateEventsAck(entity_id=msg.entity_id, sequence_nr=highest_seq))
+        match msg:
+            case ReplicateEvents(entity_id=eid, events=events, reply_to=reply_to):
+                await replica_journal.persist(eid, events)
+                ack_events.append(msg)
+                if reply_to is not None:
+                    highest_seq = events[-1].sequence_nr if events else 0
+                    reply_to.tell(ReplicateEventsAck(entity_id=eid, sequence_nr=highest_seq))
         return Behaviors.same()
 
     async with ActorSystem(name="test") as system:
@@ -247,9 +247,10 @@ async def test_event_sourced_fire_and_forget_replication() -> None:
     replications: list[Any] = []
 
     async def slow_replica_handler(ctx: Any, msg: Any) -> Any:
-        if isinstance(msg, ReplicateEvents):
-            await asyncio.sleep(0.5)  # Simulate slow replica
-            replications.append(msg)
+        match msg:
+            case ReplicateEvents():
+                await asyncio.sleep(0.5)  # Simulate slow replica
+                replications.append(msg)
         return Behaviors.same()
 
     async with ActorSystem(name="test") as system:

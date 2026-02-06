@@ -23,27 +23,29 @@ def shard_region_actor(
         shard_locations: dict[int, NodeAddress] = {}
 
         async def receive(ctx: Any, msg: Any) -> Any:
-            if isinstance(msg, ShardEnvelope):
-                envelope = cast(ShardEnvelope[Any], msg)
-                entity_id: str = envelope.entity_id
-                inner_msg: Any = envelope.message
-                shard_id = hash(entity_id) % num_shards
+            match msg:
+                case ShardEnvelope():
+                    envelope = cast(ShardEnvelope[Any], msg)
+                    entity_id: str = envelope.entity_id
+                    inner_msg: Any = envelope.message
+                    shard_id = hash(entity_id) % num_shards
 
-                # For single-node: assume local allocation
-                if shard_id not in shard_locations:
-                    shard_locations[shard_id] = self_node
+                    # For single-node: assume local allocation
+                    if shard_id not in shard_locations:
+                        shard_locations[shard_id] = self_node
 
-                node = shard_locations[shard_id]
-                if node == self_node:
-                    _deliver_local(ctx, entities, entity_id, inner_msg, entity_factory)
+                    node = shard_locations[shard_id]
+                    if node == self_node:
+                        _deliver_local(ctx, entities, entity_id, inner_msg, entity_factory)
 
-                return Behaviors.same()
+                    return Behaviors.same()
 
-            if isinstance(msg, ShardLocation):
-                shard_locations[msg.shard_id] = msg.node
-                return Behaviors.same()
+                case ShardLocation(shard_id=sid, node=node):
+                    shard_locations[sid] = node
+                    return Behaviors.same()
 
-            return Behaviors.same()
+                case _:
+                    return Behaviors.same()
 
         return Behaviors.receive(receive)
 

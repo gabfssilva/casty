@@ -389,6 +389,66 @@ The coordinator allocates primary and replicas on different nodes and handles fa
 | `0` | Fire-and-forget — lowest latency, eventual consistency |
 | `1+` | Wait for N acks — stronger durability guarantee |
 
+### Distributed Data Structures
+
+Higher-level data structures backed by cluster sharding. Call `system.distributed()` to get a facade, then create counters, maps, sets, and queues that are automatically distributed across nodes:
+
+```python
+from dataclasses import dataclass
+from casty.sharding import ClusteredActorSystem
+from casty.journal import InMemoryJournal
+
+@dataclass(frozen=True)
+class User:
+    name: str
+    email: str
+
+async with ClusteredActorSystem(
+    name="my-app", host="10.0.0.1", port=25520,
+    seed_nodes=[("10.0.0.2", 25520)],
+) as system:
+    d = system.distributed()
+
+    # Counter — increment, decrement, get
+    views = d.counter("page-views", shards=50)
+    await views.increment(100)      # -> 100
+    await views.decrement(10)       # -> 90
+    await views.get()               # -> 90
+
+    # Dict — typed key-value map, one sharded entity per key
+    users = d.map[str, User]("users", shards=50)
+    await users.put("alice", User("Alice", "a@x.com"))   # -> None (previous)
+    await users.get("alice")                              # -> User(...)
+    await users.contains("alice")                         # -> True
+    await users.delete("alice")                           # -> True (existed)
+
+    # Set — add, remove, contains, size
+    tags = d.set[str]("active-tags")
+    await tags.add("python")        # -> True  (added)
+    await tags.add("python")        # -> False (already present)
+    await tags.size()               # -> 1
+
+    # Queue — FIFO enqueue, dequeue, peek, size
+    jobs = d.queue[str]("work-queue")
+    await jobs.enqueue("task-1")
+    await jobs.peek()               # -> "task-1" (doesn't remove)
+    await jobs.dequeue()            # -> "task-1" (removes)
+    await jobs.dequeue()            # -> None (empty)
+```
+
+All creation methods accept `shards` (default `100`) for distribution granularity and `timeout` (default `5.0s`) for operations. The same structure can be accessed from any node — just use the same `name` and `shards`.
+
+To make structures persistent, pass an `EventJournal` to the facade. Every mutation is persisted as an event and replayed on recovery:
+
+```python
+d = system.distributed(journal=InMemoryJournal())
+counter = d.counter("hits")
+await counter.increment(10)
+# actor restarts → replays Incremented(10) → recovers value=10
+```
+
+`InMemoryJournal` is included for development; implement the `EventJournal` protocol for any database backend.
+
 ## State Machines
 
 Because behaviors are values, state machines are natural — each state is a function:

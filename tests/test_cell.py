@@ -4,14 +4,12 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-import pytest
 
-from casty.actor import Behaviors, ReceiveBehavior, Behavior
+from casty.actor import Behaviors, ReceiveBehavior
 from casty.events import EventStream, ActorStarted, ActorStopped, DeadLetter
-from casty.mailbox import Mailbox
 from casty.messages import Terminated
 from casty.ref import ActorRef
-from casty.supervision import Directive, OneForOneStrategy
+from casty.supervision import OneForOneStrategy
 from casty.transport import LocalTransport
 from casty._cell import ActorCell
 
@@ -215,8 +213,9 @@ async def test_cell_watch_receives_terminated() -> None:
     terminated_received: list[Terminated] = []
 
     async def watcher_handler(ctx: Any, msg: Any) -> Any:
-        if isinstance(msg, Terminated):
-            terminated_received.append(msg)
+        match msg:
+            case Terminated():
+                terminated_received.append(msg)
         return Behaviors.same()
 
     async def watched_handler(ctx: Any, msg: str) -> Any:

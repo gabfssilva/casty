@@ -11,7 +11,7 @@ from casty.address import ActorAddress
 from casty.events import EventStream
 from casty.mailbox import Mailbox
 from casty.ref import ActorRef
-from casty.transport import LocalTransport
+from casty.transport import LocalTransport, MessageTransport
 
 
 class _CallbackTransport:
@@ -62,6 +62,9 @@ class ActorSystem:
             event_stream=self._event_stream,
             system_name=self._name,
             local_transport=self._local_transport,
+            ref_transport=self._get_ref_transport(),
+            ref_host=self._get_ref_host(),
+            ref_port=self._get_ref_port(),
         )
         if mailbox is not None:
             cell.mailbox = mailbox
@@ -116,6 +119,15 @@ class ActorSystem:
             cell = child
 
         return cell.ref
+
+    def _get_ref_transport(self) -> MessageTransport | None:
+        return None
+
+    def _get_ref_host(self) -> str | None:
+        return None
+
+    def _get_ref_port(self) -> int | None:
+        return None
 
     async def shutdown(self) -> None:
         for cell in list(self._root_cells.values()):
