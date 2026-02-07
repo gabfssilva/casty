@@ -1000,6 +1000,18 @@ system.event_stream.subscribe(
 
 If the task worker uses event sourcing, reallocated entities replay their journal on the new node and resume exactly where they left off. Tasks in progress at the time of failure are recovered automatically — the new primary replays persisted events and the worker continues from its last known state.
 
+### Distributed Barriers
+
+`system.barrier(name, n)` blocks until `n` nodes reach the same named barrier, then releases all simultaneously:
+
+```python
+await system.barrier("work-complete", num_nodes)
+# all nodes have reached this point before any proceeds
+await system.barrier("shutdown", num_nodes)
+```
+
+Backed by sharded entities — no external coordination service. Each named barrier can be reused across multiple rounds.
+
 ### State Without External Storage
 
 Event sourcing combined with replication provides durable distributed state without a database. The primary persists events to its journal and pushes them to replicas on other nodes. If the primary fails, a replica is promoted with its full event history intact:
