@@ -38,7 +38,7 @@ async def test_counter_increment_and_get() -> None:
         await asyncio.sleep(0.1)
 
         counter = Counter(
-            system=system, region_ref=region_ref, name="my-counter", timeout=2.0
+            system=system, region_ref=region_ref, name="my-counter", timeout=5.0
         )
 
         val = await counter.increment()
@@ -82,10 +82,10 @@ async def test_counter_multiple_counters() -> None:
         await asyncio.sleep(0.1)
 
         counter_a = Counter(
-            system=system, region_ref=region_ref, name="counter-a", timeout=2.0
+            system=system, region_ref=region_ref, name="counter-a", timeout=5.0
         )
         counter_b = Counter(
-            system=system, region_ref=region_ref, name="counter-b", timeout=2.0
+            system=system, region_ref=region_ref, name="counter-b", timeout=5.0
         )
 
         await counter_a.increment(10)

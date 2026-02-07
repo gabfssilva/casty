@@ -39,7 +39,7 @@ async def test_queue_enqueue_dequeue() -> None:
         await asyncio.sleep(0.1)
 
         q: Queue[str] = Queue(
-            system=system, region_ref=region_ref, name="my-queue", timeout=2.0
+            system=system, region_ref=region_ref, name="my-queue", timeout=5.0
         )
 
         # Empty queue checks

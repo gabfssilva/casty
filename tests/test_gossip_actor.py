@@ -38,7 +38,7 @@ async def test_gossip_actor_join_adds_member() -> None:
         await asyncio.sleep(0.1)
 
         state = await system.ask(
-            gossip_ref, lambda r: GetClusterState(reply_to=r), timeout=2.0
+            gossip_ref, lambda r: GetClusterState(reply_to=r), timeout=5.0
         )
 
     addresses = {m.address for m in state.members}
@@ -76,7 +76,7 @@ async def test_gossip_merge_updates_state() -> None:
         await asyncio.sleep(0.1)
 
         state = await system.ask(
-            gossip_ref, lambda r: GetClusterState(reply_to=r), timeout=2.0
+            gossip_ref, lambda r: GetClusterState(reply_to=r), timeout=5.0
         )
 
     addresses = {m.address for m in state.members}

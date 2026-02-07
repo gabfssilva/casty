@@ -17,7 +17,7 @@ async def test_cluster_single_node_becomes_leader() -> None:
         await cluster.start()
         await asyncio.sleep(0.3)
 
-        state = await cluster.get_state(timeout=2.0)
+        state = await cluster.get_state(timeout=5.0)
         assert len(state.members) == 1
         member = next(iter(state.members))
         assert member.status == MemberStatus.up

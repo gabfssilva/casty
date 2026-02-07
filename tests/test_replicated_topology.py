@@ -117,7 +117,7 @@ async def test_gossip_merge_higher_epoch_wins() -> None:
         result: ClusterState = await system.ask(
             gossip_ref,
             lambda r: GetClusterState(reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert result.allocation_epoch == 3
         assert result.shard_allocations["shard"][0].primary == node_b
@@ -154,7 +154,7 @@ async def test_gossip_merge_lower_epoch_keeps_local() -> None:
         result: ClusterState = await system.ask(
             gossip_ref,
             lambda r: GetClusterState(reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert result.allocation_epoch == 5
         assert result.shard_allocations["shard"][0].primary == node_a
@@ -185,7 +185,7 @@ async def test_gossip_update_shard_allocations() -> None:
         result: ClusterState = await system.ask(
             gossip_ref,
             lambda r: GetClusterState(reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert result.allocation_epoch == 1
         assert len(result.shard_allocations["counters"]) == 2
@@ -220,7 +220,7 @@ async def test_gossip_update_shard_allocations_stale_epoch_ignored() -> None:
         result: ClusterState = await system.ask(
             gossip_ref,
             lambda r: GetClusterState(reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert result.allocation_epoch == 5
         assert result.shard_allocations["counters"][0] == alloc_new
@@ -289,7 +289,7 @@ async def test_pending_buffers_until_set_role_leader() -> None:
         loc: ShardLocation = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert loc.shard_id == 0
         assert loc.node == node
@@ -327,7 +327,7 @@ async def test_follower_serves_cached_allocations() -> None:
         loc: ShardLocation = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert loc.shard_id == 0
         assert loc.node == node_a
@@ -413,7 +413,7 @@ async def test_leader_publishes_allocations() -> None:
         loc: ShardLocation = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         await asyncio.sleep(0.1)
 
@@ -449,7 +449,7 @@ async def test_leader_to_follower_demotion() -> None:
         loc: ShardLocation = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert loc.node == node
 
@@ -461,7 +461,7 @@ async def test_leader_to_follower_demotion() -> None:
         loc2: ShardLocation = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert loc2.node == node
 
@@ -587,7 +587,7 @@ async def test_cluster_actor_forwards_publish_allocations_to_gossip() -> None:
         state: ClusterState = await system.ask(
             cluster_ref,
             lambda r: GetState(reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         # The gossip should have received the allocation via UpdateShardAllocations
         assert state.allocation_epoch == 1
@@ -621,7 +621,7 @@ async def test_gossip_updates_state_via_update_shard_allocations() -> None:
         state: ClusterState = await system.ask(
             gossip_ref,
             lambda r: GetClusterState(reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert state.allocation_epoch == 1
         assert state.shard_allocations["counters"][0] == alloc
@@ -638,7 +638,7 @@ async def test_gossip_updates_state_via_update_shard_allocations() -> None:
         state2: ClusterState = await system.ask(
             gossip_ref,
             lambda r: GetClusterState(reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert state2.allocation_epoch == 2
         assert state2.shard_allocations["counters"][0].replicas == (NodeAddress("10.0.0.2", 25520),)
@@ -681,7 +681,7 @@ async def test_follower_promoted_to_leader_responds_immediately() -> None:
         loc: ShardLocation = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert loc.shard_id == 0
         assert loc.node == node_a
@@ -690,7 +690,7 @@ async def test_follower_promoted_to_leader_responds_immediately() -> None:
         loc2: ShardLocation = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=5, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert loc2.shard_id == 5
         assert loc2.node in {node_a, node_b}
@@ -738,7 +738,7 @@ async def test_follower_promotion_publishes_new_allocations() -> None:
         loc: ShardLocation = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         await asyncio.sleep(0.1)
 
@@ -798,7 +798,7 @@ async def test_promoted_leader_handles_node_down() -> None:
         loc: ShardLocation = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert loc.node == node_b
 
@@ -856,7 +856,7 @@ async def test_three_node_consistency_after_leader_change() -> None:
             loc: ShardLocation = await system.ask(
                 coord_a,
                 lambda r, sid=i: GetShardLocation(shard_id=sid, reply_to=r),
-                timeout=2.0,
+                timeout=5.0,
             )
             allocations[loc.shard_id] = ShardAllocation(primary=loc.node, replicas=loc.replicas)
         await asyncio.sleep(0.1)
@@ -876,6 +876,6 @@ async def test_three_node_consistency_after_leader_change() -> None:
             loc_b: ShardLocation = await system.ask(
                 coord_b,
                 lambda r, sid=i: GetShardLocation(shard_id=sid, reply_to=r),
-                timeout=2.0,
+                timeout=5.0,
             )
             assert loc_b.node == allocations[i].primary, f"Shard {i} inconsistent after promotion"

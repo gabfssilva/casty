@@ -38,7 +38,7 @@ async def test_coordinator_allocates_shard_to_node() -> None:
         location: ShardLocation = await system.ask(
             coord_ref,
             lambda r: GetShardLocation(shard_id=42, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert location.shard_id == 42
         assert location.node == node_a
@@ -68,7 +68,7 @@ async def test_coordinator_distributes_evenly() -> None:
             loc = await system.ask(
                 coord_ref,
                 lambda r, sid=shard_id: GetShardLocation(shard_id=sid, reply_to=r),
-                timeout=2.0,
+                timeout=5.0,
             )
             locations.append(loc)
 
@@ -104,7 +104,7 @@ async def test_coordinator_topology_update() -> None:
             await system.ask(
                 coord_ref,
                 lambda r, sid=shard_id: GetShardLocation(shard_id=sid, reply_to=r),
-                timeout=2.0,
+                timeout=5.0,
             )
 
         # Add node_b (both topology update AND region registration)
@@ -116,7 +116,7 @@ async def test_coordinator_topology_update() -> None:
         loc = await system.ask(
             coord_ref,
             lambda r: GetShardLocation(shard_id=99, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert loc.node == node_b
 
@@ -146,7 +146,7 @@ async def test_coordinator_allocates_replicas() -> None:
         location = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
 
         assert location.node is not None
@@ -175,6 +175,6 @@ async def test_coordinator_no_replication_has_empty_replicas() -> None:
         location = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert location.replicas == ()

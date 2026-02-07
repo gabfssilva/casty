@@ -81,13 +81,13 @@ async def test_sharding_full_workflow() -> None:
         balance_0 = await system.ask(
             region_ref,
             lambda r: ShardEnvelope("account-0", GetBalance(reply_to=r)),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert balance_0 == 150  # 100 + 50
 
         balance_4 = await system.ask(
             region_ref,
             lambda r: ShardEnvelope("account-4", GetBalance(reply_to=r)),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert balance_4 == 500

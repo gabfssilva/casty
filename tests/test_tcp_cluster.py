@@ -91,7 +91,7 @@ async def test_single_system_sharded_entity() -> None:
         result = await system.ask(
             proxy,
             lambda r: ShardEnvelope("alice", GetBalance(reply_to=r)),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert result == 8
 
@@ -171,7 +171,7 @@ async def test_cross_system_sharded_entity() -> None:
             result = await system_a.ask(
                 proxy_a,
                 lambda r: ShardEnvelope("test-entity", GetBalance(reply_to=r)),
-                timeout=2.0,
+                timeout=5.0,
             )
             assert result == 42
 

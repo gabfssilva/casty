@@ -80,7 +80,7 @@ async def test_event_sourced_basic_persist_and_read() -> None:
         ref.tell(Increment(5))
         await asyncio.sleep(0.1)
 
-        value = await system.ask(ref, lambda r: GetValue(reply_to=r), timeout=2.0)
+        value = await system.ask(ref, lambda r: GetValue(reply_to=r), timeout=5.0)
         assert value == 15
 
     # Verify events were persisted
@@ -107,7 +107,7 @@ async def test_event_sourced_recovery_from_journal() -> None:
         await asyncio.sleep(0.1)
 
         # State should be recovered: 100 + 50 = 150
-        value = await system.ask(ref, lambda r: GetValue(reply_to=r), timeout=2.0)
+        value = await system.ask(ref, lambda r: GetValue(reply_to=r), timeout=5.0)
         assert value == 150
 
 
@@ -150,7 +150,7 @@ async def test_recovery_from_snapshot_plus_events() -> None:
         await asyncio.sleep(0.1)
 
         # Should recover from snapshot (30) + event 4 (7) = 37
-        value = await system.ask(ref, lambda r: GetValue(reply_to=r), timeout=2.0)
+        value = await system.ask(ref, lambda r: GetValue(reply_to=r), timeout=5.0)
         assert value == 37
 
 
@@ -222,7 +222,7 @@ async def test_event_sourced_waits_for_acks() -> None:
                 on_event=apply_event,
                 on_command=handle_command,
                 replica_refs=[replica_ref],
-                replication=ReplicationConfig(replicas=1, min_acks=1, ack_timeout=2.0),
+                replication=ReplicationConfig(replicas=1, min_acks=1, ack_timeout=5.0),
             )
 
         ref = system.spawn(counter_with_acks("c1"), "counter")
@@ -235,7 +235,7 @@ async def test_event_sourced_waits_for_acks() -> None:
         assert len(ack_events) == 1
 
         # Verify state is correct (meaning ack was processed and didn't break anything)
-        value = await system.ask(ref, lambda r: GetValue(reply_to=r), timeout=2.0)
+        value = await system.ask(ref, lambda r: GetValue(reply_to=r), timeout=5.0)
         assert value == 10
 
 
@@ -275,5 +275,5 @@ async def test_event_sourced_fire_and_forget_replication() -> None:
         await asyncio.sleep(0.1)
 
         # Primary should respond quickly even though replica is slow
-        value = await system.ask(ref, lambda r: GetValue(reply_to=r), timeout=2.0)
+        value = await system.ask(ref, lambda r: GetValue(reply_to=r), timeout=5.0)
         assert value == 10

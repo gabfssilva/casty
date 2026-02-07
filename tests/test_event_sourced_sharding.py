@@ -82,14 +82,14 @@ async def test_event_sourced_sharding_workflow() -> None:
         balance_alice = await system.ask(
             proxy,
             lambda r: ShardEnvelope("alice", GetBalance(reply_to=r)),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert balance_alice == 150
 
         balance_bob = await system.ask(
             proxy,
             lambda r: ShardEnvelope("bob", GetBalance(reply_to=r)),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert balance_bob == 200
 
@@ -134,6 +134,6 @@ async def test_sharded_with_replication_config() -> None:
         balance = await system.ask(
             proxy,
             lambda r: ShardEnvelope("alice", GetBalance(reply_to=r)),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert balance == 100

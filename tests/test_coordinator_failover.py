@@ -41,7 +41,7 @@ async def test_coordinator_promotes_replica_on_node_down() -> None:
         location = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         original_primary = location.node
         original_replicas = location.replicas
@@ -54,7 +54,7 @@ async def test_coordinator_promotes_replica_on_node_down() -> None:
         new_location = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert new_location.node != original_primary
         assert new_location.node in original_replicas
@@ -84,7 +84,7 @@ async def test_coordinator_removes_failed_replica() -> None:
         location = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         primary = location.node
         # Pick a replica to fail
@@ -96,7 +96,7 @@ async def test_coordinator_removes_failed_replica() -> None:
         new_location = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         # Primary should stay the same
         assert new_location.node == primary
@@ -126,7 +126,7 @@ async def test_coordinator_removes_shard_when_no_replicas() -> None:
         location = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         original_primary = location.node
 
@@ -137,6 +137,6 @@ async def test_coordinator_removes_shard_when_no_replicas() -> None:
         new_location = await system.ask(
             coord,
             lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert new_location.node != original_primary

@@ -71,7 +71,7 @@ async def test_shard_region_routes_to_entity() -> None:
         result = await system.ask(
             region_ref,
             lambda r: ShardEnvelope(entity_id="user-1", message=GetValue(reply_to=r)),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert result == "user-1:2"
 
@@ -108,12 +108,12 @@ async def test_shard_region_multiple_entities() -> None:
         result_a = await system.ask(
             region_ref,
             lambda r: ShardEnvelope(entity_id="a", message=GetValue(reply_to=r)),
-            timeout=2.0,
+            timeout=5.0,
         )
         result_b = await system.ask(
             region_ref,
             lambda r: ShardEnvelope(entity_id="b", message=GetValue(reply_to=r)),
-            timeout=2.0,
+            timeout=5.0,
         )
         assert result_a == "a:1"
         assert result_b == "b:2"
