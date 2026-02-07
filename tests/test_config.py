@@ -491,3 +491,49 @@ class TestActorSystemWithConfig:
 
         async with ActorSystem() as system:
             assert system.name == "casty-system"
+
+
+# ---------------------------------------------------------------------------
+# ClusteredActorSystem + Config integration
+# ---------------------------------------------------------------------------
+
+
+class TestClusteredSystemFromConfig:
+    async def test_from_config(self, tmp_path: Path) -> None:
+        from casty.sharding import ClusteredActorSystem
+
+        toml_file = tmp_path / "casty.toml"
+        toml_file.write_text(
+            '[system]\nname = "cluster-test"\n\n'
+            "[cluster]\n"
+            'host = "127.0.0.1"\n'
+            "port = 0\n"
+            "seed_nodes = []\n"
+        )
+        config = load_config(toml_file)
+        system = ClusteredActorSystem.from_config(config)
+        assert system.name == "cluster-test"
+
+    async def test_from_config_no_cluster_raises(self, tmp_path: Path) -> None:
+        from casty.sharding import ClusteredActorSystem
+
+        toml_file = tmp_path / "casty.toml"
+        toml_file.write_text('[system]\nname = "no-cluster"\n')
+        config = load_config(toml_file)
+        with pytest.raises(ValueError, match="no \\[cluster\\] section"):
+            ClusteredActorSystem.from_config(config)
+
+    async def test_from_config_with_overrides(self, tmp_path: Path) -> None:
+        from casty.sharding import ClusteredActorSystem
+
+        toml_file = tmp_path / "casty.toml"
+        toml_file.write_text(
+            '[system]\nname = "override-test"\n\n'
+            "[cluster]\n"
+            'host = "10.0.0.1"\n'
+            "port = 25520\n"
+        )
+        config = load_config(toml_file)
+        system = ClusteredActorSystem.from_config(config, host="127.0.0.1", port=0)
+        assert system._host == "127.0.0.1"
+        assert system._port == 0

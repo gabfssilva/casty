@@ -243,6 +243,10 @@ def cluster_actor(
     scheduler_ref: ActorRef[SchedulerMsg],
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
+    gossip_interval: float = 1.0,
+    heartbeat_interval: float = 0.5,
+    availability_interval: float = 2.0,
+    failure_detector_threshold: float = 8.0,
 ) -> Behavior[ClusterCmd]:
     async def setup(ctx: ActorContext[ClusterCmd]) -> Behavior[ClusterCmd]:
         self_node = NodeAddress(host=config.host, port=config.port)
@@ -265,7 +269,7 @@ def cluster_actor(
             ),
             "_gossip",
         )
-        detector = PhiAccrualFailureDetector()
+        detector = PhiAccrualFailureDetector(threshold=failure_detector_threshold)
         heartbeat_ref: ActorRef[HeartbeatMsg] = ctx.spawn(
             heartbeat_actor(
                 self_node=self_node,
@@ -297,19 +301,19 @@ def cluster_actor(
 
         # Schedule periodic ticks via scheduler
         scheduler_ref.tell(ScheduleTick(
-            key="gossip", target=gossip_ref, message=GossipTick(), interval=1.0,
+            key="gossip", target=gossip_ref, message=GossipTick(), interval=gossip_interval,
         ))
         scheduler_ref.tell(ScheduleTick(
             key="heartbeat",
             target=gossip_ref,
             message=GetClusterState(reply_to=ctx.self),  # type: ignore[arg-type]
-            interval=0.5,
+            interval=heartbeat_interval,
         ))
         scheduler_ref.tell(ScheduleTick(
             key="availability",
             target=heartbeat_ref,
             message=CheckAvailability(reply_to=ctx.self),  # type: ignore[arg-type]
-            interval=2.0,
+            interval=availability_interval,
         ))
 
         # Schedule join retry for multi-node clusters
@@ -358,11 +362,19 @@ class Cluster:
         *,
         remote_transport: RemoteTransport | None = None,
         system_name: str = "",
+        gossip_interval: float = 1.0,
+        heartbeat_interval: float = 0.5,
+        availability_interval: float = 2.0,
+        failure_detector_threshold: float = 8.0,
     ) -> None:
         self._system = system
         self._config = config
         self._remote_transport = remote_transport
         self._system_name = system_name
+        self._gossip_interval = gossip_interval
+        self._heartbeat_interval = heartbeat_interval
+        self._availability_interval = availability_interval
+        self._failure_detector_threshold = failure_detector_threshold
         self._ref: ActorRef[ClusterCmd] | None = None
 
     @property
@@ -379,6 +391,10 @@ class Cluster:
                 scheduler_ref=self._system.scheduler,
                 remote_transport=self._remote_transport,
                 system_name=self._system_name,
+                gossip_interval=self._gossip_interval,
+                heartbeat_interval=self._heartbeat_interval,
+                availability_interval=self._availability_interval,
+                failure_detector_threshold=self._failure_detector_threshold,
             ),
             "_cluster",
         )

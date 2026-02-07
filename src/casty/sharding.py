@@ -22,6 +22,7 @@ from casty.transport import MessageTransport
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from casty.config import CastyConfig
     from casty.distributed import Distributed
     from casty.journal import EventJournal
 
@@ -154,8 +155,9 @@ class ClusteredActorSystem(ActorSystem):
         port: int,
         seed_nodes: list[tuple[str, int]] | None = None,
         bind_host: str | None = None,
+        config: CastyConfig | None = None,
     ) -> None:
-        super().__init__(name=name)
+        super().__init__(name=name, config=config)
         self._host = host
         self._port: int = port
         self._bind_host = bind_host or host
@@ -185,6 +187,30 @@ class ClusteredActorSystem(ActorSystem):
     def type_registry(self) -> TypeRegistry:
         return self._type_registry
 
+    @classmethod
+    def from_config(
+        cls,
+        config: CastyConfig,
+        *,
+        host: str | None = None,
+        port: int | None = None,
+        seed_nodes: list[tuple[str, int]] | None = None,
+        bind_host: str | None = None,
+    ) -> ClusteredActorSystem:
+        cluster = config.cluster
+        if cluster is None:
+            msg = "CastyConfig has no [cluster] section"
+            raise ValueError(msg)
+
+        return cls(
+            name=config.system_name,
+            host=host or cluster.host,
+            port=port if port is not None else cluster.port,
+            seed_nodes=seed_nodes if seed_nodes is not None else cluster.seed_nodes,
+            bind_host=bind_host,
+            config=config,
+        )
+
     async def __aenter__(self) -> ClusteredActorSystem:
         await self._remote_transport.start()
         # Update actual port (handles port=0 for tests)
@@ -202,11 +228,19 @@ class ClusteredActorSystem(ActorSystem):
                 port=self._port,
                 seed_nodes=self._seed_nodes,
             )
+            gossip_interval = self._config.gossip.interval if self._config else 1.0
+            heartbeat_interval = self._config.heartbeat.interval if self._config else 0.5
+            availability_interval = self._config.heartbeat.availability_check_interval if self._config else 2.0
+            failure_detector_threshold = self._config.failure_detector.threshold if self._config else 8.0
             self._cluster = Cluster(
                 self,
                 cluster_config,
                 remote_transport=self._remote_transport,
                 system_name=self._name,
+                gossip_interval=gossip_interval,
+                heartbeat_interval=heartbeat_interval,
+                availability_interval=availability_interval,
+                failure_detector_threshold=failure_detector_threshold,
             )
             await self._cluster.start()
         except BaseException:
