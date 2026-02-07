@@ -464,3 +464,30 @@ class TestDiscoverConfig:
         cfg = load_config()
         assert cfg.system_name == "casty"
         assert cfg.cluster is None
+
+
+# ---------------------------------------------------------------------------
+# ActorSystem + Config integration
+# ---------------------------------------------------------------------------
+
+
+class TestActorSystemWithConfig:
+    async def test_system_accepts_config(self, tmp_path: Path) -> None:
+        from casty import ActorSystem
+
+        toml_file = tmp_path / "casty.toml"
+        toml_file.write_text(
+            '[system]\nname = "configured"\n\n'
+            "[actors.my-actor]\n"
+            'mailbox = { capacity = 10, strategy = "backpressure" }\n'
+        )
+        config = load_config(toml_file)
+
+        async with ActorSystem(name=config.system_name, config=config) as system:
+            assert system.name == "configured"
+
+    async def test_config_none_is_default(self) -> None:
+        from casty import ActorSystem
+
+        async with ActorSystem() as system:
+            assert system.name == "casty-system"

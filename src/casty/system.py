@@ -4,7 +4,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from casty.config import CastyConfig
 
 from casty.actor import Behavior
 from casty.cell import ActorCell
@@ -33,8 +36,9 @@ class CallbackTransport:
 
 
 class ActorSystem:
-    def __init__(self, name: str = "casty-system") -> None:
+    def __init__(self, name: str = "casty-system", *, config: CastyConfig | None = None) -> None:
         self._name = name
+        self._config = config
         self._event_stream = EventStream()
         self._root_cells: dict[str, ActorCell[Any]] = {}
         self._local_transport = LocalTransport()
@@ -79,6 +83,15 @@ class ActorSystem:
     ) -> ActorRef[M]:
         if name in self._root_cells:
             raise ValueError(f"Root actor '{name}' already exists")
+
+        if mailbox is None and self._config is not None and not name.startswith("_"):
+            from casty.mailbox import MailboxOverflowStrategy
+
+            resolved = self._config.resolve_actor(name)
+            mailbox = Mailbox(
+                capacity=resolved.mailbox.capacity,
+                overflow=MailboxOverflowStrategy[resolved.mailbox.strategy],
+            )
 
         cell: ActorCell[M] = ActorCell(
             behavior=behavior,
