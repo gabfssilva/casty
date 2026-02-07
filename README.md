@@ -450,6 +450,102 @@ system.cancel_schedule("report")
 
 Scheduled tasks are identified by a string key. Scheduling a new task with the same key cancels the previous one.
 
+## State Machines
+
+Because behaviors are values and state transitions are function calls, finite state machines emerge as a natural pattern. Each state is a behavior function, each transition is a return value. No enum, no conditional dispatch on a status field — the behavior **is** the state.
+
+```python
+import asyncio
+from dataclasses import dataclass
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
+
+@dataclass(frozen=True)
+class Item:
+    name: str
+    price: float
+
+@dataclass(frozen=True)
+class Receipt:
+    items: tuple[Item, ...]
+    total: float
+
+@dataclass(frozen=True)
+class AddItem:
+    item: Item
+
+@dataclass(frozen=True)
+class Checkout:
+    reply_to: ActorRef[Receipt]
+
+@dataclass(frozen=True)
+class GetTotal:
+    reply_to: ActorRef[float]
+
+type CartMsg = AddItem | Checkout | GetTotal
+
+def empty_cart() -> Behavior[CartMsg]:
+    async def receive(ctx: ActorContext[CartMsg], msg: CartMsg) -> Behavior[CartMsg]:
+        match msg:
+            case AddItem(item):
+                return active_cart({item.name: item})
+            case Checkout():
+                return Behaviors.same()  # cannot checkout empty cart
+            case GetTotal(reply_to):
+                reply_to.tell(0.0)
+                return Behaviors.same()
+
+    return Behaviors.receive(receive)
+
+def active_cart(items: dict[str, Item]) -> Behavior[CartMsg]:
+    async def receive(ctx: ActorContext[CartMsg], msg: CartMsg) -> Behavior[CartMsg]:
+        match msg:
+            case AddItem(item):
+                return active_cart({**items, item.name: item})
+            case Checkout(reply_to):
+                all_items = tuple(items.values())
+                total = sum(i.price for i in all_items)
+                reply_to.tell(Receipt(items=all_items, total=total))
+                return checked_out()
+            case GetTotal(reply_to):
+                reply_to.tell(sum(i.price for i in items.values()))
+                return Behaviors.same()
+
+    return Behaviors.receive(receive)
+
+def checked_out() -> Behavior[CartMsg]:
+    async def receive(ctx: ActorContext[CartMsg], msg: CartMsg) -> Behavior[CartMsg]:
+        match msg:
+            case GetTotal(reply_to):
+                reply_to.tell(0.0)
+                return Behaviors.same()
+            case _:
+                return Behaviors.same()  # terminal state, ignore modifications
+
+    return Behaviors.receive(receive)
+
+async def main() -> None:
+    async with ActorSystem() as system:
+        cart = system.spawn(empty_cart(), "cart")
+
+        cart.tell(AddItem(Item("keyboard", 75.0)))
+        cart.tell(AddItem(Item("mouse", 25.0)))
+        await asyncio.sleep(0.1)
+
+        total = await system.ask(cart, lambda r: GetTotal(reply_to=r), timeout=5.0)
+        print(f"Total: ${total:.2f}")  # Total: $100.00
+
+        receipt = await system.ask(cart, lambda r: Checkout(reply_to=r), timeout=5.0)
+        print(f"Receipt: {len(receipt.items)} items, ${receipt.total:.2f}")
+        # Receipt: 2 items, $100.00
+
+        # Further modifications are ignored — checked_out is a terminal state
+        cart.tell(AddItem(Item("monitor", 300.0)))
+
+asyncio.run(main())
+```
+
+Three functions, three states: `empty_cart`, `active_cart`, `checked_out`. The transitions are explicit in the return values — `empty_cart` transitions to `active_cart` on the first `AddItem`, `active_cart` transitions to `checked_out` on `Checkout`. A `checked_out` actor ignores further modifications. The type checker ensures every state handles the full `CartMsg` union.
+
 ## Event Sourcing
 
 Traditional persistence stores the **current state** — a row in a database with `balance = 500`. Event sourcing stores the **sequence of facts that produced the state** — `Deposited(100)`, `Deposited(500)`, `Withdrawn(100)`. The current state is a derived value, computed by folding events from left to right.
@@ -776,101 +872,108 @@ await counter.increment(10)
 
 These structures are intentionally simple. For domain-specific entities — bank accounts, user sessions, IoT sensor aggregators — define custom behaviors using `Behaviors.sharded()` and `Behaviors.event_sourced()`. The distributed data structures exist for the common cases that don't warrant a custom actor.
 
-## State Machines
+## Casty as a Cluster Backend
 
-Because behaviors are values and state transitions are function calls, finite state machines emerge as a natural pattern. Each state is a behavior function, each transition is a return value. No enum, no conditional dispatch on a status field — the behavior **is** the state.
+Most Python libraries that need distributed coordination depend on external services. Celery requires Redis or RabbitMQ. Distributed lock managers need etcd or ZooKeeper. Service meshes depend on Consul. Each external dependency adds operational complexity — deployment, monitoring, version compatibility, network configuration.
+
+Casty provides the same cluster capabilities as an embeddable Python library with zero external dependencies. No broker to deploy, no configuration server to manage, no serialization protocol to learn. A library author can add `casty` to their dependencies and get cluster membership, leader election, failure detection, work distribution, and state replication out of the box. An application developer can add clustering to an existing system without introducing new infrastructure.
+
+The following sections illustrate these capabilities through the lens of building a distributed task queue — a scenario where Celery would typically require Redis and a separate worker process.
+
+### Cluster Formation
+
+`ClusteredActorSystem` establishes a cluster through seed nodes. Once started, nodes discover each other automatically via the gossip protocol. The event stream publishes membership events as nodes join and leave:
 
 ```python
-import asyncio
-from dataclasses import dataclass
-from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
+from casty import MemberUp, MemberLeft
+from casty.sharding import ClusteredActorSystem
 
-@dataclass(frozen=True)
-class Item:
-    name: str
-    price: float
-
-@dataclass(frozen=True)
-class Receipt:
-    items: tuple[Item, ...]
-    total: float
-
-@dataclass(frozen=True)
-class AddItem:
-    item: Item
-
-@dataclass(frozen=True)
-class Checkout:
-    reply_to: ActorRef[Receipt]
-
-@dataclass(frozen=True)
-class GetTotal:
-    reply_to: ActorRef[float]
-
-type CartMsg = AddItem | Checkout | GetTotal
-
-def empty_cart() -> Behavior[CartMsg]:
-    async def receive(ctx: ActorContext[CartMsg], msg: CartMsg) -> Behavior[CartMsg]:
-        match msg:
-            case AddItem(item):
-                return active_cart({item.name: item})
-            case Checkout():
-                return Behaviors.same()  # cannot checkout empty cart
-            case GetTotal(reply_to):
-                reply_to.tell(0.0)
-                return Behaviors.same()
-
-    return Behaviors.receive(receive)
-
-def active_cart(items: dict[str, Item]) -> Behavior[CartMsg]:
-    async def receive(ctx: ActorContext[CartMsg], msg: CartMsg) -> Behavior[CartMsg]:
-        match msg:
-            case AddItem(item):
-                return active_cart({**items, item.name: item})
-            case Checkout(reply_to):
-                all_items = tuple(items.values())
-                total = sum(i.price for i in all_items)
-                reply_to.tell(Receipt(items=all_items, total=total))
-                return checked_out()
-            case GetTotal(reply_to):
-                reply_to.tell(sum(i.price for i in items.values()))
-                return Behaviors.same()
-
-    return Behaviors.receive(receive)
-
-def checked_out() -> Behavior[CartMsg]:
-    async def receive(ctx: ActorContext[CartMsg], msg: CartMsg) -> Behavior[CartMsg]:
-        match msg:
-            case GetTotal(reply_to):
-                reply_to.tell(0.0)
-                return Behaviors.same()
-            case _:
-                return Behaviors.same()  # terminal state, ignore modifications
-
-    return Behaviors.receive(receive)
-
-async def main() -> None:
-    async with ActorSystem() as system:
-        cart = system.spawn(empty_cart(), "cart")
-
-        cart.tell(AddItem(Item("keyboard", 75.0)))
-        cart.tell(AddItem(Item("mouse", 25.0)))
-        await asyncio.sleep(0.1)
-
-        total = await system.ask(cart, lambda r: GetTotal(reply_to=r), timeout=5.0)
-        print(f"Total: ${total:.2f}")  # Total: $100.00
-
-        receipt = await system.ask(cart, lambda r: Checkout(reply_to=r), timeout=5.0)
-        print(f"Receipt: {len(receipt.items)} items, ${receipt.total:.2f}")
-        # Receipt: 2 items, $100.00
-
-        # Further modifications are ignored — checked_out is a terminal state
-        cart.tell(AddItem(Item("monitor", 300.0)))
-
-asyncio.run(main())
+async with ClusteredActorSystem(
+    name="task-queue",
+    host="10.0.0.1",
+    port=25520,
+    seed_nodes=[("10.0.0.2", 25520), ("10.0.0.3", 25520)],
+) as system:
+    system.event_stream.subscribe(
+        MemberUp, lambda e: log.info(f"Worker joined: {e.member.address}")
+    )
+    system.event_stream.subscribe(
+        MemberLeft, lambda e: log.info(f"Worker left: {e.member.address}")
+    )
 ```
 
-Three functions, three states: `empty_cart`, `active_cart`, `checked_out`. The transitions are explicit in the return values — `empty_cart` transitions to `active_cart` on the first `AddItem`, `active_cart` transitions to `checked_out` on `Checkout`. A `checked_out` actor ignores further modifications. The type checker ensures every state handles the full `CartMsg` union.
+Every node in the cluster runs the same code. There is no distinction between "broker" and "worker" — every node is both. The cluster forms automatically as nodes start and discover each other through the seed list.
+
+### Work Distribution
+
+`Behaviors.sharded()` partitions work across nodes by entity ID. For a task queue, each task type or queue name can be an entity, and the cluster handles routing transparently:
+
+```python
+from casty import Behaviors, ShardEnvelope
+
+def task_worker(entity_id: str) -> Behavior[TaskMsg]:
+    def idle() -> Behavior[TaskMsg]:
+        async def receive(ctx, msg):
+            match msg:
+                case SubmitTask(payload, reply_to):
+                    result = await execute(payload)
+                    reply_to.tell(TaskResult(result))
+                    return idle()
+        return Behaviors.receive(receive)
+    return idle()
+
+tasks = system.spawn(Behaviors.sharded(task_worker, num_shards=256), "tasks")
+
+# Submit from any node — routing is transparent
+tasks.tell(ShardEnvelope("queue:emails", SubmitTask(send_welcome, reply_to)))
+tasks.tell(ShardEnvelope("queue:reports", SubmitTask(generate_pdf, reply_to)))
+```
+
+The entity ID determines which node processes the task. Tasks with the same queue name always land on the same node, providing natural ordering guarantees. Tasks with different queue names are distributed across the cluster.
+
+### Failure Handling
+
+When a node becomes unreachable, the phi accrual failure detector identifies it and the coordinator reallocates its shards to surviving nodes. No manual intervention, no external health check service:
+
+```python
+from casty import UnreachableMember
+
+system.event_stream.subscribe(
+    UnreachableMember,
+    lambda e: log.warning(f"Node unreachable: {e.member.address}, shards will be reallocated"),
+)
+```
+
+If the task worker uses event sourcing, reallocated entities replay their journal on the new node and resume exactly where they left off. Tasks in progress at the time of failure are recovered automatically — the new primary replays persisted events and the worker continues from its last known state.
+
+### State Without External Storage
+
+Event sourcing combined with replication provides durable distributed state without a database. The primary persists events to its journal and pushes them to replicas on other nodes. If the primary fails, a replica is promoted with its full event history intact:
+
+```python
+from casty import Behaviors
+from casty.journal import InMemoryJournal
+from casty.replication import ReplicationConfig
+
+journal = InMemoryJournal()  # replace with a database-backed journal in production
+
+tasks = system.spawn(
+    Behaviors.sharded(
+        lambda eid: Behaviors.event_sourced(
+            entity_id=eid,
+            journal=journal,
+            initial_state=QueueState(pending=(), completed=()),
+            on_event=apply_event,
+            on_command=handle_command,
+        ),
+        num_shards=256,
+        replication=ReplicationConfig(replicas=1, min_acks=1),
+    ),
+    "tasks",
+)
+```
+
+No Redis. No RabbitMQ. No ZooKeeper. The cluster stack is the library — membership, leader election, failure detection, sharding, replication, and distributed data structures, all in pure Python, all in a single `pip install`.
 
 ## Contributing
 
