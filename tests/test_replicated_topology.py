@@ -19,6 +19,7 @@ from casty.shard_coordinator_actor import (
     LeastShardStrategy,
     NodeDown,
     PublishAllocations,
+    RegisterRegion,
     SetRole,
     ShardLocation,
     SyncAllocations,
@@ -256,28 +257,6 @@ def test_serialization_shard_allocations_round_trip() -> None:
 # ===========================================================================
 
 
-async def test_legacy_mode_no_shard_type_is_leader() -> None:
-    """Without shard_type, coordinator acts as leader directly (backward compat)."""
-    node = NodeAddress(host="127.0.0.1", port=25520)
-    async with ActorSystem(name="test") as system:
-        coord = system.spawn(
-            shard_coordinator_actor(
-                strategy=LeastShardStrategy(),
-                available_nodes=frozenset({node}),
-            ),
-            "coord",
-        )
-        await asyncio.sleep(0.1)
-
-        loc: ShardLocation = await system.ask(
-            coord,
-            lambda r: GetShardLocation(shard_id=0, reply_to=r),
-            timeout=2.0,
-        )
-        assert loc.shard_id == 0
-        assert loc.node == node
-
-
 async def test_pending_buffers_until_set_role_leader() -> None:
     """With shard_type, coordinator buffers until SetRole(is_leader=True)."""
     node = NodeAddress(host="127.0.0.1", port=25520)
@@ -290,6 +269,7 @@ async def test_pending_buffers_until_set_role_leader() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node))
         await asyncio.sleep(0.1)
 
         # Send a GetShardLocation — should be buffered
@@ -331,6 +311,8 @@ async def test_follower_serves_cached_allocations() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node_a))
+        coord.tell(RegisterRegion(node=node_b))
         await asyncio.sleep(0.1)
 
         # Set role to follower
@@ -366,6 +348,7 @@ async def test_follower_buffers_unknown_shards_drains_on_sync() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node))
         await asyncio.sleep(0.1)
 
         # Set role to follower (no allocations yet)
@@ -418,6 +401,7 @@ async def test_leader_publishes_allocations() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node))
         await asyncio.sleep(0.1)
 
         # Activate as leader
@@ -453,6 +437,7 @@ async def test_leader_to_follower_demotion() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node))
         await asyncio.sleep(0.1)
 
         # Start as leader
@@ -498,6 +483,8 @@ async def test_pending_waits_for_both_set_role_and_sync() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node_a))
+        coord.tell(RegisterRegion(node=node_b))
         await asyncio.sleep(0.1)
 
         # Send SetRole first — should NOT activate yet
@@ -677,6 +664,8 @@ async def test_follower_promoted_to_leader_responds_immediately() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node_a))
+        coord.tell(RegisterRegion(node=node_b))
         await asyncio.sleep(0.1)
 
         # Activate as follower with shard 0 allocated
@@ -732,6 +721,8 @@ async def test_follower_promotion_publishes_new_allocations() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node_a))
+        coord.tell(RegisterRegion(node=node_b))
         await asyncio.sleep(0.1)
 
         # Start as follower
@@ -786,6 +777,9 @@ async def test_promoted_leader_handles_node_down() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node_a))
+        coord.tell(RegisterRegion(node=node_b))
+        coord.tell(RegisterRegion(node=node_c))
         await asyncio.sleep(0.1)
 
         # Start as follower with existing allocation
@@ -841,6 +835,10 @@ async def test_three_node_consistency_after_leader_change() -> None:
             ),
             "coord_c",
         )
+        for coord in [coord_a, coord_b, coord_c]:
+            coord.tell(RegisterRegion(node=node_a))
+            coord.tell(RegisterRegion(node=node_b))
+            coord.tell(RegisterRegion(node=node_c))
         await asyncio.sleep(0.1)
 
         # A is leader, B and C are followers

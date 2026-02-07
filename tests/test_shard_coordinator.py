@@ -6,11 +6,14 @@ import asyncio
 from casty import ActorSystem
 from casty.cluster_state import NodeAddress
 from casty.shard_coordinator_actor import (
-    shard_coordinator_actor,
     GetShardLocation,
-    ShardLocation,
-    UpdateTopology,
     LeastShardStrategy,
+    RegisterRegion,
+    SetRole,
+    ShardLocation,
+    SyncAllocations,
+    UpdateTopology,
+    shard_coordinator_actor,
 )
 from casty.replication import ReplicationConfig
 
@@ -27,6 +30,9 @@ async def test_coordinator_allocates_shard_to_node() -> None:
             ),
             "coordinator",
         )
+        coord_ref.tell(RegisterRegion(node=node_a))
+        coord_ref.tell(SetRole(is_leader=True, leader_node=node_a))
+        coord_ref.tell(SyncAllocations(allocations={}, epoch=0))
         await asyncio.sleep(0.1)
 
         location: ShardLocation = await system.ask(
@@ -51,6 +57,10 @@ async def test_coordinator_distributes_evenly() -> None:
             ),
             "coordinator",
         )
+        coord_ref.tell(RegisterRegion(node=node_a))
+        coord_ref.tell(RegisterRegion(node=node_b))
+        coord_ref.tell(SetRole(is_leader=True, leader_node=node_a))
+        coord_ref.tell(SyncAllocations(allocations={}, epoch=0))
         await asyncio.sleep(0.1)
 
         locations: list[ShardLocation] = []
@@ -72,7 +82,7 @@ async def test_coordinator_distributes_evenly() -> None:
 
 
 async def test_coordinator_topology_update() -> None:
-    """Adding a node via UpdateTopology makes it available for allocation."""
+    """Adding a node via UpdateTopology + RegisterRegion makes it available for allocation."""
     node_a = NodeAddress(host="127.0.0.1", port=25520)
     node_b = NodeAddress(host="127.0.0.2", port=25520)
 
@@ -84,6 +94,9 @@ async def test_coordinator_topology_update() -> None:
             ),
             "coordinator",
         )
+        coord_ref.tell(RegisterRegion(node=node_a))
+        coord_ref.tell(SetRole(is_leader=True, leader_node=node_a))
+        coord_ref.tell(SyncAllocations(allocations={}, epoch=0))
         await asyncio.sleep(0.1)
 
         # Allocate some shards to node_a
@@ -94,8 +107,9 @@ async def test_coordinator_topology_update() -> None:
                 timeout=2.0,
             )
 
-        # Add node_b
+        # Add node_b (both topology update AND region registration)
         coord_ref.tell(UpdateTopology(available_nodes=frozenset({node_a, node_b})))
+        coord_ref.tell(RegisterRegion(node=node_b))
         await asyncio.sleep(0.1)
 
         # New shard should go to node_b (fewer shards)
@@ -122,6 +136,11 @@ async def test_coordinator_allocates_replicas() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node_a))
+        coord.tell(RegisterRegion(node=node_b))
+        coord.tell(RegisterRegion(node=node_c))
+        coord.tell(SetRole(is_leader=True, leader_node=node_a))
+        coord.tell(SyncAllocations(allocations={}, epoch=0))
         await asyncio.sleep(0.1)
 
         location = await system.ask(
@@ -148,6 +167,9 @@ async def test_coordinator_no_replication_has_empty_replicas() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node_a))
+        coord.tell(SetRole(is_leader=True, leader_node=node_a))
+        coord.tell(SyncAllocations(allocations={}, epoch=0))
         await asyncio.sleep(0.1)
 
         location = await system.ask(

@@ -30,6 +30,7 @@ from casty.shard_coordinator_actor import (
     GetShardLocation,
     LeastShardStrategy,
     PublishAllocations,
+    RegisterRegion,
     ShardLocation,
     shard_coordinator_actor,
 )
@@ -268,6 +269,7 @@ class ClusteredActorSystem(ActorSystem):
         coordinator = self._get_or_create_coordinator(
             name, sharded, available_nodes
         )
+        coordinator.tell(RegisterRegion(node=self._self_node))
 
         # Local shard region
         region_ref = super().spawn(

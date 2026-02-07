@@ -5,10 +5,13 @@ import asyncio
 
 from casty import ActorSystem
 from casty.shard_coordinator_actor import (
-    shard_coordinator_actor,
     GetShardLocation,
     LeastShardStrategy,
     NodeDown,
+    RegisterRegion,
+    SetRole,
+    SyncAllocations,
+    shard_coordinator_actor,
 )
 from casty.cluster_state import NodeAddress
 from casty.replication import ReplicationConfig
@@ -28,6 +31,11 @@ async def test_coordinator_promotes_replica_on_node_down() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node_a))
+        coord.tell(RegisterRegion(node=node_b))
+        coord.tell(RegisterRegion(node=node_c))
+        coord.tell(SetRole(is_leader=True, leader_node=node_a))
+        coord.tell(SyncAllocations(allocations={}, epoch=0))
         await asyncio.sleep(0.1)
 
         location = await system.ask(
@@ -66,6 +74,11 @@ async def test_coordinator_removes_failed_replica() -> None:
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node_a))
+        coord.tell(RegisterRegion(node=node_b))
+        coord.tell(RegisterRegion(node=node_c))
+        coord.tell(SetRole(is_leader=True, leader_node=node_a))
+        coord.tell(SyncAllocations(allocations={}, epoch=0))
         await asyncio.sleep(0.1)
 
         location = await system.ask(
@@ -101,10 +114,13 @@ async def test_coordinator_removes_shard_when_no_replicas() -> None:
             shard_coordinator_actor(
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({node_a, node_b}),
-                # No replication
             ),
             "coord",
         )
+        coord.tell(RegisterRegion(node=node_a))
+        coord.tell(RegisterRegion(node=node_b))
+        coord.tell(SetRole(is_leader=True, leader_node=node_a))
+        coord.tell(SyncAllocations(allocations={}, epoch=0))
         await asyncio.sleep(0.1)
 
         location = await system.ask(

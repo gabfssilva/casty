@@ -58,6 +58,11 @@ class PublishAllocations:
     epoch: int
 
 
+@dataclass(frozen=True)
+class RegisterRegion:
+    node: NodeAddress
+
+
 type CoordinatorMsg = (
     GetShardLocation
     | UpdateTopology
@@ -65,6 +70,7 @@ type CoordinatorMsg = (
     | SetRole
     | SyncAllocations
     | PublishAllocations
+    | RegisterRegion
 )
 
 
@@ -162,28 +168,13 @@ def shard_coordinator_actor(
     log = logger or logging.getLogger(f"casty.coordinator.{system_name}")
     num_replicas = replication.replicas if replication is not None else 0
 
-    # Legacy mode: no shard_type → direct leader behavior (backward-compatible)
-    if not shard_type:
-        return leader_behavior(
-            allocations={},
-            nodes=available_nodes,
-            strategy=strategy,
-            num_replicas=num_replicas,
-            publish_ref=None,
-            shard_type="",
-            epoch=0,
-            remote_transport=remote_transport,
-            system_name=system_name,
-            logger=log,
-        )
-
-    # New mode: start in pending, wait for SetRole AND SyncAllocations
     return pending_behavior(
         strategy=strategy,
         num_replicas=num_replicas,
         shard_type=shard_type,
         publish_ref=publish_ref,
         nodes=available_nodes,
+        region_nodes=frozenset(),
         remote_transport=remote_transport,
         system_name=system_name,
         logger=log,
@@ -197,6 +188,7 @@ def pending_behavior(
     shard_type: str,
     publish_ref: ActorRef[PublishAllocations] | None,
     nodes: frozenset[NodeAddress],
+    region_nodes: frozenset[NodeAddress],
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
     buffer: tuple[GetShardLocation, ...] = (),
@@ -211,11 +203,15 @@ def pending_behavior(
         role: SetRole,
         sync: SyncAllocations,
     ) -> Behavior[CoordinatorMsg]:
-        if role.is_leader:
+        should_lead = role.is_leader or (
+            role.leader_node is not None and role.leader_node not in region_nodes
+        )
+        if should_lead:
             log.info("Coordinator [%s] activated as leader (buffered=%d)", shard_type, len(buffer))
             return leader_behavior(
                 allocations=sync.allocations,
                 nodes=nodes,
+                region_nodes=region_nodes,
                 strategy=strategy,
                 num_replicas=num_replicas,
                 publish_ref=publish_ref,
@@ -229,6 +225,7 @@ def pending_behavior(
         return follower_behavior(
             allocations=sync.allocations,
             nodes=nodes,
+            region_nodes=region_nodes,
             epoch=sync.epoch,
             strategy=strategy,
             num_replicas=num_replicas,
@@ -242,6 +239,22 @@ def pending_behavior(
 
     async def receive(ctx: Any, msg: CoordinatorMsg) -> Any:
         match msg:
+            case RegisterRegion(node):
+                return pending_behavior(
+                    strategy=strategy,
+                    num_replicas=num_replicas,
+                    shard_type=shard_type,
+                    publish_ref=publish_ref,
+                    nodes=nodes,
+                    region_nodes=region_nodes | {node},
+                    remote_transport=remote_transport,
+                    system_name=system_name,
+                    buffer=buffer,
+                    pending_role=pending_role,
+                    pending_sync=pending_sync,
+                    logger=log,
+                )
+
             case SetRole() as role:
                 if pending_sync is not None:
                     behavior = try_activate(role, pending_sync)
@@ -254,6 +267,7 @@ def pending_behavior(
                     shard_type=shard_type,
                     publish_ref=publish_ref,
                     nodes=nodes,
+                    region_nodes=region_nodes,
                     remote_transport=remote_transport,
                     system_name=system_name,
                     buffer=buffer,
@@ -274,6 +288,7 @@ def pending_behavior(
                     shard_type=shard_type,
                     publish_ref=publish_ref,
                     nodes=nodes,
+                    region_nodes=region_nodes,
                     remote_transport=remote_transport,
                     system_name=system_name,
                     buffer=buffer,
@@ -289,6 +304,7 @@ def pending_behavior(
                     shard_type=shard_type,
                     publish_ref=publish_ref,
                     nodes=nodes,
+                    region_nodes=region_nodes,
                     remote_transport=remote_transport,
                     system_name=system_name,
                     buffer=(*buffer, msg),
@@ -304,6 +320,7 @@ def pending_behavior(
                     shard_type=shard_type,
                     publish_ref=publish_ref,
                     nodes=new_nodes,
+                    region_nodes=region_nodes,
                     remote_transport=remote_transport,
                     system_name=system_name,
                     buffer=buffer,
@@ -322,6 +339,7 @@ def leader_behavior(
     *,
     allocations: dict[int, ShardAllocation],
     nodes: frozenset[NodeAddress],
+    region_nodes: frozenset[NodeAddress],
     strategy: ShardAllocationStrategy,
     num_replicas: int,
     publish_ref: ActorRef[PublishAllocations] | None,
@@ -335,15 +353,32 @@ def leader_behavior(
     log = logger or logging.getLogger(f"casty.coordinator.{system_name}")
 
     def publish(allocs: dict[int, ShardAllocation], new_epoch: int) -> None:
-        if publish_ref is not None and shard_type:
+        if publish_ref is not None:
             publish_ref.tell(PublishAllocations(
                 shard_type=shard_type,
                 allocations=allocs,
                 epoch=new_epoch,
             ))
 
+    effective_nodes = nodes & region_nodes
+
     async def receive(ctx: Any, msg: CoordinatorMsg) -> Any:
         match msg:
+            case RegisterRegion(node):
+                return leader_behavior(
+                    allocations=allocations,
+                    nodes=nodes,
+                    region_nodes=region_nodes | {node},
+                    strategy=strategy,
+                    num_replicas=num_replicas,
+                    publish_ref=publish_ref,
+                    shard_type=shard_type,
+                    epoch=epoch,
+                    remote_transport=remote_transport,
+                    system_name=system_name,
+                    logger=log,
+                )
+
             case GetShardLocation(shard_id, reply_to):
                 if shard_id in allocations:
                     alloc = allocations[shard_id]
@@ -355,7 +390,7 @@ def leader_behavior(
                     return Behaviors.same()
 
                 new_alloc = allocate_shard(
-                    shard_id, strategy, allocations, nodes, num_replicas
+                    shard_id, strategy, allocations, effective_nodes, num_replicas
                 )
                 new_allocations = {**allocations, shard_id: new_alloc}
                 reply_to.tell(ShardLocation(
@@ -369,6 +404,7 @@ def leader_behavior(
                 return leader_behavior(
                     allocations=new_allocations,
                     nodes=nodes,
+                    region_nodes=region_nodes,
                     strategy=strategy,
                     num_replicas=num_replicas,
                     publish_ref=publish_ref,
@@ -383,6 +419,7 @@ def leader_behavior(
                 return leader_behavior(
                     allocations=allocations,
                     nodes=new_nodes,
+                    region_nodes=region_nodes,
                     strategy=strategy,
                     num_replicas=num_replicas,
                     publish_ref=publish_ref,
@@ -403,6 +440,7 @@ def leader_behavior(
                 return leader_behavior(
                     allocations=new_allocations,
                     nodes=new_nodes,
+                    region_nodes=region_nodes,
                     strategy=strategy,
                     num_replicas=num_replicas,
                     publish_ref=publish_ref,
@@ -416,10 +454,14 @@ def leader_behavior(
             case SetRole(is_leader, leader_node):
                 if is_leader:
                     return Behaviors.same()
+                if leader_node is not None and leader_node not in region_nodes:
+                    log.debug("Ignoring demotion: leader %s:%d has no region for [%s]", leader_node.host, leader_node.port, shard_type)
+                    return Behaviors.same()
                 log.info("Coordinator [%s] demoted to follower", shard_type)
                 return follower_behavior(
                     allocations=allocations,
                     nodes=nodes,
+                    region_nodes=region_nodes,
                     epoch=epoch,
                     strategy=strategy,
                     num_replicas=num_replicas,
@@ -436,6 +478,7 @@ def leader_behavior(
                     return leader_behavior(
                         allocations=new_allocs,
                         nodes=nodes,
+                        region_nodes=region_nodes,
                         strategy=strategy,
                         num_replicas=num_replicas,
                         publish_ref=publish_ref,
@@ -457,6 +500,7 @@ def follower_behavior(
     *,
     allocations: dict[int, ShardAllocation],
     nodes: frozenset[NodeAddress],
+    region_nodes: frozenset[NodeAddress],
     epoch: int,
     strategy: ShardAllocationStrategy,
     num_replicas: int,
@@ -473,6 +517,35 @@ def follower_behavior(
 
     async def receive(ctx: Any, msg: CoordinatorMsg) -> Any:
         match msg:
+            case RegisterRegion(node):
+                # Forward to leader so it knows about this region
+                if leader_node is not None and remote_transport is not None:
+                    leader_coord_addr = ActorAddress(
+                        system=system_name,
+                        path=f"/_coord-{shard_type}",
+                        host=leader_node.host,
+                        port=leader_node.port,
+                    )
+                    leader_ref: ActorRef[CoordinatorMsg] = remote_transport.make_ref(
+                        leader_coord_addr
+                    )
+                    leader_ref.tell(msg)
+                return follower_behavior(
+                    allocations=allocations,
+                    nodes=nodes,
+                    region_nodes=region_nodes | {node},
+                    epoch=epoch,
+                    strategy=strategy,
+                    num_replicas=num_replicas,
+                    publish_ref=publish_ref,
+                    shard_type=shard_type,
+                    leader_node=leader_node,
+                    remote_transport=remote_transport,
+                    system_name=system_name,
+                    buffer=buffer,
+                    logger=log,
+                )
+
             case GetShardLocation(shard_id, reply_to):
                 if shard_id in allocations:
                     alloc = allocations[shard_id]
@@ -500,6 +573,7 @@ def follower_behavior(
                 return follower_behavior(
                     allocations=allocations,
                     nodes=nodes,
+                    region_nodes=region_nodes,
                     epoch=epoch,
                     strategy=strategy,
                     num_replicas=num_replicas,
@@ -518,6 +592,7 @@ def follower_behavior(
                     behavior = follower_behavior(
                         allocations=new_allocs,
                         nodes=nodes,
+                        region_nodes=region_nodes,
                         epoch=new_epoch,
                         strategy=strategy,
                         num_replicas=num_replicas,
@@ -539,6 +614,22 @@ def follower_behavior(
                     return leader_behavior(
                         allocations=allocations,
                         nodes=nodes,
+                        region_nodes=region_nodes,
+                        strategy=strategy,
+                        num_replicas=num_replicas,
+                        publish_ref=publish_ref,
+                        shard_type=shard_type,
+                        epoch=epoch,
+                        remote_transport=remote_transport,
+                        system_name=system_name,
+                        logger=log,
+                    )
+                if new_leader_node is not None and new_leader_node not in region_nodes:
+                    log.info("Coordinator [%s] promoting to leader: %s:%d has no region", shard_type, new_leader_node.host, new_leader_node.port)
+                    return leader_behavior(
+                        allocations=allocations,
+                        nodes=nodes,
+                        region_nodes=region_nodes,
                         strategy=strategy,
                         num_replicas=num_replicas,
                         publish_ref=publish_ref,
@@ -552,6 +643,7 @@ def follower_behavior(
                 behavior = follower_behavior(
                     allocations=allocations,
                     nodes=nodes,
+                    region_nodes=region_nodes,
                     epoch=epoch,
                     strategy=strategy,
                     num_replicas=num_replicas,
@@ -570,6 +662,7 @@ def follower_behavior(
                 return follower_behavior(
                     allocations=allocations,
                     nodes=new_nodes,
+                    region_nodes=region_nodes,
                     epoch=epoch,
                     strategy=strategy,
                     num_replicas=num_replicas,
