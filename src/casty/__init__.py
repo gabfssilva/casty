@@ -17,6 +17,18 @@ from casty.actor import (
     UnhandledBehavior,
 )
 from casty.cluster import Cluster, ClusterConfig
+from casty.config import (
+    CastyConfig,
+    FailureDetectorConfig,
+    GossipConfig,
+    HeartbeatConfig,
+    MailboxConfig,
+    ResolvedActorConfig,
+    ShardingConfig,
+    SupervisionConfig,
+    discover_config,
+    load_config,
+)
 from casty.cluster_state import (
     ClusterState,
     Member,
@@ -124,6 +136,17 @@ __all__ = [
     "Snapshot",
     # Failure Detection
     "PhiAccrualFailureDetector",
+    # Config
+    "CastyConfig",
+    "load_config",
+    "discover_config",
+    "MailboxConfig",
+    "SupervisionConfig",
+    "ShardingConfig",
+    "FailureDetectorConfig",
+    "GossipConfig",
+    "HeartbeatConfig",
+    "ResolvedActorConfig",
     # Cluster
     "Cluster",
     "ClusterConfig",
