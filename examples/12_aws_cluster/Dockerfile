@@ -5,6 +5,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY . /app
 WORKDIR /app
 
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
 # Install the example's dependencies (includes casty as path dep)
 RUN uv sync --project examples/12_aws_cluster --no-dev
 

@@ -13,6 +13,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries",
     "Framework :: AsyncIO",
     "Typing :: Typed",
@@ -24,9 +25,9 @@ performance = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/gabfssilva/casty"
+Homepage = "https://gabfssilva.github.io/casty/"
 Repository = "https://github.com/gabfssilva/casty"
-Documentation = "https://github.com/gabfssilva/casty#readme"
+Documentation = "https://gabfssilva.github.io/casty/"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
