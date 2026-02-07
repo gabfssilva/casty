@@ -550,6 +550,7 @@ async def test_cluster_actor_sends_set_role_to_registered_coordinators() -> None
         cluster_ref: ActorRef[ClusterCmd] = system.spawn(
             cluster_actor(
                 config=ClusterConfig(host="127.0.0.1", port=25520, seed_nodes=[]),
+                scheduler_ref=system.scheduler,
             ),
             "_cluster",
         )
@@ -581,6 +582,7 @@ async def test_cluster_actor_forwards_publish_allocations_to_gossip() -> None:
         cluster_ref: ActorRef[ClusterCmd] = system.spawn(
             cluster_actor(
                 config=ClusterConfig(host="127.0.0.1", port=25520, seed_nodes=[]),
+                scheduler_ref=system.scheduler,
             ),
             "_cluster",
         )

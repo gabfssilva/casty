@@ -120,8 +120,9 @@ def gossip_actor(
                         status=MemberStatus.joining,
                         roles=roles,
                     )
+                    existing = frozenset(m for m in state.members if m.address != node)
                     new_state = ClusterState(
-                        members=state.members | {new_member},
+                        members=existing | {new_member},
                         unreachable=state.unreachable,
                         version=state.version.increment(self_node),
                         shard_allocations=state.shard_allocations,
@@ -141,7 +142,7 @@ def gossip_actor(
                         merged_allocs = state.shard_allocations
                         merged_epoch = state.allocation_epoch
                     new_state = ClusterState(
-                        members=state.members | accepted_state.members,
+                        members=state.merge_members(accepted_state),
                         unreachable=state.unreachable,
                         version=merged_version.increment(self_node),
                         shard_allocations=merged_allocs,

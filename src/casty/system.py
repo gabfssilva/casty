@@ -11,6 +11,13 @@ from casty.address import ActorAddress
 from casty.events import EventStream
 from casty.mailbox import Mailbox
 from casty.ref import ActorRef
+from casty.scheduler import (
+    CancelSchedule,
+    ScheduleOnce,
+    SchedulerMsg,
+    ScheduleTick,
+    scheduler as scheduler_behavior,
+)
 from casty.transport import LocalTransport, MessageTransport
 
 
@@ -30,6 +37,7 @@ class ActorSystem:
         self._event_stream = EventStream()
         self._root_cells: dict[str, ActorCell[Any]] = {}
         self._local_transport = LocalTransport()
+        self._scheduler: ActorRef[SchedulerMsg] | None = None
 
     @property
     def name(self) -> str:
@@ -38,6 +46,21 @@ class ActorSystem:
     @property
     def event_stream(self) -> EventStream:
         return self._event_stream
+
+    @property
+    def scheduler(self) -> ActorRef[SchedulerMsg]:
+        if self._scheduler is None:
+            self._scheduler = self.spawn(scheduler_behavior(), "_scheduler")
+        return self._scheduler
+
+    def tick[M](self, key: str, target: ActorRef[M], message: M, interval: float) -> None:
+        self.scheduler.tell(ScheduleTick(key=key, target=target, message=message, interval=interval))
+
+    def schedule[M](self, key: str, target: ActorRef[M], message: M, delay: float) -> None:
+        self.scheduler.tell(ScheduleOnce(key=key, target=target, message=message, delay=delay))
+
+    def cancel_schedule(self, key: str) -> None:
+        self.scheduler.tell(CancelSchedule(key=key))
 
     async def __aenter__(self) -> ActorSystem:
         return self

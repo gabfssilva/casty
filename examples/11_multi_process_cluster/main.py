@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import socket
 import sys
 from dataclasses import dataclass
@@ -258,4 +259,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
     main()

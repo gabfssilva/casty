@@ -93,13 +93,19 @@ class ClusterState:
     allocation_epoch: int = 0
 
     def add_member(self, member: Member) -> ClusterState:
+        filtered = frozenset(m for m in self.members if m.address != member.address)
         return ClusterState(
-            members=self.members | {member},
+            members=filtered | {member},
             unreachable=self.unreachable,
             version=self.version,
             shard_allocations=self.shard_allocations,
             allocation_epoch=self.allocation_epoch,
         )
+
+    def merge_members(self, other: ClusterState) -> frozenset[Member]:
+        by_addr = {m.address: m for m in other.members}
+        by_addr.update({m.address: m for m in self.members})
+        return frozenset(by_addr.values())
 
     def update_status(
         self, address: NodeAddress, status: MemberStatus
@@ -151,9 +157,52 @@ class ClusterState:
             allocation_epoch=epoch,
         )
 
+    def __str__(self) -> str:
+        nodes = ", ".join(
+            f"{m.address.host}:{m.address.port}({m.status.name})"
+            for m in sorted(self.members, key=lambda m: m.address)
+        )
+        leader = self.leader
+        leader_str = f"{leader.host}:{leader.port}" if leader else "none"
+        return f"[{nodes}] leader={leader_str}"
+
     @property
     def leader(self) -> NodeAddress | None:
         up_members = sorted(
             (m.address for m in self.members if m.status == MemberStatus.up)
         )
         return up_members[0] if up_members else None
+
+    def diff(self, previous: ClusterState | None) -> ClusterChanges:
+        old_by_addr = {m.address: m for m in previous.members} if previous else {}
+        new_by_addr = {m.address: m for m in self.members}
+
+        joined = tuple(
+            new_by_addr[addr]
+            for addr in sorted(new_by_addr.keys() - old_by_addr.keys())
+        )
+        removed = tuple(
+            old_by_addr[addr]
+            for addr in sorted(old_by_addr.keys() - new_by_addr.keys())
+        )
+
+        old_leader = previous.leader if previous else None
+        elected = old_leader != self.leader
+
+        return ClusterChanges(
+            joined=joined,
+            removed=removed,
+            leader=self.leader,
+            just_elected=elected,
+        )
+
+
+@dataclass(frozen=True)
+class ClusterChanges:
+    joined: tuple[Member, ...] = ()
+    removed: tuple[Member, ...] = ()
+    leader: NodeAddress | None = None
+    just_elected: bool = False
+
+    def __bool__(self) -> bool:
+        return bool(self.joined or self.removed or self.just_elected)

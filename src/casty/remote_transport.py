@@ -191,6 +191,8 @@ class RemoteTransport:
                 type_hint=type_name,
             )
             await self._tcp.send(host, port, envelope.to_bytes())
+        except (ConnectionError, OSError):
+            self._logger.debug("Cannot reach %s:%s (connection refused or reset)", host, port)
         except Exception:
             self._logger.warning("Failed to send remote message to %s", address, exc_info=True)
 

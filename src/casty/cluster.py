@@ -1,7 +1,6 @@
 # src/casty/cluster.py
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -35,6 +34,12 @@ from casty.shard_coordinator_actor import (
     SetRole,
     SyncAllocations,
 )
+from casty.scheduler import (
+    CancelSchedule,
+    ScheduleOnce,
+    SchedulerMsg,
+    ScheduleTick,
+)
 from casty.address import ActorAddress
 from casty.failure_detector import PhiAccrualFailureDetector
 from casty.ref import ActorRef
@@ -61,8 +66,13 @@ class RegisterCoordinator:
     coord_ref: ActorRef[CoordinatorMsg]
 
 
+@dataclass(frozen=True)
+class JoinRetry:
+    pass
+
+
 type ClusterCmd = (
-    GetState | NodeUnreachable | PublishAllocations | RegisterCoordinator | ClusterState
+    GetState | NodeUnreachable | PublishAllocations | RegisterCoordinator | JoinRetry | ClusterState
 )
 
 
@@ -84,7 +94,10 @@ def cluster_receive(
     *,
     gossip_ref: ActorRef[GossipMsg],
     heartbeat_ref: ActorRef[HeartbeatMsg],
+    scheduler_ref: ActorRef[SchedulerMsg],
     self_node: NodeAddress,
+    roles: frozenset[str],
+    seed_refs: tuple[ActorRef[GossipMsg], ...],
     logger: logging.Logger,
     coordinators: dict[str, ActorRef[CoordinatorMsg]],
     cluster_state: ClusterState | None,
@@ -99,7 +112,10 @@ def cluster_receive(
         return cluster_receive(
             gossip_ref=gossip_ref,
             heartbeat_ref=heartbeat_ref,
+            scheduler_ref=scheduler_ref,
             self_node=self_node,
+            roles=roles,
+            seed_refs=seed_refs,
             logger=logger,
             coordinators=new_coordinators
             if new_coordinators is not None
@@ -153,6 +169,9 @@ def cluster_receive(
                 return _next(new_coordinators=new_coords)
 
             case ClusterState() as state:
+                if state.diff(cluster_state):
+                    logger.info("Cluster topology update: %s", state)
+
                 members = frozenset(
                     m.address
                     for m in state.members
@@ -176,6 +195,26 @@ def cluster_receive(
                     )
                 return _next(new_cluster_state=state)
 
+            case JoinRetry():
+                if cluster_state is None or len(cluster_state.members) <= 1:
+                    for seed_ref in seed_refs:
+                        seed_ref.tell(
+                            JoinRequest(
+                                node=self_node,
+                                roles=roles,
+                                reply_to=gossip_ref,  # type: ignore[arg-type]
+                            )
+                        )
+                    scheduler_ref.tell(
+                        ScheduleOnce(
+                            key="join-retry",
+                            target=ctx.self,
+                            message=JoinRetry(),
+                            delay=1.0,
+                        )
+                    )
+                return Behaviors.same()
+
             case _:
                 return Behaviors.same()
 
@@ -185,6 +224,7 @@ def cluster_receive(
 def cluster_actor(
     *,
     config: ClusterConfig,
+    scheduler_ref: ActorRef[SchedulerMsg],
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
 ) -> Behavior[ClusterCmd]:
@@ -217,52 +257,8 @@ def cluster_actor(
 
         logger = logging.getLogger(f"casty.cluster.{system_name}")
 
-        # Schedule periodic ticks
-        tick_tasks: list[asyncio.Task[None]] = []
-
-        async def _gossip_tick_loop() -> None:
-            try:
-                while True:
-                    await asyncio.sleep(1.0)
-                    gossip_ref.tell(GossipTick())
-            except asyncio.CancelledError:
-                pass
-
-        async def _heartbeat_tick_loop() -> None:
-            try:
-                while True:
-                    await asyncio.sleep(0.5)
-                    gossip_ref.tell(
-                        GetClusterState(reply_to=ctx.self)  # type: ignore[arg-type]
-                    )
-            except asyncio.CancelledError:
-                pass
-
-        async def _availability_check_loop() -> None:
-            try:
-                while True:
-                    await asyncio.sleep(2.0)
-                    heartbeat_ref.tell(
-                        CheckAvailability(reply_to=ctx.self)  # type: ignore[arg-type]
-                    )
-            except asyncio.CancelledError:
-                pass
-
-        loop = asyncio.get_running_loop()
-        tick_tasks.append(loop.create_task(_gossip_tick_loop()))
-        tick_tasks.append(loop.create_task(_heartbeat_tick_loop()))
-        tick_tasks.append(loop.create_task(_availability_check_loop()))
-
-        async def _cancel_ticks(ctx: ActorContext[ClusterCmd]) -> None:
-            for task in tick_tasks:
-                task.cancel()
-            for task in tick_tasks:
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        # Send join requests to seed nodes
+        # Build seed refs for join retry
+        seed_refs_list: list[ActorRef[GossipMsg]] = []
         if remote_transport is not None:
             for seed_host, seed_port in config.seed_nodes:
                 seed_node = NodeAddress(host=seed_host, port=seed_port)
@@ -274,20 +270,40 @@ def cluster_actor(
                     host=seed_host,
                     port=seed_port,
                 )
-                seed_ref: ActorRef[GossipMsg] = remote_transport.make_ref(
-                    seed_gossip_addr
-                )  # type: ignore[assignment]
-                seed_ref.tell(
-                    JoinRequest(
-                        node=self_node,
-                        roles=config.roles,
-                        reply_to=gossip_ref,  # type: ignore[arg-type]
-                    )
+                seed_refs_list.append(
+                    remote_transport.make_ref(seed_gossip_addr)  # type: ignore[arg-type]
                 )
+        seed_refs = tuple(seed_refs_list)
 
-        # For single-node clusters (no seeds), initialize immediately so that
-        # coordinators registered before gossip produces state get activated.
-        # For multi-node clusters, wait for gossip to converge.
+        # Schedule periodic ticks via scheduler
+        scheduler_ref.tell(ScheduleTick(
+            key="gossip", target=gossip_ref, message=GossipTick(), interval=1.0,
+        ))
+        scheduler_ref.tell(ScheduleTick(
+            key="heartbeat",
+            target=gossip_ref,
+            message=GetClusterState(reply_to=ctx.self),  # type: ignore[arg-type]
+            interval=0.5,
+        ))
+        scheduler_ref.tell(ScheduleTick(
+            key="availability",
+            target=heartbeat_ref,
+            message=CheckAvailability(reply_to=ctx.self),  # type: ignore[arg-type]
+            interval=2.0,
+        ))
+
+        # Schedule join retry for multi-node clusters
+        if seed_refs:
+            scheduler_ref.tell(ScheduleOnce(
+                key="join-retry", target=ctx.self, message=JoinRetry(), delay=0.0,
+            ))
+
+        async def cancel_schedules(ctx: ActorContext[ClusterCmd]) -> None:
+            scheduler_ref.tell(CancelSchedule(key="gossip"))
+            scheduler_ref.tell(CancelSchedule(key="heartbeat"))
+            scheduler_ref.tell(CancelSchedule(key="availability"))
+            scheduler_ref.tell(CancelSchedule(key="join-retry"))
+
         has_seeds = bool(config.seed_nodes)
         initial_cluster_state = None if has_seeds else initial_state
 
@@ -295,12 +311,15 @@ def cluster_actor(
             cluster_receive(
                 gossip_ref=gossip_ref,
                 heartbeat_ref=heartbeat_ref,
+                scheduler_ref=scheduler_ref,
                 self_node=self_node,
+                roles=config.roles,
+                seed_refs=seed_refs,
                 logger=logger,
                 coordinators={},
                 cluster_state=initial_cluster_state,
             ),
-            post_stop=_cancel_ticks,
+            post_stop=cancel_schedules,
         )
 
     return Behaviors.setup(setup)
@@ -335,6 +354,7 @@ class Cluster:
         self._ref = self._system.spawn(
             cluster_actor(
                 config=self._config,
+                scheduler_ref=self._system.scheduler,
                 remote_transport=self._remote_transport,
                 system_name=self._system_name,
             ),
