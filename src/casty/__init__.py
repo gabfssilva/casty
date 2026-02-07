@@ -27,6 +27,7 @@ from casty.config import (
     ResolvedActorConfig,
     ShardingConfig,
     SupervisionConfig,
+    TransportConfig,
     discover_config,
     load_config,
 )
@@ -149,6 +150,7 @@ __all__ = [
     "GossipConfig",
     "HeartbeatConfig",
     "ResolvedActorConfig",
+    "TransportConfig",
     # Cluster
     "Cluster",
     "ClusterConfig",

@@ -21,12 +21,18 @@ __all__ = [
     "ResolvedActorConfig",
     "ShardingConfig",
     "SupervisionConfig",
+    "TransportConfig",
     "discover_config",
     "load_config",
 ]
 
 
 type MailboxStrategy = Literal["drop_new", "drop_oldest", "backpressure"]
+
+
+@dataclass(frozen=True)
+class TransportConfig:
+    max_pending_per_path: int = 64
 
 
 @dataclass(frozen=True)
@@ -88,6 +94,7 @@ class ResolvedActorConfig:
 class CastyConfig:
     system_name: str = "casty"
     cluster: ClusterConfig | None = None
+    transport: TransportConfig = field(default_factory=TransportConfig)
     gossip: GossipConfig = field(default_factory=GossipConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
     failure_detector: FailureDetectorConfig = field(
@@ -163,6 +170,8 @@ def load_config(path: Path | None = None) -> CastyConfig:
 
     system_name = raw.get("system", {}).get("name", "casty")
 
+    transport = TransportConfig(**raw.get("transport", {}))
+
     defaults_raw = raw.get("defaults", {})
     defaults_mailbox = MailboxConfig(**defaults_raw.get("mailbox", {}))
     defaults_supervision = SupervisionConfig(**defaults_raw.get("supervision", {}))
@@ -207,6 +216,7 @@ def load_config(path: Path | None = None) -> CastyConfig:
     return CastyConfig(
         system_name=system_name,
         cluster=cluster,
+        transport=transport,
         gossip=gossip,
         heartbeat=heartbeat,
         failure_detector=failure_detector,

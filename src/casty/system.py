@@ -41,7 +41,8 @@ class ActorSystem:
         self._config = config
         self._event_stream = EventStream()
         self._root_cells: dict[str, ActorCell[Any]] = {}
-        self._local_transport = LocalTransport()
+        max_pending = config.transport.max_pending_per_path if config is not None else 64
+        self._local_transport = LocalTransport(max_pending_per_path=max_pending)
         self._scheduler: ActorRef[SchedulerMsg] | None = None
         self._system_logger = logging.getLogger(f"casty.system.{name}")
 

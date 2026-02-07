@@ -117,6 +117,7 @@ class TestCastyConfigDefaults:
         cfg = CastyConfig()
         assert cfg.system_name == "casty"
         assert cfg.cluster is None
+        assert cfg.transport.max_pending_per_path == 64
         assert isinstance(cfg.gossip, GossipConfig)
         assert isinstance(cfg.heartbeat, HeartbeatConfig)
         assert isinstance(cfg.failure_detector, FailureDetectorConfig)
@@ -241,6 +242,9 @@ class TestLoadConfigFull:
 [system]
 name = "my-app"
 
+[transport]
+max_pending_per_path = 128
+
 [defaults.mailbox]
 capacity = 5000
 strategy = "backpressure"
@@ -284,6 +288,9 @@ mailbox = { capacity = 50 }
 
         # System
         assert cfg.system_name == "my-app"
+
+        # Transport
+        assert cfg.transport.max_pending_per_path == 128
 
         # Defaults
         assert cfg.defaults_mailbox.capacity == 5000
@@ -491,6 +498,13 @@ class TestActorSystemWithConfig:
 
         async with ActorSystem() as system:
             assert system.name == "casty-system"
+
+    async def test_transport_config_flows_to_local_transport(self) -> None:
+        from casty import ActorSystem, CastyConfig, TransportConfig
+
+        config = CastyConfig(transport=TransportConfig(max_pending_per_path=16))
+        async with ActorSystem(config=config) as system:
+            assert system._local_transport._max_pending_per_path == 16  # pyright: ignore[reportPrivateUsage]
 
 
 # ---------------------------------------------------------------------------

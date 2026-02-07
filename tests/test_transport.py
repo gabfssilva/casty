@@ -19,11 +19,12 @@ async def test_local_transport_delivers_to_registered_cell() -> None:
     assert received == ["hello"]
 
 
-async def test_local_transport_unregistered_path_is_noop() -> None:
+async def test_local_transport_unregistered_path_buffers() -> None:
     transport = LocalTransport()
     addr = ActorAddress(system="test", path="/user/unknown")
-    # Should not raise
     transport.deliver(addr, "hello")
+
+    assert transport._pending["/user/unknown"] == ["hello"]
 
 
 async def test_local_transport_unregister() -> None:
@@ -37,5 +38,32 @@ async def test_local_transport_unregister() -> None:
 
     transport.unregister("/user/greeter")
     transport.deliver(addr, "after")
-    # Nothing new delivered after unregister
     assert received == ["before"]
+    assert "/user/greeter" not in transport._pending
+
+
+async def test_local_transport_pending_flushed_on_register() -> None:
+    transport = LocalTransport()
+    addr = ActorAddress(system="test", path="/actor")
+    transport.deliver(addr, "msg-1")
+    transport.deliver(addr, "msg-2")
+
+    received: list[object] = []
+    transport.register("/actor", lambda msg: received.append(msg))
+
+    assert received == ["msg-1", "msg-2"]
+    assert "/actor" not in transport._pending
+
+
+async def test_local_transport_pending_respects_max_buffer() -> None:
+    transport = LocalTransport(max_pending_per_path=2)
+    addr = ActorAddress(system="test", path="/actor")
+    transport.deliver(addr, "a")
+    transport.deliver(addr, "b")
+    transport.deliver(addr, "c")
+
+    assert transport._pending["/actor"] == ["a", "b"]
+
+    received: list[object] = []
+    transport.register("/actor", lambda msg: received.append(msg))
+    assert received == ["a", "b"]
