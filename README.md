@@ -987,8 +987,6 @@ uv run ruff check src/ tests/    # lint
 uv run ruff format src/ tests/   # format
 ```
 
-The project follows test-driven development. Tests are feature-oriented: they exercise real workflows rather than testing individual functions in isolation. Major features require a design document in `docs/plans/` before implementation.
-
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
