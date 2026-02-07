@@ -4,7 +4,7 @@ import re
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from casty.cluster import ClusterConfig
 from casty.replication import ReplicationConfig
@@ -17,6 +17,7 @@ __all__ = [
     "GossipConfig",
     "HeartbeatConfig",
     "MailboxConfig",
+    "MailboxStrategy",
     "ResolvedActorConfig",
     "ShardingConfig",
     "SupervisionConfig",
@@ -25,10 +26,13 @@ __all__ = [
 ]
 
 
+type MailboxStrategy = Literal["drop_new", "drop_oldest", "backpressure"]
+
+
 @dataclass(frozen=True)
 class MailboxConfig:
     capacity: int = 1000
-    strategy: str = "drop_new"
+    strategy: MailboxStrategy = "drop_new"
 
 
 @dataclass(frozen=True)

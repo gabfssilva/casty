@@ -18,6 +18,7 @@ from casty.actor import (
 )
 from casty.cluster import Cluster, ClusterConfig
 from casty.config import (
+    ActorConfig,
     CastyConfig,
     FailureDetectorConfig,
     GossipConfig,
@@ -140,6 +141,7 @@ __all__ = [
     "CastyConfig",
     "load_config",
     "discover_config",
+    "ActorConfig",
     "MailboxConfig",
     "SupervisionConfig",
     "ShardingConfig",

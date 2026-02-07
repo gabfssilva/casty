@@ -47,6 +47,7 @@ from casty.failure_detector import PhiAccrualFailureDetector
 from casty.ref import ActorRef
 
 if TYPE_CHECKING:
+    from casty.config import FailureDetectorConfig
     from casty.context import ActorContext
     from casty.remote_transport import RemoteTransport
     from casty.system import ActorSystem
@@ -246,7 +247,7 @@ def cluster_actor(
     gossip_interval: float = 1.0,
     heartbeat_interval: float = 0.5,
     availability_interval: float = 2.0,
-    failure_detector_threshold: float = 8.0,
+    failure_detector_config: FailureDetectorConfig | None = None,
 ) -> Behavior[ClusterCmd]:
     async def setup(ctx: ActorContext[ClusterCmd]) -> Behavior[ClusterCmd]:
         self_node = NodeAddress(host=config.host, port=config.port)
@@ -269,7 +270,16 @@ def cluster_actor(
             ),
             "_gossip",
         )
-        detector = PhiAccrualFailureDetector(threshold=failure_detector_threshold)
+        from casty.config import FailureDetectorConfig as _FDConfig
+
+        fd = failure_detector_config or _FDConfig()
+        detector = PhiAccrualFailureDetector(
+            threshold=fd.threshold,
+            max_sample_size=fd.max_sample_size,
+            min_std_deviation_ms=fd.min_std_deviation_ms,
+            acceptable_heartbeat_pause_ms=fd.acceptable_heartbeat_pause_ms,
+            first_heartbeat_estimate_ms=fd.first_heartbeat_estimate_ms,
+        )
         heartbeat_ref: ActorRef[HeartbeatMsg] = ctx.spawn(
             heartbeat_actor(
                 self_node=self_node,
@@ -365,7 +375,7 @@ class Cluster:
         gossip_interval: float = 1.0,
         heartbeat_interval: float = 0.5,
         availability_interval: float = 2.0,
-        failure_detector_threshold: float = 8.0,
+        failure_detector_config: FailureDetectorConfig | None = None,
     ) -> None:
         self._system = system
         self._config = config
@@ -374,7 +384,7 @@ class Cluster:
         self._gossip_interval = gossip_interval
         self._heartbeat_interval = heartbeat_interval
         self._availability_interval = availability_interval
-        self._failure_detector_threshold = failure_detector_threshold
+        self._failure_detector_config = failure_detector_config
         self._ref: ActorRef[ClusterCmd] | None = None
 
     @property
@@ -394,7 +404,7 @@ class Cluster:
                 gossip_interval=self._gossip_interval,
                 heartbeat_interval=self._heartbeat_interval,
                 availability_interval=self._availability_interval,
-                failure_detector_threshold=self._failure_detector_threshold,
+                failure_detector_config=self._failure_detector_config,
             ),
             "_cluster",
         )

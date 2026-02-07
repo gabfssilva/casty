@@ -154,6 +154,7 @@ class ClusteredActorSystem(ActorSystem):
         host: str,
         port: int,
         seed_nodes: list[tuple[str, int]] | None = None,
+        roles: frozenset[str] = frozenset(),
         bind_host: str | None = None,
         config: CastyConfig | None = None,
     ) -> None:
@@ -162,6 +163,7 @@ class ClusteredActorSystem(ActorSystem):
         self._port: int = port
         self._bind_host = bind_host or host
         self._seed_nodes = seed_nodes or []
+        self._roles = roles
         self._self_node = NodeAddress(host=host, port=port)
         self._coordinators: dict[str, ActorRef[CoordinatorMsg]] = {}
         self._logger = logging.getLogger(f"casty.sharding.{name}")
@@ -207,6 +209,7 @@ class ClusteredActorSystem(ActorSystem):
             host=host or cluster.host,
             port=port if port is not None else cluster.port,
             seed_nodes=seed_nodes if seed_nodes is not None else cluster.seed_nodes,
+            roles=cluster.roles,
             bind_host=bind_host,
             config=config,
         )
@@ -227,20 +230,20 @@ class ClusteredActorSystem(ActorSystem):
                 host=self._host,
                 port=self._port,
                 seed_nodes=self._seed_nodes,
+                roles=self._roles,
             )
-            gossip_interval = self._config.gossip.interval if self._config else 1.0
-            heartbeat_interval = self._config.heartbeat.interval if self._config else 0.5
-            availability_interval = self._config.heartbeat.availability_check_interval if self._config else 2.0
-            failure_detector_threshold = self._config.failure_detector.threshold if self._config else 8.0
+            from casty.config import CastyConfig as _CastyConfig
+
+            cfg = self._config or _CastyConfig()
             self._cluster = Cluster(
                 self,
                 cluster_config,
                 remote_transport=self._remote_transport,
                 system_name=self._name,
-                gossip_interval=gossip_interval,
-                heartbeat_interval=heartbeat_interval,
-                availability_interval=availability_interval,
-                failure_detector_threshold=failure_detector_threshold,
+                gossip_interval=cfg.gossip.interval,
+                heartbeat_interval=cfg.heartbeat.interval,
+                availability_interval=cfg.heartbeat.availability_check_interval,
+                failure_detector_config=cfg.failure_detector,
             )
             await self._cluster.start()
         except BaseException:
