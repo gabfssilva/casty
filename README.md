@@ -242,6 +242,60 @@ asyncio.run(main())
 
 `system.ask()` is a convenience that creates a temporary actor behind the scenes, passes its `ActorRef` as the `reply_to` field, and awaits the response with a timeout. The underlying mechanism is still `tell` — `ask` simply wraps the reply-to pattern into a coroutine.
 
+> **Warning:** `system.ask()` is meant for use **outside** actors — from `main()`, HTTP handlers, or other external code. If called inside an actor's receive handler, it blocks that actor's mailbox until the response arrives (actors process one message at a time), which can lead to deadlocks.
+>
+> Inside actors, pass `ctx.self` as `reply_to` and handle the response as a regular message:
+
+```python
+@dataclass(frozen=True)
+class Deposit:
+    amount: int
+
+@dataclass(frozen=True)
+class GetBalance:
+    reply_to: ActorRef[int]
+
+type AccountMsg = Deposit | GetBalance
+
+def bank_account(balance: int = 0) -> Behavior[AccountMsg]:
+    async def receive(ctx: ActorContext[AccountMsg], msg: AccountMsg) -> Behavior[AccountMsg]:
+        match msg:
+            case Deposit(amount):
+                return bank_account(balance + amount)
+            case GetBalance(reply_to):
+                reply_to.tell(balance)
+                return Behaviors.same()
+
+    return Behaviors.receive(receive)
+
+@dataclass(frozen=True)
+class CheckBalance:
+    account: ActorRef[AccountMsg]
+
+type MonitorMsg = CheckBalance | int
+
+def monitor() -> Behavior[MonitorMsg]:
+    async def receive(ctx: ActorContext[MonitorMsg], msg: MonitorMsg) -> Behavior[MonitorMsg]:
+        match msg:
+            case CheckBalance(account):
+                # Non-blocking: sends the request and keeps processing
+                account.tell(GetBalance(reply_to=ctx.self))
+                return Behaviors.same()
+            case int() as balance:
+                print(f"Balance: {balance}")
+                return Behaviors.same()
+
+    return Behaviors.receive(receive)
+
+async def main() -> None:
+    async with ActorSystem() as system:
+        acc = system.spawn(bank_account(), "account")
+        acc.tell(Deposit(100))
+
+        mon = system.spawn(monitor(), "monitor")
+        mon.tell(CheckBalance(account=acc))  # prints "Balance: 100"
+```
+
 ## Actor Hierarchies
 
 Actors form a tree. When an actor spawns a child via `ctx.spawn()`, it becomes the parent. This hierarchy is not merely organizational — it is the foundation of fault tolerance. A parent is responsible for the lifecycle of its children: it can stop them, watch them for termination, and define supervision strategies for their failures.
