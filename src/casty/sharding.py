@@ -305,6 +305,8 @@ class ClusteredActorSystem(ActorSystem):
                 replication=sharded.replication,
                 shard_type=name,
                 publish_ref=publish_ref,
+                remote_transport=self._remote_transport,
+                system_name=self._name,
             ),
             f"_coord-{name}",
         )

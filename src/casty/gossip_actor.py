@@ -49,6 +49,12 @@ class GossipTick:
 
 
 @dataclass(frozen=True)
+class PromoteMember:
+    """Leader tells gossip to promote a joining member to up."""
+    address: NodeAddress
+
+
+@dataclass(frozen=True)
 class UpdateShardAllocations:
     """Published by coordinator leader → gossip for cluster-wide propagation."""
     shard_type: str
@@ -56,7 +62,7 @@ class UpdateShardAllocations:
     epoch: int
 
 
-type GossipMsg = GossipMessage | GetClusterState | JoinRequest | JoinAccepted | GossipTick | UpdateShardAllocations
+type GossipMsg = GossipMessage | GetClusterState | JoinRequest | JoinAccepted | GossipTick | PromoteMember | UpdateShardAllocations
 
 
 def gossip_actor(
@@ -168,6 +174,24 @@ def gossip_actor(
                             )
                             gossip_ref: ActorRef[Any] = remote_transport.make_ref(gossip_addr)
                             gossip_ref.tell(GossipMessage(state=state, from_node=self_node))
+                    return Behaviors.same()
+
+                case PromoteMember(address):
+                    promoted = frozenset(
+                        Member(address=m.address, status=MemberStatus.up, roles=m.roles)
+                        if m.address == address and m.status == MemberStatus.joining
+                        else m
+                        for m in state.members
+                    )
+                    if promoted != state.members:
+                        new_state = ClusterState(
+                            members=promoted,
+                            unreachable=state.unreachable,
+                            version=state.version.increment(self_node),
+                            shard_allocations=state.shard_allocations,
+                            allocation_epoch=state.allocation_epoch,
+                        )
+                        return active(new_state)
                     return Behaviors.same()
 
                 case UpdateShardAllocations(shard_type, allocations, epoch):

@@ -17,6 +17,7 @@ from casty.gossip_actor import (
     GossipTick,
     GetClusterState,
     JoinRequest,
+    PromoteMember,
     UpdateShardAllocations,
     gossip_actor,
 )
@@ -33,6 +34,7 @@ from casty.shard_coordinator_actor import (
     PublishAllocations,
     SetRole,
     SyncAllocations,
+    UpdateTopology,
 )
 from casty.scheduler import (
     CancelSchedule,
@@ -172,12 +174,22 @@ def cluster_receive(
                 if state.diff(cluster_state):
                     logger.info("Cluster topology update: %s", state)
 
+                # Leader promotes joining → up
+                if state.leader == self_node:
+                    for m in state.members:
+                        if m.status == MemberStatus.joining:
+                            gossip_ref.tell(PromoteMember(address=m.address))
+
                 members = frozenset(
                     m.address
                     for m in state.members
                     if m.status in (MemberStatus.up, MemberStatus.joining)
                 )
                 heartbeat_ref.tell(HeartbeatTick(members=members))
+
+                up_nodes = frozenset(
+                    m.address for m in state.members if m.status == MemberStatus.up
+                )
                 for shard_name, coord_ref in coordinators.items():
                     is_leader = state.leader == self_node
                     coord_ref.tell(
@@ -193,6 +205,7 @@ def cluster_receive(
                             epoch=state.allocation_epoch,
                         )
                     )
+                    coord_ref.tell(UpdateTopology(available_nodes=up_nodes))
                 return _next(new_cluster_state=state)
 
             case JoinRetry():
