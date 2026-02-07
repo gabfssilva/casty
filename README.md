@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="logo.png" alt="Casty" width="200">
+  <img src="logo.png" alt="Casty" width="512">
 </p>
 
 <p align="center">
-  <strong>Minimalist, type-safe actor framework for Python 3.13+</strong>
+  <strong>Minimalist, type-safe actor framework for Python 3.12+</strong>
 </p>
 
 <p align="center">
