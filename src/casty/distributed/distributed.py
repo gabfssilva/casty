@@ -4,9 +4,12 @@ from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
 
 from casty.actor import Behaviors
+from casty.distributed.barrier import Barrier, barrier_entity
 from casty.distributed.counter import Counter, counter_entity, persistent_counter_entity
 from casty.distributed.dict import Dict, map_entity, persistent_map_entity
+from casty.distributed.lock import Lock, lock_entity
 from casty.distributed.queue import Queue, queue_entity, persistent_queue_entity
+from casty.distributed.semaphore import Semaphore, semaphore_entity_factory
 from casty.distributed.set import Set, set_entity, persistent_set_entity
 
 if TYPE_CHECKING:
@@ -151,3 +154,30 @@ class Distributed:
         """Create a distributed queue via ``d.queue[V]("name", shards=10)``."""
         factory = persistent_queue_entity(self._journal) if self._journal is not None else queue_entity
         return QueueAccessor(self._system, self._regions, factory)
+
+    def lock(self, name: str, *, shards: int = 100, timeout: float = 5.0) -> Lock:
+        """Create a distributed lock."""
+        region = get_or_spawn_region(
+            self._system, self._regions, f"d-lock-{name}", lock_entity, shards
+        )
+        return Lock(system=self._system, region_ref=region, name=name, timeout=timeout)
+
+    def semaphore(
+        self, name: str, permits: int, *, shards: int = 100, timeout: float = 5.0
+    ) -> Semaphore:
+        """Create a distributed semaphore with *permits* concurrent holders."""
+        factory = semaphore_entity_factory(permits)
+        region = get_or_spawn_region(
+            self._system, self._regions, f"d-sem-{name}", factory, shards
+        )
+        return Semaphore(system=self._system, region_ref=region, name=name, timeout=timeout)
+
+    def barrier(
+        self, name: str, *, node_id: str | None = None, shards: int = 10, timeout: float = 60.0
+    ) -> Barrier:
+        """Create a distributed barrier."""
+        nid = node_id or f"{self._system.self_node.host}:{self._system.self_node.port}"
+        region = get_or_spawn_region(
+            self._system, self._regions, f"d-barrier-{name}", barrier_entity, shards
+        )
+        return Barrier(system=self._system, region_ref=region, name=name, node_id=nid, timeout=timeout)

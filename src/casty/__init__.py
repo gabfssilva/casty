@@ -38,7 +38,7 @@ from casty.cluster_state import (
     VectorClock,
 )
 from casty.context import ActorContext
-from casty.distributed import Counter, Dict, Distributed, Queue, Set
+from casty.distributed import Barrier, Counter, Dict, Distributed, Lock, Queue, Semaphore, Set
 from casty.events import (
     ActorRestarted,
     ActorStarted,
@@ -175,8 +175,11 @@ __all__ = [
     "ShardEnvelope",
     # Distributed Data Structures
     "Distributed",
+    "Barrier",
     "Counter",
     "Dict",
+    "Lock",
     "Queue",
+    "Semaphore",
     "Set",
 ]

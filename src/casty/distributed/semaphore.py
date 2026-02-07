@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, TYPE_CHECKING
+from uuid import uuid4
+
+from casty.actor import Behavior, Behaviors
+from casty.sharding import ShardEnvelope
+
+if TYPE_CHECKING:
+    from casty.ref import ActorRef
+    from casty.system import ActorSystem
+
+
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SemaphoreAcquire:
+    owner: str
+    reply_to: ActorRef[SemaphoreAcquired]
+
+
+@dataclass(frozen=True)
+class SemaphoreAcquired:
+    pass
+
+
+@dataclass(frozen=True)
+class SemaphoreTryAcquire:
+    owner: str
+    reply_to: ActorRef[SemaphoreTryResult]
+
+
+@dataclass(frozen=True)
+class SemaphoreTryResult:
+    acquired: bool
+
+
+@dataclass(frozen=True)
+class SemaphoreRelease:
+    owner: str
+    reply_to: ActorRef[SemaphoreReleased]
+
+
+@dataclass(frozen=True)
+class SemaphoreReleased:
+    released: bool
+
+
+type SemaphoreMsg = SemaphoreAcquire | SemaphoreTryAcquire | SemaphoreRelease
+
+
+# ---------------------------------------------------------------------------
+# Entity behavior — factory-of-factory (same pattern as persistent_counter_entity)
+# ---------------------------------------------------------------------------
+
+
+def semaphore_entity_factory(
+    max_permits: int,
+) -> Callable[[str], Behavior[SemaphoreMsg]]:
+    def factory(entity_id: str) -> Behavior[SemaphoreMsg]:
+        return semaphore_active(available=max_permits, holders=(), waiters=())
+
+    return factory
+
+
+def semaphore_active(
+    available: int,
+    holders: tuple[str, ...],
+    waiters: tuple[tuple[str, ActorRef[SemaphoreAcquired]], ...],
+) -> Behavior[SemaphoreMsg]:
+    async def receive(_ctx: Any, msg: SemaphoreMsg) -> Behavior[SemaphoreMsg]:
+        match msg:
+            case SemaphoreAcquire(owner=owner, reply_to=reply_to) if available > 0:
+                reply_to.tell(SemaphoreAcquired())
+                return semaphore_active(
+                    available=available - 1,
+                    holders=(*holders, owner),
+                    waiters=waiters,
+                )
+            case SemaphoreAcquire(owner=owner, reply_to=reply_to):
+                return semaphore_active(
+                    available=available,
+                    holders=holders,
+                    waiters=(*waiters, (owner, reply_to)),
+                )
+            case SemaphoreTryAcquire(owner=owner, reply_to=reply_to) if available > 0:
+                reply_to.tell(SemaphoreTryResult(acquired=True))
+                return semaphore_active(
+                    available=available - 1,
+                    holders=(*holders, owner),
+                    waiters=waiters,
+                )
+            case SemaphoreTryAcquire(reply_to=reply_to):
+                reply_to.tell(SemaphoreTryResult(acquired=False))
+                return Behaviors.same()
+            case SemaphoreRelease(owner=owner, reply_to=reply_to) if owner in holders:
+                remaining = list(holders)
+                remaining.remove(owner)
+                new_holders = tuple(remaining)
+                reply_to.tell(SemaphoreReleased(released=True))
+                if waiters:
+                    next_owner, next_reply = waiters[0]
+                    next_reply.tell(SemaphoreAcquired())
+                    return semaphore_active(
+                        available=available,
+                        holders=(*new_holders, next_owner),
+                        waiters=waiters[1:],
+                    )
+                return semaphore_active(
+                    available=available + 1,
+                    holders=new_holders,
+                    waiters=waiters,
+                )
+            case SemaphoreRelease(reply_to=reply_to):
+                reply_to.tell(SemaphoreReleased(released=False))
+                return Behaviors.same()
+
+    return Behaviors.receive(receive)
+
+
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
+
+
+class Semaphore:
+    """Client for a distributed semaphore backed by a sharded actor."""
+
+    def __init__(
+        self,
+        *,
+        system: ActorSystem,
+        region_ref: ActorRef[ShardEnvelope[SemaphoreMsg]],
+        name: str,
+        timeout: float = 5.0,
+    ) -> None:
+        self._system = system
+        self._region_ref = region_ref
+        self._name = name
+        self._timeout = timeout
+        self._owner = uuid4().hex
+
+    async def acquire(self) -> None:
+        """Block until a permit is acquired."""
+        await self._system.ask(
+            self._region_ref,
+            lambda reply_to: ShardEnvelope(
+                self._name,
+                SemaphoreAcquire(owner=self._owner, reply_to=reply_to),
+            ),
+            timeout=self._timeout,
+        )
+
+    async def try_acquire(self) -> bool:
+        """Try to acquire a permit without blocking. Returns True if acquired."""
+        result: SemaphoreTryResult = await self._system.ask(
+            self._region_ref,
+            lambda reply_to: ShardEnvelope(
+                self._name,
+                SemaphoreTryAcquire(owner=self._owner, reply_to=reply_to),
+            ),
+            timeout=self._timeout,
+        )
+        return result.acquired
+
+    async def release(self) -> bool:
+        """Release a permit. Returns False if not a holder."""
+        result: SemaphoreReleased = await self._system.ask(
+            self._region_ref,
+            lambda reply_to: ShardEnvelope(
+                self._name,
+                SemaphoreRelease(owner=self._owner, reply_to=reply_to),
+            ),
+            timeout=self._timeout,
+        )
+        return result.released
