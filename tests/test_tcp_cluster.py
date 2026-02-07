@@ -141,12 +141,8 @@ async def test_cross_system_tell_via_tcp() -> None:
             assert "hello from B" in received
 
 
-async def test_cross_system_sharded_entity(caplog: Any) -> None:
+async def test_cross_system_sharded_entity() -> None:
     """Two ClusteredActorSystems: coordinator on node A, entity ask from node B."""
-    import logging
-
-    caplog.set_level(logging.DEBUG, logger="casty")
-
     async with ClusteredActorSystem(
         name="cluster",
         host="127.0.0.1",
@@ -158,16 +154,18 @@ async def test_cross_system_sharded_entity(caplog: Any) -> None:
             host="127.0.0.1",
             port=0,
             seed_nodes=[("127.0.0.1", port_a)],
-        ) as _system_b:  # noqa: F841
+        ) as system_b:
             # Wait for gossip convergence
             await system_a.wait_for(2, timeout=10.0)
 
-            # Spawn sharded entity on system A (which is first seed = coordinator)
             proxy_a = system_a.spawn(
                 Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
                 "counters",
             )
-            # Give coordinator time to activate
+            system_b.spawn(
+                Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
+                "counters",
+            )
             await asyncio.sleep(0.5)
 
             # Write from A
