@@ -28,4 +28,4 @@ jobs:
     - name: Type check with pyright
       run: uv run pyright src/casty/
     - name: Test with pytest
-      run: uv run pytest
+      run: uv run pytest -n auto
