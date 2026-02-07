@@ -10,10 +10,10 @@ from uuid import uuid4
 
 from casty.actor import Behavior, Behaviors, ShardedBehavior
 from casty.address import ActorAddress
-from casty.cluster_state import NodeAddress
+from casty.cluster_state import ClusterState, NodeAddress
 from casty.mailbox import Mailbox
 from casty.ref import ActorRef
-from casty.cluster import Cluster, ClusterConfig, RegisterCoordinator
+from casty.cluster import Cluster, ClusterConfig, RegisterCoordinator, WaitForMembers
 from casty.remote_transport import RemoteTransport, TcpTransport
 from casty.serialization import JsonSerializer, TypeRegistry
 from casty.system import ActorSystem
@@ -400,6 +400,18 @@ class ClusteredActorSystem(ActorSystem):
             return await asyncio.wait_for(future, timeout=timeout)
         finally:
             self._local_transport.unregister(temp_path)
+
+    async def get_cluster_state(self, *, timeout: float = 5.0) -> ClusterState:
+        """Query the current cluster membership state."""
+        return await self._cluster.get_state(timeout=timeout)
+
+    async def wait_for(self, n: int, *, timeout: float = 60.0) -> ClusterState:
+        """Block until at least *n* members have status ``up``."""
+        return await self.ask(
+            self._cluster.ref,
+            lambda r: WaitForMembers(n=n, reply_to=r),
+            timeout=timeout,
+        )
 
     def distributed(self, *, journal: EventJournal | None = None) -> Distributed:
         """Create a :class:`Distributed` facade for this system."""

@@ -1,215 +1,271 @@
 """
-Multi-Process Cluster Example
-==============================
+Distributed Task Queue
+======================
 
-Run N nodes in separate terminals, each on its own TCP port.
-Node 1 is the seed/coordinator.
+All nodes are symmetric workers. Each submits tasks that get sharded across
+the cluster, processed on whichever node owns the shard, and results queried
+back from any node.
 
-Usage (local terminals):
-    python examples/11_multi_process_cluster/main.py 1      # node 1 on port 25520 (seed)
-    python examples/11_multi_process_cluster/main.py 2      # node 2 on port 25521
-    python examples/11_multi_process_cluster/main.py 3      # node 3 on port 25522
+Usage (local):
+    uv run python examples/11_multi_process_cluster/main.py --port 25520
+    uv run python examples/11_multi_process_cluster/main.py --port 25521 --seed 127.0.0.1:25520
 
 Usage (Docker Compose):
     cd examples/11_multi_process_cluster
-    docker compose up --build --scale node=4
+    docker compose up --build
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import logging
 import socket
-import sys
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from casty import Behaviors, ActorRef, Behavior
+from casty import ActorRef, Behavior, Behaviors
+from casty.config import load_config
+from casty.cluster_state import MemberStatus
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
 
 
-# --- Counter entity ---
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class Increment:
-    amount: int
+class SubmitTask:
+    payload: str
+    iterations: int
 
 
 @dataclass(frozen=True)
-class GetValue:
-    reply_to: ActorRef[int]
+class GetResult:
+    reply_to: ActorRef[TaskResult]
 
 
-type CounterMsg = Increment | GetValue
+@dataclass(frozen=True)
+class TaskResult:
+    task_id: str
+    status: str
+    result: str | None
+    processed_by: str | None = None
 
 
-def counter_entity(entity_id: str) -> Behavior[CounterMsg]:
-    async def setup(_ctx: Any) -> Any:
-        value = 0
-        print(f"  [entity:{entity_id}] spawned")
-
-        async def receive(_ctx: Any, msg: Any) -> Any:
-            nonlocal value
-            match msg:
-                case Increment(amount=amount):
-                    value += amount
-                    print(f"  [entity:{entity_id}] incremented by {amount} -> {value}")
-                case GetValue(reply_to=reply_to):
-                    print(f"  [entity:{entity_id}] get -> {value}")
-                    reply_to.tell(value)
-            return Behaviors.same()
-
-        return Behaviors.receive(receive)
-
-    return Behaviors.setup(setup)
+@dataclass(frozen=True)
+class NodeReport:
+    from_node: str
+    distribution: dict[str, int]
+    total: int
 
 
-# --- Interactive mode ---
+@dataclass(frozen=True)
+class GetFinalReport:
+    reply_to: ActorRef[FinalReport]
 
 
-async def run_interactive(
+@dataclass(frozen=True)
+class FinalReport:
+    distribution: dict[str, int]
+    total: int
+    nodes_reported: int
+
+
+type EntityMsg = SubmitTask | GetResult | NodeReport | GetFinalReport
+
+
+# ---------------------------------------------------------------------------
+# Task entity — state machine via behavior recursion
+# ---------------------------------------------------------------------------
+
+
+def entity_factory(entity_id: str) -> Behavior[EntityMsg]:
+    if entity_id == "report":
+        return report_collecting(reports={}, total=0)
+    return task_pending(entity_id)
+
+
+def task_pending(entity_id: str) -> Behavior[EntityMsg]:
+    async def receive(_ctx: Any, msg: EntityMsg) -> Behavior[EntityMsg]:
+        match msg:
+            case SubmitTask(payload=payload, iterations=n):
+                digest = payload.encode()
+                for _ in range(n):
+                    digest = hashlib.sha256(digest).digest()
+                result = digest.hex()[:16]
+                node = socket.gethostname()
+                print(f"  [task:{entity_id}] processed ({n} iters) -> {result}")
+                return task_completed(entity_id, result, node)
+            case GetResult(reply_to=reply_to):
+                reply_to.tell(TaskResult(entity_id, "pending", None))
+                return Behaviors.same()
+            case _:
+                return Behaviors.same()
+    return Behaviors.receive(receive)
+
+
+def task_completed(entity_id: str, result: str, node: str) -> Behavior[EntityMsg]:
+    async def receive(_ctx: Any, msg: EntityMsg) -> Behavior[EntityMsg]:
+        match msg:
+            case GetResult(reply_to=reply_to):
+                reply_to.tell(TaskResult(entity_id, "completed", result, node))
+                return Behaviors.same()
+            case _:
+                return Behaviors.same()
+    return Behaviors.receive(receive)
+
+
+# ---------------------------------------------------------------------------
+# Report entity — aggregates distribution from all nodes
+# ---------------------------------------------------------------------------
+
+
+def report_collecting(
+    reports: dict[str, dict[str, int]], total: int,
+) -> Behavior[EntityMsg]:
+    async def receive(_ctx: Any, msg: EntityMsg) -> Behavior[EntityMsg]:
+        match msg:
+            case NodeReport(from_node=from_node, distribution=dist, total=node_total):
+                new_reports = {**reports, from_node: dist}
+                return report_collecting(new_reports, total + node_total)
+            case GetFinalReport(reply_to=reply_to):
+                merged: dict[str, int] = {}
+                for dist in reports.values():
+                    for node, count in dist.items():
+                        merged[node] = merged.get(node, 0) + count
+                reply_to.tell(FinalReport(merged, total, len(reports)))
+                return Behaviors.same()
+            case _:
+                return Behaviors.same()
+    return Behaviors.receive(receive)
+
+
+# ---------------------------------------------------------------------------
+# Worker — submit tasks, query results, report
+# ---------------------------------------------------------------------------
+
+
+async def run_worker(
     system: ClusteredActorSystem,
-    proxy: ActorRef[ShardEnvelope[CounterMsg]],
-    node_id: int,
+    proxy: ActorRef[ShardEnvelope[EntityMsg]],
+    worker_id: str,
+    num_tasks: int,
+    num_nodes: int,
 ) -> None:
-    print(f"[node{node_id}] Ready. Commands: inc <entity> <amount> | get <entity> | quit")
+    task_ids = [f"job-{worker_id}-{i}" for i in range(num_tasks)]
 
-    loop = asyncio.get_running_loop()
-    while True:
-        line = await loop.run_in_executor(None, sys.stdin.readline)
-        line = line.strip()
-        if not line:
-            continue
-        if line == "quit":
-            break
+    print(f"[{worker_id}] Submitting {num_tasks} tasks...")
+    start = time.monotonic()
 
-        parts = line.split()
-        if parts[0] == "inc" and len(parts) == 3:
-            entity_id = parts[1]
-            amount = int(parts[2])
-            proxy.tell(ShardEnvelope(entity_id, Increment(amount=amount)))
-            print(f"  -> sent Increment({amount}) to {entity_id}")
+    for tid in task_ids:
+        proxy.tell(
+            ShardEnvelope(tid, SubmitTask(payload=f"doc-{tid}", iterations=500))
+        )
 
-        elif parts[0] == "get" and len(parts) == 2:
-            entity_id = parts[1]
-            try:
-                result = await system.ask(
-                    proxy,
-                    lambda r, eid=entity_id: ShardEnvelope(eid, GetValue(reply_to=r)),
-                    timeout=3.0,
+    await asyncio.sleep(3.0)
+
+    print(f"[{worker_id}] Querying results...")
+    done_count = 0
+    node_counts: dict[str, int] = {}
+    for tid in task_ids:
+        try:
+            result: TaskResult = await system.ask(
+                proxy,
+                lambda r, eid=tid: ShardEnvelope(eid, GetResult(reply_to=r)),
+                timeout=5.0,
+            )
+            mark = "[ok]" if result.status == "completed" else "[..]"
+            print(f"  {mark} {result.task_id}: {result.result} (on {result.processed_by})")
+            if result.status == "completed":
+                done_count += 1
+                if result.processed_by:
+                    node_counts[result.processed_by] = node_counts.get(result.processed_by, 0) + 1
+        except asyncio.TimeoutError:
+            print(f"  [!!] {tid}: timeout")
+
+    elapsed = time.monotonic() - start
+    print(f"[{worker_id}] {done_count}/{num_tasks} completed in {elapsed:.1f}s")
+
+    # Send report to centralized entity
+    proxy.tell(ShardEnvelope(
+        "report", NodeReport(from_node=worker_id, distribution=node_counts, total=done_count),
+    ))
+
+    # Ensure all nodes are still up before querying the consolidated report.
+    await system.wait_for(num_nodes, timeout=60.0)
+
+    for _ in range(30):
+        await asyncio.sleep(1.0)
+        try:
+            report: FinalReport = await system.ask(
+                proxy,
+                lambda r: ShardEnvelope("report", GetFinalReport(reply_to=r)),
+                timeout=3.0,
+            )
+            if report.nodes_reported >= num_nodes:
+                dist = ", ".join(
+                    f"{node}: {count}" for node, count in sorted(report.distribution.items())
                 )
-                print(f"  -> {entity_id} = {result}")
-            except asyncio.TimeoutError:
-                print(f"  -> timeout getting {entity_id}")
-        else:
-            print("  Usage: inc <entity> <amount> | get <entity> | quit")
+                print(f"[{worker_id}] === Final Report ({report.total} tasks) ===")
+                print(f"[{worker_id}]   {dist}")
+                return
+        except asyncio.TimeoutError:
+            pass
+
+    print(f"[{worker_id}] Report incomplete (not all nodes reported)")
 
 
-# --- Auto mode (non-interactive, for Docker) ---
-
-
-async def run_auto_seed(
-    system: ClusteredActorSystem,
-    proxy: ActorRef[ShardEnvelope[CounterMsg]],
-) -> None:
-    """Seed node: write to counter, read back, print result, then stay alive for workers."""
-    await asyncio.sleep(3.0)  # wait for workers to join
-
-    entity = "demo-counter"
-    total = 10
-    print(f"[seed] Incrementing '{entity}' {total} times...")
-    for _ in range(total):
-        proxy.tell(ShardEnvelope(entity, Increment(amount=1)))
-        await asyncio.sleep(0.05)
-
-    await asyncio.sleep(1.0)  # let increments propagate
-
-    try:
-        result = await system.ask(
-            proxy,
-            lambda r: ShardEnvelope(entity, GetValue(reply_to=r)),
-            timeout=5.0,
-        )
-        print(f"[seed] Result: {entity} = {result} (expected {total})")
-    except asyncio.TimeoutError:
-        print(f"[seed] Timeout reading {entity}")
-
-    # Stay alive so workers can query the entity hosted here
-    await asyncio.sleep(10.0)
-    print("[seed] Done, shutting down.")
-
-
-async def run_auto_worker(
-    system: ClusteredActorSystem,
-    proxy: ActorRef[ShardEnvelope[CounterMsg]],
-    host: str,
-) -> None:
-    """Worker node: wait for seed to write, then read the counter."""
-    await asyncio.sleep(8.0)  # wait for seed to finish writing
-
-    entity = "demo-counter"
-    try:
-        result = await system.ask(
-            proxy,
-            lambda r: ShardEnvelope(entity, GetValue(reply_to=r)),
-            timeout=5.0,
-        )
-        print(f"[worker:{host}] Result: {entity} = {result}")
-    except asyncio.TimeoutError:
-        print(f"[worker:{host}] Timeout reading {entity}")
-
-
-# --- Node runner ---
+# ---------------------------------------------------------------------------
+# Node runner
+# ---------------------------------------------------------------------------
 
 
 async def run_node(
-    node_id: int,
-    port: int,
     host: str,
+    port: int,
     bind_host: str,
-    seed_host: str,
-    seed_port: int,
-    auto: bool,
+    seed_nodes: list[tuple[str, int]] | None,
+    num_tasks: int,
+    num_nodes: int,
 ) -> None:
-    seed_nodes: list[tuple[str, int]] = (
-        [] if node_id == 1 else [(seed_host, seed_port)]
-    )
+    worker_id = socket.gethostname()
+    config = load_config(Path(__file__).parent / "casty.toml")
 
-    print(f"[node{node_id}] Starting on {host}:{port} (bind={bind_host})...")
+    print(f"[{worker_id}] Starting...")
 
-    async with ClusteredActorSystem(
-        name="demo-cluster",
+    async with ClusteredActorSystem.from_config(
+        config,
         host=host,
         port=port,
         seed_nodes=seed_nodes,
         bind_host=bind_host,
     ) as system:
         proxy = system.spawn(
-            Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
-            "counters",
+            Behaviors.sharded(entity_factory=entity_factory, num_shards=50),
+            "tasks",
         )
-        await asyncio.sleep(1.0)
 
-        if auto:
-            if node_id == 1:
-                await run_auto_seed(system, proxy)
-            else:
-                await run_auto_worker(system, proxy, host)
-        else:
-            await run_interactive(system, proxy, node_id)
+        state = await system.wait_for(num_nodes)
+        up = sum(1 for m in state.members if m.status == MemberStatus.up)
+        print(f"[{worker_id}] Cluster ready ({up} nodes).")
 
-    print(f"[node{node_id}] Shutdown complete.")
+        await run_worker(system, proxy, worker_id, num_tasks, num_nodes)
+
+    print(f"[{worker_id}] Shutdown.")
 
 
-# --- CLI ---
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Casty multi-process cluster example")
-    parser.add_argument("node_id", type=int, help="Node number (1 = seed)")
-    parser.add_argument("--base-port", type=int, default=25520, help="Base port (default: 25520)")
-    parser.add_argument("--port", type=int, default=None, help="Explicit port (overrides base-port + node_id)")
+    parser = argparse.ArgumentParser(description="Casty Distributed Task Queue")
+    parser.add_argument("--port", type=int, default=25520)
     parser.add_argument(
         "--host",
         default=None,
@@ -221,41 +277,41 @@ def main() -> None:
         help="Address to bind TCP listener. Default: same as --host",
     )
     parser.add_argument(
-        "--seed-host",
+        "--seed",
         default=None,
-        help="Hostname of the seed node. Default: same as --host",
+        help="Seed node address (host:port) to join an existing cluster",
     )
     parser.add_argument(
-        "--seed-port",
+        "--tasks",
         type=int,
-        default=None,
-        help="Port of the seed node. Default: same as --base-port",
+        default=5,
+        help="Number of tasks per worker (default: 5)",
     )
     parser.add_argument(
-        "--auto",
-        action="store_true",
-        help="Non-interactive mode for Docker (seed writes, workers read)",
+        "--nodes",
+        type=int,
+        default=1,
+        help="Wait for N nodes before starting work (default: 1)",
     )
     args = parser.parse_args()
 
-    if args.node_id < 1:
-        parser.error("node_id must be >= 1")
-
-    # Resolve host
     if args.host is None:
         host = "127.0.0.1"
     elif args.host == "auto":
-        # Get the container's IP address (resolvable by other containers)
         host = socket.gethostbyname(socket.gethostname())
     else:
         host = args.host
 
-    port: int = args.port if args.port is not None else args.base_port + args.node_id - 1
     bind_host: str = args.bind_host or host
-    seed_host: str = args.seed_host or host
-    seed_port: int = args.seed_port if args.seed_port is not None else args.base_port
 
-    asyncio.run(run_node(args.node_id, port, host, bind_host, seed_host, seed_port, args.auto))
+    seed_nodes: list[tuple[str, int]] | None = None
+    if args.seed:
+        seed_host, seed_port_str = args.seed.rsplit(":", maxsplit=1)
+        seed_nodes = [(seed_host, int(seed_port_str))]
+
+    asyncio.run(
+        run_node(host, args.port, bind_host, seed_nodes, args.tasks, args.nodes)
+    )
 
 
 if __name__ == "__main__":

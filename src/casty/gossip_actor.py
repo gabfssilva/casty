@@ -126,6 +126,10 @@ def gossip_actor(
                     return Behaviors.same()
 
                 case JoinRequest(node, roles, reply_to):
+                    if node == self_node:
+                        if reply_to is not None:
+                            reply_to.tell(JoinAccepted(state=state))
+                        return Behaviors.same()
                     log.info("Join request from %s:%d", node.host, node.port)
                     new_member = Member(
                         address=node,

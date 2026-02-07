@@ -203,10 +203,7 @@ def pending_behavior(
         role: SetRole,
         sync: SyncAllocations,
     ) -> Behavior[CoordinatorMsg]:
-        should_lead = role.is_leader or (
-            role.leader_node is not None and role.leader_node not in region_nodes
-        )
-        if should_lead:
+        if role.is_leader:
             log.info("Coordinator [%s] activated as leader (buffered=%d)", shard_type, len(buffer))
             return leader_behavior(
                 allocations=sync.allocations,
@@ -260,6 +257,9 @@ def pending_behavior(
                     behavior = try_activate(role, pending_sync)
                     for buffered in buffer:
                         ctx.self.tell(buffered)
+                    if not role.is_leader:
+                        for node in region_nodes:
+                            ctx.self.tell(RegisterRegion(node=node))
                     return behavior
                 return pending_behavior(
                     strategy=strategy,
@@ -281,6 +281,9 @@ def pending_behavior(
                     behavior = try_activate(pending_role, sync)
                     for buffered in buffer:
                         ctx.self.tell(buffered)
+                    if not pending_role.is_leader:
+                        for node in region_nodes:
+                            ctx.self.tell(RegisterRegion(node=node))
                     return behavior
                 return pending_behavior(
                     strategy=strategy,
@@ -454,11 +457,8 @@ def leader_behavior(
             case SetRole(is_leader, leader_node):
                 if is_leader:
                     return Behaviors.same()
-                if leader_node is not None and leader_node not in region_nodes:
-                    log.debug("Ignoring demotion: leader %s:%d has no region for [%s]", leader_node.host, leader_node.port, shard_type)
-                    return Behaviors.same()
                 log.info("Coordinator [%s] demoted to follower", shard_type)
-                return follower_behavior(
+                behavior = follower_behavior(
                     allocations=allocations,
                     nodes=nodes,
                     region_nodes=region_nodes,
@@ -472,6 +472,9 @@ def leader_behavior(
                     system_name=system_name,
                     logger=log,
                 )
+                for node in region_nodes:
+                    ctx.self.tell(RegisterRegion(node=node))
+                return behavior
 
             case SyncAllocations(new_allocs, new_epoch):
                 if new_epoch > epoch:
@@ -611,21 +614,6 @@ def follower_behavior(
             case SetRole(is_leader, new_leader_node):
                 if is_leader:
                     log.info("Coordinator [%s] promoted to leader", shard_type)
-                    return leader_behavior(
-                        allocations=allocations,
-                        nodes=nodes,
-                        region_nodes=region_nodes,
-                        strategy=strategy,
-                        num_replicas=num_replicas,
-                        publish_ref=publish_ref,
-                        shard_type=shard_type,
-                        epoch=epoch,
-                        remote_transport=remote_transport,
-                        system_name=system_name,
-                        logger=log,
-                    )
-                if new_leader_node is not None and new_leader_node not in region_nodes:
-                    log.info("Coordinator [%s] promoting to leader: %s:%d has no region", shard_type, new_leader_node.host, new_leader_node.port)
                     return leader_behavior(
                         allocations=allocations,
                         nodes=nodes,

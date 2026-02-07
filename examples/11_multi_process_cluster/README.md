@@ -1,32 +1,32 @@
-# Multi-Process Cluster Example
+# Distributed Task Queue
 
-Runs multiple Casty nodes as separate processes, each on its own TCP port.
-Node 1 acts as the seed/coordinator. Other nodes join through it.
+All nodes are symmetric workers. Each submits tasks that get sharded across
+the cluster, processed on whichever node owns the shard, and results queried
+back from any node.
 
-The example spawns a sharded counter entity and demonstrates
-sending increments and reading values across the cluster.
+Tasks are sharded entities with a state machine: `pending` -> `completed`.
+Each task receives a payload, computes an iterative SHA-256 hash (simulating
+CPU work), and stores the result. Any worker can query any task's result,
+even if it lives on a different node.
+
+## Configuration
+
+Cluster settings live in `casty.toml`. Per-node host/port/seed are passed
+via CLI args, overriding the TOML defaults.
 
 ## Running locally
 
 Open separate terminals from the project root:
 
 ```bash
-# Terminal 1 — seed node (port 25520)
-uv run python examples/11_multi_process_cluster/main.py 1
+# Terminal 1 — first node (starts the cluster)
+uv run python examples/11_multi_process_cluster/main.py --port 25520
 
-# Terminal 2 — worker (port 25521)
-uv run python examples/11_multi_process_cluster/main.py 2
+# Terminal 2 — joins via seed
+uv run python examples/11_multi_process_cluster/main.py --port 25521 --seed 127.0.0.1:25520
 
-# Terminal 3 — worker (port 25522)
-uv run python examples/11_multi_process_cluster/main.py 3
-```
-
-Each node starts an interactive prompt with the following commands:
-
-```
-inc <entity> <amount>   — increment a counter entity
-get <entity>            — read the current value
-quit                    — shut down the node
+# Terminal 3 — joins via seed
+uv run python examples/11_multi_process_cluster/main.py --port 25522 --seed 127.0.0.1:25520
 ```
 
 ## Running with Docker Compose
@@ -37,29 +37,34 @@ From this directory:
 docker compose up --build
 ```
 
-This starts one seed and one worker in `--auto` mode (non-interactive).
-The seed increments a counter 10 times, then both nodes read the result.
+This starts 3 identical nodes. All use `node-1:25520` as seed — each service
+name is DNS-resolvable within the Docker network. `node-1` receives its own
+join request and discards it; the other nodes join through it. Gossip then
+propagates the full cluster state.
 
-To scale to more workers:
+To add more nodes, add entries to `docker-compose.yml`:
 
-```bash
-docker compose up --build --scale node=4
+```yaml
+  node-4:
+    <<: *node
+    hostname: node-4
+  node-5:
+    <<: *node
+    hostname: node-5
 ```
 
 ## CLI reference
 
 ```
-usage: main.py [-h] [--base-port BASE_PORT] [--port PORT] [--host HOST]
-               [--bind-host BIND_HOST] [--seed-host SEED_HOST]
-               [--seed-port SEED_PORT] [--auto]
-               node_id
+usage: main.py [-h] [--port PORT] [--host HOST] [--bind-host BIND_HOST]
+               [--seed SEED] [--tasks TASKS]
 
-  node_id              Node number (1 = seed)
-  --base-port          Base port (default: 25520)
-  --port               Explicit port (overrides base-port + node_id)
-  --host               Identity hostname; use 'auto' for container IP (default: 127.0.0.1)
-  --bind-host          Address to bind TCP listener (default: same as --host)
-  --seed-host          Hostname of the seed node (default: same as --host)
-  --seed-port          Port of the seed node (default: same as --base-port)
-  --auto               Non-interactive mode for Docker
+  --port         TCP port (default: 25520)
+  --host         Identity hostname; 'auto' for container IP (default: 127.0.0.1)
+  --bind-host    Address to bind TCP listener (default: same as --host)
+  --seed         Seed node address (host:port) to join existing cluster
+  --tasks        Tasks per worker (default: 5)
+
+The final report automatically detects how many nodes are in the cluster
+by querying the cluster membership state — no need to specify the node count.
 ```

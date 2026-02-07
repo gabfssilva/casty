@@ -70,12 +70,18 @@ class RegisterCoordinator:
 
 
 @dataclass(frozen=True)
+class WaitForMembers:
+    n: int
+    reply_to: ActorRef[ClusterState]
+
+
+@dataclass(frozen=True)
 class JoinRetry:
     pass
 
 
 type ClusterCmd = (
-    GetState | NodeUnreachable | PublishAllocations | RegisterCoordinator | JoinRetry | ClusterState
+    GetState | WaitForMembers | NodeUnreachable | PublishAllocations | RegisterCoordinator | JoinRetry | ClusterState
 )
 
 
@@ -104,13 +110,30 @@ def cluster_receive(
     logger: logging.Logger,
     coordinators: dict[str, ActorRef[CoordinatorMsg]],
     cluster_state: ClusterState | None,
+    waiters: tuple[WaitForMembers, ...] = (),
 ) -> Behavior[ClusterCmd]:
     """Pure receive behavior — all state in parameters, returns new behavior."""
+
+    def _up_count(state: ClusterState) -> int:
+        return sum(1 for m in state.members if m.status == MemberStatus.up)
+
+    def _notify_waiters(
+        state: ClusterState, pending: tuple[WaitForMembers, ...],
+    ) -> tuple[WaitForMembers, ...]:
+        up = _up_count(state)
+        remaining: list[WaitForMembers] = []
+        for w in pending:
+            if up >= w.n:
+                w.reply_to.tell(state)
+            else:
+                remaining.append(w)
+        return tuple(remaining)
 
     def _next(
         *,
         new_coordinators: dict[str, ActorRef[CoordinatorMsg]] | None = None,
         new_cluster_state: ClusterState | None = None,
+        new_waiters: tuple[WaitForMembers, ...] | None = None,
     ) -> Behavior[ClusterCmd]:
         return cluster_receive(
             gossip_ref=gossip_ref,
@@ -126,6 +149,9 @@ def cluster_receive(
             cluster_state=new_cluster_state
             if new_cluster_state is not None
             else cluster_state,
+            waiters=new_waiters
+            if new_waiters is not None
+            else waiters,
         )
 
     async def receive(
@@ -135,6 +161,12 @@ def cluster_receive(
             case GetState(reply_to):
                 gossip_ref.tell(GetClusterState(reply_to=reply_to))
                 return Behaviors.same()
+
+            case WaitForMembers(n, reply_to):
+                if cluster_state is not None and _up_count(cluster_state) >= n:
+                    reply_to.tell(cluster_state)
+                    return Behaviors.same()
+                return _next(new_waiters=(*waiters, msg))
 
             case NodeUnreachable(node):
                 logger.warning("Node unreachable: %s:%d", node.host, node.port)
@@ -209,7 +241,8 @@ def cluster_receive(
                         )
                     )
                     coord_ref.tell(UpdateTopology(available_nodes=up_nodes))
-                return _next(new_cluster_state=state)
+                remaining = _notify_waiters(state, waiters)
+                return _next(new_cluster_state=state, new_waiters=remaining)
 
             case JoinRetry():
                 if cluster_state is None or len(cluster_state.members) <= 1:
