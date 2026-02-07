@@ -1,6 +1,6 @@
 [project]
 name = "casty"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A minimalist, type-safe actor framework for Python 3.13+ inspired by Akka Typed"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,8 +29,11 @@ Repository = "https://github.com/gabfssilva/casty"
 Documentation = "https://github.com/gabfssilva/casty#readme"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/casty"]

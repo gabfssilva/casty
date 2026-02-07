@@ -3,7 +3,7 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "casty"
-version = "0.1.0"
+version = "0.3.1.dev0+gf795f3951.d20260207"
 source = { editable = "." }
 
 [package.optional-dependencies]
