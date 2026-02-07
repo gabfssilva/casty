@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 
 from casty import ActorSystem
-from casty._shard_coordinator_actor import (
+from casty.shard_coordinator_actor import (
     shard_coordinator_actor,
     GetShardLocation,
     LeastShardStrategy,

@@ -8,7 +8,7 @@ from casty.ref import ActorRef
 from casty.remote_transport import MessageEnvelope, RemoteTransport, TcpTransport
 from casty.serialization import JsonSerializer, TypeRegistry
 from casty.transport import LocalTransport
-from casty._shard_coordinator_actor import GetShardLocation, ShardLocation
+from casty.shard_coordinator_actor import GetShardLocation, ShardLocation
 from casty.cluster_state import NodeAddress
 
 

@@ -4,6 +4,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from casty.actor import Behavior
     from casty.mailbox import Mailbox
     from casty.ref import ActorRef
 
@@ -17,7 +18,7 @@ class ActorContext[M](Protocol):
 
     def spawn[C](
         self,
-        behavior: Any,
+        behavior: Behavior[C],
         name: str,
         *,
         mailbox: Mailbox[C] | None = None,

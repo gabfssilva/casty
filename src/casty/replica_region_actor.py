@@ -6,7 +6,7 @@ from typing import Any
 
 from casty.actor import Behavior, Behaviors
 from casty.journal import EventJournal
-from casty.replication import ReplicateEvents
+from casty.replication import ReplicateEvents, ReplicateEventsAck
 
 
 def replica_region_actor[S, E](
@@ -21,36 +21,39 @@ def replica_region_actor[S, E](
     and applies events to maintain replica state.
     """
 
-    async def setup(ctx: Any) -> Any:
-        entity_states: dict[str, S] = {}
-        entity_sequence_nrs: dict[str, int] = {}
-
+    def active(
+        entity_states: dict[str, S],
+        entity_sequence_nrs: dict[str, int],
+    ) -> Behavior[Any]:
         async def receive(ctx: Any, msg: Any) -> Any:
             match msg:
-                case ReplicateEvents(entity_id=entity_id, events=events, reply_to=reply_to):
+                case ReplicateEvents(
+                    entity_id=entity_id, events=events, reply_to=reply_to
+                ):
                     state = entity_states.get(entity_id, initial_state)
 
-                    # Persist events to local journal
                     await journal.persist(entity_id, events)
 
-                    # Apply events to state
+                    highest_seq = entity_sequence_nrs.get(entity_id, 0)
                     for persisted in events:
                         state = on_event(state, persisted.event)
-                        entity_sequence_nrs[entity_id] = persisted.sequence_nr
+                        highest_seq = persisted.sequence_nr
 
-                    entity_states[entity_id] = state
+                    new_entity_states = {**entity_states, entity_id: state}
+                    new_sequence_nrs = {**entity_sequence_nrs, entity_id: highest_seq}
 
-                    # Send ack if requested
                     if reply_to is not None:
-                        from casty.replication import ReplicateEventsAck
-                        highest_seq = entity_sequence_nrs.get(entity_id, 0)
-                        reply_to.tell(ReplicateEventsAck(entity_id=entity_id, sequence_nr=highest_seq))
+                        reply_to.tell(
+                            ReplicateEventsAck(
+                                entity_id=entity_id, sequence_nr=highest_seq
+                            )
+                        )
 
-                    return Behaviors.same()
+                    return active(new_entity_states, new_sequence_nrs)
 
                 case _:
                     return Behaviors.same()
 
         return Behaviors.receive(receive)
 
-    return Behaviors.setup(setup)
+    return active({}, {})

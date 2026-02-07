@@ -15,48 +15,48 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class _Put:
+class Put:
     value: Any
     reply_to: ActorRef[Any]
 
 
 @dataclass(frozen=True)
-class _Get:
+class Get:
     reply_to: ActorRef[Any]
 
 
 @dataclass(frozen=True)
-class _Delete:
+class Delete:
     reply_to: ActorRef[bool]
 
 
 @dataclass(frozen=True)
-class _Contains:
+class Contains:
     reply_to: ActorRef[bool]
 
 
-type _MapEntryMsg = _Put | _Get | _Delete | _Contains
+type MapEntryMsg = Put | Get | Delete | Contains
 
 
-def map_entity(entity_id: str) -> Behavior[_MapEntryMsg]:
+def map_entity(entity_id: str) -> Behavior[MapEntryMsg]:
     """Sharded map entry behavior. State via closure, starts as None."""
 
-    def active(value: Any) -> Behavior[_MapEntryMsg]:
+    def active(value: Any) -> Behavior[MapEntryMsg]:
         async def receive(
-            ctx: ActorContext[_MapEntryMsg], msg: _MapEntryMsg
-        ) -> Behavior[_MapEntryMsg]:
+            ctx: ActorContext[MapEntryMsg], msg: MapEntryMsg
+        ) -> Behavior[MapEntryMsg]:
             match msg:
-                case _Put(new_value, reply_to):
+                case Put(new_value, reply_to):
                     reply_to.tell(value)
                     return active(new_value)
-                case _Get(reply_to):
+                case Get(reply_to):
                     reply_to.tell(value)
                     return Behaviors.same()
-                case _Delete(reply_to):
+                case Delete(reply_to):
                     existed = value is not None
                     reply_to.tell(existed)
                     return active(None)
-                case _Contains(reply_to):
+                case Contains(reply_to):
                     reply_to.tell(value is not None)
                     return Behaviors.same()
 
@@ -69,24 +69,24 @@ def map_entity(entity_id: str) -> Behavior[_MapEntryMsg]:
 
 
 @dataclass(frozen=True)
-class _ValueSet:
+class ValueSet:
     value: Any
 
 
 @dataclass(frozen=True)
-class _ValueDeleted:
+class ValueDeleted:
     pass
 
 
-type _MapEntryEvent = _ValueSet | _ValueDeleted
+type MapEntryEvent = ValueSet | ValueDeleted
 
 
-def _apply_event(state: Any, event: _MapEntryEvent) -> Any:
+def apply_event(state: Any, event: MapEntryEvent) -> Any:
     """Pure event applier for persistent map entry."""
     match event:
-        case _ValueSet(value):
+        case ValueSet(value):
             return value
-        case _ValueDeleted():
+        case ValueDeleted():
             return None
         case _:
             msg = f"Unknown map entry event: {type(event)}"
@@ -95,7 +95,7 @@ def _apply_event(state: Any, event: _MapEntryEvent) -> Any:
 
 def persistent_map_entity(
     journal: EventJournal,
-) -> Callable[[str], Behavior[_MapEntryMsg]]:
+) -> Callable[[str], Behavior[MapEntryMsg]]:
     """Factory that returns an entity factory for event-sourced map entries.
 
     Usage::
@@ -107,25 +107,25 @@ def persistent_map_entity(
         )
     """
 
-    def factory(entity_id: str) -> Behavior[_MapEntryMsg]:
+    def factory(entity_id: str) -> Behavior[MapEntryMsg]:
         async def on_command(
-            ctx: ActorContext[_MapEntryMsg], state: Any, msg: _MapEntryMsg
-        ) -> Behavior[_MapEntryMsg]:
+            ctx: ActorContext[MapEntryMsg], state: Any, msg: MapEntryMsg
+        ) -> Behavior[MapEntryMsg]:
             match msg:
-                case _Put(new_value, reply_to):
+                case Put(new_value, reply_to):
                     reply_to.tell(state)
                     return Behaviors.persisted(
-                        [_ValueSet(new_value)], then=Behaviors.same()
+                        [ValueSet(new_value)], then=Behaviors.same()
                     )
-                case _Get(reply_to):
+                case Get(reply_to):
                     reply_to.tell(state)
                     return Behaviors.same()
-                case _Delete(reply_to):
+                case Delete(reply_to):
                     reply_to.tell(state is not None)
                     return Behaviors.persisted(
-                        [_ValueDeleted()], then=Behaviors.same()
+                        [ValueDeleted()], then=Behaviors.same()
                     )
-                case _Contains(reply_to):
+                case Contains(reply_to):
                     reply_to.tell(state is not None)
                     return Behaviors.same()
 
@@ -133,14 +133,14 @@ def persistent_map_entity(
             entity_id=entity_id,
             journal=journal,
             initial_state=None,
-            on_event=_apply_event,
+            on_event=apply_event,
             on_command=on_command,
         )
 
     return factory
 
 
-def map_behavior(*, num_shards: int = 100) -> ShardedBehavior[_MapEntryMsg]:
+def map_behavior(*, num_shards: int = 100) -> ShardedBehavior[MapEntryMsg]:
     """Returns a ShardedBehavior suitable for ClusteredActorSystem.spawn()."""
     return Behaviors.sharded(entity_factory=map_entity, num_shards=num_shards)
 
@@ -152,7 +152,7 @@ class Dict[K, V]:
         self,
         *,
         system: ActorSystem,
-        region_ref: ActorRef[ShardEnvelope[_MapEntryMsg]],
+        region_ref: ActorRef[ShardEnvelope[MapEntryMsg]],
         name: str,
         timeout: float = 5.0,
     ) -> None:
@@ -169,7 +169,7 @@ class Dict[K, V]:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._entity_id(key), _Put(value=value, reply_to=reply_to)
+                self._entity_id(key), Put(value=value, reply_to=reply_to)
             ),
             timeout=self._timeout,
         )
@@ -182,7 +182,7 @@ class Dict[K, V]:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._entity_id(key), _Get(reply_to=reply_to)
+                self._entity_id(key), Get(reply_to=reply_to)
             ),
             timeout=self._timeout,
         )
@@ -192,7 +192,7 @@ class Dict[K, V]:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._entity_id(key), _Delete(reply_to=reply_to)
+                self._entity_id(key), Delete(reply_to=reply_to)
             ),
             timeout=self._timeout,
         )
@@ -202,7 +202,7 @@ class Dict[K, V]:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._entity_id(key), _Contains(reply_to=reply_to)
+                self._entity_id(key), Contains(reply_to=reply_to)
             ),
             timeout=self._timeout,
         )

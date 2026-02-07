@@ -23,7 +23,7 @@ class HeartbeatTick:
 @dataclass(frozen=True)
 class HeartbeatRequest:
     from_node: NodeAddress
-    reply_to: ActorRef[Any]
+    reply_to: ActorRef[HeartbeatMsg]
 
 
 @dataclass(frozen=True)
@@ -76,10 +76,23 @@ def heartbeat_actor(
                         )
                 return Behaviors.same()
 
-            case HeartbeatTick(members):
-                _send_heartbeats(
-                    members, self_node, ctx.self, remote_transport, system_name
-                )
+            case HeartbeatTick(members=members):
+                if remote_transport is not None:
+                    for member in members:
+                        if member == self_node:
+                            continue
+                        hb_addr = ActorAddress(
+                            system=system_name,
+                            path="/_cluster/_heartbeat",
+                            host=member.host,
+                            port=member.port,
+                        )
+                        hb_ref: ActorRef[HeartbeatMsg] = remote_transport.make_ref(
+                            hb_addr
+                        )
+                        hb_ref.tell(
+                            HeartbeatRequest(from_node=self_node, reply_to=ctx.self)
+                        )
                 return Behaviors.same()
 
             case _:
@@ -87,26 +100,3 @@ def heartbeat_actor(
 
     return Behaviors.receive(receive)
 
-
-def _send_heartbeats(
-    members: frozenset[NodeAddress],
-    self_node: NodeAddress,
-    self_ref: ActorRef[Any],
-    remote_transport: RemoteTransport | None,
-    system_name: str,
-) -> None:
-    """Send HeartbeatRequest to each peer's heartbeat actor via TCP."""
-    if remote_transport is None:
-        return
-
-    for member in members:
-        if member == self_node:
-            continue
-        hb_addr = ActorAddress(
-            system=system_name,
-            path="/_cluster/_heartbeat",
-            host=member.host,
-            port=member.port,
-        )
-        hb_ref: ActorRef[Any] = remote_transport.make_ref(hb_addr)
-        hb_ref.tell(HeartbeatRequest(from_node=self_node, reply_to=self_ref))

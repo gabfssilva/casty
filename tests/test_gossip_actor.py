@@ -11,7 +11,7 @@ from casty.cluster_state import (
     NodeAddress,
     VectorClock,
 )
-from casty._gossip_actor import (
+from casty.gossip_actor import (
     gossip_actor,
     GossipMessage,
     GetClusterState,

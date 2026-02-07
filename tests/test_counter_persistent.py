@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 
 from casty import ActorSystem, InMemoryJournal
-from casty._shard_coordinator_actor import LeastShardStrategy, shard_coordinator_actor
-from casty._shard_region_actor import shard_region_actor
+from casty.shard_coordinator_actor import LeastShardStrategy, shard_coordinator_actor
+from casty.shard_region_actor import shard_region_actor
 from casty.cluster_state import NodeAddress
 from casty.distributed import Counter
-from casty.distributed._counter import persistent_counter_entity
+from casty.distributed.counter import persistent_counter_entity
 
 
 async def test_persistent_counter_survives_replay() -> None:
@@ -184,7 +184,7 @@ async def test_persistent_counter_events_in_journal() -> None:
     # Check journal contents
     events = await journal.load("metrics")
     assert len(events) == 2
-    from casty.distributed._counter import _Decremented, _Incremented
+    from casty.distributed.counter import Decremented, Incremented
 
-    assert events[0].event == _Incremented(5)
-    assert events[1].event == _Decremented(2)
+    assert events[0].event == Incremented(5)
+    assert events[1].event == Decremented(2)

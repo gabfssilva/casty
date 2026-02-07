@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from casty.distributed import Distributed
     from casty.journal import EventJournal
 
-from casty._shard_coordinator_actor import (
+from casty.shard_coordinator_actor import (
     CoordinatorMsg,
     GetShardLocation,
     LeastShardStrategy,
@@ -41,7 +41,7 @@ class ShardEnvelope[M]:
     message: M
 
 
-def _entity_shard(entity_id: str, num_shards: int) -> int:
+def entity_shard(entity_id: str, num_shards: int) -> int:
     """Deterministic shard assignment — consistent across processes."""
     digest = hashlib.md5(entity_id.encode(), usedforsecurity=False).digest()
     return int.from_bytes(digest[:4], "big") % num_shards
@@ -52,7 +52,7 @@ def _entity_shard(entity_id: str, num_shards: int) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _shard_proxy_behavior(
+def shard_proxy_behavior(
     *,
     coordinator: ActorRef[CoordinatorMsg],
     local_region: ActorRef[Any],
@@ -69,57 +69,70 @@ def _shard_proxy_behavior(
     - Buffers messages while waiting for coordinator response
     """
 
-    async def setup(_ctx: Any) -> Any:
-        shard_cache: dict[int, NodeAddress] = {}
-        buffer: dict[int, list[ShardEnvelope[Any]]] = {}
-
-        def _route(envelope: ShardEnvelope[Any], node: NodeAddress) -> None:
-            if node == self_node:
-                local_region.tell(envelope)
-            elif remote_transport is not None:
-                remote_addr = ActorAddress(
-                    system=system_name,
-                    path=f"/_region-{shard_name}",
-                    host=node.host,
-                    port=node.port,
-                )
-                remote_ref: ActorRef[Any] = remote_transport.make_ref(remote_addr)
-                remote_ref.tell(envelope)
-
+    def active(
+        shard_cache: dict[int, NodeAddress],
+        buffer: dict[int, list[ShardEnvelope[Any]]],
+    ) -> Behavior[Any]:
         async def receive(ctx: Any, msg: Any) -> Any:
             match msg:
                 case ShardEnvelope():
                     envelope = cast(ShardEnvelope[Any], msg)
-                    shard_id = _entity_shard(envelope.entity_id, num_shards)
+                    shard_id = entity_shard(envelope.entity_id, num_shards)
 
                     if shard_id in shard_cache:
-                        _route(envelope, shard_cache[shard_id])
+                        node = shard_cache[shard_id]
+                        if node == self_node:
+                            local_region.tell(envelope)
+                        elif remote_transport is not None:
+                            remote_addr = ActorAddress(
+                                system=system_name,
+                                path=f"/_region-{shard_name}",
+                                host=node.host,
+                                port=node.port,
+                            )
+                            remote_ref: ActorRef[Any] = (
+                                remote_transport.make_ref(remote_addr)
+                            )
+                            remote_ref.tell(envelope)
                         return Behaviors.same()
 
-                    # Buffer and ask coordinator
-                    buf = buffer.setdefault(shard_id, [])
-                    buf.append(envelope)
-                    if len(buf) == 1:
-                        # First message for this shard — ask coordinator
+                    existing_buf = buffer.get(shard_id, [])
+                    new_buf = [*existing_buf, envelope]
+                    new_buffer = {**buffer, shard_id: new_buf}
+                    if not existing_buf:
                         coordinator.tell(
-                            GetShardLocation(shard_id=shard_id, reply_to=ctx.self)
+                            GetShardLocation(
+                                shard_id=shard_id, reply_to=ctx.self
+                            )
                         )
-                    return Behaviors.same()
+                    return active(shard_cache, new_buffer)
 
                 case ShardLocation(shard_id=sid, node=node):
-                    shard_cache[sid] = node
-                    # Drain buffered messages
-                    buffered = buffer.pop(sid, [])
+                    new_cache = {**shard_cache, sid: node}
+                    buffered = buffer.get(sid, [])
+                    new_buffer = {k: v for k, v in buffer.items() if k != sid}
                     for envelope in buffered:
-                        _route(envelope, node)
-                    return Behaviors.same()
+                        if node == self_node:
+                            local_region.tell(envelope)
+                        elif remote_transport is not None:
+                            remote_addr = ActorAddress(
+                                system=system_name,
+                                path=f"/_region-{shard_name}",
+                                host=node.host,
+                                port=node.port,
+                            )
+                            remote_ref: ActorRef[Any] = (
+                                remote_transport.make_ref(remote_addr)
+                            )
+                            remote_ref.tell(envelope)
+                    return active(new_cache, new_buffer)
 
                 case _:
                     return Behaviors.same()
 
         return Behaviors.receive(receive)
 
-    return Behaviors.setup(setup)
+    return active({}, {})
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +249,7 @@ class ClusteredActorSystem(ActorSystem):
     def _spawn_sharded[M](
         self, sharded: ShardedBehavior[M], name: str
     ) -> ActorRef[ShardEnvelope[M]]:
-        from casty._shard_region_actor import shard_region_actor
+        from casty.shard_region_actor import shard_region_actor
 
         # Build available nodes from self + seed_nodes
         available_nodes = frozenset(
@@ -260,7 +273,7 @@ class ClusteredActorSystem(ActorSystem):
 
         # Proxy — the ref users interact with
         proxy_ref: ActorRef[Any] = super().spawn(
-            _shard_proxy_behavior(
+            shard_proxy_behavior(
                 coordinator=coordinator,
                 local_region=region_ref,
                 self_node=self._self_node,

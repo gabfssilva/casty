@@ -16,7 +16,7 @@ from casty.ref import ActorRef
 from casty.serialization import JsonSerializer, Serializer, TypeRegistry
 from casty.sharding import ShardEnvelope
 from casty.transport import LocalTransport
-from casty._shard_coordinator_actor import GetShardLocation, ShardLocation
+from casty.shard_coordinator_actor import GetShardLocation, ShardLocation
 
 
 @dataclass(frozen=True)

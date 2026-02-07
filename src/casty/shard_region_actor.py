@@ -19,14 +19,21 @@ def shard_region_actor(
     Extra keyword arguments (self_node, coordinator, num_shards) are
     accepted for caller compatibility but not used.
     """
-    async def setup(ctx: Any) -> Any:
-        entities: dict[str, ActorRef[Any]] = {}
 
+    def active(entities: dict[str, ActorRef[Any]]) -> Behavior[Any]:
         async def receive(ctx: Any, msg: Any) -> Any:
             match msg:
                 case ShardEnvelope():
                     envelope = cast(ShardEnvelope[Any], msg)
-                    _deliver_local(ctx, entities, envelope.entity_id, envelope.message, entity_factory)
+                    entity_id = envelope.entity_id
+                    if entity_id not in entities:
+                        ref = ctx.spawn(
+                            entity_factory(entity_id), f"entity-{entity_id}"
+                        )
+                        new_entities = {**entities, entity_id: ref}
+                        new_entities[entity_id].tell(envelope.message)
+                        return active(new_entities)
+                    entities[entity_id].tell(envelope.message)
                     return Behaviors.same()
 
                 case _:
@@ -34,17 +41,4 @@ def shard_region_actor(
 
         return Behaviors.receive(receive)
 
-    return Behaviors.setup(setup)
-
-
-def _deliver_local(
-    ctx: Any,
-    entities: dict[str, ActorRef[Any]],
-    entity_id: str,
-    msg: Any,
-    entity_factory: Callable[[str], Behavior[Any]],
-) -> None:
-    if entity_id not in entities:
-        ref = ctx.spawn(entity_factory(entity_id), f"entity-{entity_id}")
-        entities[entity_id] = ref
-    entities[entity_id].tell(msg)
+    return active({})

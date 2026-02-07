@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from casty import ActorSystem
 from casty.journal import InMemoryJournal, PersistedEvent
 from casty.replication import ReplicateEvents
-from casty._replica_region_actor import replica_region_actor
+from casty.replica_region_actor import replica_region_actor
 
 
 @dataclass(frozen=True)

@@ -11,7 +11,7 @@ from casty.messages import Terminated
 from casty.ref import ActorRef
 from casty.supervision import OneForOneStrategy
 from casty.transport import LocalTransport
-from casty._cell import ActorCell
+from casty.cell import ActorCell
 
 
 @dataclass(frozen=True)

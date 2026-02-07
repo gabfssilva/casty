@@ -5,7 +5,7 @@ import asyncio
 
 from casty import ActorSystem
 from casty.cluster_state import NodeAddress
-from casty._shard_coordinator_actor import (
+from casty.shard_coordinator_actor import (
     shard_coordinator_actor,
     GetShardLocation,
     ShardLocation,

@@ -35,7 +35,7 @@ from casty.supervision import Directive, SupervisionStrategy
 from casty.transport import LocalTransport, MessageTransport
 
 
-class _CellContext[M]:
+class CellContext[M]:
     """Concrete implementation of the ActorContext protocol for a cell."""
 
     def __init__(self, cell: ActorCell[M]) -> None:
@@ -51,7 +51,7 @@ class _CellContext[M]:
 
     def spawn[C](
         self,
-        behavior: Any,
+        behavior: Behavior[C],
         name: str,
         *,
         mailbox: Mailbox[C] | None = None,
@@ -164,7 +164,7 @@ class ActorCell[M]:
         self._ack_queue: asyncio.Queue[Any] = asyncio.Queue()
 
         # Context
-        self._ctx: _CellContext[M] = _CellContext(self)
+        self._ctx: CellContext[M] = CellContext(self)
 
         # Create the ref with address + transport
         effective_transport: MessageTransport = ref_transport or local_transport

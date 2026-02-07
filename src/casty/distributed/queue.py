@@ -21,27 +21,27 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class _Enqueue:
+class Enqueue:
     value: Any
     reply_to: ActorRef[None]
 
 
 @dataclass(frozen=True)
-class _Dequeue:
+class Dequeue:
     reply_to: ActorRef[Any]
 
 
 @dataclass(frozen=True)
-class _Peek:
+class Peek:
     reply_to: ActorRef[Any]
 
 
 @dataclass(frozen=True)
-class _QueueSize:
+class QueueSize:
     reply_to: ActorRef[int]
 
 
-type _QueueMsg = _Enqueue | _Dequeue | _Peek | _QueueSize
+type QueueMsg = Enqueue | Dequeue | Peek | QueueSize
 
 
 # ---------------------------------------------------------------------------
@@ -49,27 +49,27 @@ type _QueueMsg = _Enqueue | _Dequeue | _Peek | _QueueSize
 # ---------------------------------------------------------------------------
 
 
-def queue_entity(entity_id: str) -> Behavior[_QueueMsg]:
+def queue_entity(entity_id: str) -> Behavior[QueueMsg]:
     """Sharded queue entity behavior. State via mutable deque in closure."""
     items: deque[Any] = deque()
 
     async def receive(
-        ctx: ActorContext[_QueueMsg], msg: _QueueMsg
-    ) -> Behavior[_QueueMsg]:
+        ctx: ActorContext[QueueMsg], msg: QueueMsg
+    ) -> Behavior[QueueMsg]:
         match msg:
-            case _Enqueue(value, reply_to):
+            case Enqueue(value, reply_to):
                 items.append(value)
                 reply_to.tell(None)
                 return Behaviors.same()
-            case _Dequeue(reply_to):
+            case Dequeue(reply_to):
                 value = items.popleft() if items else None
                 reply_to.tell(value)
                 return Behaviors.same()
-            case _Peek(reply_to):
+            case Peek(reply_to):
                 value = items[0] if items else None
                 reply_to.tell(value)
                 return Behaviors.same()
-            case _QueueSize(reply_to):
+            case QueueSize(reply_to):
                 reply_to.tell(len(items))
                 return Behaviors.same()
 
@@ -82,24 +82,24 @@ def queue_entity(entity_id: str) -> Behavior[_QueueMsg]:
 
 
 @dataclass(frozen=True)
-class _ItemEnqueued:
+class ItemEnqueued:
     value: Any
 
 
 @dataclass(frozen=True)
-class _ItemDequeued:
+class ItemDequeued:
     pass
 
 
-type _QueueEvent = _ItemEnqueued | _ItemDequeued
+type QueueEvent = ItemEnqueued | ItemDequeued
 
 
-def _apply_event(state: tuple[Any, ...], event: _QueueEvent) -> tuple[Any, ...]:
+def apply_event(state: tuple[Any, ...], event: QueueEvent) -> tuple[Any, ...]:
     """Pure event applier for persistent queue."""
     match event:
-        case _ItemEnqueued(value):
+        case ItemEnqueued(value):
             return (*state, value)
-        case _ItemDequeued():
+        case ItemDequeued():
             return state[1:] if state else state
         case _:
             msg = f"Unknown queue event: {type(event)}"
@@ -108,7 +108,7 @@ def _apply_event(state: tuple[Any, ...], event: _QueueEvent) -> tuple[Any, ...]:
 
 def persistent_queue_entity(
     journal: EventJournal,
-) -> Callable[[str], Behavior[_QueueMsg]]:
+) -> Callable[[str], Behavior[QueueMsg]]:
     """Factory that returns an entity factory for event-sourced queues.
 
     Usage::
@@ -120,30 +120,30 @@ def persistent_queue_entity(
         )
     """
 
-    def factory(entity_id: str) -> Behavior[_QueueMsg]:
+    def factory(entity_id: str) -> Behavior[QueueMsg]:
         async def on_command(
-            ctx: ActorContext[_QueueMsg],
+            ctx: ActorContext[QueueMsg],
             state: tuple[Any, ...],
-            msg: _QueueMsg,
-        ) -> Behavior[_QueueMsg]:
+            msg: QueueMsg,
+        ) -> Behavior[QueueMsg]:
             match msg:
-                case _Enqueue(value, reply_to):
+                case Enqueue(value, reply_to):
                     reply_to.tell(None)
                     return Behaviors.persisted(
-                        [_ItemEnqueued(value)], then=Behaviors.same()
+                        [ItemEnqueued(value)], then=Behaviors.same()
                     )
-                case _Dequeue(reply_to):
+                case Dequeue(reply_to):
                     if state:
                         reply_to.tell(state[0])
                         return Behaviors.persisted(
-                            [_ItemDequeued()], then=Behaviors.same()
+                            [ItemDequeued()], then=Behaviors.same()
                         )
                     reply_to.tell(None)
                     return Behaviors.same()
-                case _Peek(reply_to):
+                case Peek(reply_to):
                     reply_to.tell(state[0] if state else None)
                     return Behaviors.same()
-                case _QueueSize(reply_to):
+                case QueueSize(reply_to):
                     reply_to.tell(len(state))
                     return Behaviors.same()
 
@@ -151,7 +151,7 @@ def persistent_queue_entity(
             entity_id=entity_id,
             journal=journal,
             initial_state=(),
-            on_event=_apply_event,
+            on_event=apply_event,
             on_command=on_command,
         )
 
@@ -163,7 +163,7 @@ def persistent_queue_entity(
 # ---------------------------------------------------------------------------
 
 
-def queue_behavior(*, num_shards: int = 100) -> ShardedBehavior[_QueueMsg]:
+def queue_behavior(*, num_shards: int = 100) -> ShardedBehavior[QueueMsg]:
     """Returns a ShardedBehavior suitable for ClusteredActorSystem.spawn()."""
     return Behaviors.sharded(entity_factory=queue_entity, num_shards=num_shards)
 
@@ -180,7 +180,7 @@ class Queue[V]:
         self,
         *,
         system: ActorSystem,
-        region_ref: ActorRef[ShardEnvelope[_QueueMsg]],
+        region_ref: ActorRef[ShardEnvelope[QueueMsg]],
         name: str,
         timeout: float = 5.0,
     ) -> None:
@@ -194,7 +194,7 @@ class Queue[V]:
         await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._name, _Enqueue(value=value, reply_to=reply_to)
+                self._name, Enqueue(value=value, reply_to=reply_to)
             ),
             timeout=self._timeout,
         )
@@ -204,7 +204,7 @@ class Queue[V]:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._name, _Dequeue(reply_to=reply_to)
+                self._name, Dequeue(reply_to=reply_to)
             ),
             timeout=self._timeout,
         )
@@ -214,7 +214,7 @@ class Queue[V]:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._name, _Peek(reply_to=reply_to)
+                self._name, Peek(reply_to=reply_to)
             ),
             timeout=self._timeout,
         )
@@ -224,7 +224,7 @@ class Queue[V]:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._name, _QueueSize(reply_to=reply_to)
+                self._name, QueueSize(reply_to=reply_to)
             ),
             timeout=self._timeout,
         )

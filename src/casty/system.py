@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from casty.actor import Behavior
-from casty._cell import ActorCell
+from casty.cell import ActorCell
 from casty.address import ActorAddress
 from casty.events import EventStream
 from casty.mailbox import Mailbox
@@ -14,7 +14,7 @@ from casty.ref import ActorRef
 from casty.transport import LocalTransport, MessageTransport
 
 
-class _CallbackTransport:
+class CallbackTransport:
     """Lightweight transport for temporary ask refs."""
 
     def __init__(self, callback: Callable[[Any], None]) -> None:
@@ -87,7 +87,7 @@ class ActorSystem:
 
         temp_ref: ActorRef[R] = ActorRef(
             address=ActorAddress(system=self._name, path=f"/_temp/{id(future)}"),
-            _transport=_CallbackTransport(on_reply),
+            _transport=CallbackTransport(on_reply),
         )
         message = msg_factory(temp_ref)
         ref.tell(message)

@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 
 from casty import ActorSystem, InMemoryJournal
-from casty._shard_coordinator_actor import LeastShardStrategy, shard_coordinator_actor
-from casty._shard_region_actor import shard_region_actor
+from casty.shard_coordinator_actor import LeastShardStrategy, shard_coordinator_actor
+from casty.shard_region_actor import shard_region_actor
 from casty.cluster_state import NodeAddress
 from casty.distributed import Set
-from casty.distributed._set import persistent_set_entity
+from casty.distributed.set import persistent_set_entity
 
 
 async def test_persistent_set_multinode_recovery() -> None:

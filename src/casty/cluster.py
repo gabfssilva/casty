@@ -13,7 +13,7 @@ from casty.cluster_state import (
     MemberStatus,
     NodeAddress,
 )
-from casty._gossip_actor import (
+from casty.gossip_actor import (
     GossipMsg,
     GossipTick,
     GetClusterState,
@@ -21,14 +21,14 @@ from casty._gossip_actor import (
     UpdateShardAllocations,
     gossip_actor,
 )
-from casty._heartbeat_actor import (
+from casty.heartbeat_actor import (
     CheckAvailability,
     HeartbeatMsg,
     HeartbeatTick,
     NodeUnreachable,
     heartbeat_actor,
 )
-from casty._shard_coordinator_actor import (
+from casty.shard_coordinator_actor import (
     CoordinatorMsg,
     NodeDown,
     PublishAllocations,
@@ -56,11 +56,14 @@ class GetState:
 @dataclass(frozen=True)
 class RegisterCoordinator:
     """Registers a replicated coordinator with the cluster actor."""
+
     shard_name: str
     coord_ref: ActorRef[CoordinatorMsg]
 
 
-type ClusterCmd = GetState | NodeUnreachable | PublishAllocations | RegisterCoordinator
+type ClusterCmd = (
+    GetState | NodeUnreachable | PublishAllocations | RegisterCoordinator | ClusterState
+)
 
 
 # --- ClusterConfig ---
@@ -77,26 +80,7 @@ class ClusterConfig:
 # --- cluster_actor behavior ---
 
 
-def _send_role_and_sync(
-    coord_ref: ActorRef[CoordinatorMsg],
-    shard_name: str,
-    cluster_state: ClusterState,
-    self_node: NodeAddress,
-) -> None:
-    """Send SetRole + SyncAllocations to a replicated coordinator."""
-    is_leader = cluster_state.leader == self_node
-    coord_ref.tell(SetRole(
-        is_leader=is_leader,
-        leader_node=cluster_state.leader,
-    ))
-    allocs = cluster_state.shard_allocations.get(shard_name, {})
-    coord_ref.tell(SyncAllocations(
-        allocations=allocs,
-        epoch=cluster_state.allocation_epoch,
-    ))
-
-
-def _cluster_receive(
+def cluster_receive(
     *,
     gossip_ref: ActorRef[GossipMsg],
     heartbeat_ref: ActorRef[HeartbeatMsg],
@@ -112,13 +96,17 @@ def _cluster_receive(
         new_coordinators: dict[str, ActorRef[CoordinatorMsg]] | None = None,
         new_cluster_state: ClusterState | None = None,
     ) -> Behavior[ClusterCmd]:
-        return _cluster_receive(
+        return cluster_receive(
             gossip_ref=gossip_ref,
             heartbeat_ref=heartbeat_ref,
             self_node=self_node,
             logger=logger,
-            coordinators=new_coordinators if new_coordinators is not None else coordinators,
-            cluster_state=new_cluster_state if new_cluster_state is not None else cluster_state,
+            coordinators=new_coordinators
+            if new_coordinators is not None
+            else coordinators,
+            cluster_state=new_cluster_state
+            if new_cluster_state is not None
+            else cluster_state,
         )
 
     async def receive(
@@ -136,31 +124,59 @@ def _cluster_receive(
                 return Behaviors.same()
 
             case PublishAllocations(shard_type, allocations, epoch):
-                gossip_ref.tell(UpdateShardAllocations(
-                    shard_type=shard_type,
-                    allocations=allocations,
-                    epoch=epoch,
-                ))
+                gossip_ref.tell(
+                    UpdateShardAllocations(
+                        shard_type=shard_type,
+                        allocations=allocations,
+                        epoch=epoch,
+                    )
+                )
                 return Behaviors.same()
 
-            case RegisterCoordinator(shard_name, coord_ref):
+            case RegisterCoordinator(shard_name=shard_name, coord_ref=coord_ref):
                 new_coords = {**coordinators, shard_name: coord_ref}
                 if cluster_state is not None:
-                    _send_role_and_sync(coord_ref, shard_name, cluster_state, self_node)
+                    is_leader = cluster_state.leader == self_node
+                    coord_ref.tell(
+                        SetRole(
+                            is_leader=is_leader,
+                            leader_node=cluster_state.leader,
+                        )
+                    )
+                    allocs = cluster_state.shard_allocations.get(shard_name, {})
+                    coord_ref.tell(
+                        SyncAllocations(
+                            allocations=allocs,
+                            epoch=cluster_state.allocation_epoch,
+                        )
+                    )
                 return _next(new_coordinators=new_coords)
 
-            case _:
-                if isinstance(msg, ClusterState):
-                    state: ClusterState = msg  # type: ignore[assignment]
-                    members = frozenset(
-                        m.address
-                        for m in state.members
-                        if m.status in (MemberStatus.up, MemberStatus.joining)
+            case ClusterState() as state:
+                members = frozenset(
+                    m.address
+                    for m in state.members
+                    if m.status in (MemberStatus.up, MemberStatus.joining)
+                )
+                heartbeat_ref.tell(HeartbeatTick(members=members))
+                for shard_name, coord_ref in coordinators.items():
+                    is_leader = state.leader == self_node
+                    coord_ref.tell(
+                        SetRole(
+                            is_leader=is_leader,
+                            leader_node=state.leader,
+                        )
                     )
-                    heartbeat_ref.tell(HeartbeatTick(members=members))
-                    for shard_name, coord_ref in coordinators.items():
-                        _send_role_and_sync(coord_ref, shard_name, state, self_node)
-                    return _next(new_cluster_state=state)
+                    allocs = state.shard_allocations.get(shard_name, {})
+                    coord_ref.tell(
+                        SyncAllocations(
+                            allocations=allocs,
+                            epoch=state.allocation_epoch,
+                        )
+                    )
+                return _next(new_cluster_state=state)
+
+            case _:
                 return Behaviors.same()
 
     return Behaviors.receive(receive)
@@ -258,7 +274,9 @@ def cluster_actor(
                     host=seed_host,
                     port=seed_port,
                 )
-                seed_ref: ActorRef[GossipMsg] = remote_transport.make_ref(seed_gossip_addr)  # type: ignore[assignment]
+                seed_ref: ActorRef[GossipMsg] = remote_transport.make_ref(
+                    seed_gossip_addr
+                )  # type: ignore[assignment]
                 seed_ref.tell(
                     JoinRequest(
                         node=self_node,
@@ -274,7 +292,7 @@ def cluster_actor(
         initial_cluster_state = None if has_seeds else initial_state
 
         return Behaviors.with_lifecycle(
-            _cluster_receive(
+            cluster_receive(
                 gossip_ref=gossip_ref,
                 heartbeat_ref=heartbeat_ref,
                 self_node=self_node,

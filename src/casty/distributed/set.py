@@ -15,55 +15,55 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class _Add:
+class Add:
     value: Any
     reply_to: ActorRef[bool]
 
 
 @dataclass(frozen=True)
-class _Remove:
+class Remove:
     value: Any
     reply_to: ActorRef[bool]
 
 
 @dataclass(frozen=True)
-class _SetContains:
+class SetContains:
     value: Any
     reply_to: ActorRef[bool]
 
 
 @dataclass(frozen=True)
-class _SetSize:
+class SetSize:
     reply_to: ActorRef[int]
 
 
-type _SetMsg = _Add | _Remove | _SetContains | _SetSize
+type SetMsg = Add | Remove | SetContains | SetSize
 
 
-def set_entity(entity_id: str) -> Behavior[_SetMsg]:
+def set_entity(entity_id: str) -> Behavior[SetMsg]:
     """Sharded set entity behavior. State via closure, starts as empty frozenset."""
 
-    def active(items: frozenset[Any]) -> Behavior[_SetMsg]:
+    def active(items: frozenset[Any]) -> Behavior[SetMsg]:
         async def receive(
-            ctx: ActorContext[_SetMsg], msg: _SetMsg
-        ) -> Behavior[_SetMsg]:
+            ctx: ActorContext[SetMsg], msg: SetMsg
+        ) -> Behavior[SetMsg]:
             match msg:
-                case _Add(value, reply_to):
+                case Add(value, reply_to):
                     was_absent = value not in items
                     reply_to.tell(was_absent)
                     if was_absent:
                         return active(items | {value})
                     return Behaviors.same()
-                case _Remove(value, reply_to):
+                case Remove(value, reply_to):
                     was_present = value in items
                     reply_to.tell(was_present)
                     if was_present:
                         return active(items - {value})
                     return Behaviors.same()
-                case _SetContains(value, reply_to):
+                case SetContains(value, reply_to):
                     reply_to.tell(value in items)
                     return Behaviors.same()
-                case _SetSize(reply_to):
+                case SetSize(reply_to):
                     reply_to.tell(len(items))
                     return Behaviors.same()
 
@@ -76,24 +76,24 @@ def set_entity(entity_id: str) -> Behavior[_SetMsg]:
 
 
 @dataclass(frozen=True)
-class _ItemAdded:
+class ItemAdded:
     value: Any
 
 
 @dataclass(frozen=True)
-class _ItemRemoved:
+class ItemRemoved:
     value: Any
 
 
-type _SetEvent = _ItemAdded | _ItemRemoved
+type SetEvent = ItemAdded | ItemRemoved
 
 
-def _apply_event(state: frozenset[Any], event: _SetEvent) -> frozenset[Any]:
+def apply_event(state: frozenset[Any], event: SetEvent) -> frozenset[Any]:
     """Pure event applier for persistent set."""
     match event:
-        case _ItemAdded(value):
+        case ItemAdded(value):
             return state | {value}
-        case _ItemRemoved(value):
+        case ItemRemoved(value):
             return state - {value}
         case _:
             msg = f"Unknown set event: {type(event)}"
@@ -102,7 +102,7 @@ def _apply_event(state: frozenset[Any], event: _SetEvent) -> frozenset[Any]:
 
 def persistent_set_entity(
     journal: EventJournal,
-) -> Callable[[str], Behavior[_SetMsg]]:
+) -> Callable[[str], Behavior[SetMsg]]:
     """Factory that returns an entity factory for event-sourced sets.
 
     Usage::
@@ -114,31 +114,31 @@ def persistent_set_entity(
         )
     """
 
-    def factory(entity_id: str) -> Behavior[_SetMsg]:
+    def factory(entity_id: str) -> Behavior[SetMsg]:
         async def on_command(
-            ctx: ActorContext[_SetMsg], state: frozenset[Any], msg: _SetMsg
-        ) -> Behavior[_SetMsg]:
+            ctx: ActorContext[SetMsg], state: frozenset[Any], msg: SetMsg
+        ) -> Behavior[SetMsg]:
             match msg:
-                case _Add(value, reply_to):
+                case Add(value, reply_to):
                     was_absent = value not in state
                     reply_to.tell(was_absent)
                     if was_absent:
                         return Behaviors.persisted(
-                            [_ItemAdded(value)], then=Behaviors.same()
+                            [ItemAdded(value)], then=Behaviors.same()
                         )
                     return Behaviors.same()
-                case _Remove(value, reply_to):
+                case Remove(value, reply_to):
                     was_present = value in state
                     reply_to.tell(was_present)
                     if was_present:
                         return Behaviors.persisted(
-                            [_ItemRemoved(value)], then=Behaviors.same()
+                            [ItemRemoved(value)], then=Behaviors.same()
                         )
                     return Behaviors.same()
-                case _SetContains(value, reply_to):
+                case SetContains(value, reply_to):
                     reply_to.tell(value in state)
                     return Behaviors.same()
-                case _SetSize(reply_to):
+                case SetSize(reply_to):
                     reply_to.tell(len(state))
                     return Behaviors.same()
 
@@ -146,14 +146,14 @@ def persistent_set_entity(
             entity_id=entity_id,
             journal=journal,
             initial_state=frozenset[Any](),
-            on_event=_apply_event,
+            on_event=apply_event,
             on_command=on_command,
         )
 
     return factory
 
 
-def set_behavior(*, num_shards: int = 100) -> ShardedBehavior[_SetMsg]:
+def set_behavior(*, num_shards: int = 100) -> ShardedBehavior[SetMsg]:
     """Returns a ShardedBehavior suitable for ClusteredActorSystem.spawn()."""
     return Behaviors.sharded(entity_factory=set_entity, num_shards=num_shards)
 
@@ -165,7 +165,7 @@ class Set[V]:
         self,
         *,
         system: ActorSystem,
-        region_ref: ActorRef[ShardEnvelope[_SetMsg]],
+        region_ref: ActorRef[ShardEnvelope[SetMsg]],
         name: str,
         timeout: float = 5.0,
     ) -> None:
@@ -179,7 +179,7 @@ class Set[V]:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._name, _Add(value=value, reply_to=reply_to)
+                self._name, Add(value=value, reply_to=reply_to)
             ),
             timeout=self._timeout,
         )
@@ -189,7 +189,7 @@ class Set[V]:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._name, _Remove(value=value, reply_to=reply_to)
+                self._name, Remove(value=value, reply_to=reply_to)
             ),
             timeout=self._timeout,
         )
@@ -199,7 +199,7 @@ class Set[V]:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._name, _SetContains(value=value, reply_to=reply_to)
+                self._name, SetContains(value=value, reply_to=reply_to)
             ),
             timeout=self._timeout,
         )
@@ -209,7 +209,7 @@ class Set[V]:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._name, _SetSize(reply_to=reply_to)
+                self._name, SetSize(reply_to=reply_to)
             ),
             timeout=self._timeout,
         )

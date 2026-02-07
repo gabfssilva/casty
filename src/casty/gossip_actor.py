@@ -150,7 +150,23 @@ def gossip_actor(
                     return active(new_state)
 
                 case GossipTick():
-                    _push_gossip(state, self_node, remote_transport, system_name)
+                    if remote_transport is not None:
+                        peers = [
+                            m.address
+                            for m in state.members
+                            if m.address != self_node
+                            and m.status in (MemberStatus.up, MemberStatus.joining)
+                        ]
+                        if peers:
+                            target_node = random.choice(peers)
+                            gossip_addr = ActorAddress(
+                                system=system_name,
+                                path="/_cluster/_gossip",
+                                host=target_node.host,
+                                port=target_node.port,
+                            )
+                            gossip_ref: ActorRef[Any] = remote_transport.make_ref(gossip_addr)
+                            gossip_ref.tell(GossipMessage(state=state, from_node=self_node))
                     return Behaviors.same()
 
                 case UpdateShardAllocations(shard_type, allocations, epoch):
@@ -167,33 +183,3 @@ def gossip_actor(
         return Behaviors.receive(receive)
 
     return active(initial_state)
-
-
-def _push_gossip(
-    state: ClusterState,
-    self_node: NodeAddress,
-    remote_transport: RemoteTransport | None,
-    system_name: str,
-) -> None:
-    """Pick a random up member and send GossipMessage via TCP."""
-    if remote_transport is None:
-        return
-
-    peers = [
-        m.address
-        for m in state.members
-        if m.address != self_node
-        and m.status in (MemberStatus.up, MemberStatus.joining)
-    ]
-    if not peers:
-        return
-
-    target_node = random.choice(peers)
-    gossip_addr = ActorAddress(
-        system=system_name,
-        path="/_cluster/_gossip",
-        host=target_node.host,
-        port=target_node.port,
-    )
-    gossip_ref: ActorRef[Any] = remote_transport.make_ref(gossip_addr)
-    gossip_ref.tell(GossipMessage(state=state, from_node=self_node))

@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 
 from casty import ActorSystem
-from casty._shard_coordinator_actor import (
+from casty.shard_coordinator_actor import (
     shard_coordinator_actor,
     LeastShardStrategy,
 )
-from casty._shard_region_actor import shard_region_actor
+from casty.shard_region_actor import shard_region_actor
 from casty.cluster_state import NodeAddress
 from casty.distributed import Queue
-from casty.distributed._queue import queue_entity
+from casty.distributed.queue import queue_entity
 
 
 async def test_queue_enqueue_dequeue() -> None:

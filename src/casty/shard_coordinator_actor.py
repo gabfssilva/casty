@@ -90,7 +90,7 @@ class LeastShardStrategy:
         return min(available_nodes, key=lambda n: counts.get(n, 0))
 
 
-def _allocate_shard(
+def allocate_shard(
     shard_id: int,
     strategy: ShardAllocationStrategy,
     allocations: dict[int, ShardAllocation],
@@ -116,7 +116,7 @@ def _allocate_shard(
     return ShardAllocation(primary=primary, replicas=tuple(replica_nodes_list))
 
 
-def _handle_node_down(
+def handle_node_down(
     failed_node: NodeAddress,
     allocations: dict[int, ShardAllocation],
     nodes: frozenset[NodeAddress],
@@ -159,7 +159,7 @@ def shard_coordinator_actor(
 
     # Legacy mode: no shard_type → direct leader behavior (backward-compatible)
     if not shard_type:
-        return _leader_behavior(
+        return leader_behavior(
             allocations={},
             nodes=available_nodes,
             strategy=strategy,
@@ -170,7 +170,7 @@ def shard_coordinator_actor(
         )
 
     # New mode: start in pending, wait for SetRole AND SyncAllocations
-    return _pending_behavior(
+    return pending_behavior(
         strategy=strategy,
         num_replicas=num_replicas,
         shard_type=shard_type,
@@ -179,7 +179,7 @@ def shard_coordinator_actor(
     )
 
 
-def _pending_behavior(
+def pending_behavior(
     *,
     strategy: ShardAllocationStrategy,
     num_replicas: int,
@@ -191,13 +191,13 @@ def _pending_behavior(
 ) -> Behavior[CoordinatorMsg]:
     """Buffers requests until BOTH SetRole and SyncAllocations arrive."""
 
-    def _try_activate(
+    def try_activate(
         role: SetRole,
         allocations: dict[int, ShardAllocation],
         epoch: int,
     ) -> Behavior[CoordinatorMsg]:
         if role.is_leader:
-            return _leader_behavior(
+            return leader_behavior(
                 allocations=allocations,
                 nodes=nodes,
                 strategy=strategy,
@@ -206,7 +206,7 @@ def _pending_behavior(
                 shard_type=shard_type,
                 epoch=epoch,
             )
-        return _follower_behavior(
+        return follower_behavior(
             allocations=allocations,
             nodes=nodes,
             epoch=epoch,
@@ -220,7 +220,7 @@ def _pending_behavior(
         match msg:
             case SetRole() as role:
                 # Store role, wait for SyncAllocations
-                return _pending_behavior(
+                return pending_behavior(
                     strategy=strategy,
                     num_replicas=num_replicas,
                     shard_type=shard_type,
@@ -234,12 +234,12 @@ def _pending_behavior(
                 role = pending_role
                 if role is not None:
                     # Have both — activate
-                    behavior = _try_activate(role, allocations, epoch)
+                    behavior = try_activate(role, allocations, epoch)
                     for buffered in buffer:
                         ctx.self.tell(buffered)
                     return behavior
                 # Got sync before role — activate as follower with data
-                behavior = _follower_behavior(
+                behavior = follower_behavior(
                     allocations=allocations,
                     nodes=nodes,
                     epoch=epoch,
@@ -253,7 +253,7 @@ def _pending_behavior(
                 return behavior
 
             case GetShardLocation():
-                return _pending_behavior(
+                return pending_behavior(
                     strategy=strategy,
                     num_replicas=num_replicas,
                     shard_type=shard_type,
@@ -264,7 +264,7 @@ def _pending_behavior(
                 )
 
             case UpdateTopology(new_nodes):
-                return _pending_behavior(
+                return pending_behavior(
                     strategy=strategy,
                     num_replicas=num_replicas,
                     shard_type=shard_type,
@@ -280,7 +280,7 @@ def _pending_behavior(
     return Behaviors.receive(receive)
 
 
-def _leader_behavior(
+def leader_behavior(
     *,
     allocations: dict[int, ShardAllocation],
     nodes: frozenset[NodeAddress],
@@ -292,7 +292,7 @@ def _leader_behavior(
 ) -> Behavior[CoordinatorMsg]:
     """Leader mode: allocates new shards, publishes via publish_ref."""
 
-    def _publish(allocs: dict[int, ShardAllocation], new_epoch: int) -> None:
+    def publish(allocs: dict[int, ShardAllocation], new_epoch: int) -> None:
         if publish_ref is not None and shard_type:
             publish_ref.tell(PublishAllocations(
                 shard_type=shard_type,
@@ -312,7 +312,7 @@ def _leader_behavior(
                     ))
                     return Behaviors.same()
 
-                new_alloc = _allocate_shard(
+                new_alloc = allocate_shard(
                     shard_id, strategy, allocations, nodes, num_replicas
                 )
                 new_allocations = {**allocations, shard_id: new_alloc}
@@ -322,8 +322,8 @@ def _leader_behavior(
                     replicas=new_alloc.replicas,
                 ))
                 new_epoch = epoch + 1
-                _publish(new_allocations, new_epoch)
-                return _leader_behavior(
+                publish(new_allocations, new_epoch)
+                return leader_behavior(
                     allocations=new_allocations,
                     nodes=nodes,
                     strategy=strategy,
@@ -334,7 +334,7 @@ def _leader_behavior(
                 )
 
             case UpdateTopology(new_nodes):
-                return _leader_behavior(
+                return leader_behavior(
                     allocations=allocations,
                     nodes=new_nodes,
                     strategy=strategy,
@@ -345,12 +345,12 @@ def _leader_behavior(
                 )
 
             case NodeDown(failed_node):
-                new_allocations, new_nodes = _handle_node_down(
+                new_allocations, new_nodes = handle_node_down(
                     failed_node, allocations, nodes
                 )
                 new_epoch = epoch + 1
-                _publish(new_allocations, new_epoch)
-                return _leader_behavior(
+                publish(new_allocations, new_epoch)
+                return leader_behavior(
                     allocations=new_allocations,
                     nodes=new_nodes,
                     strategy=strategy,
@@ -364,7 +364,7 @@ def _leader_behavior(
                 if is_leader:
                     return Behaviors.same()
                 # Demoted to follower
-                return _follower_behavior(
+                return follower_behavior(
                     allocations=allocations,
                     nodes=nodes,
                     epoch=epoch,
@@ -377,7 +377,7 @@ def _leader_behavior(
             case SyncAllocations(new_allocs, new_epoch):
                 # Leader receiving sync — adopt if epoch is higher
                 if new_epoch > epoch:
-                    return _leader_behavior(
+                    return leader_behavior(
                         allocations=new_allocs,
                         nodes=nodes,
                         strategy=strategy,
@@ -394,7 +394,7 @@ def _leader_behavior(
     return Behaviors.receive(receive)
 
 
-def _follower_behavior(
+def follower_behavior(
     *,
     allocations: dict[int, ShardAllocation],
     nodes: frozenset[NodeAddress],
@@ -418,7 +418,7 @@ def _follower_behavior(
                         replicas=alloc.replicas,
                     ))
                     return Behaviors.same()
-                return _follower_behavior(
+                return follower_behavior(
                     allocations=allocations,
                     nodes=nodes,
                     epoch=epoch,
@@ -431,7 +431,7 @@ def _follower_behavior(
 
             case SyncAllocations(new_allocs, new_epoch):
                 if new_epoch >= epoch:
-                    behavior = _follower_behavior(
+                    behavior = follower_behavior(
                         allocations=new_allocs,
                         nodes=nodes,
                         epoch=new_epoch,
@@ -447,7 +447,7 @@ def _follower_behavior(
 
             case SetRole(is_leader, _):
                 if is_leader:
-                    return _leader_behavior(
+                    return leader_behavior(
                         allocations=allocations,
                         nodes=nodes,
                         strategy=strategy,
@@ -459,7 +459,7 @@ def _follower_behavior(
                 return Behaviors.same()
 
             case UpdateTopology(new_nodes):
-                return _follower_behavior(
+                return follower_behavior(
                     allocations=allocations,
                     nodes=new_nodes,
                     epoch=epoch,

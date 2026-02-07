@@ -6,14 +6,14 @@ import asyncio
 from typing import Any
 
 from casty import ActorSystem, Behaviors, ClusterState, NodeAddress
-from casty._gossip_actor import (
+from casty.gossip_actor import (
     GossipMessage,
     GossipMsg,
     GetClusterState,
     UpdateShardAllocations,
     gossip_actor,
 )
-from casty._shard_coordinator_actor import (
+from casty.shard_coordinator_actor import (
     CoordinatorMsg,
     GetShardLocation,
     LeastShardStrategy,

@@ -6,7 +6,7 @@ from typing import Any
 from casty import ActorSystem, Behaviors
 from casty.cluster_state import NodeAddress
 from casty.failure_detector import PhiAccrualFailureDetector
-from casty._heartbeat_actor import (
+from casty.heartbeat_actor import (
     heartbeat_actor,
     HeartbeatRequest,
     HeartbeatResponse,

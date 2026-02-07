@@ -7,11 +7,11 @@ from typing import Any
 
 from casty import ActorSystem, Behaviors, ActorRef, Behavior
 from casty.sharding import ShardEnvelope
-from casty._shard_coordinator_actor import (
+from casty.shard_coordinator_actor import (
     shard_coordinator_actor,
     LeastShardStrategy,
 )
-from casty._shard_region_actor import shard_region_actor
+from casty.shard_region_actor import shard_region_actor
 from casty.cluster_state import NodeAddress
 
 
