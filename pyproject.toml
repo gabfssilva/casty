@@ -1,7 +1,7 @@
 [project]
 name = "casty"
 dynamic = ["version"]
-description = "A minimalist, type-safe actor framework for Python 3.13+ inspired by Akka Typed"
+description = "A minimalist, type-safe actor framework for Python 3.12+ inspired by Akka Typed"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
