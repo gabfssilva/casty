@@ -1,6 +1,7 @@
 # src/casty/_shard_region_actor.py
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -12,6 +13,7 @@ from casty.sharding import ShardEnvelope
 def shard_region_actor(
     *,
     entity_factory: Callable[[str], Behavior[Any]],
+    logger: logging.Logger | None = None,
     **_kwargs: Any,
 ) -> Behavior[Any]:
     """Region that delivers ShardEnvelopes to local entities.
@@ -19,6 +21,7 @@ def shard_region_actor(
     Extra keyword arguments (self_node, coordinator, num_shards) are
     accepted for caller compatibility but not used.
     """
+    log = logger or logging.getLogger("casty.region")
 
     def active(entities: dict[str, ActorRef[Any]]) -> Behavior[Any]:
         async def receive(ctx: Any, msg: Any) -> Any:
@@ -27,6 +30,7 @@ def shard_region_actor(
                     envelope = cast(ShardEnvelope[Any], msg)
                     entity_id = envelope.entity_id
                     if entity_id not in entities:
+                        log.debug("Spawning entity: %s", entity_id)
                         ref = ctx.spawn(
                             entity_factory(entity_id), f"entity-{entity_id}"
                         )

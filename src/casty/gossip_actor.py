@@ -1,6 +1,7 @@
 # src/casty/_gossip_actor.py
 from __future__ import annotations
 
+import logging
 import random
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
@@ -71,11 +72,15 @@ def gossip_actor(
     initial_state: ClusterState,
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
+    logger: logging.Logger | None = None,
 ) -> Behavior[GossipMsg]:
+    log = logger or logging.getLogger(f"casty.gossip.{system_name}")
+
     def active(state: ClusterState) -> Behavior[GossipMsg]:
         async def receive(ctx: Any, msg: GossipMsg) -> Any:
             match msg:
-                case GossipMessage(remote_state, _):
+                case GossipMessage(remote_state, from_node):
+                    log.debug("Gossip from %s:%d (members=%d)", from_node.host, from_node.port, len(remote_state.members))
                     merged_version = state.version.merge(remote_state.version)
                     all_addresses = {m.address for m in state.members} | {
                         m.address for m in remote_state.members
@@ -121,6 +126,7 @@ def gossip_actor(
                     return Behaviors.same()
 
                 case JoinRequest(node, roles, reply_to):
+                    log.info("Join request from %s:%d", node.host, node.port)
                     new_member = Member(
                         address=node,
                         status=MemberStatus.joining,
@@ -139,6 +145,7 @@ def gossip_actor(
                     return active(new_state)
 
                 case JoinAccepted(accepted_state):
+                    log.info("Join accepted (members=%d)", len(accepted_state.members))
                     # Merge accepted state from seed — higher epoch wins
                     merged_version = state.version.merge(accepted_state.version)
                     if accepted_state.allocation_epoch > state.allocation_epoch:
@@ -166,6 +173,7 @@ def gossip_actor(
                         ]
                         if peers:
                             target_node = random.choice(peers)
+                            log.debug("Gossip -> %s:%d", target_node.host, target_node.port)
                             gossip_addr = ActorAddress(
                                 system=system_name,
                                 path="/_cluster/_gossip",
@@ -184,6 +192,7 @@ def gossip_actor(
                         for m in state.members
                     )
                     if promoted != state.members:
+                        log.info("Promoted %s:%d -> up", address.host, address.port)
                         new_state = ClusterState(
                             members=promoted,
                             unreachable=state.unreachable,
@@ -196,6 +205,7 @@ def gossip_actor(
 
                 case UpdateShardAllocations(shard_type, allocations, epoch):
                     if epoch > state.allocation_epoch:
+                        log.debug("Shard allocations updated: %s epoch %d", shard_type, epoch)
                         new_state = state.with_allocations(
                             shard_type, allocations, epoch
                         )

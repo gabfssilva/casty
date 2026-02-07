@@ -1,6 +1,7 @@
 # src/casty/_replica_region_actor.py
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -14,12 +15,14 @@ def replica_region_actor[S, E](
     journal: EventJournal,
     on_event: Callable[[S, E], S],
     initial_state: S,
+    logger: logging.Logger | None = None,
 ) -> Behavior[Any]:
     """Manages passive entity replicas on a node.
 
     Receives ReplicateEvents from primary entities, persists to local journal,
     and applies events to maintain replica state.
     """
+    log = logger or logging.getLogger("casty.replica")
 
     def active(
         entity_states: dict[str, S],
@@ -39,6 +42,7 @@ def replica_region_actor[S, E](
                         state = on_event(state, persisted.event)
                         highest_seq = persisted.sequence_nr
 
+                    log.debug("Replicated %d events for %s (seq_nr=%d)", len(events), entity_id, highest_seq)
                     new_entity_states = {**entity_states, entity_id: state}
                     new_sequence_nrs = {**entity_sequence_nrs, entity_id: highest_seq}
 

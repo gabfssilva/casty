@@ -50,11 +50,12 @@ class MessageEnvelope:
 
 
 class TcpTransport:
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, *, logger: logging.Logger | None = None) -> None:
         self._host = host
         self._port = port
         self._server: asyncio.Server | None = None
         self._handler: InboundHandler | None = None
+        self._logger = logger or logging.getLogger("casty.tcp")
         self._connections: dict[
             tuple[str, int], tuple[asyncio.StreamReader, asyncio.StreamWriter]
         ] = {}
@@ -102,6 +103,7 @@ class TcpTransport:
         key = (host, port)
         try:
             if key not in self._connections:
+                self._logger.debug("TCP connect -> %s:%d", host, port)
                 reader, writer = await asyncio.open_connection(host, port)
                 self._connections[key] = (reader, writer)
             _, writer = self._connections[key]
@@ -110,6 +112,7 @@ class TcpTransport:
         except (ConnectionError, OSError):
             # Drop stale connection and retry once
             self._connections.pop(key, None)
+            self._logger.warning("TCP reconnect -> %s:%d", host, port)
             reader, writer = await asyncio.open_connection(host, port)
             self._connections[key] = (reader, writer)
             writer.write(struct.pack("!I", len(data)) + data)
@@ -190,6 +193,7 @@ class RemoteTransport:
                 payload=payload,
                 type_hint=type_name,
             )
+            self._logger.debug("Sending %s -> %s:%d%s", type_name, host, port, address.path)
             await self._tcp.send(host, port, envelope.to_bytes())
         except (ConnectionError, OSError):
             self._logger.debug("Cannot reach %s:%s (connection refused or reset)", host, port)
@@ -202,6 +206,7 @@ class RemoteTransport:
             envelope = MessageEnvelope.from_bytes(data)
             msg = self._serializer.deserialize(envelope.payload)
             target_addr = ActorAddress.from_uri(envelope.target)
+            self._logger.debug("Received %s -> %s", envelope.type_hint, target_addr.path)
             # Deliver to local transport at the target path
             self._local.deliver(target_addr, msg)
         except Exception:
@@ -224,6 +229,8 @@ class RemoteTransport:
 
     async def start(self) -> None:
         await self._tcp.start(self)
+        self._logger.info("Started on %s:%d", self._local_host, self._tcp.port)
 
     async def stop(self) -> None:
+        self._logger.info("Stopping")
         await self._tcp.stop()

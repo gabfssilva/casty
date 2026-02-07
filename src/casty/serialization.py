@@ -4,10 +4,13 @@ import dataclasses
 import enum
 import importlib
 import json
+import logging
 from collections.abc import Callable
 from typing import Any, Protocol, cast, runtime_checkable
 
 from casty.address import ActorAddress
+
+logger = logging.getLogger("casty.serialization")
 
 
 class TypeRegistry:
@@ -50,6 +53,7 @@ class TypeRegistry:
                     return obj
             except (ImportError, AttributeError):
                 continue
+        logger.warning("Failed to resolve type: %s", name)
         msg = f"Cannot resolve type: {name}"
         raise KeyError(msg)
 

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any, Protocol, runtime_checkable
 
 from casty.address import ActorAddress
+
+logger = logging.getLogger("casty.transport")
 
 
 @runtime_checkable
@@ -25,3 +28,5 @@ class LocalTransport:
         handler = self._handlers.get(address.path)
         if handler is not None:
             handler(msg)
+        else:
+            logger.warning("No handler for path %s, dropping %s", address.path, type(msg).__name__)

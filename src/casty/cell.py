@@ -240,6 +240,7 @@ class ActorCell[M]:
         from casty.replication import ReplicateEventsAck
 
         if self._stopped:
+            self._logger.warning("Dead letter: %s", type(msg).__name__)
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(
@@ -264,6 +265,7 @@ class ActorCell[M]:
             await self._recover_event_sourced()
         self._loop_task = asyncio.get_running_loop().create_task(self._run_loop())
         await self._event_stream.publish(ActorStarted(ref=self._ref))
+        self._logger.info("Started")
 
     async def _initialize_behavior(self, behavior: Behavior[M]) -> None:
         """Recursively unwrap behavior layers and set up the cell."""
@@ -334,6 +336,7 @@ class ActorCell[M]:
         if snapshot is not None:
             self._es_state = snapshot.state
             self._es_sequence_nr = snapshot.sequence_nr
+            self._logger.debug("Recovering from snapshot seq_nr=%d", snapshot.sequence_nr)
 
         # Load and replay events after snapshot
         events = await self._es_journal.load(
@@ -342,6 +345,8 @@ class ActorCell[M]:
         for persisted in events:
             self._es_state = self._es_on_event(self._es_state, persisted.event)
             self._es_sequence_nr = persisted.sequence_nr
+        if events:
+            self._logger.debug("Recovered: replayed %d events to seq_nr=%d", len(events), self._es_sequence_nr)
 
     async def _run_loop(self) -> None:
         """Main message processing loop."""
@@ -429,6 +434,7 @@ class ActorCell[M]:
 
         # Persist to journal
         await self._es_journal.persist(self._es_entity_id, wrapped)
+        self._logger.debug("Persisted %d events (seq_nr=%d)", len(wrapped), self._es_sequence_nr)
 
         # Apply events to state
         for persisted_event in wrapped:
@@ -446,6 +452,7 @@ class ActorCell[M]:
                     )
                     await self._es_journal.save_snapshot(self._es_entity_id, snapshot)
                     self._es_events_since_snapshot = 0
+                    self._logger.debug("Snapshot saved at seq_nr=%d", self._es_sequence_nr)
             case _:
                 pass
 
@@ -495,11 +502,12 @@ class ActorCell[M]:
         self._logger.error("Actor %s failed: %s", self._name, exception, exc_info=True)
 
         if self._strategy is None:
-            # No strategy — stop the actor
+            self._logger.warning("No supervision strategy, stopping")
             await self._do_stop()
             return
 
         directive = self._strategy.decide(exception, child_id=self._name)
+        self._logger.debug("Supervision: %s", directive.name)
 
         match directive:
             case Directive.restart:
@@ -514,6 +522,7 @@ class ActorCell[M]:
 
     async def _do_restart(self, exception: Exception) -> None:
         """Restart the actor: call pre_restart, re-initialize, call post_restart."""
+        self._logger.info("Restarting: %s", exception)
         if self._pre_restart is not None:
             try:
                 await self._pre_restart(self._ctx, exception)
@@ -546,6 +555,7 @@ class ActorCell[M]:
             return
 
         self._stopped = True
+        self._logger.info("Stopping")
 
         # Call post_stop hook
         if self._post_stop is not None:

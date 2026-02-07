@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -38,6 +39,7 @@ class ActorSystem:
         self._root_cells: dict[str, ActorCell[Any]] = {}
         self._local_transport = LocalTransport()
         self._scheduler: ActorRef[SchedulerMsg] | None = None
+        self._system_logger = logging.getLogger(f"casty.system.{name}")
 
     @property
     def name(self) -> str:
@@ -93,6 +95,7 @@ class ActorSystem:
             cell.mailbox = mailbox
         self._root_cells[name] = cell
         asyncio.get_running_loop().create_task(cell.start())
+        self._system_logger.info("Spawning root actor: %s", name)
         return cell.ref
 
     async def ask[M, R](
@@ -113,6 +116,9 @@ class ActorSystem:
             _transport=CallbackTransport(on_reply),
         )
         message = msg_factory(temp_ref)
+        self._system_logger.debug(
+            "ask %s -> %s (timeout=%.1fs)", type(message).__name__, ref.address.path, timeout
+        )
         ref.tell(message)
 
         return await asyncio.wait_for(future, timeout=timeout)
@@ -153,6 +159,7 @@ class ActorSystem:
         return None
 
     async def shutdown(self) -> None:
+        self._system_logger.info("Shutting down (%d root actors)", len(self._root_cells))
         for cell in list(self._root_cells.values()):
             await cell.stop()
         self._root_cells.clear()

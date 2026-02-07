@@ -61,6 +61,7 @@ def shard_proxy_behavior(
     num_shards: int,
     remote_transport: RemoteTransport | None,
     system_name: str,
+    logger: logging.Logger | None = None,
 ) -> Behavior[Any]:
     """Proxy actor that routes ShardEnvelopes to the correct region.
 
@@ -68,6 +69,7 @@ def shard_proxy_behavior(
     - Caches shard->node mappings
     - Buffers messages while waiting for coordinator response
     """
+    log = logger or logging.getLogger(f"casty.shard_proxy.{system_name}")
 
     def active(
         shard_cache: dict[int, NodeAddress],
@@ -100,6 +102,7 @@ def shard_proxy_behavior(
                     new_buf = [*existing_buf, envelope]
                     new_buffer = {**buffer, shard_id: new_buf}
                     if not existing_buf:
+                        log.debug("Shard %d: requesting location (entity=%s)", shard_id, envelope.entity_id)
                         coordinator.tell(
                             GetShardLocation(
                                 shard_id=shard_id, reply_to=ctx.self
@@ -110,6 +113,7 @@ def shard_proxy_behavior(
                 case ShardLocation(shard_id=sid, node=node):
                     new_cache = {**shard_cache, sid: node}
                     buffered = buffer.get(sid, [])
+                    log.debug("Shard %d -> %s:%d (flushed %d)", sid, node.host, node.port, len(buffered))
                     new_buffer = {k: v for k, v in buffer.items() if k != sid}
                     for envelope in buffered:
                         if node == self_node:
@@ -157,11 +161,11 @@ class ClusteredActorSystem(ActorSystem):
         self._seed_nodes = seed_nodes or []
         self._self_node = NodeAddress(host=host, port=port)
         self._coordinators: dict[str, ActorRef[CoordinatorMsg]] = {}
-        self._logger = logging.getLogger(f"casty.cluster.{name}")
+        self._logger = logging.getLogger(f"casty.sharding.{name}")
 
         # Serialization + transport
         self._type_registry = TypeRegistry()
-        self._tcp_transport = TcpTransport(self._bind_host, port)
+        self._tcp_transport = TcpTransport(self._bind_host, port, logger=logging.getLogger(f"casty.remote_transport.{name}"))
         self._serializer = JsonSerializer(self._type_registry)
         self._remote_transport = RemoteTransport(
             local=self._local_transport,
@@ -208,6 +212,7 @@ class ClusteredActorSystem(ActorSystem):
             await self._remote_transport.stop()
             raise
 
+        self._logger.info("Started on %s:%d", self._host, self._port)
         return self
 
     def _get_ref_transport(self) -> MessageTransport | None:
@@ -251,6 +256,8 @@ class ClusteredActorSystem(ActorSystem):
     ) -> ActorRef[ShardEnvelope[M]]:
         from casty.shard_region_actor import shard_region_actor
 
+        self._logger.info("Sharded entity: %s (shards=%d)", name, sharded.num_shards)
+
         # Build available nodes from self + seed_nodes
         available_nodes = frozenset(
             {self._self_node}
@@ -266,6 +273,7 @@ class ClusteredActorSystem(ActorSystem):
         region_ref = super().spawn(
             shard_region_actor(
                 entity_factory=sharded.entity_factory,
+                logger=logging.getLogger(f"casty.region.{self._name}"),
             ),
             f"_region-{name}",
         )
@@ -281,6 +289,7 @@ class ClusteredActorSystem(ActorSystem):
                 num_shards=sharded.num_shards,
                 remote_transport=self._remote_transport,
                 system_name=self._name,
+                logger=logging.getLogger(f"casty.shard_proxy.{self._name}"),
             ),
             name,
         )
@@ -307,6 +316,7 @@ class ClusteredActorSystem(ActorSystem):
                 publish_ref=publish_ref,
                 remote_transport=self._remote_transport,
                 system_name=self._name,
+                logger=logging.getLogger(f"casty.coordinator.{self._name}"),
             ),
             f"_coord-{name}",
         )
@@ -359,6 +369,7 @@ class ClusteredActorSystem(ActorSystem):
         return Distributed(self, journal=journal)
 
     async def shutdown(self) -> None:
+        self._logger.info("Shutting down")
         self._coordinators.clear()
         await super().shutdown()
         await self._remote_transport.stop()

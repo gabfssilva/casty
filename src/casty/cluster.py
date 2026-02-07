@@ -152,6 +152,7 @@ def cluster_receive(
                 return Behaviors.same()
 
             case RegisterCoordinator(shard_name=shard_name, coord_ref=coord_ref):
+                logger.info("Registered coordinator: %s", shard_name)
                 new_coords = {**coordinators, shard_name: coord_ref}
                 if cluster_state is not None:
                     is_leader = cluster_state.leader == self_node
@@ -178,6 +179,7 @@ def cluster_receive(
                 if state.leader == self_node:
                     for m in state.members:
                         if m.status == MemberStatus.joining:
+                            logger.info("Promoting member %s:%d", m.address.host, m.address.port)
                             gossip_ref.tell(PromoteMember(address=m.address))
 
                 members = frozenset(
@@ -210,6 +212,7 @@ def cluster_receive(
 
             case JoinRetry():
                 if cluster_state is None or len(cluster_state.members) <= 1:
+                    logger.debug("Join retry (%d seeds)", len(seed_refs))
                     for seed_ref in seed_refs:
                         seed_ref.tell(
                             JoinRequest(
@@ -248,12 +251,17 @@ def cluster_actor(
         )
         initial_state = ClusterState().add_member(initial_member)
 
+        logger = logging.getLogger(f"casty.cluster.{system_name}")
+        gossip_logger = logging.getLogger(f"casty.gossip.{system_name}")
+        heartbeat_logger = logging.getLogger(f"casty.heartbeat.{system_name}")
+
         gossip_ref: ActorRef[GossipMsg] = ctx.spawn(
             gossip_actor(
                 self_node=self_node,
                 initial_state=initial_state,
                 remote_transport=remote_transport,
                 system_name=system_name,
+                logger=gossip_logger,
             ),
             "_gossip",
         )
@@ -264,11 +272,10 @@ def cluster_actor(
                 detector=detector,
                 remote_transport=remote_transport,
                 system_name=system_name,
+                logger=heartbeat_logger,
             ),
             "_heartbeat",
         )
-
-        logger = logging.getLogger(f"casty.cluster.{system_name}")
 
         # Build seed refs for join retry
         seed_refs_list: list[ActorRef[GossipMsg]] = []
@@ -316,6 +323,8 @@ def cluster_actor(
             scheduler_ref.tell(CancelSchedule(key="heartbeat"))
             scheduler_ref.tell(CancelSchedule(key="availability"))
             scheduler_ref.tell(CancelSchedule(key="join-retry"))
+
+        logger.info("Cluster started %s:%d (seeds=%d)", self_node.host, self_node.port, len(config.seed_nodes))
 
         has_seeds = bool(config.seed_nodes)
         initial_cluster_state = None if has_seeds else initial_state

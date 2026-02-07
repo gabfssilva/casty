@@ -16,9 +16,6 @@ if TYPE_CHECKING:
     from casty.remote_transport import RemoteTransport
 
 
-logger = logging.getLogger("casty.coordinator")
-
-
 @dataclass(frozen=True)
 class GetShardLocation:
     shard_id: int
@@ -160,7 +157,9 @@ def shard_coordinator_actor(
     publish_ref: ActorRef[PublishAllocations] | None = None,
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
+    logger: logging.Logger | None = None,
 ) -> Behavior[CoordinatorMsg]:
+    log = logger or logging.getLogger(f"casty.coordinator.{system_name}")
     num_replicas = replication.replicas if replication is not None else 0
 
     # Legacy mode: no shard_type → direct leader behavior (backward-compatible)
@@ -175,6 +174,7 @@ def shard_coordinator_actor(
             epoch=0,
             remote_transport=remote_transport,
             system_name=system_name,
+            logger=log,
         )
 
     # New mode: start in pending, wait for SetRole AND SyncAllocations
@@ -186,6 +186,7 @@ def shard_coordinator_actor(
         nodes=available_nodes,
         remote_transport=remote_transport,
         system_name=system_name,
+        logger=log,
     )
 
 
@@ -201,14 +202,17 @@ def pending_behavior(
     buffer: tuple[GetShardLocation, ...] = (),
     pending_role: SetRole | None = None,
     pending_sync: SyncAllocations | None = None,
+    logger: logging.Logger | None = None,
 ) -> Behavior[CoordinatorMsg]:
     """Buffers requests until BOTH SetRole and SyncAllocations arrive."""
+    log = logger or logging.getLogger(f"casty.coordinator.{system_name}")
 
     def try_activate(
         role: SetRole,
         sync: SyncAllocations,
     ) -> Behavior[CoordinatorMsg]:
         if role.is_leader:
+            log.info("Coordinator [%s] activated as leader (buffered=%d)", shard_type, len(buffer))
             return leader_behavior(
                 allocations=sync.allocations,
                 nodes=nodes,
@@ -219,7 +223,9 @@ def pending_behavior(
                 epoch=sync.epoch,
                 remote_transport=remote_transport,
                 system_name=system_name,
+                logger=log,
             )
+        log.info("Coordinator [%s] activated as follower (buffered=%d)", shard_type, len(buffer))
         return follower_behavior(
             allocations=sync.allocations,
             nodes=nodes,
@@ -231,6 +237,7 @@ def pending_behavior(
             leader_node=role.leader_node,
             remote_transport=remote_transport,
             system_name=system_name,
+            logger=log,
         )
 
     async def receive(ctx: Any, msg: CoordinatorMsg) -> Any:
@@ -252,6 +259,7 @@ def pending_behavior(
                     buffer=buffer,
                     pending_role=role,
                     pending_sync=pending_sync,
+                    logger=log,
                 )
 
             case SyncAllocations() as sync:
@@ -271,6 +279,7 @@ def pending_behavior(
                     buffer=buffer,
                     pending_role=pending_role,
                     pending_sync=sync,
+                    logger=log,
                 )
 
             case GetShardLocation():
@@ -285,6 +294,7 @@ def pending_behavior(
                     buffer=(*buffer, msg),
                     pending_role=pending_role,
                     pending_sync=pending_sync,
+                    logger=log,
                 )
 
             case UpdateTopology(new_nodes):
@@ -299,6 +309,7 @@ def pending_behavior(
                     buffer=buffer,
                     pending_role=pending_role,
                     pending_sync=pending_sync,
+                    logger=log,
                 )
 
             case _:
@@ -318,8 +329,10 @@ def leader_behavior(
     epoch: int,
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
+    logger: logging.Logger | None = None,
 ) -> Behavior[CoordinatorMsg]:
     """Leader mode: allocates new shards, publishes via publish_ref."""
+    log = logger or logging.getLogger(f"casty.coordinator.{system_name}")
 
     def publish(allocs: dict[int, ShardAllocation], new_epoch: int) -> None:
         if publish_ref is not None and shard_type:
@@ -351,6 +364,7 @@ def leader_behavior(
                     replicas=new_alloc.replicas,
                 ))
                 new_epoch = epoch + 1
+                log.info("Shard %d -> %s:%d (epoch=%d)", shard_id, new_alloc.primary.host, new_alloc.primary.port, new_epoch)
                 publish(new_allocations, new_epoch)
                 return leader_behavior(
                     allocations=new_allocations,
@@ -362,6 +376,7 @@ def leader_behavior(
                     epoch=new_epoch,
                     remote_transport=remote_transport,
                     system_name=system_name,
+                    logger=log,
                 )
 
             case UpdateTopology(new_nodes):
@@ -375,9 +390,11 @@ def leader_behavior(
                     epoch=epoch,
                     remote_transport=remote_transport,
                     system_name=system_name,
+                    logger=log,
                 )
 
             case NodeDown(failed_node):
+                log.warning("NodeDown %s:%d (shards affected)", failed_node.host, failed_node.port)
                 new_allocations, new_nodes = handle_node_down(
                     failed_node, allocations, nodes
                 )
@@ -393,11 +410,13 @@ def leader_behavior(
                     epoch=new_epoch,
                     remote_transport=remote_transport,
                     system_name=system_name,
+                    logger=log,
                 )
 
             case SetRole(is_leader, leader_node):
                 if is_leader:
                     return Behaviors.same()
+                log.info("Coordinator [%s] demoted to follower", shard_type)
                 return follower_behavior(
                     allocations=allocations,
                     nodes=nodes,
@@ -409,6 +428,7 @@ def leader_behavior(
                     leader_node=leader_node,
                     remote_transport=remote_transport,
                     system_name=system_name,
+                    logger=log,
                 )
 
             case SyncAllocations(new_allocs, new_epoch):
@@ -423,6 +443,7 @@ def leader_behavior(
                         epoch=new_epoch,
                         remote_transport=remote_transport,
                         system_name=system_name,
+                        logger=log,
                     )
                 return Behaviors.same()
 
@@ -445,8 +466,10 @@ def follower_behavior(
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
     buffer: tuple[GetShardLocation, ...] = (),
+    logger: logging.Logger | None = None,
 ) -> Behavior[CoordinatorMsg]:
     """Follower mode: serves cached allocations, forwards unknown to leader."""
+    log = logger or logging.getLogger(f"casty.coordinator.{system_name}")
 
     async def receive(ctx: Any, msg: CoordinatorMsg) -> Any:
         match msg:
@@ -461,6 +484,7 @@ def follower_behavior(
                     return Behaviors.same()
                 # Forward to leader if possible — leader replies directly to reply_to
                 if leader_node is not None and remote_transport is not None:
+                    log.debug("Forwarding shard %d to leader", shard_id)
                     leader_coord_addr = ActorAddress(
                         system=system_name,
                         path=f"/_coord-{shard_type}",
@@ -485,10 +509,12 @@ def follower_behavior(
                     remote_transport=remote_transport,
                     system_name=system_name,
                     buffer=(*buffer, msg),
+                    logger=log,
                 )
 
             case SyncAllocations(new_allocs, new_epoch):
                 if new_epoch >= epoch:
+                    log.debug("Synced allocations epoch %d -> %d (%d shards)", epoch, new_epoch, len(new_allocs))
                     behavior = follower_behavior(
                         allocations=new_allocs,
                         nodes=nodes,
@@ -500,6 +526,7 @@ def follower_behavior(
                         leader_node=leader_node,
                         remote_transport=remote_transport,
                         system_name=system_name,
+                        logger=log,
                     )
                     for buffered in buffer:
                         ctx.self.tell(buffered)
@@ -508,6 +535,7 @@ def follower_behavior(
 
             case SetRole(is_leader, new_leader_node):
                 if is_leader:
+                    log.info("Coordinator [%s] promoted to leader", shard_type)
                     return leader_behavior(
                         allocations=allocations,
                         nodes=nodes,
@@ -518,6 +546,7 @@ def follower_behavior(
                         epoch=epoch,
                         remote_transport=remote_transport,
                         system_name=system_name,
+                        logger=log,
                     )
                 # Update leader_node and replay buffer (leader may have changed)
                 behavior = follower_behavior(
@@ -531,6 +560,7 @@ def follower_behavior(
                     leader_node=new_leader_node,
                     remote_transport=remote_transport,
                     system_name=system_name,
+                    logger=log,
                 )
                 for buffered in buffer:
                     ctx.self.tell(buffered)
@@ -549,6 +579,7 @@ def follower_behavior(
                     remote_transport=remote_transport,
                     system_name=system_name,
                     buffer=buffer,
+                    logger=log,
                 )
 
             case _:

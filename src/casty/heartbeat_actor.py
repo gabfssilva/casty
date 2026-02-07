@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -54,7 +55,10 @@ def heartbeat_actor(
     detector: PhiAccrualFailureDetector,
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
+    logger: logging.Logger | None = None,
 ) -> Behavior[HeartbeatMsg]:
+    log = logger or logging.getLogger(f"casty.heartbeat.{system_name}")
+
     async def receive(ctx: Any, msg: HeartbeatMsg) -> Any:
         match msg:
             case HeartbeatRequest(from_node, reply_to):
@@ -68,6 +72,7 @@ def heartbeat_actor(
             case CheckAvailability(reply_to):
                 for node_key in detector.tracked_nodes:
                     if not detector.is_available(node_key):
+                        log.warning("Node unreachable: %s (phi=%.1f)", node_key, detector.phi(node_key))
                         host, port_str = node_key.rsplit(":", 1)
                         reply_to.tell(
                             NodeUnreachable(
@@ -78,6 +83,8 @@ def heartbeat_actor(
 
             case HeartbeatTick(members=members):
                 if remote_transport is not None:
+                    count = sum(1 for m in members if m != self_node)
+                    log.debug("Heartbeats -> %d peers", count)
                     for member in members:
                         if member == self_node:
                             continue
