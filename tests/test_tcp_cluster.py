@@ -176,6 +176,47 @@ async def test_cross_system_sharded_entity() -> None:
             assert result == 42
 
 
+async def test_barrier_single_node() -> None:
+    """Barrier with n=1 returns immediately on a single node."""
+    async with ClusteredActorSystem(
+        name="barrier-1", host="127.0.0.1", port=0
+    ) as system:
+        await system.barrier("phase-1", 1, timeout=3.0)
+
+
+async def test_barrier_two_nodes() -> None:
+    """Barrier blocks until both nodes arrive, then releases both."""
+    async with ClusteredActorSystem(
+        name="barrier-2", host="127.0.0.1", port=0
+    ) as system_a:
+        port_a = system_a.self_node.port
+        async with ClusteredActorSystem(
+            name="barrier-2",
+            host="127.0.0.1",
+            port=0,
+            seed_nodes=[("127.0.0.1", port_a)],
+        ) as system_b:
+            await system_a.wait_for(2)
+
+            released: list[str] = []
+
+            async def arrive(system: ClusteredActorSystem, label: str) -> None:
+                await system.barrier("sync", 2, timeout=5.0)
+                released.append(label)
+
+            await asyncio.gather(arrive(system_a, "a"), arrive(system_b, "b"))
+            assert sorted(released) == ["a", "b"]
+
+
+async def test_barrier_reusable() -> None:
+    """Same barrier name can be used multiple times in sequence."""
+    async with ClusteredActorSystem(
+        name="barrier-reuse", host="127.0.0.1", port=0
+    ) as system:
+        await system.barrier("gate", 1, timeout=3.0)
+        await system.barrier("gate", 1, timeout=3.0)
+
+
 async def test_remote_ask_timeout() -> None:
     """Remote ask() times out cleanly when target doesn't reply."""
     import pytest

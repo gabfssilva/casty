@@ -136,6 +136,18 @@ class ActorSystem:
 
         return await asyncio.wait_for(future, timeout=timeout)
 
+    async def ask_or_none[M, R](
+        self,
+        ref: ActorRef[M],
+        msg_factory: Callable[[ActorRef[R]], M],
+        *,
+        timeout: float,
+    ) -> R | None:
+        try:
+            return await self.ask(ref, msg_factory, timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+
     def resolve(self, address: ActorAddress) -> ActorRef[Any] | None:
         """Resolve an ActorAddress to a local ActorRef, or None if not found."""
         if address.is_local or address.host is None:

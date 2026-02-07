@@ -22,19 +22,62 @@ import hashlib
 import logging
 import socket
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from casty import ActorRef, Behavior, Behaviors
 from casty.config import load_config
-from casty.cluster_state import MemberStatus
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
 
+log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Messages
-# ---------------------------------------------------------------------------
+RESET = "\033[0m"
+DIM = "\033[2m"
+CYAN = "\033[36m"
+LEVEL_COLORS = {
+    logging.DEBUG: "\033[2m",
+    logging.INFO: "\033[32m",
+    logging.WARNING: "\033[33m",
+    logging.ERROR: "\033[31m",
+    logging.CRITICAL: "\033[1;31m",
+}
+
+
+class ColorFormatter(logging.Formatter):
+    def __init__(self) -> None:
+        self.node = socket.gethostname()
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = time.strftime("%H:%M:%S", time.localtime(record.created))
+        color = LEVEL_COLORS.get(record.levelno, "")
+        level = record.levelname.ljust(7)
+        return (
+            f"{DIM}{ts}{RESET}  "
+            f"{color}{level}{RESET} "
+            f"{CYAN}{self.node}{RESET}  "
+            f"{DIM}{record.name}{RESET}  "
+            f"{record.getMessage()}"
+        )
+
+
+async def retry[T](
+    fn: Callable[[], Awaitable[T]],
+    *,
+    until: Callable[[T], bool] = lambda _: True,
+    attempts: int = 30,
+    delay: float = 1.0,
+) -> T | None:
+    for _ in range(attempts):
+        await asyncio.sleep(delay)
+        try:
+            result = await fn()
+        except asyncio.TimeoutError:
+            continue
+        if until(result):
+            return result
+    return None
 
 
 @dataclass(frozen=True)
@@ -78,11 +121,6 @@ class FinalReport:
 type EntityMsg = SubmitTask | GetResult | NodeReport | GetFinalReport
 
 
-# ---------------------------------------------------------------------------
-# Task entity — state machine via behavior recursion
-# ---------------------------------------------------------------------------
-
-
 def entity_factory(entity_id: str) -> Behavior[EntityMsg]:
     if entity_id == "report":
         return report_collecting(reports={}, total=0)
@@ -98,7 +136,7 @@ def task_pending(entity_id: str) -> Behavior[EntityMsg]:
                     digest = hashlib.sha256(digest).digest()
                 result = digest.hex()[:16]
                 node = socket.gethostname()
-                print(f"  [task:{entity_id}] processed ({n} iters) -> {result}")
+                log.info("[task:%s] processed (%d iters) -> %s", entity_id, n, result)
                 return task_completed(entity_id, result, node)
             case GetResult(reply_to=reply_to):
                 reply_to.tell(TaskResult(entity_id, "pending", None))
@@ -119,19 +157,13 @@ def task_completed(entity_id: str, result: str, node: str) -> Behavior[EntityMsg
     return Behaviors.receive(receive)
 
 
-# ---------------------------------------------------------------------------
-# Report entity — aggregates distribution from all nodes
-# ---------------------------------------------------------------------------
-
-
 def report_collecting(
     reports: dict[str, dict[str, int]], total: int,
 ) -> Behavior[EntityMsg]:
     async def receive(_ctx: Any, msg: EntityMsg) -> Behavior[EntityMsg]:
         match msg:
             case NodeReport(from_node=from_node, distribution=dist, total=node_total):
-                new_reports = {**reports, from_node: dist}
-                return report_collecting(new_reports, total + node_total)
+                return report_collecting({**reports, from_node: dist}, total + node_total)
             case GetFinalReport(reply_to=reply_to):
                 merged: dict[str, int] = {}
                 for dist in reports.values():
@@ -144,11 +176,6 @@ def report_collecting(
     return Behaviors.receive(receive)
 
 
-# ---------------------------------------------------------------------------
-# Worker — submit tasks, query results, report
-# ---------------------------------------------------------------------------
-
-
 async def run_worker(
     system: ClusteredActorSystem,
     proxy: ActorRef[ShardEnvelope[EntityMsg]],
@@ -157,71 +184,59 @@ async def run_worker(
     num_nodes: int,
 ) -> None:
     task_ids = [f"job-{worker_id}-{i}" for i in range(num_tasks)]
-
-    print(f"[{worker_id}] Submitting {num_tasks} tasks...")
     start = time.monotonic()
 
+    log.info("Submitting %d tasks...", num_tasks)
     for tid in task_ids:
-        proxy.tell(
-            ShardEnvelope(tid, SubmitTask(payload=f"doc-{tid}", iterations=500))
-        )
+        proxy.tell(ShardEnvelope(tid, SubmitTask(payload=f"doc-{tid}", iterations=500)))
 
     await asyncio.sleep(3.0)
 
-    print(f"[{worker_id}] Querying results...")
-    done_count = 0
-    node_counts: dict[str, int] = {}
+    log.info("Querying results...")
+    done = 0
+    distribution: dict[str, int] = {}
+
     for tid in task_ids:
-        try:
-            result: TaskResult = await system.ask(
-                proxy,
-                lambda r, eid=tid: ShardEnvelope(eid, GetResult(reply_to=r)),
-                timeout=5.0,
-            )
-            mark = "[ok]" if result.status == "completed" else "[..]"
-            print(f"  {mark} {result.task_id}: {result.result} (on {result.processed_by})")
-            if result.status == "completed":
-                done_count += 1
-                if result.processed_by:
-                    node_counts[result.processed_by] = node_counts.get(result.processed_by, 0) + 1
-        except asyncio.TimeoutError:
-            print(f"  [!!] {tid}: timeout")
+        result = await system.ask_or_none(
+            proxy,
+            lambda r, eid=tid: ShardEnvelope(eid, GetResult(reply_to=r)),
+            timeout=5.0,
+        )
+        if result is None:
+            log.warning("%s: timeout", tid)
+            continue
+
+        log.info("%s: %s (on %s)", result.task_id, result.result, result.processed_by)
+        match result:
+            case TaskResult(status="completed", processed_by=node) if node:
+                done += 1
+                distribution[node] = distribution.get(node, 0) + 1
+            case _:
+                pass
 
     elapsed = time.monotonic() - start
-    print(f"[{worker_id}] {done_count}/{num_tasks} completed in {elapsed:.1f}s")
+    log.info("%d/%d completed in %.1fs", done, num_tasks, elapsed)
 
-    # Send report to centralized entity
     proxy.tell(ShardEnvelope(
-        "report", NodeReport(from_node=worker_id, distribution=node_counts, total=done_count),
+        "report", NodeReport(from_node=worker_id, distribution=distribution, total=done),
     ))
 
-    # Ensure all nodes are still up before querying the consolidated report.
-    await system.wait_for(num_nodes, timeout=60.0)
+    await system.barrier("reports-sent", num_nodes)
 
-    for _ in range(30):
-        await asyncio.sleep(1.0)
-        try:
-            report: FinalReport = await system.ask(
-                proxy,
-                lambda r: ShardEnvelope("report", GetFinalReport(reply_to=r)),
-                timeout=3.0,
-            )
-            if report.nodes_reported >= num_nodes:
-                dist = ", ".join(
-                    f"{node}: {count}" for node, count in sorted(report.distribution.items())
-                )
-                print(f"[{worker_id}] === Final Report ({report.total} tasks) ===")
-                print(f"[{worker_id}]   {dist}")
-                return
-        except asyncio.TimeoutError:
-            pass
+    report = await retry(
+        lambda: system.ask(
+            proxy,
+            lambda r: ShardEnvelope("report", GetFinalReport(reply_to=r)),
+            timeout=3.0,
+        ),
+        until=lambda r: r.nodes_reported >= num_nodes,
+    )
 
-    print(f"[{worker_id}] Report incomplete (not all nodes reported)")
-
-
-# ---------------------------------------------------------------------------
-# Node runner
-# ---------------------------------------------------------------------------
+    if report:
+        dist = ", ".join(f"{n}: {c}" for n, c in sorted(report.distribution.items()))
+        log.info("Final Report (%d tasks): %s", report.total, dist)
+    else:
+        log.warning("Report incomplete (not all nodes reported)")
 
 
 async def run_node(
@@ -235,7 +250,7 @@ async def run_node(
     worker_id = socket.gethostname()
     config = load_config(Path(__file__).parent / "casty.toml")
 
-    print(f"[{worker_id}] Starting...")
+    log.info("Starting...")
 
     async with ClusteredActorSystem.from_config(
         config,
@@ -249,18 +264,13 @@ async def run_node(
             "tasks",
         )
 
-        state = await system.wait_for(num_nodes)
-        up = sum(1 for m in state.members if m.status == MemberStatus.up)
-        print(f"[{worker_id}] Cluster ready ({up} nodes).")
+        await system.wait_for(num_nodes)
+        log.info("Cluster ready (%d nodes)", num_nodes)
 
         await run_worker(system, proxy, worker_id, num_tasks, num_nodes)
+        await system.barrier("shutdown", num_nodes)
 
-    print(f"[{worker_id}] Shutdown.")
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+    log.info("Shutdown")
 
 
 def main() -> None:
@@ -295,12 +305,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.host is None:
-        host = "127.0.0.1"
-    elif args.host == "auto":
-        host = socket.gethostbyname(socket.gethostname())
-    else:
-        host = args.host
+    match args.host:
+        case None:
+            host = "127.0.0.1"
+        case "auto":
+            host = socket.gethostbyname(socket.gethostname())
+        case h:
+            host = h
 
     bind_host: str = args.bind_host or host
 
@@ -315,5 +326,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
+    handler = logging.StreamHandler()
+    handler.setFormatter(ColorFormatter())
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
     main()

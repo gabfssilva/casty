@@ -43,6 +43,40 @@ class ShardEnvelope[M]:
     message: M
 
 
+@dataclass(frozen=True)
+class BarrierArrive:
+    node: str
+    expected: int
+    reply_to: ActorRef[BarrierReleased]
+
+
+@dataclass(frozen=True)
+class BarrierReleased:
+    pass
+
+
+type BarrierMsg = BarrierArrive
+
+
+def barrier_entity(entity_id: str) -> Behavior[BarrierMsg]:
+    return barrier_waiting(waiters={})
+
+
+def barrier_waiting(
+    waiters: dict[str, ActorRef[BarrierReleased]],
+) -> Behavior[BarrierMsg]:
+    async def receive(_ctx: Any, msg: BarrierMsg) -> Behavior[BarrierMsg]:
+        match msg:
+            case BarrierArrive(node=node, expected=expected, reply_to=reply_to):
+                new_waiters = {**waiters, node: reply_to}
+                if len(new_waiters) >= expected:
+                    for ref in new_waiters.values():
+                        ref.tell(BarrierReleased())
+                    return barrier_waiting({})
+                return barrier_waiting(new_waiters)
+    return Behaviors.receive(receive)
+
+
 def entity_shard(entity_id: str, num_shards: int) -> int:
     """Deterministic shard assignment — consistent across processes."""
     digest = hashlib.md5(entity_id.encode(), usedforsecurity=False).digest()
@@ -250,6 +284,15 @@ class ClusteredActorSystem(ActorSystem):
             await self._remote_transport.stop()
             raise
 
+        self._type_registry.register_all(
+            BarrierArrive, BarrierReleased, ShardEnvelope,
+        )
+
+        self._barrier_proxy: ActorRef[ShardEnvelope[BarrierMsg]] = self.spawn(
+            Behaviors.sharded(entity_factory=barrier_entity, num_shards=10),
+            "_barrier",
+        )
+
         self._logger.info("Started on %s:%d", self._host, self._port)
         return self
 
@@ -410,6 +453,15 @@ class ClusteredActorSystem(ActorSystem):
         return await self.ask(
             self._cluster.ref,
             lambda r: WaitForMembers(n=n, reply_to=r),
+            timeout=timeout,
+        )
+
+    async def barrier(self, name: str, n: int, *, timeout: float = 60.0) -> None:
+        """Distributed barrier — blocks until *n* nodes have reached this point."""
+        node_id = f"{self._host}:{self._port}"
+        await self.ask(
+            self._barrier_proxy,
+            lambda r: ShardEnvelope(name, BarrierArrive(node=node_id, expected=n, reply_to=r)),
             timeout=timeout,
         )
 
