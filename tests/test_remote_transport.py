@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import ssl
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
 
 from casty.address import ActorAddress
 from casty.ref import ActorRef
@@ -274,6 +279,75 @@ async def test_tcp_transport_connection_retry() -> None:
         await transport_a.send("127.0.0.1", port_b, envelope2.to_bytes())
         await asyncio.sleep(0.2)
         assert len(received) == 2
+    finally:
+        await transport_a.stop()
+        await transport_b.stop()
+
+
+@pytest.fixture()
+def tls_certs(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Generate self-signed CA + server cert for testing."""
+    ca_key = tmp_path / "ca.key"
+    ca_cert = tmp_path / "ca.pem"
+    srv_key = tmp_path / "server.key"
+    srv_csr = tmp_path / "server.csr"
+    srv_cert = tmp_path / "server.pem"
+
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(ca_key),
+         "-out", str(ca_cert), "-days", "1", "-nodes", "-subj", "/CN=TestCA"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["openssl", "req", "-newkey", "rsa:2048", "-keyout", str(srv_key),
+         "-out", str(srv_csr), "-nodes", "-subj", "/CN=127.0.0.1"],
+        check=True, capture_output=True,
+    )
+    # Sign with SAN for IP
+    ext_file = tmp_path / "ext.cnf"
+    ext_file.write_text("subjectAltName=IP:127.0.0.1\n")
+    subprocess.run(
+        ["openssl", "x509", "-req", "-in", str(srv_csr), "-CA", str(ca_cert),
+         "-CAkey", str(ca_key), "-CAcreateserial", "-out", str(srv_cert),
+         "-days", "1", "-extfile", str(ext_file)],
+        check=True, capture_output=True,
+    )
+    return srv_cert, srv_key, ca_cert
+
+
+async def test_tcp_transport_tls(tls_certs: tuple[Path, Path, Path]) -> None:
+    srv_cert, srv_key, ca_cert = tls_certs
+
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.load_cert_chain(str(srv_cert), str(srv_key))
+
+    client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client_ctx.load_verify_locations(str(ca_cert))
+
+    received: list[bytes] = []
+
+    class Handler:
+        async def on_message(self, data: bytes) -> None:
+            received.append(data)
+
+    transport_a = TcpTransport(host="127.0.0.1", port=0, server_ssl=server_ctx, client_ssl=client_ctx)
+    transport_b = TcpTransport(host="127.0.0.1", port=0, server_ssl=server_ctx, client_ssl=client_ctx)
+
+    await transport_a.start(Handler())
+    await transport_b.start(Handler())
+
+    try:
+        envelope = MessageEnvelope(
+            target=f"casty://sys@127.0.0.1:{transport_b.port}/actor",
+            sender=f"casty://sys@127.0.0.1:{transport_a.port}/sender",
+            payload=b"hello-tls",
+            type_hint="str",
+        )
+        await transport_a.send("127.0.0.1", transport_b.port, envelope.to_bytes())
+        await asyncio.sleep(0.2)
+        assert len(received) == 1
+        restored = MessageEnvelope.from_bytes(received[0])
+        assert restored.payload == b"hello-tls"
     finally:
         await transport_a.stop()
         await transport_b.stop()

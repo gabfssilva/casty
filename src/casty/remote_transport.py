@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import socket
+import ssl
 import struct
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -51,12 +52,22 @@ class MessageEnvelope:
 
 
 class TcpTransport:
-    def __init__(self, host: str, port: int, *, logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        logger: logging.Logger | None = None,
+        server_ssl: ssl.SSLContext | None = None,
+        client_ssl: ssl.SSLContext | None = None,
+    ) -> None:
         self._host = host
         self._port = port
         self._server: asyncio.Server | None = None
         self._handler: InboundHandler | None = None
         self._logger = logger or logging.getLogger("casty.tcp")
+        self._server_ssl = server_ssl
+        self._client_ssl = client_ssl
         self._connections: dict[
             tuple[str, int], tuple[asyncio.StreamReader, asyncio.StreamWriter]
         ] = {}
@@ -84,7 +95,7 @@ class TcpTransport:
     async def start(self, handler: InboundHandler) -> None:
         self._handler = handler
         self._server = await asyncio.start_server(
-            self._handle_connection, self._host, self._port
+            self._handle_connection, self._host, self._port, ssl=self._server_ssl
         )
 
     async def _handle_connection(
@@ -112,7 +123,7 @@ class TcpTransport:
         try:
             if key not in self._connections:
                 self._logger.debug("TCP connect -> %s:%d", host, port)
-                reader, writer = await asyncio.open_connection(host, port)
+                reader, writer = await asyncio.open_connection(host, port, ssl=self._client_ssl)
                 self._set_nodelay(writer)
                 self._connections[key] = (reader, writer)
             _, writer = self._connections[key]
@@ -122,7 +133,7 @@ class TcpTransport:
             # Drop stale connection and retry once
             self._connections.pop(key, None)
             self._logger.warning("TCP reconnect -> %s:%d", host, port)
-            reader, writer = await asyncio.open_connection(host, port)
+            reader, writer = await asyncio.open_connection(host, port, ssl=self._client_ssl)
             self._set_nodelay(writer)
             self._connections[key] = (reader, writer)
             writer.write(struct.pack("!I", len(data)) + data)

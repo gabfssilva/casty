@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import ssl
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING, cast, overload
 from uuid import uuid4
@@ -157,6 +158,8 @@ class ClusteredActorSystem(ActorSystem):
         roles: frozenset[str] = frozenset(),
         bind_host: str | None = None,
         config: CastyConfig | None = None,
+        server_ssl: ssl.SSLContext | None = None,
+        client_ssl: ssl.SSLContext | None = None,
     ) -> None:
         super().__init__(name=name, config=config)
         self._host = host
@@ -170,7 +173,13 @@ class ClusteredActorSystem(ActorSystem):
 
         # Serialization + transport
         self._type_registry = TypeRegistry()
-        self._tcp_transport = TcpTransport(self._bind_host, port, logger=logging.getLogger(f"casty.remote_transport.{name}"))
+        self._tcp_transport = TcpTransport(
+            self._bind_host,
+            port,
+            logger=logging.getLogger(f"casty.remote_transport.{name}"),
+            server_ssl=server_ssl,
+            client_ssl=client_ssl,
+        )
         self._serializer = JsonSerializer(self._type_registry)
         self._remote_transport = RemoteTransport(
             local=self._local_transport,
@@ -198,6 +207,8 @@ class ClusteredActorSystem(ActorSystem):
         port: int | None = None,
         seed_nodes: list[tuple[str, int]] | None = None,
         bind_host: str | None = None,
+        server_ssl: ssl.SSLContext | None = None,
+        client_ssl: ssl.SSLContext | None = None,
     ) -> ClusteredActorSystem:
         cluster = config.cluster
         if cluster is None:
@@ -212,6 +223,8 @@ class ClusteredActorSystem(ActorSystem):
             roles=cluster.roles,
             bind_host=bind_host,
             config=config,
+            server_ssl=server_ssl,
+            client_ssl=client_ssl,
         )
 
     async def __aenter__(self) -> ClusteredActorSystem:
