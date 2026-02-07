@@ -59,10 +59,6 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     ) as system:
         _system = system
 
-        system.type_registry.register_all(
-            Increment, GetCounter, Put, Get, ShardEnvelope
-        )
-
         _counter_proxy = system.spawn(
             Behaviors.sharded(entity_factory=counter_entity, num_shards=20),
             "counters",

@@ -13,7 +13,7 @@ from casty.cluster_state import (
     VectorClock,
 )
 from casty.ref import ActorRef
-from casty.serialization import JsonSerializer, Serializer, TypeRegistry
+from casty.serialization import JsonSerializer, PickleSerializer, Serializer, TypeRegistry
 from casty.sharding import ShardEnvelope
 from casty.transport import LocalTransport
 from casty.shard_coordinator_actor import GetShardLocation, ShardLocation
@@ -254,3 +254,143 @@ def test_shard_location_with_replicas_roundtrip() -> None:
     assert restored.node == node1
     assert len(restored.replicas) == 1
     assert restored.replicas[0] == node2
+
+
+# --- PickleSerializer tests ---
+
+
+def _pickle_ref_factory(addr: ActorAddress) -> ActorRef[object]:
+    transport = LocalTransport()
+    return ActorRef(address=addr, _transport=transport)
+
+
+def _make_pickle_serializer() -> PickleSerializer:
+    s = PickleSerializer()
+    s.set_ref_factory(_pickle_ref_factory)
+    return s
+
+
+def test_pickle_serializer_implements_protocol() -> None:
+    serializer = PickleSerializer()
+    assert isinstance(serializer, Serializer)
+
+
+def test_pickle_roundtrip_simple() -> None:
+    serializer = _make_pickle_serializer()
+    original = Greet(name="Alice")
+    data = serializer.serialize(original)
+    restored = serializer.deserialize(data)
+    assert restored == original
+
+
+def test_pickle_roundtrip_int_field() -> None:
+    serializer = _make_pickle_serializer()
+    original = Count(value=42)
+    data = serializer.serialize(original)
+    restored = serializer.deserialize(data)
+    assert restored == original
+
+
+def test_pickle_nested_dataclass_roundtrip() -> None:
+    serializer = _make_pickle_serializer()
+    inner = UserGreet(name="Alice", count=42)
+    envelope = ShardEnvelope(entity_id="user-1", message=inner)
+    data = serializer.serialize(envelope)
+    restored = serializer.deserialize(data)
+
+    assert isinstance(restored, ShardEnvelope)
+    assert isinstance(restored.message, UserGreet)
+    assert restored.entity_id == "user-1"
+    assert restored.message.name == "Alice"
+    assert restored.message.count == 42
+
+
+def test_pickle_actor_ref_serialization() -> None:
+    serializer = _make_pickle_serializer()
+    reply_ref: ActorRef[ShardLocation] = ActorRef(
+        address=ActorAddress(
+            system="test", path="/reply", host="127.0.0.1", port=25521
+        ),
+        _transport=LocalTransport(),
+    )
+    msg = GetShardLocation(shard_id=7, reply_to=reply_ref)
+
+    data = serializer.serialize(msg)
+    restored = serializer.deserialize(data)
+
+    assert isinstance(restored, GetShardLocation)
+    assert restored.shard_id == 7
+    assert isinstance(restored.reply_to, ActorRef)
+    assert restored.reply_to.address.host == "127.0.0.1"
+    assert restored.reply_to.address.port == 25521
+    assert restored.reply_to.address.path == "/reply"
+
+
+def test_pickle_frozenset_roundtrip() -> None:
+    serializer = _make_pickle_serializer()
+    node1 = NodeAddress(host="127.0.0.1", port=25520)
+    node2 = NodeAddress(host="127.0.0.1", port=25521)
+    member1 = Member(address=node1, status=MemberStatus.up, roles=frozenset({"web"}))
+    member2 = Member(address=node2, status=MemberStatus.joining, roles=frozenset({"worker"}))
+    state = ClusterState(members=frozenset({member1, member2}))
+
+    data = serializer.serialize(state)
+    restored = serializer.deserialize(data)
+
+    assert isinstance(restored, ClusterState)
+    assert len(restored.members) == 2
+    addresses = {m.address for m in restored.members}
+    assert node1 in addresses
+    assert node2 in addresses
+
+
+def test_pickle_enum_roundtrip() -> None:
+    serializer = _make_pickle_serializer()
+    node = NodeAddress(host="127.0.0.1", port=25520)
+    member = Member(address=node, status=MemberStatus.leaving, roles=frozenset())
+
+    data = serializer.serialize(member)
+    restored = serializer.deserialize(data)
+
+    assert isinstance(restored, Member)
+    assert restored.status == MemberStatus.leaving
+    assert restored.address == node
+    assert restored.roles == frozenset()
+
+
+def test_pickle_vector_clock_roundtrip() -> None:
+    serializer = _make_pickle_serializer()
+    node1 = NodeAddress(host="127.0.0.1", port=25520)
+    node2 = NodeAddress(host="127.0.0.1", port=25521)
+    clock = VectorClock().increment(node1).increment(node1).increment(node2)
+
+    data = serializer.serialize(clock)
+    restored = serializer.deserialize(data)
+
+    assert isinstance(restored, VectorClock)
+    assert restored.version_of(node1) == 2
+    assert restored.version_of(node2) == 1
+
+
+def test_pickle_full_cluster_state_roundtrip() -> None:
+    serializer = _make_pickle_serializer()
+    node1 = NodeAddress(host="10.0.0.1", port=25520)
+    node2 = NodeAddress(host="10.0.0.2", port=25521)
+    member1 = Member(address=node1, status=MemberStatus.up, roles=frozenset({"seed", "web"}))
+    member2 = Member(address=node2, status=MemberStatus.up, roles=frozenset({"worker"}))
+    clock = VectorClock().increment(node1).increment(node2)
+    state = ClusterState(
+        members=frozenset({member1, member2}),
+        unreachable=frozenset({node2}),
+        version=clock,
+    )
+
+    data = serializer.serialize(state)
+    restored = serializer.deserialize(data)
+
+    assert isinstance(restored, ClusterState)
+    assert len(restored.members) == 2
+    assert len(restored.unreachable) == 1
+    assert node2 in restored.unreachable
+    assert restored.version.version_of(node1) == 1
+    assert restored.version.version_of(node2) == 1

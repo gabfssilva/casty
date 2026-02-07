@@ -72,7 +72,7 @@ from casty.replication import (
 from casty.messages import Terminated
 from casty.ref import ActorRef
 from casty.remote_transport import MessageEnvelope, RemoteTransport, TcpTransport
-from casty.serialization import JsonSerializer, Serializer, TypeRegistry
+from casty.serialization import JsonSerializer, PickleSerializer, Serializer, TypeRegistry
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
 from casty.supervision import Directive, OneForOneStrategy, SupervisionStrategy
 from casty.system import ActorSystem
@@ -130,6 +130,7 @@ __all__ = [
     # Serialization
     "TypeRegistry",
     "JsonSerializer",
+    "PickleSerializer",
     "Serializer",
     # Journal / Event Sourcing
     "EventJournal",

@@ -5,6 +5,7 @@ import enum
 import importlib
 import json
 import logging
+import pickle
 from collections.abc import Callable
 from typing import Any, Protocol, cast, runtime_checkable
 
@@ -65,6 +66,7 @@ class TypeRegistry:
 class Serializer(Protocol):
     def serialize(self, obj: Any) -> bytes: ...
     def deserialize(self, data: bytes) -> Any: ...
+    def set_ref_factory(self, factory: Callable[[ActorAddress], Any]) -> None: ...
 
 
 class JsonSerializer:
@@ -167,3 +169,18 @@ class JsonSerializer:
                 return value
 
 
+class PickleSerializer:
+    def __init__(self, *, ref_factory: Callable[[ActorAddress], Any] | None = None) -> None:
+        self._ref_factory = ref_factory
+
+    def set_ref_factory(self, factory: Callable[[ActorAddress], Any]) -> None:
+        from casty import ref as _ref_module
+
+        self._ref_factory = factory
+        _ref_module.ref_restore_hook = lambda uri: factory(ActorAddress.from_uri(uri))
+
+    def serialize(self, obj: Any) -> bytes:
+        return pickle.dumps(obj, protocol=5)
+
+    def deserialize(self, data: bytes) -> Any:
+        return pickle.loads(data)  # noqa: S301

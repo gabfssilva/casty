@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from casty.address import ActorAddress
-from casty.serialization import JsonSerializer
+from casty.serialization import Serializer
 from casty.transport import LocalTransport
 
 if TYPE_CHECKING:
@@ -161,7 +161,7 @@ class RemoteTransport:
         *,
         local: LocalTransport,
         tcp: TcpTransport,
-        serializer: JsonSerializer,
+        serializer: Serializer,
         local_host: str,
         local_port: int,
         system_name: str,
@@ -193,8 +193,6 @@ class RemoteTransport:
             except RuntimeError:
                 self._logger.warning("No running loop for remote deliver to %s", address)
 
-    _PRIMITIVE_TYPES: frozenset[type] = frozenset({int, float, str, bool, type(None)})
-
     async def _send_remote(self, address: ActorAddress, msg: Any) -> None:
         host = address.host
         port = address.port
@@ -203,11 +201,8 @@ class RemoteTransport:
             return
         try:
             payload = self._serializer.serialize(msg)
-            msg_type = type(msg)  # pyright: ignore[reportUnknownVariableType]
-            if msg_type in self._PRIMITIVE_TYPES:
-                type_name = f"builtins.{msg_type.__name__}"
-            else:
-                type_name = self._serializer.registry.type_name(msg_type)  # pyright: ignore[reportUnknownArgumentType]
+            msg_cls = msg.__class__
+            type_name = f"{msg_cls.__module__}.{msg_cls.__qualname__}"
             envelope = MessageEnvelope(
                 target=address.to_uri(),
                 sender=f"casty://{self._system_name}@{self._local_host}:{self._local_port}/",

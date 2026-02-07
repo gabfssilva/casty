@@ -16,7 +16,7 @@ from casty.mailbox import Mailbox
 from casty.ref import ActorRef
 from casty.cluster import Cluster, ClusterConfig, RegisterCoordinator, WaitForMembers
 from casty.remote_transport import RemoteTransport, TcpTransport
-from casty.serialization import JsonSerializer, TypeRegistry
+from casty.serialization import PickleSerializer
 from casty.system import ActorSystem
 from casty.transport import MessageTransport
 
@@ -172,7 +172,6 @@ class ClusteredActorSystem(ActorSystem):
         self._logger = logging.getLogger(f"casty.sharding.{name}")
 
         # Serialization + transport
-        self._type_registry = TypeRegistry()
         self._tcp_transport = TcpTransport(
             self._bind_host,
             port,
@@ -180,7 +179,7 @@ class ClusteredActorSystem(ActorSystem):
             server_ssl=server_ssl,
             client_ssl=client_ssl,
         )
-        self._serializer = JsonSerializer(self._type_registry)
+        self._serializer = PickleSerializer()
         self._remote_transport = RemoteTransport(
             local=self._local_transport,
             tcp=self._tcp_transport,
@@ -193,10 +192,6 @@ class ClusteredActorSystem(ActorSystem):
     @property
     def self_node(self) -> NodeAddress:
         return self._self_node
-
-    @property
-    def type_registry(self) -> TypeRegistry:
-        return self._type_registry
 
     @classmethod
     def from_config(
@@ -263,15 +258,7 @@ class ClusteredActorSystem(ActorSystem):
             await self._remote_transport.stop()
             raise
 
-        from casty.distributed.barrier import BarrierArrive, BarrierMsg, BarrierReleased, barrier_entity
-        from casty.distributed.lock import LockAcquire, LockAcquired, LockRelease, LockReleased, LockTryAcquire, LockTryResult
-        from casty.distributed.semaphore import SemaphoreAcquire, SemaphoreAcquired, SemaphoreRelease, SemaphoreReleased, SemaphoreTryAcquire, SemaphoreTryResult
-
-        self._type_registry.register_all(
-            BarrierArrive, BarrierReleased, ShardEnvelope,
-            LockAcquire, LockAcquired, LockTryAcquire, LockTryResult, LockRelease, LockReleased,
-            SemaphoreAcquire, SemaphoreAcquired, SemaphoreTryAcquire, SemaphoreTryResult, SemaphoreRelease, SemaphoreReleased,
-        )
+        from casty.distributed.barrier import BarrierMsg, barrier_entity
 
         self._barrier_proxy: ActorRef[ShardEnvelope[BarrierMsg]] = self.spawn(
             Behaviors.sharded(entity_factory=barrier_entity, num_shards=10),
