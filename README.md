@@ -10,31 +10,29 @@
   <a href="https://pypi.org/project/casty/"><img src="https://img.shields.io/pypi/v/casty.svg" alt="PyPI"></a>
   <a href="https://pypi.org/project/casty/"><img src="https://img.shields.io/pypi/pyversions/casty.svg" alt="Python"></a>
   <a href="https://github.com/gabfssilva/casty/actions"><img src="https://img.shields.io/github/actions/workflow/status/gabfssilva/casty/python-package.yml" alt="Tests"></a>
-  <a href="https://github.com/gabfssilva/casty/blob/main/LICENSE"><img src="https://img.shields.io/github/license/gabfssilva/casty.svg" alt="License"></a>
+  <a href="https://github.com/gabfssilva/casty/blob/main/LICENSE"><img src="https://img.shields.io/github/license/gabfssilva.svg" alt="License"></a>
 </p>
 
 <p align="center">
   <code>pip install casty</code>
 </p>
 
+---
+
 ## What is Casty?
 
-Casty is an actor framework inspired by [Akka Typed](https://doc.akka.io/libraries/akka-core/current/typed/index.html) that brings the behavior-driven, functional actor model to Python. Instead of dealing with threads, locks, and shared state, you write small independent units called **actors** that communicate through **messages**.
+Casty is an actor framework inspired by [Akka Typed](https://doc.akka.io/libraries/akka-core/current/typed/index.html) that brings the behavior-driven, functional actor model to Python. Instead of dealing with threads, locks, and shared mutable state, you model your system as independent units called **actors** that communicate exclusively through **messages**.
 
-**Why actors?**
+The actor model was introduced by Carl Hewitt in 1973 and later battle-tested in Erlang/OTP — the foundation of telecom systems achieving 99.9999% uptime — and in Akka, which powers JVM systems processing millions of messages per second. Casty brings these ideas to Python's `asyncio` ecosystem with a design that embraces Python's strengths: closures for state, frozen dataclasses for immutability, type aliases for exhaustive matching, and Protocols for extensibility.
 
-- **No shared state** — Each actor owns its data. No locks, no race conditions.
-- **Message-driven** — Actors communicate asynchronously through messages.
-- **Fault-tolerant** — Actors can supervise each other and recover from failures.
-- **Hierarchical** — Parent actors supervise children, forming a natural fault-tolerance tree.
+Casty makes several deliberate design choices that distinguish it from other actor libraries:
 
-**Why Casty?**
-
-- **Functional** — Behaviors are values, not classes. State lives in closures, not mutable fields.
-- **Type-safe** — Fully typed with `ActorRef[M]`, `Behavior[M]`, and Pyright strict mode.
-- **Zero dependencies** — Pure Python, stdlib only. Nothing to install beyond Casty itself.
-- **Built on asyncio** — Native async/await, no custom event loop needed.
-- **Cluster-ready** — Distribute actors across nodes with `ClusteredActorSystem` and `Behaviors.sharded()`.
+- **Behaviors are values, not classes.** There is no `Actor` base class to subclass. A behavior is a frozen dataclass produced by a factory function, composed and transformed like any other value.
+- **State lives in closures, not mutable fields.** An actor's state is captured in the closure of its message handler. State transitions happen by returning a new behavior that closes over the new state.
+- **Immutability by default.** All messages, behaviors, events, and configurations are frozen dataclasses. If a value can't be mutated after creation, it's safe to pass between actors without copying.
+- **Zero external dependencies.** Pure Python, stdlib only. Nothing to install beyond Casty itself.
+- **Type-safe end-to-end.** `ActorRef[M]`, `Behavior[M]`, and PEP 695 type aliases ensure that the type checker catches message mismatches at development time, not at runtime.
+- **Cluster-ready.** Distribute actors across nodes with `ClusteredActorSystem`, gossip-based membership, phi accrual failure detection, and automatic shard rebalancing.
 
 ## Quick Start
 
@@ -66,94 +64,217 @@ asyncio.run(main())
 # Hello, Bob!
 ```
 
-**What just happened?**
+Four things happened here:
 
-1. **Messages are frozen dataclasses** — `Greet` carries data immutably
-2. **Behaviors are functions** — `greeter()` returns a `Behavior[Greet]` value
-3. **State via closures** — returning `Behaviors.same()` keeps the current behavior; returning a new behavior transitions state
-4. **`tell` is fire-and-forget** — messages are delivered asynchronously to the actor's mailbox
+1. **`Greet` is a frozen dataclass.** Messages are immutable values — safe to send between actors without defensive copying.
+2. **`greeter()` returns a `Behavior[Greet]`.** The behavior is a value produced by `Behaviors.receive()`, not a class instance. The actor system interprets this value to wire up the message handler.
+3. **`Behaviors.same()` means "keep the current behavior."** Returning a different behavior would transition the actor to a new state. This is the fundamental mechanism for state management.
+4. **`tell()` is fire-and-forget.** Messages are enqueued in the actor's mailbox and processed asynchronously, one at a time.
 
-## Core Concepts
+The sections that follow build on these foundations progressively — from functional state management through fault tolerance, event sourcing, and distributed clustering. Each section introduces one concept, explains why it exists in the actor model, and shows how Casty implements it.
 
-### Messages
+---
 
-Messages are frozen dataclasses. Group related messages with type aliases:
+## Actors and Messages
+
+In the actor model, an **actor** is the fundamental unit of computation. When an actor receives a message, it can do exactly three things:
+
+1. **Send messages** to other actors it knows about.
+2. **Create new actors** (its children).
+3. **Designate the behavior** for the next message it receives.
+
+That's the entire model. There is no shared memory between actors, no synchronization primitives, no mutex. Concurrency emerges naturally: each actor processes one message at a time from its mailbox, and multiple actors run concurrently on the asyncio event loop.
+
+A **message** is any value sent to an actor. In Casty, messages are frozen dataclasses — immutable by construction. Related messages are grouped using PEP 695 type aliases, which enables exhaustive pattern matching via `match` statements:
 
 ```python
+from dataclasses import dataclass
+from casty import ActorRef
+
 @dataclass(frozen=True)
-class Increment:
+class Deposit:
     amount: int
 
 @dataclass(frozen=True)
-class GetValue:
+class Withdraw:
+    amount: int
+    reply_to: ActorRef[str]
+
+@dataclass(frozen=True)
+class GetBalance:
     reply_to: ActorRef[int]
 
-type CounterMsg = Increment | GetValue
+type AccountMsg = Deposit | Withdraw | GetBalance
 ```
 
-### Behaviors
+The type alias `AccountMsg` is a union of all messages the actor accepts. When handling messages with `match`, the type checker verifies that all variants are covered. If a new message type is added to the union but not handled, Pyright reports an error at development time.
 
-Behaviors define how an actor handles messages. They are **values**, not classes — you compose them using the `Behaviors` factory:
+## Behaviors as Values
+
+In most actor frameworks, an actor is defined by subclassing a base class and overriding a `receive` method. Casty takes a different approach, inspired by Akka Typed: **behaviors are values**, not classes.
+
+A behavior is a frozen dataclass that describes how an actor processes messages. You compose behaviors using the `Behaviors` factory:
 
 | Factory | Purpose |
 |---------|---------|
-| `Behaviors.receive(handler)` | Handle messages with `async (ctx, msg) -> Behavior` |
-| `Behaviors.setup(factory)` | Run initialization logic, then return the real behavior |
-| `Behaviors.same()` | Keep the current behavior (return from handler) |
+| `Behaviors.receive(handler)` | Create a behavior from an async message handler `(ctx, msg) -> Behavior` |
+| `Behaviors.setup(factory)` | Run initialization logic with access to `ActorContext`, then return the real behavior |
+| `Behaviors.same()` | Keep the current behavior unchanged (returned from a message handler) |
 | `Behaviors.stopped()` | Stop the actor gracefully |
-| `Behaviors.unhandled()` | Signal the message wasn't handled |
+| `Behaviors.unhandled()` | Signal that the message was not handled |
 | `Behaviors.restart()` | Explicitly restart the actor |
-| `Behaviors.supervise(behavior, strategy)` | Wrap with a supervision strategy |
-| `Behaviors.with_lifecycle(behavior, ...)` | Attach lifecycle hooks |
-| `Behaviors.sharded(entity_factory, num_shards=100)` | Create sharded entities distributed across cluster nodes |
+| `Behaviors.supervise(behavior, strategy)` | Wrap a behavior with a supervision strategy |
+| `Behaviors.with_lifecycle(behavior, ...)` | Attach lifecycle hooks (pre_start, post_stop, etc.) |
 | `Behaviors.event_sourced(...)` | Persist actor state as a sequence of events |
-| `Behaviors.persisted(events)` | Return from command handler to persist events |
+| `Behaviors.persisted(events)` | Return from a command handler to persist events and update state |
+| `Behaviors.sharded(entity_factory, ...)` | Distribute entities across cluster nodes via sharding |
 
-### Functional State
+Because behaviors are values, they compose naturally. A behavior can be wrapped with supervision, decorated with lifecycle hooks, and backed by event sourcing — all through function composition, not class inheritance.
 
-State is captured in closures. Returning a new behavior **is** the state transition:
+## Functional State
+
+The actor model requires each actor to designate the behavior for its *next* message. This is the mechanism for state transitions. In Casty, state is captured in closures: the message handler closes over the current state, and returning a new behavior with different closed-over values constitutes a state transition.
+
+Consider a bank account actor that tracks a balance:
 
 ```python
-def counter(value: int = 0) -> Behavior[CounterMsg]:
-    async def receive(ctx: ActorContext[CounterMsg], msg: CounterMsg) -> Behavior[CounterMsg]:
+import asyncio
+from dataclasses import dataclass
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
+
+@dataclass(frozen=True)
+class Deposit:
+    amount: int
+
+@dataclass(frozen=True)
+class GetBalance:
+    reply_to: ActorRef[int]
+
+type AccountMsg = Deposit | GetBalance
+
+def bank_account(balance: int = 0) -> Behavior[AccountMsg]:
+    async def receive(ctx: ActorContext[AccountMsg], msg: AccountMsg) -> Behavior[AccountMsg]:
         match msg:
-            case Increment(amount):
-                return counter(value + amount)  # new state
-            case GetValue(reply_to):
-                reply_to.tell(value)
-                return Behaviors.same()         # keep state
+            case Deposit(amount):
+                return bank_account(balance + amount)
+            case GetBalance(reply_to):
+                reply_to.tell(balance)
+                return Behaviors.same()
 
     return Behaviors.receive(receive)
+
+async def main() -> None:
+    async with ActorSystem() as system:
+        account = system.spawn(bank_account(), "account")
+        account.tell(Deposit(100))
+        account.tell(Deposit(50))
+        await asyncio.sleep(0.1)
+
+asyncio.run(main())
 ```
 
-No mutable fields. No `self.state = ...`. The function **is** the state.
+The line `return bank_account(balance + amount)` is the state transition. It creates a new `ReceiveBehavior` whose handler closes over `balance + amount`. There is no mutable field, no `self.balance = ...`, no `nonlocal`. The function call **is** the state transition.
 
-### Actor References
+This approach — called **behavior recursion** — makes state transitions explicit, traceable, and impossible to corrupt through accidental sharing. Each invocation of `bank_account(n)` produces a completely independent behavior value.
 
-When you spawn an actor, you get back a typed `ActorRef[M]`. It's the only way to communicate with an actor:
+## Request-Reply
+
+Actors communicate via fire-and-forget `tell()` by default. When a response is needed, the actor model uses the **reply-to pattern**: the sender includes its own `ActorRef` in the message so the receiver can send a response back.
 
 ```python
-ref = system.spawn(counter(), "my-counter")
-ref.tell(Increment(10))  # fire-and-forget
+import asyncio
+from dataclasses import dataclass
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
+
+@dataclass(frozen=True)
+class Deposit:
+    amount: int
+
+@dataclass(frozen=True)
+class Withdraw:
+    amount: int
+    reply_to: ActorRef[str]
+
+@dataclass(frozen=True)
+class GetBalance:
+    reply_to: ActorRef[int]
+
+type AccountMsg = Deposit | Withdraw | GetBalance
+
+def bank_account(balance: int = 0) -> Behavior[AccountMsg]:
+    async def receive(ctx: ActorContext[AccountMsg], msg: AccountMsg) -> Behavior[AccountMsg]:
+        match msg:
+            case Deposit(amount):
+                return bank_account(balance + amount)
+            case Withdraw(amount, reply_to) if balance >= amount:
+                reply_to.tell("ok")
+                return bank_account(balance - amount)
+            case Withdraw(_, reply_to):
+                reply_to.tell(f"insufficient funds (balance={balance})")
+                return Behaviors.same()
+            case GetBalance(reply_to):
+                reply_to.tell(balance)
+                return Behaviors.same()
+
+    return Behaviors.receive(receive)
+
+async def main() -> None:
+    async with ActorSystem() as system:
+        account = system.spawn(bank_account(), "account")
+        account.tell(Deposit(100))
+
+        balance = await system.ask(
+            account,
+            lambda reply_to: GetBalance(reply_to=reply_to),
+            timeout=5.0,
+        )
+        print(f"Balance: {balance}")  # Balance: 100
+
+        result = await system.ask(
+            account,
+            lambda reply_to: Withdraw(200, reply_to=reply_to),
+            timeout=5.0,
+        )
+        print(f"Withdraw: {result}")  # Withdraw: insufficient funds (balance=100)
+
+asyncio.run(main())
 ```
 
-### Request-Reply (Ask)
+`system.ask()` is a convenience that creates a temporary actor behind the scenes, passes its `ActorRef` as the `reply_to` field, and awaits the response with a timeout. The underlying mechanism is still `tell` — `ask` simply wraps the reply-to pattern into a coroutine.
 
-For request-response, include a `reply_to: ActorRef[R]` in the message. The system provides a convenience `ask`:
+## Actor Hierarchies
 
-```python
-result = await system.ask(
-    ref,
-    lambda reply_to: GetValue(reply_to=reply_to),
-    timeout=5.0,
-)
-```
+Actors form a tree. When an actor spawns a child via `ctx.spawn()`, it becomes the parent. This hierarchy is not merely organizational — it is the foundation of fault tolerance. A parent is responsible for the lifecycle of its children: it can stop them, watch them for termination, and define supervision strategies for their failures.
 
-### Setup (Initialization)
-
-Use `Behaviors.setup` when you need access to the `ActorContext` before handling messages — for example, to spawn children:
+`Behaviors.setup()` provides access to the `ActorContext` at initialization time, which is where children are typically spawned:
 
 ```python
+import asyncio
+from dataclasses import dataclass
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Terminated
+
+@dataclass(frozen=True)
+class Task:
+    description: str
+
+@dataclass(frozen=True)
+class Hire:
+    name: str
+
+@dataclass(frozen=True)
+class Assign:
+    worker: str
+    task: str
+
+type ManagerMsg = Hire | Assign | Terminated
+
+def worker(name: str) -> Behavior[Task]:
+    async def receive(ctx: ActorContext[Task], msg: Task) -> Behavior[Task]:
+        print(f"[{name}] working on: {msg.description}")
+        return Behaviors.same()
+
+    return Behaviors.receive(receive)
+
 def manager() -> Behavior[ManagerMsg]:
     async def setup(ctx: ActorContext[ManagerMsg]) -> Behavior[ManagerMsg]:
         workers: dict[str, ActorRef[Task]] = {}
@@ -161,55 +282,111 @@ def manager() -> Behavior[ManagerMsg]:
         async def receive(ctx: ActorContext[ManagerMsg], msg: ManagerMsg) -> Behavior[ManagerMsg]:
             match msg:
                 case Hire(name):
-                    workers[name] = ctx.spawn(worker(name), name)
+                    ref = ctx.spawn(worker(name), name)
+                    ctx.watch(ref)
+                    workers[name] = ref
                     return Behaviors.same()
                 case Assign(worker_name, task):
-                    workers[worker_name].tell(Task(task))
+                    if worker_name in workers:
+                        workers[worker_name].tell(Task(task))
+                    return Behaviors.same()
+                case Terminated(ref):
+                    print(f"Worker stopped: {ref.address}")
                     return Behaviors.same()
 
         return Behaviors.receive(receive)
 
     return Behaviors.setup(setup)
+
+async def main() -> None:
+    async with ActorSystem() as system:
+        mgr = system.spawn(manager(), "manager")
+        mgr.tell(Hire("alice"))
+        mgr.tell(Hire("bob"))
+        await asyncio.sleep(0.1)
+
+        mgr.tell(Assign("alice", "implement login"))
+        mgr.tell(Assign("bob", "write tests"))
+        await asyncio.sleep(0.1)
+
+asyncio.run(main())
 ```
 
-### Supervision
+**Death watch** is the mechanism by which an actor observes the termination of another actor. Calling `ctx.watch(ref)` registers interest; when the watched actor stops — whether gracefully or due to failure — the watcher receives a `Terminated` message containing the stopped actor's ref.
 
-Actors fail. Supervisors decide what happens next:
+## Supervision
+
+In traditional programming, errors propagate upward through the call stack via exceptions. In the actor model, errors propagate **to the supervisor**. This is the "let it crash" philosophy pioneered by Erlang/OTP: instead of writing defensive code within the actor to handle every possible failure, let the actor fail fast and let its supervisor decide the recovery strategy.
+
+A supervisor is any actor that has spawned children. The supervision strategy defines what happens when a child fails:
+
+| Directive | Effect |
+|-----------|--------|
+| `Directive.restart` | Restart the actor with its initial behavior, resetting state |
+| `Directive.stop` | Stop the actor permanently |
+| `Directive.escalate` | Propagate the failure to the next supervisor up the hierarchy |
+
+`OneForOneStrategy` supervises each child independently. It tracks restart counts within a configurable time window — if a child exceeds the limit, it is stopped instead of restarted:
 
 ```python
-from casty import Behaviors, OneForOneStrategy, Directive
+import asyncio
+from casty import ActorContext, ActorSystem, Behavior, Behaviors, Directive, OneForOneStrategy
 
-strategy = OneForOneStrategy(
-    max_restarts=3,
-    within=60.0,
-    decider=lambda exc: Directive.restart,
-)
+def unreliable_worker() -> Behavior[str]:
+    async def receive(ctx: ActorContext[str], msg: str) -> Behavior[str]:
+        if msg == "crash":
+            raise RuntimeError("something went wrong")
+        print(f"Processed: {msg}")
+        return Behaviors.same()
 
-supervised = Behaviors.supervise(unreliable_worker(), strategy)
-ref = system.spawn(supervised, "worker")
+    return Behaviors.receive(receive)
+
+async def main() -> None:
+    strategy = OneForOneStrategy(
+        max_restarts=3,
+        within=60.0,
+        decider=lambda exc: Directive.restart,
+    )
+
+    async with ActorSystem() as system:
+        ref = system.spawn(
+            Behaviors.supervise(unreliable_worker(), strategy),
+            "worker",
+        )
+
+        ref.tell("crash")          # fails, supervisor restarts
+        await asyncio.sleep(0.2)
+
+        ref.tell("hello")          # succeeds — actor recovered
+        await asyncio.sleep(0.1)
+
+asyncio.run(main())
 ```
 
-Directives:
+The `decider` function receives the exception and returns a directive. This allows fine-grained control: restart on transient errors, stop on fatal ones, escalate on unknown failures.
 
-| Directive | Behavior |
-|-----------|----------|
-| `Directive.restart` | Restart the actor, reset state |
-| `Directive.stop` | Stop the actor permanently |
-| `Directive.escalate` | Escalate to parent supervisor |
+An important interaction to note: when a supervised actor without event sourcing is restarted, its state is reset to the initial behavior. This means the bank account from previous sections would lose its balance on restart. Event sourcing (covered later) solves this by replaying persisted events to reconstruct state after a restart.
 
-`OneForOneStrategy` tracks restart counts within a time window. If the limit is exceeded, the actor is stopped.
+## Actor Runtime
+
+The following concepts control the operational behavior of actors. They are grouped here because each is important but self-contained — none changes the fundamental mental model established in previous sections.
 
 ### Lifecycle Hooks
 
-Attach hooks to observe actor lifecycle transitions:
+Actors transition through a defined lifecycle: start, stop, and (if supervised) restart. Lifecycle hooks allow executing side effects at each boundary — acquiring resources on start, releasing them on stop, logging on restart:
 
 ```python
+from casty import ActorContext, Behavior, Behaviors
+
 def my_actor() -> Behavior[str]:
     async def pre_start(ctx: ActorContext[str]) -> None:
-        print("starting up")
+        ctx.log.info("Actor starting")
 
     async def post_stop(ctx: ActorContext[str]) -> None:
-        print("shutting down")
+        ctx.log.info("Actor stopped")
+
+    async def receive(ctx: ActorContext[str], msg: str) -> Behavior[str]:
+        return Behaviors.same()
 
     return Behaviors.with_lifecycle(
         Behaviors.receive(receive),
@@ -218,46 +395,27 @@ def my_actor() -> Behavior[str]:
     )
 ```
 
-Available hooks: `pre_start`, `post_stop`, `pre_restart`, `post_restart`.
-
-### Death Watch
-
-Actors can watch other actors and receive a `Terminated` message when they stop:
-
-```python
-from casty import Terminated
-
-def watcher_behavior() -> Behavior[Terminated]:
-    async def setup(ctx: ActorContext[Terminated]) -> Behavior[Terminated]:
-        child = ctx.spawn(some_actor(), "child")
-        ctx.watch(child)
-
-        async def receive(ctx: ActorContext[Terminated], msg: Terminated) -> Behavior[Terminated]:
-            print(f"actor {msg.ref} has stopped")
-            return Behaviors.same()
-
-        return Behaviors.receive(receive)
-
-    return Behaviors.setup(setup)
-```
+Available hooks: `pre_start` (before first message), `post_stop` (after final message), `pre_restart` (before restart), `post_restart` (after restart, before first message of new incarnation).
 
 ### Event Stream
 
-The system-wide event bus for observability:
+The `EventStream` is a system-wide publish/subscribe bus for observability. Every significant actor lifecycle event is published automatically:
 
 ```python
 from casty import ActorStarted, ActorStopped, DeadLetter
 
-system.event_stream.subscribe(ActorStarted, lambda e: print(f"started: {e.ref}"))
-system.event_stream.subscribe(ActorStopped, lambda e: print(f"stopped: {e.ref}"))
-system.event_stream.subscribe(DeadLetter, lambda e: print(f"dead letter: {e.message}"))
+system.event_stream.subscribe(ActorStarted, lambda e: print(f"Started: {e.ref}"))
+system.event_stream.subscribe(ActorStopped, lambda e: print(f"Stopped: {e.ref}"))
+system.event_stream.subscribe(DeadLetter, lambda e: print(f"Dead letter: {e.message}"))
 ```
 
-Events: `ActorStarted`, `ActorStopped`, `ActorRestarted`, `DeadLetter`, `UnhandledMessage`.
+A `DeadLetter` is published when a message is sent to an actor that has already stopped. This is valuable for debugging message routing issues.
+
+Available events: `ActorStarted`, `ActorStopped`, `ActorRestarted`, `DeadLetter`, `UnhandledMessage`. In clustered mode, additional events are published: `MemberUp`, `MemberLeft`, `UnreachableMember`, `ReachableMember`.
 
 ### Mailbox Configuration
 
-Control backpressure with bounded mailboxes:
+Each actor has a mailbox — a bounded queue that buffers incoming messages. When messages arrive faster than the actor can process them, the overflow strategy determines what happens:
 
 ```python
 from casty import Mailbox, MailboxOverflowStrategy
@@ -269,53 +427,67 @@ ref = system.spawn(
 )
 ```
 
-Overflow strategies: `drop_new` (default), `drop_oldest`, `backpressure`.
+| Strategy | Behavior |
+|----------|----------|
+| `drop_new` (default) | Discard the incoming message when the mailbox is full |
+| `drop_oldest` | Discard the oldest message in the mailbox to make room for the new one |
+| `backpressure` | Raise `asyncio.QueueFull`, propagating pressure to the sender |
 
-### Cluster Sharding
+### Scheduling
 
-Distribute actors across multiple nodes with `ClusteredActorSystem` and `Behaviors.sharded()`. Entities are automatically partitioned into shards and routed to the correct node — the API feels identical to local spawning:
+The scheduler is an actor (spawned lazily by the system) that manages timed message delivery. Two patterns are supported: periodic ticks and one-shot delays.
 
 ```python
-from casty import Behaviors, ShardEnvelope
-from casty.sharding import ClusteredActorSystem
+# Send a BalanceReport to the account actor every 30 seconds
+system.tick("report", account_ref, BalanceReport(), interval=30.0)
 
-# Each node in the cluster runs the same code
-async with ClusteredActorSystem(
-    name="bank",
-    host="10.0.0.1",
-    port=25520,
-    seed_nodes=[("10.0.0.2", 25520), ("10.0.0.3", 25520)],
-) as system:
-    # spawn returns ActorRef[ShardEnvelope[AccountMsg]]
-    accounts = system.spawn(Behaviors.sharded(account_entity, num_shards=10), "accounts")
+# Send a Timeout message after 5 seconds
+system.schedule("timeout", account_ref, Timeout(), delay=5.0)
 
-    # send messages — routing is transparent
-    accounts.tell(ShardEnvelope("alice", Deposit(100)))
-
-    # ask works the same way
-    balance = await system.ask(
-        accounts,
-        lambda r: ShardEnvelope("alice", GetBalance(reply_to=r)),
-        timeout=2.0,
-    )
+# Cancel a scheduled task
+system.cancel_schedule("report")
 ```
 
-Each entity (e.g. `"alice"`) is hashed to a shard, and the coordinator assigns shards to nodes using a least-shard-first strategy. Messages to remote entities are forwarded automatically. Every node in the cluster runs the same code — just change `host` per machine.
+Scheduled tasks are identified by a string key. Scheduling a new task with the same key cancels the previous one.
 
-### Event Sourcing
+## Event Sourcing
 
-Persist actor state as a sequence of events instead of storing state directly. On recovery, events are replayed from the journal to reconstruct state — no data loss, full audit trail:
+Traditional persistence stores the **current state** — a row in a database with `balance = 500`. Event sourcing stores the **sequence of facts that produced the state** — `Deposited(100)`, `Deposited(500)`, `Withdrawn(100)`. The current state is a derived value, computed by folding events from left to right.
+
+This distinction has profound consequences:
+
+- **Complete audit trail.** Every state change is recorded as an immutable event. You can reconstruct the state at any point in time by replaying events up to that moment.
+- **Recovery after failure.** When an actor restarts (via supervision) or a process crashes and restarts, the actor replays its events from the journal and recovers its exact state. Supervision provides the restart; event sourcing provides the memory.
+- **Separation of concerns.** The *decision* to change state (command handling) is separated from the *application* of the change (event handling). Commands can be rejected; events are facts that have already occurred and cannot be rejected.
+
+Event sourcing introduces three distinct concepts:
+
+- **Commands** — Messages from the outside world requesting a state change. "Deposit 100" is a command. It may be accepted or rejected (e.g., "insufficient funds" for a withdrawal).
+- **Events** — Immutable records of what actually happened. "Deposited 100" is an event. Events are persisted to a journal and never modified.
+- **State** — The current value derived from the event sequence. Computed by folding `on_event` over all persisted events from an initial state.
+
+A regular Casty actor holds state in a closure — but closures cannot be replayed. Event sourcing requires a different behavior shape with two explicit functions:
+
+- `on_event(state, event) -> state` — A pure, synchronous function that applies one event to the current state. Used both for live processing and for recovery (replay).
+- `on_command(ctx, state, command) -> Behavior` — An async function that receives the current state and a command, decides what events to persist, and returns `Behaviors.persisted(events=[...])`.
 
 ```python
-from casty import Behaviors
-from casty.journal import InMemoryJournal
+import asyncio
+from dataclasses import dataclass
+from typing import Any
+from casty import ActorRef, ActorSystem, Behavior, Behaviors
 from casty.actor import SnapshotEvery
+from casty.journal import InMemoryJournal
+
+# --- State ---
 
 @dataclass(frozen=True)
 class AccountState:
     balance: int
+    tx_count: int
 
-# Events — what gets persisted
+# --- Events (persisted to the journal) ---
+
 @dataclass(frozen=True)
 class Deposited:
     amount: int
@@ -324,54 +496,208 @@ class Deposited:
 class Withdrawn:
     amount: int
 
-# Pure function: folds an event into state (used for replay too)
-def on_event(state: AccountState, event: Deposited | Withdrawn) -> AccountState:
+type AccountEvent = Deposited | Withdrawn
+
+# --- Commands (sent by the outside world) ---
+
+@dataclass(frozen=True)
+class Deposit:
+    amount: int
+
+@dataclass(frozen=True)
+class Withdraw:
+    amount: int
+    reply_to: ActorRef[str]
+
+@dataclass(frozen=True)
+class GetBalance:
+    reply_to: ActorRef[AccountState]
+
+type AccountCommand = Deposit | Withdraw | GetBalance
+
+# --- Event handler (pure — used for replay and live updates) ---
+
+def on_event(state: AccountState, event: AccountEvent) -> AccountState:
     match event:
         case Deposited(amount):
-            return AccountState(balance=state.balance + amount)
+            return AccountState(balance=state.balance + amount, tx_count=state.tx_count + 1)
         case Withdrawn(amount):
-            return AccountState(balance=state.balance - amount)
+            return AccountState(balance=state.balance - amount, tx_count=state.tx_count + 1)
     return state
 
-# Async handler: decides what events to persist
-async def on_command(ctx, state: AccountState, cmd) -> Behavior:
+# --- Command handler (async — decides what events to persist) ---
+
+async def on_command(ctx: Any, state: AccountState, cmd: AccountCommand) -> Any:
     match cmd:
         case Deposit(amount):
             return Behaviors.persisted(events=[Deposited(amount)])
-        case Withdraw(amount) if state.balance >= amount:
+        case Withdraw(amount, reply_to) if state.balance >= amount:
+            reply_to.tell("ok")
             return Behaviors.persisted(events=[Withdrawn(amount)])
+        case Withdraw(_, reply_to):
+            reply_to.tell(f"insufficient funds (balance={state.balance})")
+            return Behaviors.same()
         case GetBalance(reply_to):
-            reply_to.tell(state.balance)
-            return Behaviors.same()  # no events, no persistence
+            reply_to.tell(state)
+            return Behaviors.same()
+    return Behaviors.unhandled()
+
+# --- Entity factory ---
 
 journal = InMemoryJournal()
 
-def account(entity_id: str) -> Behavior:
+def bank_account(entity_id: str) -> Behavior[AccountCommand]:
     return Behaviors.event_sourced(
         entity_id=entity_id,
         journal=journal,
-        initial_state=AccountState(balance=0),
+        initial_state=AccountState(balance=0, tx_count=0),
         on_event=on_event,
         on_command=on_command,
-        snapshot_policy=SnapshotEvery(n_events=100),  # snapshot every 100 events
+        snapshot_policy=SnapshotEvery(n_events=100),
     )
+
+# --- Recovery demonstration ---
+
+async def main() -> None:
+    # Phase 1: Normal operations
+    async with ActorSystem(name="bank") as system:
+        account = system.spawn(bank_account("acc-001"), "account")
+        await asyncio.sleep(0.1)
+
+        account.tell(Deposit(1000))
+        account.tell(Deposit(500))
+        await asyncio.sleep(0.1)
+
+        state = await system.ask(
+            account, lambda r: GetBalance(reply_to=r), timeout=2.0
+        )
+        print(f"Balance: {state.balance}, transactions: {state.tx_count}")
+        # Balance: 1500, transactions: 2
+
+    # Phase 2: Recovery — new actor, same journal
+    async with ActorSystem(name="bank") as system:
+        account = system.spawn(bank_account("acc-001"), "account")
+        await asyncio.sleep(0.1)
+
+        state = await system.ask(
+            account, lambda r: GetBalance(reply_to=r), timeout=2.0
+        )
+        print(f"Recovered balance: {state.balance}, transactions: {state.tx_count}")
+        # Recovered balance: 1500, transactions: 2
+
+asyncio.run(main())
 ```
 
-The key difference from a regular behavior: the command handler receives an explicit `state` parameter managed by the framework. This is necessary because event sourcing must replay events to reconstruct state — closures can't be replayed.
+In Phase 2, a new actor is spawned with the same `entity_id`. The framework automatically loads the latest snapshot (if any), replays events from the journal since that snapshot, and reconstructs the state. The actor resumes exactly where it left off.
 
-The `EventJournal` protocol is storage-agnostic. `InMemoryJournal` is included for tests and development; implement the protocol for any database backend.
+The `SnapshotEvery(n_events=100)` policy periodically saves the current state to the journal. Without snapshots, recovery requires replaying every event from the beginning — acceptable for entities with few events, but expensive for long-lived entities with thousands.
 
-### Shard Replication
+The `EventJournal` protocol is storage-agnostic. `InMemoryJournal` is included for testing and development. For production, implement the protocol for any database backend — the interface requires four methods: `persist`, `load`, `save_snapshot`, and `load_snapshot`.
 
-Add passive replicas to sharded entities for fault tolerance. The primary pushes persisted events to replicas after each command; replicas maintain their own journal copy and can be promoted on failover:
+## Cluster Sharding
+
+A single process has limits — memory, CPU, network connections. When a system manages millions of entities (bank accounts, user sessions, IoT sensors), no single machine can host them all. **Cluster sharding** solves this by partitioning entities across multiple nodes and routing messages transparently.
+
+Consider a network of 100,000 temperature sensors reporting readings every second. Each sensor is modeled as an actor that aggregates its readings. No single machine can host all 100,000 actors — but if they are partitioned into 256 shards distributed across 8 nodes, each node manages roughly 12,500 sensors. When a sensor reports a reading, the cluster routes the message to whichever node owns that sensor's shard. If nodes are added or removed, shards are rebalanced automatically.
+
+Cluster sharding has three components:
+
+- **Shards.** A logical partition of the entity space. Entity IDs are hashed deterministically to a shard number (Casty uses MD5). The number of shards is fixed at creation time and should be significantly larger than the expected number of nodes — this ensures rebalancing is granular (individual shards move between nodes, not entire ranges).
+- **Coordinator.** Decides which node owns which shard. Uses a least-shard-first allocation strategy: when a shard is accessed for the first time, it is assigned to the node currently hosting the fewest shards. The coordinator is replicated across the cluster with a leader/follower topology — the leader makes allocation decisions, followers cache allocations and forward unknown shards to the leader.
+- **Region.** Each node runs a region that manages local entities. When a message arrives for a shard owned by this node, the region spawns the entity actor (if it doesn't exist yet) and delivers the message. Messages for shards owned by other nodes are forwarded over the network.
+
+Underneath the sharding layer, Casty implements a **gossip protocol** for cluster state propagation, a **phi accrual failure detector** (Hayashibara et al.) for identifying unresponsive nodes, and **vector clocks** for resolving conflicting state during network partitions.
 
 ```python
+import asyncio
+from dataclasses import dataclass
+from casty import ActorContext, ActorRef, Behavior, Behaviors, ShardEnvelope
+from casty.sharding import ClusteredActorSystem
+
+@dataclass(frozen=True)
+class Deposit:
+    amount: int
+
+@dataclass(frozen=True)
+class GetBalance:
+    reply_to: ActorRef[int]
+
+type AccountMsg = Deposit | GetBalance
+
+def account_entity(entity_id: str) -> Behavior[AccountMsg]:
+    def active(balance: int) -> Behavior[AccountMsg]:
+        async def receive(ctx: ActorContext[AccountMsg], msg: AccountMsg) -> Behavior[AccountMsg]:
+            match msg:
+                case Deposit(amount):
+                    return active(balance + amount)
+                case GetBalance(reply_to):
+                    reply_to.tell(balance)
+                    return Behaviors.same()
+
+        return Behaviors.receive(receive)
+
+    return active(0)
+
+async def main() -> None:
+    async with (
+        ClusteredActorSystem(
+            name="bank", host="127.0.0.1", port=25520,
+            seed_nodes=[("127.0.0.1", 25521)],
+        ) as node1,
+        ClusteredActorSystem(
+            name="bank", host="127.0.0.1", port=25521,
+            seed_nodes=[("127.0.0.1", 25520)],
+        ) as node2,
+    ):
+        accounts1 = node1.spawn(Behaviors.sharded(account_entity, num_shards=100), "accounts")
+        accounts2 = node2.spawn(Behaviors.sharded(account_entity, num_shards=100), "accounts")
+        await asyncio.sleep(0.3)
+
+        # Deposit via node 1
+        accounts1.tell(ShardEnvelope("alice", Deposit(100)))
+        accounts1.tell(ShardEnvelope("bob", Deposit(200)))
+        await asyncio.sleep(0.3)
+
+        # Deposit via node 2 — routes to the correct node transparently
+        accounts2.tell(ShardEnvelope("alice", Deposit(50)))
+        await asyncio.sleep(0.3)
+
+        # Query from either node
+        balance = await node1.ask(
+            accounts1,
+            lambda r: ShardEnvelope("alice", GetBalance(reply_to=r)),
+            timeout=2.0,
+        )
+        print(f"Alice's balance: {balance}")  # Alice's balance: 150
+
+asyncio.run(main())
+```
+
+Every node in the cluster runs the same code — only `host` and `port` differ. `ShardEnvelope(entity_id, message)` wraps a message with the entity ID for routing. The proxy actor on each node caches shard-to-node mappings and forwards messages to the correct region, whether local or remote.
+
+`ClusteredActorSystem` extends `ActorSystem`. Spawning a `ShardedBehavior` (produced by `Behaviors.sharded()`) returns an `ActorRef[ShardEnvelope[M]]`. All other spawns work identically to the local `ActorSystem`. This means existing actors that don't need distribution require no changes when moving to a clustered deployment.
+
+## Shard Replication
+
+Sharding solves the capacity problem but introduces a new failure mode: if a node goes down, all entities hosted on that node become unavailable. **Replication** addresses this by maintaining passive copies of each entity on other nodes.
+
+The primary processes commands and pushes persisted events to its replicas after each command. Replicas maintain their own copy of the event journal and can be promoted to primary if the original node fails. This requires the entity to use event sourcing — replication operates on the event stream, not on raw state.
+
+The `min_acks` parameter controls the consistency/latency trade-off:
+
+| `min_acks` | Behavior |
+|------------|----------|
+| `0` | Fire-and-forget replication. Lowest latency, but recent events may be lost if the primary fails before replication completes. |
+| `1+` | The primary waits for N replica acknowledgments before confirming the command. Stronger durability at the cost of increased latency. |
+
+```python
+from casty import Behaviors
 from casty.replication import ReplicationConfig
 
 accounts = node.spawn(
     Behaviors.sharded(
-        account,
-        num_shards=10,
+        account_entity,
+        num_shards=100,
         replication=ReplicationConfig(
             replicas=2,        # 2 passive replicas per entity
             min_acks=1,        # wait for 1 replica ack before confirming
@@ -382,18 +708,16 @@ accounts = node.spawn(
 )
 ```
 
-The coordinator allocates primary and replicas on different nodes and handles failover: when a primary's node goes down, the replica with the highest sequence number is promoted.
+The coordinator allocates primary and replicas on different nodes. When a node fails, the failure detector triggers a `NodeDown` event, and the coordinator promotes the replica with the highest event sequence number to primary. With three nodes and `replicas=2`, every entity has a primary on one node and replicas on the other two — the cluster tolerates the loss of any single node without data loss.
 
-| `min_acks` | Behavior |
-|------------|----------|
-| `0` | Fire-and-forget — lowest latency, eventual consistency |
-| `1+` | Wait for N acks — stronger durability guarantee |
+## Distributed Data Structures
 
-### Distributed Data Structures
+For common patterns that don't require custom entity actors, Casty provides higher-level data structures built on top of cluster sharding. Each structure is backed by sharded actors, optionally persistent via event sourcing.
 
-Higher-level data structures backed by cluster sharding. Call `system.distributed()` to get a facade, then create counters, maps, sets, and queues that are automatically distributed across nodes:
+Every concept from the previous sections — actors, functional state, event sourcing, cluster sharding — converges here. A `Counter`, for example, is a sharded actor with a predefined message protocol, distributed transparently across the cluster.
 
 ```python
+import asyncio
 from dataclasses import dataclass
 from casty.sharding import ClusteredActorSystem
 from casty.journal import InMemoryJournal
@@ -403,83 +727,150 @@ class User:
     name: str
     email: str
 
-async with ClusteredActorSystem(
-    name="my-app", host="10.0.0.1", port=25520,
-    seed_nodes=[("10.0.0.2", 25520)],
-) as system:
-    d = system.distributed()
+async def main() -> None:
+    async with ClusteredActorSystem(
+        name="my-app", host="127.0.0.1", port=25520,
+        seed_nodes=[("127.0.0.1", 25521)],
+    ) as system:
+        d = system.distributed()
 
-    # Counter — increment, decrement, get
-    views = d.counter("page-views", shards=50)
-    await views.increment(100)      # -> 100
-    await views.decrement(10)       # -> 90
-    await views.get()               # -> 90
+        # Counter
+        views = d.counter("page-views", shards=50)
+        await views.increment(100)
+        await views.decrement(10)
+        value = await views.get()        # 90
 
-    # Dict — typed key-value map, one sharded entity per key
-    users = d.map[str, User]("users", shards=50)
-    await users.put("alice", User("Alice", "a@x.com"))   # -> None (previous)
-    await users.get("alice")                              # -> User(...)
-    await users.contains("alice")                         # -> True
-    await users.delete("alice")                           # -> True (existed)
+        # Dict — one sharded entity per key
+        users = d.map[str, User]("users", shards=50)
+        await users.put("alice", User("Alice", "alice@example.com"))
+        user = await users.get("alice")  # User(name='Alice', email='alice@example.com')
+        await users.contains("alice")    # True
+        await users.delete("alice")      # True (existed)
 
-    # Set — add, remove, contains, size
-    tags = d.set[str]("active-tags")
-    await tags.add("python")        # -> True  (added)
-    await tags.add("python")        # -> False (already present)
-    await tags.size()               # -> 1
+        # Set
+        tags = d.set[str]("active-tags", shards=50)
+        await tags.add("python")         # True (added)
+        await tags.add("python")         # False (already present)
+        await tags.size()                # 1
 
-    # Queue — FIFO enqueue, dequeue, peek, size
-    jobs = d.queue[str]("work-queue")
-    await jobs.enqueue("task-1")
-    await jobs.peek()               # -> "task-1" (doesn't remove)
-    await jobs.dequeue()            # -> "task-1" (removes)
-    await jobs.dequeue()            # -> None (empty)
+        # Queue (FIFO)
+        jobs = d.queue[str]("work-queue", shards=50)
+        await jobs.enqueue("task-1")
+        await jobs.peek()                # "task-1" (does not remove)
+        await jobs.dequeue()             # "task-1" (removes)
+        await jobs.dequeue()             # None (empty)
+
+asyncio.run(main())
 ```
 
-All creation methods accept `shards` (default `100`) for distribution granularity and `timeout` (default `5.0s`) for operations. The same structure can be accessed from any node — just use the same `name` and `shards`.
+All structures accept `shards` (default `100`) for distribution granularity and `timeout` (default `5.0s`) for operation timeouts. The same structure can be accessed from any node in the cluster — use the same `name` and `shards`.
 
-To make structures persistent, pass an `EventJournal` to the facade. Every mutation is persisted as an event and replayed on recovery:
+To make structures persistent, pass an `EventJournal` to the `distributed()` facade. Every mutation is persisted as an event and replayed on recovery:
 
 ```python
 d = system.distributed(journal=InMemoryJournal())
 counter = d.counter("hits")
 await counter.increment(10)
-# actor restarts → replays Incremented(10) → recovers value=10
+# Process restarts → replays Incremented(10) → recovers value=10
 ```
 
-`InMemoryJournal` is included for development; implement the `EventJournal` protocol for any database backend.
+These structures are intentionally simple. For domain-specific entities — bank accounts, user sessions, IoT sensor aggregators — define custom behaviors using `Behaviors.sharded()` and `Behaviors.event_sourced()`. The distributed data structures exist for the common cases that don't warrant a custom actor.
 
 ## State Machines
 
-Because behaviors are values, state machines are natural — each state is a function:
+Because behaviors are values and state transitions are function calls, finite state machines emerge as a natural pattern. Each state is a behavior function, each transition is a return value. No enum, no conditional dispatch on a status field — the behavior **is** the state.
 
 ```python
+import asyncio
+from dataclasses import dataclass
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
+
+@dataclass(frozen=True)
+class Item:
+    name: str
+    price: float
+
+@dataclass(frozen=True)
+class Receipt:
+    items: tuple[Item, ...]
+    total: float
+
+@dataclass(frozen=True)
+class AddItem:
+    item: Item
+
+@dataclass(frozen=True)
+class Checkout:
+    reply_to: ActorRef[Receipt]
+
+@dataclass(frozen=True)
+class GetTotal:
+    reply_to: ActorRef[float]
+
+type CartMsg = AddItem | Checkout | GetTotal
+
 def empty_cart() -> Behavior[CartMsg]:
-    async def receive(ctx, msg):
+    async def receive(ctx: ActorContext[CartMsg], msg: CartMsg) -> Behavior[CartMsg]:
         match msg:
             case AddItem(item):
-                return active_cart({item.name: item})  # transition!
+                return active_cart({item.name: item})
             case Checkout():
-                print("cannot checkout an empty cart")
+                return Behaviors.same()  # cannot checkout empty cart
+            case GetTotal(reply_to):
+                reply_to.tell(0.0)
                 return Behaviors.same()
+
     return Behaviors.receive(receive)
 
 def active_cart(items: dict[str, Item]) -> Behavior[CartMsg]:
-    async def receive(ctx, msg):
+    async def receive(ctx: ActorContext[CartMsg], msg: CartMsg) -> Behavior[CartMsg]:
         match msg:
             case AddItem(item):
                 return active_cart({**items, item.name: item})
             case Checkout(reply_to):
-                reply_to.tell(Receipt(items))
-                return checked_out()  # transition!
+                all_items = tuple(items.values())
+                total = sum(i.price for i in all_items)
+                reply_to.tell(Receipt(items=all_items, total=total))
+                return checked_out()
+            case GetTotal(reply_to):
+                reply_to.tell(sum(i.price for i in items.values()))
+                return Behaviors.same()
+
     return Behaviors.receive(receive)
 
 def checked_out() -> Behavior[CartMsg]:
-    # terminal state — rejects further modifications
-    ...
+    async def receive(ctx: ActorContext[CartMsg], msg: CartMsg) -> Behavior[CartMsg]:
+        match msg:
+            case GetTotal(reply_to):
+                reply_to.tell(0.0)
+                return Behaviors.same()
+            case _:
+                return Behaviors.same()  # terminal state, ignore modifications
+
+    return Behaviors.receive(receive)
+
+async def main() -> None:
+    async with ActorSystem() as system:
+        cart = system.spawn(empty_cart(), "cart")
+
+        cart.tell(AddItem(Item("keyboard", 75.0)))
+        cart.tell(AddItem(Item("mouse", 25.0)))
+        await asyncio.sleep(0.1)
+
+        total = await system.ask(cart, lambda r: GetTotal(reply_to=r), timeout=5.0)
+        print(f"Total: ${total:.2f}")  # Total: $100.00
+
+        receipt = await system.ask(cart, lambda r: Checkout(reply_to=r), timeout=5.0)
+        print(f"Receipt: {len(receipt.items)} items, ${receipt.total:.2f}")
+        # Receipt: 2 items, $100.00
+
+        # Further modifications are ignored — checked_out is a terminal state
+        cart.tell(AddItem(Item("monitor", 300.0)))
+
+asyncio.run(main())
 ```
 
-No enums, no if/else chains. The behavior **is** the state.
+Three functions, three states: `empty_cart`, `active_cart`, `checked_out`. The transitions are explicit in the return values — `empty_cart` transitions to `active_cart` on the first `AddItem`, `active_cart` transitions to `checked_out` on `Checkout`. A `checked_out` actor ignores further modifications. The type checker ensures every state handles the full `CartMsg` union.
 
 ## Contributing
 
@@ -487,10 +878,13 @@ No enums, no if/else chains. The behavior **is** the state.
 git clone https://github.com/gabfssilva/casty
 cd casty
 uv sync
-uv run pytest
-uv run pyright src/casty/
-uv run ruff check src/ tests/
+uv run pytest                    # run tests
+uv run pyright src/casty/        # type checking (strict mode)
+uv run ruff check src/ tests/    # lint
+uv run ruff format src/ tests/   # format
 ```
+
+The project follows test-driven development. Tests are feature-oriented: they exercise real workflows rather than testing individual functions in isolation. Major features require a design document in `docs/plans/` before implementation.
 
 ## License
 
