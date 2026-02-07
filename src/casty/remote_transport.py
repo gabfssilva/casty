@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 import struct
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -74,6 +75,12 @@ class TcpTransport:
                 return addr[1]
         return self._port
 
+    @staticmethod
+    def _set_nodelay(writer: asyncio.StreamWriter) -> None:
+        sock = writer.transport.get_extra_info("socket")
+        if sock is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
     async def start(self, handler: InboundHandler) -> None:
         self._handler = handler
         self._server = await asyncio.start_server(
@@ -83,6 +90,7 @@ class TcpTransport:
     async def _handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        self._set_nodelay(writer)
         self._inbound_writers.append(writer)
         try:
             while True:
@@ -105,6 +113,7 @@ class TcpTransport:
             if key not in self._connections:
                 self._logger.debug("TCP connect -> %s:%d", host, port)
                 reader, writer = await asyncio.open_connection(host, port)
+                self._set_nodelay(writer)
                 self._connections[key] = (reader, writer)
             _, writer = self._connections[key]
             writer.write(struct.pack("!I", len(data)) + data)
@@ -114,6 +123,7 @@ class TcpTransport:
             self._connections.pop(key, None)
             self._logger.warning("TCP reconnect -> %s:%d", host, port)
             reader, writer = await asyncio.open_connection(host, port)
+            self._set_nodelay(writer)
             self._connections[key] = (reader, writer)
             writer.write(struct.pack("!I", len(data)) + data)
             await writer.drain()
