@@ -1,0 +1,21 @@
+[system]
+name = "broadcast"
+
+[cluster]
+host = "127.0.0.1"
+port = 25520
+seed_nodes = ["127.0.0.1:25520"]
+
+[cluster.gossip]
+interval = 1.0
+
+[cluster.heartbeat]
+interval = 0.5
+availability_check_interval = 2.0
+
+[cluster.failure_detector]
+threshold = 8.0
+
+[defaults.mailbox]
+capacity = 1000
+strategy = "drop_new"

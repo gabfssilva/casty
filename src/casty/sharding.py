@@ -439,6 +439,23 @@ class ClusteredActorSystem(ActorSystem):
             timeout=timeout,
         )
 
+    def lookup(
+        self, path: str, *, node: NodeAddress | None = None,
+    ) -> ActorRef[Any] | None:
+        """Look up an actor by path, optionally on a remote node.
+
+        When *node* is ``None`` or points to this node, performs a local
+        lookup (may return ``None`` if no actor exists at *path*).
+        When *node* points to a different cluster member, constructs a
+        remote ``ActorRef`` — the actor is assumed to exist.
+        """
+        if node is None or node == self._self_node:
+            return super().lookup(path)
+        addr = ActorAddress(
+            system=self._name, path=path, host=node.host, port=node.port,
+        )
+        return self._remote_transport.make_ref(addr)
+
     def distributed(self, *, journal: EventJournal | None = None) -> Distributed:
         """Create a :class:`Distributed` facade for this system."""
         from casty.distributed import Distributed

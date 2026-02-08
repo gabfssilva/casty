@@ -1,0 +1,30 @@
+x-node: &node
+  build:
+    context: ../..
+    dockerfile: examples/13_broadcast/Dockerfile
+  command:
+    [
+      "--port", "25520",
+      "--host", "auto",
+      "--bind-host", "0.0.0.0",
+      "--seed", "node-1:25520",
+      "--nodes", "5",
+      "--rounds", "3",
+    ]
+
+services:
+  node-1:
+    <<: *node
+    hostname: node-1
+  node-2:
+    <<: *node
+    hostname: node-2
+  node-3:
+    <<: *node
+    hostname: node-3
+  node-4:
+    <<: *node
+    hostname: node-4
+  node-5:
+    <<: *node
+    hostname: node-5
