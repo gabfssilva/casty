@@ -1,76 +1,53 @@
 # Example 13 — Cluster Broadcast
 
 A 5-node cluster where the elected leader broadcasts an announcement to
-every member and collects acknowledgements.
+every member and collects acknowledgements — all with a single `ask()` call.
 
 ## What it demonstrates
 
+- **`Behaviors.broadcasted()`** — spawns the actor on every node automatically
+- **`BroadcastRef[M]`** — `tell()` fans out to all nodes, `ask()` collects all responses
+- **Typesafe broadcast ask** — `ask(BroadcastRef, ...)` returns `tuple[Ack, ...]`
 - **Cluster formation** — 5 Docker containers discover each other via gossip
-- **Leader election** — deterministic leader picks itself as the broadcaster
-- **Remote lookup** — `system.lookup(path, node=address)` resolves actors on
-  remote nodes
-- **Request-reply across nodes** — `ask` with a remote ref, ack flows back
-  over TCP
 - **Barrier synchronization** — all nodes wait for each other before shutdown
 
 ## Architecture
 
 ```
-┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-│  node-1  │    │  node-2  │    │  node-3  │    │  node-4  │    │  node-5  │
-│ /listener│    │ /listener│    │ /listener│    │ /listener│    │ /listener│
-└────▲─────┘    └────▲─────┘    └────▲─────┘    └────▲─────┘    └────▲─────┘
-     │               │               │               │               │
-     └───────────────┴───────────────┴───────┬───────┴───────────────┘
-                                             │
-                                        leader node
-                                     (broadcast loop)
+ref.tell(m) → broadcast_proxy → node-1: /_bcast-listener.tell(m)
+                               → node-2: /_bcast-listener.tell(m) (TCP)
+                               → node-3: /_bcast-listener.tell(m) (TCP)
+                               → node-4: /_bcast-listener.tell(m) (TCP)
+                               → node-5: /_bcast-listener.tell(m) (TCP)
 ```
 
-Every node spawns a **listener** actor at the well-known path `/listener`.
-The leader queries cluster state, iterates all `up` members, and sends an
-`Announcement` to each via remote lookup. Each listener replies with an `Ack`.
+Every node spawns a **broadcasted listener**. The proxy tracks cluster membership
+and fans out messages to all `up` members.
 
 ## Key code
 
-### Messages
+### Spawn — creates BroadcastRef
 
 ```python
-@dataclass(frozen=True)
-class Announcement:
-    text: str
-    seq: int
-    from_node: str
-    reply_to: ActorRef[Ack]
-
-@dataclass(frozen=True)
-class Ack:
-    seq: int
-    from_node: str
+listener: BroadcastRef[ListenerMsg] = system.spawn(
+    Behaviors.broadcasted(listener_actor()), "listener"
+)
 ```
 
-### Listener (runs on every node)
+### Ask — collects responses from all nodes
 
 ```python
-def listener_actor() -> Behavior[ListenerMsg]:
-    node = socket.gethostname()
-
-    async def receive(_ctx, msg):
-        msg.reply_to.tell(Ack(seq=msg.seq, from_node=node))
-        return Behaviors.same()
-
-    return Behaviors.receive(receive)
+acks: tuple[Ack, ...] = await system.ask(
+    listener,
+    lambda r: Announcement(text="Hello!", reply_to=r),
+    timeout=5.0,
+)
 ```
 
-### Broadcast (runs on leader only)
+### Tell — fire-and-forget to all nodes
 
 ```python
-state = await system.get_cluster_state()
-up_members = [m for m in state.members if m.status == MemberStatus.up]
-
-for member in up_members:
-    ref = system.lookup("/listener", node=member.address)
-    ack = await system.ask_or_none(ref, lambda r: Announcement(..., reply_to=r), timeout=5.0)
+listener.tell(SomeMessage(...))
 ```
 
 ## Running
@@ -103,13 +80,13 @@ uv run python examples/13_broadcast/main.py --port 25522 --seed 127.0.0.1:25520 
 
 ```
 01:47:44  INFO    node-5  I am the leader — starting broadcast
-01:47:44  INFO    node-5  Broadcasting round #1 to 5 nodes...
+01:47:44  INFO    node-5  Broadcasting round #1...
 01:47:44  INFO    node-5    ack from node-3 for #1
 01:47:44  INFO    node-5    ack from node-5 for #1
 01:47:44  INFO    node-5    ack from node-2 for #1
 01:47:44  INFO    node-5    ack from node-4 for #1
 01:47:44  INFO    node-5    ack from node-1 for #1
-01:47:44  INFO    node-5  Round #1: 5/5 acks received
+01:47:44  INFO    node-5  Round #1: 5 acks received
 ...
 01:47:48  INFO    node-5  Broadcast complete!
 ```

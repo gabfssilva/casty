@@ -20,6 +20,11 @@ class ShardedBehavior[M]:
 
 
 @dataclass(frozen=True)
+class BroadcastedBehavior[M]:
+    behavior: Behavior[M]
+
+
+@dataclass(frozen=True)
 class ReceiveBehavior[M]:
     handler: Callable[[ActorContext[M], M], Awaitable[Behavior[M]]]
 
@@ -153,6 +158,12 @@ class Behaviors:
         strategy: SupervisionStrategy,
     ) -> SupervisedBehavior[M]:
         return SupervisedBehavior(behavior, strategy)
+
+    @staticmethod
+    def broadcasted[M](
+        behavior: Behavior[M],
+    ) -> BroadcastedBehavior[M]:
+        return BroadcastedBehavior(behavior=behavior)
 
     @staticmethod
     def sharded[M](

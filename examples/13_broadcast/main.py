@@ -2,15 +2,14 @@
 Cluster Broadcast
 =================
 
-Every node spawns a listener actor. One node (the leader) periodically
-broadcasts an announcement to ALL nodes via remote refs.  Each listener
-receives the message, logs it, and acks back to the sender.
+Every node spawns a **broadcasted** listener actor. A single ``tell()``
+or ``ask()`` on the returned ``BroadcastRef`` automatically fans out to
+ALL cluster members — no manual iteration required.
 
 Demonstrates:
-  - Cluster formation and leader election
-  - Remote lookup via system.lookup(path, node=...)
-  - Broadcasting to all cluster members
-  - Request-reply across nodes
+  - ``Behaviors.broadcasted()`` — automatic fan-out to all nodes
+  - ``BroadcastRef`` — typesafe ref where ``ask()`` returns ``tuple[R, ...]``
+  - Cluster formation and barrier synchronization
 
 Usage (local):
     uv run python examples/13_broadcast/main.py --port 25520
@@ -32,8 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from casty import ActorRef, Behavior, Behaviors
-from casty.cluster_state import MemberStatus
+from casty import ActorRef, Behavior, Behaviors, BroadcastRef
 from casty.config import load_config
 from casty.sharding import ClusteredActorSystem
 
@@ -96,8 +94,6 @@ type ListenerMsg = Announcement
 # Listener actor — receives broadcasts, sends ack
 # ---------------------------------------------------------------------------
 
-LISTENER_PATH = "/listener"
-
 
 def listener_actor() -> Behavior[ListenerMsg]:
     node = socket.gethostname()
@@ -116,51 +112,40 @@ def listener_actor() -> Behavior[ListenerMsg]:
 
 
 # ---------------------------------------------------------------------------
-# Broadcaster — leader sends announcements to all nodes
+# Broadcaster — leader sends announcements via BroadcastRef
 # ---------------------------------------------------------------------------
 
 
 async def broadcast_loop(
     system: ClusteredActorSystem,
+    listener: BroadcastRef[ListenerMsg],
     rounds: int,
 ) -> None:
     node = socket.gethostname()
 
     for seq in range(1, rounds + 1):
-        state = await system.get_cluster_state()
-        up_members = [m for m in state.members if m.status == MemberStatus.up]
+        log.info("Broadcasting round %s#%d%s...", MAGENTA, seq, RESET)
 
-        log.info(
-            "Broadcasting round %s#%d%s to %d nodes...",
-            MAGENTA, seq, RESET, len(up_members),
+        acks: tuple[Ack, ...] = await system.ask(
+            listener,
+            lambda r, s=seq: Announcement(
+                text=f"Hello cluster! (round {s})",
+                seq=s,
+                from_node=node,
+                reply_to=r,
+            ),
+            timeout=5.0,
         )
 
-        ack_count = 0
-        for member in up_members:
-            ref = system.lookup(LISTENER_PATH, node=member.address)
-            if ref is None:
-                continue
-
-            ack = await system.ask_or_none(
-                ref,
-                lambda r, s=seq: Announcement(
-                    text=f"Hello cluster! (round {s})",
-                    seq=s,
-                    from_node=node,
-                    reply_to=r,
-                ),
-                timeout=5.0,
+        for ack in acks:
+            log.info(
+                "  ack from %s%s%s for #%d",
+                CYAN, ack.from_node, RESET, ack.seq,
             )
-            if ack is not None:
-                log.info(
-                    "  ack from %s%s%s for #%d",
-                    CYAN, ack.from_node, RESET, ack.seq,
-                )
-                ack_count += 1
 
         log.info(
-            "Round #%d: %s%d/%d%s acks received",
-            seq, GREEN, ack_count, len(up_members), RESET,
+            "Round #%d: %s%d%s acks received",
+            seq, GREEN, len(acks), RESET,
         )
 
         if seq < rounds:
@@ -193,24 +178,25 @@ async def run_node(
         seed_nodes=seed_nodes,
         bind_host=bind_host,
     ) as system:
-        # Every node spawns a listener at a well-known path
-        system.spawn(listener_actor(), "listener")
+        # Broadcasted actor — spawned on every node, tell/ask fans out to all
+        listener = system.spawn(
+            Behaviors.broadcasted(listener_actor()), "listener"
+        )
 
         # Wait for all nodes to join
         await system.wait_for(num_nodes)
         log.info("Cluster ready (%d nodes)", num_nodes)
 
-        # Small delay so all listeners are registered
+        # Small delay so all broadcast proxies have cluster state
         await asyncio.sleep(1.0)
 
         # Only the leader broadcasts
         state = await system.get_cluster_state()
         if state.leader == system.self_node:
             log.info("%sI am the leader — starting broadcast%s", YELLOW, RESET)
-            await broadcast_loop(system, rounds)
+            await broadcast_loop(system, listener, rounds)
         else:
             log.info("Waiting for broadcasts from leader...")
-            # Wait long enough for the leader to finish
             await asyncio.sleep(rounds * 3.0)
 
         await system.barrier("shutdown", num_nodes)

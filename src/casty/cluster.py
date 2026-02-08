@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from casty.actor import Behavior, Behaviors
 from casty.cluster_state import (
@@ -76,12 +76,19 @@ class WaitForMembers:
 
 
 @dataclass(frozen=True)
+class RegisterBroadcast:
+    name: str
+    proxy_ref: ActorRef[Any]
+
+
+@dataclass(frozen=True)
 class JoinRetry:
     pass
 
 
 type ClusterCmd = (
-    GetState | WaitForMembers | NodeUnreachable | PublishAllocations | RegisterCoordinator | JoinRetry | ClusterState
+    GetState | WaitForMembers | NodeUnreachable | PublishAllocations
+    | RegisterCoordinator | RegisterBroadcast | JoinRetry | ClusterState
 )
 
 
@@ -109,6 +116,7 @@ def cluster_receive(
     seed_refs: tuple[ActorRef[GossipMsg], ...],
     logger: logging.Logger,
     coordinators: dict[str, ActorRef[CoordinatorMsg]],
+    broadcast_proxies: dict[str, ActorRef[Any]],
     cluster_state: ClusterState | None,
     waiters: tuple[WaitForMembers, ...] = (),
 ) -> Behavior[ClusterCmd]:
@@ -132,6 +140,7 @@ def cluster_receive(
     def _next(
         *,
         new_coordinators: dict[str, ActorRef[CoordinatorMsg]] | None = None,
+        new_broadcast_proxies: dict[str, ActorRef[Any]] | None = None,
         new_cluster_state: ClusterState | None = None,
         new_waiters: tuple[WaitForMembers, ...] | None = None,
     ) -> Behavior[ClusterCmd]:
@@ -146,6 +155,9 @@ def cluster_receive(
             coordinators=new_coordinators
             if new_coordinators is not None
             else coordinators,
+            broadcast_proxies=new_broadcast_proxies
+            if new_broadcast_proxies is not None
+            else broadcast_proxies,
             cluster_state=new_cluster_state
             if new_cluster_state is not None
             else cluster_state,
@@ -204,6 +216,13 @@ def cluster_receive(
                     )
                 return _next(new_coordinators=new_coords)
 
+            case RegisterBroadcast(name=name, proxy_ref=proxy_ref):
+                logger.info("Registered broadcast: %s", name)
+                new_proxies = {**broadcast_proxies, name: proxy_ref}
+                if cluster_state is not None:
+                    proxy_ref.tell(cluster_state)
+                return _next(new_broadcast_proxies=new_proxies)
+
             case ClusterState() as state:
                 if state.diff(cluster_state):
                     logger.info("Cluster topology update: %s", state)
@@ -241,6 +260,8 @@ def cluster_receive(
                         )
                     )
                     coord_ref.tell(UpdateTopology(available_nodes=up_nodes))
+                for proxy_ref in broadcast_proxies.values():
+                    proxy_ref.tell(state)
                 remaining = _notify_waiters(state, waiters)
                 return _next(new_cluster_state=state, new_waiters=remaining)
 
@@ -386,6 +407,7 @@ def cluster_actor(
                 seed_refs=seed_refs,
                 logger=logger,
                 coordinators={},
+                broadcast_proxies={},
                 cluster_state=initial_cluster_state,
             ),
             post_stop=cancel_schedules,

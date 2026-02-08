@@ -2,6 +2,7 @@ from casty.address import ActorAddress
 from casty.actor import (
     Behavior,
     Behaviors,
+    BroadcastedBehavior,
     EventSourcedBehavior,
     LifecycleBehavior,
     PersistedBehavior,
@@ -70,7 +71,7 @@ from casty.replication import (
     ShardAllocation,
 )
 from casty.messages import Terminated
-from casty.ref import ActorRef
+from casty.ref import ActorRef, BroadcastRef
 from casty.remote_transport import MessageEnvelope, RemoteTransport, TcpTransport
 from casty.serialization import JsonSerializer, PickleSerializer, Serializer, TypeRegistry
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
@@ -84,7 +85,9 @@ __all__ = [
     "Behaviors",
     "ActorContext",
     "ActorRef",
+    "BroadcastRef",
     # Behavior types
+    "BroadcastedBehavior",
     "ReceiveBehavior",
     "SetupBehavior",
     "SameBehavior",

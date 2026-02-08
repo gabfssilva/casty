@@ -9,12 +9,18 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING, cast, overload
 from uuid import uuid4
 
-from casty.actor import Behavior, Behaviors, ShardedBehavior
+from casty.actor import Behavior, Behaviors, BroadcastedBehavior, ShardedBehavior
 from casty.address import ActorAddress
-from casty.cluster_state import ClusterState, NodeAddress
+from casty.cluster_state import ClusterState, MemberStatus, NodeAddress
 from casty.mailbox import Mailbox
-from casty.ref import ActorRef
-from casty.cluster import Cluster, ClusterConfig, RegisterCoordinator, WaitForMembers
+from casty.ref import ActorRef, BroadcastRef
+from casty.cluster import (
+    Cluster,
+    ClusterConfig,
+    RegisterBroadcast,
+    RegisterCoordinator,
+    WaitForMembers,
+)
 from casty.remote_transport import RemoteTransport, TcpTransport
 from casty.serialization import PickleSerializer
 from casty.system import ActorSystem
@@ -140,6 +146,54 @@ def shard_proxy_behavior(
         return Behaviors.receive(receive)
 
     return active({}, {})
+
+
+# ---------------------------------------------------------------------------
+# Broadcast proxy behavior — fans out messages to all cluster members
+# ---------------------------------------------------------------------------
+
+
+def broadcast_proxy_behavior(
+    *,
+    local_ref: ActorRef[Any],
+    self_node: NodeAddress,
+    bcast_name: str,
+    remote_transport: RemoteTransport,
+    system_name: str,
+) -> Behavior[Any]:
+    """Proxy that fans out every message to all cluster members.
+
+    Receives ``ClusterState`` from the cluster actor to track membership.
+    Any other message is forwarded to every ``up`` member — locally via
+    ``local_ref.tell()`` and remotely via ``remote_transport.make_ref()``.
+    """
+
+    def active(members: frozenset[NodeAddress]) -> Behavior[Any]:
+        async def receive(ctx: Any, msg: Any) -> Behavior[Any]:
+            match msg:
+                case ClusterState() as state:
+                    up = frozenset(
+                        m.address for m in state.members if m.status == MemberStatus.up
+                    )
+                    return active(up)
+                case _:
+                    for node in members:
+                        if node == self_node:
+                            local_ref.tell(msg)
+                        else:
+                            addr = ActorAddress(
+                                system=system_name,
+                                path=f"/_bcast-{bcast_name}",
+                                host=node.host,
+                                port=node.port,
+                            )
+                            remote_ref: ActorRef[Any] = remote_transport.make_ref(addr)
+                            remote_ref.tell(msg)
+                    return Behaviors.same()
+
+        return Behaviors.receive(receive)
+
+    return active(frozenset({self_node}))
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +333,11 @@ class ClusteredActorSystem(ActorSystem):
 
     @overload
     def spawn[M](
+        self, behavior: BroadcastedBehavior[M], name: str
+    ) -> BroadcastRef[M]: ...
+
+    @overload
+    def spawn[M](
         self, behavior: ShardedBehavior[M], name: str
     ) -> ActorRef[ShardEnvelope[M]]: ...
 
@@ -293,12 +352,14 @@ class ClusteredActorSystem(ActorSystem):
 
     def spawn[M](
         self,
-        behavior: ShardedBehavior[M] | Behavior[M],
+        behavior: BroadcastedBehavior[M] | ShardedBehavior[M] | Behavior[M],
         name: str,
         *,
         mailbox: Mailbox[M] | None = None,
-    ) -> ActorRef[ShardEnvelope[M]] | ActorRef[M]:
+    ) -> BroadcastRef[M] | ActorRef[ShardEnvelope[M]] | ActorRef[M]:
         match behavior:
+            case BroadcastedBehavior():
+                return self._spawn_broadcasted(behavior, name)
             case ShardedBehavior():
                 return self._spawn_sharded(behavior, name)
             case _:
@@ -350,6 +411,37 @@ class ClusteredActorSystem(ActorSystem):
 
         return cast(ActorRef[ShardEnvelope[M]], proxy_ref)
 
+    def _spawn_broadcasted[M](
+        self, broadcasted: BroadcastedBehavior[M], name: str
+    ) -> BroadcastRef[M]:
+        self._logger.info("Broadcasted actor: %s", name)
+
+        # Spawn the real actor on this node at /_bcast-{name}
+        local_ref: ActorRef[M] = super().spawn(broadcasted.behavior, f"_bcast-{name}")
+
+        # Spawn the proxy at /{name} — fans out to all members
+        proxy_ref: ActorRef[Any] = super().spawn(
+            broadcast_proxy_behavior(
+                local_ref=local_ref,
+                self_node=self._self_node,
+                bcast_name=name,
+                remote_transport=self._remote_transport,
+                system_name=self._name,
+            ),
+            name,
+        )
+
+        # Register proxy with cluster actor so it receives ClusterState updates
+        self._cluster.ref.tell(RegisterBroadcast(  # type: ignore[arg-type]
+            name=name,
+            proxy_ref=proxy_ref,
+        ))
+
+        return BroadcastRef[M](
+            address=proxy_ref.address,
+            _transport=proxy_ref._transport,  # pyright: ignore[reportPrivateUsage]
+        )
+
     def _get_or_create_coordinator(
         self,
         name: str,
@@ -383,14 +475,40 @@ class ClusteredActorSystem(ActorSystem):
 
         return coord_ref
 
+    @overload
+    async def ask[M, R](
+        self,
+        ref: BroadcastRef[M],
+        msg_factory: Callable[[ActorRef[R]], M],
+        *,
+        timeout: float,
+    ) -> tuple[R, ...]: ...
+
+    @overload
     async def ask[M, R](
         self,
         ref: ActorRef[M],
         msg_factory: Callable[[ActorRef[R]], M],
         *,
         timeout: float,
-    ) -> R:
-        """Ask with remote-addressable temp reply ref."""
+    ) -> R: ...
+
+    async def ask[M, R](
+        self,
+        ref: ActorRef[M],
+        msg_factory: Callable[[ActorRef[R]], M],
+        *,
+        timeout: float,
+    ) -> R | tuple[R, ...]:
+        """Ask with remote-addressable temp reply ref.
+
+        When *ref* is a ``BroadcastRef``, the message is fanned out to all
+        cluster members and responses are collected into a ``tuple[R, ...]``.
+        """
+        if isinstance(ref, BroadcastRef):
+            bcast_result: tuple[R, ...] = await self._ask_broadcast(ref, msg_factory, timeout=timeout)  # type: ignore[assignment]
+            return bcast_result
+
         future: asyncio.Future[R] = asyncio.get_running_loop().create_future()
         ask_id = uuid4().hex
         temp_path = f"/_ask/{ask_id}"
@@ -413,6 +531,45 @@ class ClusteredActorSystem(ActorSystem):
             message = msg_factory(temp_ref)
             ref.tell(message)
             return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            self._local_transport.unregister(temp_path)
+
+    async def _ask_broadcast[M, R](
+        self,
+        ref: BroadcastRef[M],
+        msg_factory: Callable[[ActorRef[R]], M],
+        *,
+        timeout: float,
+    ) -> tuple[R, ...]:
+        """Broadcast ask — sends to all members, collects all responses."""
+        state = await self.get_cluster_state(timeout=timeout)
+        expected = sum(1 for m in state.members if m.status == MemberStatus.up)
+
+        responses: list[R] = []
+        done_event = asyncio.Event()
+        ask_id = uuid4().hex
+        temp_path = f"/_ask/{ask_id}"
+
+        def on_reply(msg: Any) -> None:
+            responses.append(msg)
+            if len(responses) >= expected:
+                done_event.set()
+
+        self._local_transport.register(temp_path, on_reply)
+        try:
+            temp_ref: ActorRef[R] = ActorRef(
+                address=ActorAddress(
+                    system=self._name,
+                    path=temp_path,
+                    host=self._host,
+                    port=self._port,
+                ),
+                _transport=self._remote_transport,
+            )
+            message = msg_factory(temp_ref)
+            ref.tell(message)
+            await asyncio.wait_for(done_event.wait(), timeout=timeout)
+            return tuple(responses)
         finally:
             self._local_transport.unregister(temp_path)
 

@@ -829,16 +829,13 @@ Every node in the cluster runs the same code — only `host` and `port` differ. 
 
 ## Cluster Broadcast
 
-Sharding routes messages to a **single** entity via its ID. But some scenarios require sending a message to **all** nodes — configuration updates, cache invalidation, system-wide announcements. For these, `system.lookup(path, node=address)` resolves an actor on any node by its path, whether local or remote.
-
-The pattern: every node spawns an actor at a well-known path. The sender queries cluster state to discover all members, then uses `lookup` with each member's address to get a remote ref and send the message:
+Sharding routes messages to a **single** entity via its ID. But some scenarios require sending a message to **all** nodes — configuration updates, cache invalidation, system-wide announcements. `Behaviors.broadcasted()` wraps any behavior so that `tell()` automatically fans out to every cluster member and `ask()` collects all responses:
 
 ```python
 import asyncio
 import socket
 from dataclasses import dataclass
-from casty import ActorRef, Behavior, Behaviors
-from casty.cluster_state import MemberStatus
+from casty import ActorRef, Behavior, Behaviors, BroadcastRef
 from casty.sharding import ClusteredActorSystem
 
 @dataclass(frozen=True)
@@ -859,33 +856,28 @@ def listener() -> Behavior[Announcement]:
 
     return Behaviors.receive(receive)
 
-async def broadcast(system: ClusteredActorSystem) -> None:
-    state = await system.get_cluster_state()
-    up_members = [m for m in state.members if m.status == MemberStatus.up]
-
-    for member in up_members:
-        ref = system.lookup("/listener", node=member.address)
-        if ref is None:
-            continue
-        ack = await system.ask_or_none(
-            ref,
-            lambda r: Announcement(text="Hello cluster!", reply_to=r),
-            timeout=5.0,
-        )
-        if ack is not None:
-            print(f"Ack from {ack.from_node}")
-
 async def main() -> None:
     async with ClusteredActorSystem(
         name="demo", host="127.0.0.1", port=25520,
     ) as system:
-        system.spawn(listener(), "listener")
-        await broadcast(system)
+        # BroadcastRef — tell/ask fan out to ALL nodes
+        ref: BroadcastRef[Announcement] = system.spawn(
+            Behaviors.broadcasted(listener()), "listener"
+        )
+
+        # ask() returns tuple[Ack, ...] — one per node
+        acks: tuple[Ack, ...] = await system.ask(
+            ref,
+            lambda r: Announcement(text="Hello cluster!", reply_to=r),
+            timeout=5.0,
+        )
+        for ack in acks:
+            print(f"Ack from {ack.from_node}")
 
 asyncio.run(main())
 ```
 
-`system.lookup(path)` without a `node` performs a local lookup (returns `None` if no actor exists at that path). With `node=address`, it constructs a remote `ActorRef` that delivers messages over TCP — the actor is assumed to exist on the target node. This is the same mechanism the cluster uses internally for gossip and heartbeat, exposed as a public API.
+Under the hood, each node spawns a local copy of the actor at `/_bcast-{name}` and a proxy at `/{name}`. The proxy tracks cluster membership via gossip and fans out messages to all `up` members — locally or over TCP. The `BroadcastRef[M]` subclass of `ActorRef[M]` enables typesafe overloads: `ask(BroadcastRef, ...)` returns `tuple[R, ...]` instead of `R`.
 
 ## Shard Replication
 

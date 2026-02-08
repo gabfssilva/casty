@@ -27,3 +27,13 @@ class ActorRef[M]:
 
     def __reduce__(self) -> tuple[Callable[[str], ActorRef[Any]], tuple[str]]:
         return (_restore_actor_ref, (self.address.to_uri(),))
+
+
+@dataclass(frozen=True)
+class BroadcastRef[M](ActorRef[M]):
+    """Typed handle for a broadcasted actor.
+
+    Inherits ``tell()`` from ``ActorRef``.  The subclass exists so that
+    ``spawn`` and ``ask`` overloads can distinguish broadcast refs at the
+    type level — ``ask(BroadcastRef, ...)`` returns ``tuple[R, ...]``.
+    """
