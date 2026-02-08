@@ -1,0 +1,48 @@
+x-node: &node
+  build:
+    context: ..
+    dockerfile: tests/Dockerfile
+  command:
+    [
+      "tests/cluster_node.py",
+      "--port", "25520",
+      "--host", "auto",
+      "--bind-host", "0.0.0.0",
+      "--seed", "node-1:25520",
+      "--nodes", "${NODES:-1}",
+    ]
+
+services:
+  node-1:
+    <<: *node
+    hostname: node-1
+    command:
+      [
+        "tests/cluster_node.py",
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "node-1:25520",
+        "--nodes", "${NODES:-1}",
+        "--is-seed",
+      ]
+
+  node-2:
+    <<: *node
+    hostname: node-2
+
+  node-3:
+    <<: *node
+    hostname: node-3
+
+  node-4:
+    <<: *node
+    hostname: node-4
+
+  node-5:
+    <<: *node
+    hostname: node-5
+
+  node-6:
+    <<: *node
+    hostname: node-6

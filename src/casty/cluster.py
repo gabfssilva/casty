@@ -299,6 +299,7 @@ def cluster_actor(
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
     gossip_interval: float = 1.0,
+    gossip_fanout: int = 3,
     heartbeat_interval: float = 0.5,
     availability_interval: float = 2.0,
     failure_detector_config: FailureDetectorConfig | None = None,
@@ -321,6 +322,7 @@ def cluster_actor(
                 remote_transport=remote_transport,
                 system_name=system_name,
                 logger=gossip_logger,
+                fanout=gossip_fanout,
             ),
             "_gossip",
         )
@@ -428,6 +430,7 @@ class Cluster:
         remote_transport: RemoteTransport | None = None,
         system_name: str = "",
         gossip_interval: float = 1.0,
+        gossip_fanout: int = 3,
         heartbeat_interval: float = 0.5,
         availability_interval: float = 2.0,
         failure_detector_config: FailureDetectorConfig | None = None,
@@ -437,6 +440,7 @@ class Cluster:
         self._remote_transport = remote_transport
         self._system_name = system_name
         self._gossip_interval = gossip_interval
+        self._gossip_fanout = gossip_fanout
         self._heartbeat_interval = heartbeat_interval
         self._availability_interval = availability_interval
         self._failure_detector_config = failure_detector_config
@@ -457,6 +461,7 @@ class Cluster:
                 remote_transport=self._remote_transport,
                 system_name=self._system_name,
                 gossip_interval=self._gossip_interval,
+                gossip_fanout=self._gossip_fanout,
                 heartbeat_interval=self._heartbeat_interval,
                 availability_interval=self._availability_interval,
                 failure_detector_config=self._failure_detector_config,

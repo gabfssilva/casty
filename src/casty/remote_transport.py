@@ -142,11 +142,17 @@ class TcpTransport:
     async def stop(self) -> None:
         for _, writer in self._connections.values():
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
         self._connections.clear()
         for writer in self._inbound_writers:
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
         self._inbound_writers.clear()
         if self._server is not None:
             self._server.close()

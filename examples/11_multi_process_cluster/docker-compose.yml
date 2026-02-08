@@ -9,7 +9,7 @@ x-node: &node
       "--bind-host", "0.0.0.0",
       "--seed", "node-1:25520",
       "--tasks", "5",
-      "--nodes", "3",
+      "--nodes", "20",
     ]
 
 services:
@@ -22,3 +22,54 @@ services:
   node-3:
     <<: *node
     hostname: node-3
+  node-4:
+    <<: *node
+    hostname: node-4
+  node-5:
+    <<: *node
+    hostname: node-5
+  node-6:
+    <<: *node
+    hostname: node-6
+  node-7:
+    <<: *node
+    hostname: node-7
+  node-8:
+    <<: *node
+    hostname: node-8
+  node-9:
+    <<: *node
+    hostname: node-9
+  node-10:
+    <<: *node
+    hostname: node-10
+  node-11:
+    <<: *node
+    hostname: node-11
+  node-12:
+    <<: *node
+    hostname: node-12
+  node-13:
+    <<: *node
+    hostname: node-13
+  node-14:
+    <<: *node
+    hostname: node-14
+  node-15:
+    <<: *node
+    hostname: node-15
+  node-16:
+    <<: *node
+    hostname: node-16
+  node-17:
+    <<: *node
+    hostname: node-17
+  node-18:
+    <<: *node
+    hostname: node-18
+  node-19:
+    <<: *node
+    hostname: node-19
+  node-20:
+    <<: *node
+    hostname: node-20

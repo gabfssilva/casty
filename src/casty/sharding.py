@@ -307,6 +307,7 @@ class ClusteredActorSystem(ActorSystem):
                 remote_transport=self._remote_transport,
                 system_name=self._name,
                 gossip_interval=cfg.gossip.interval,
+                gossip_fanout=cfg.gossip.fanout,
                 heartbeat_interval=cfg.heartbeat.interval,
                 availability_interval=cfg.heartbeat.availability_check_interval,
                 failure_detector_config=cfg.failure_detector,

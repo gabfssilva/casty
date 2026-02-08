@@ -65,6 +65,7 @@ class FailureDetectorConfig:
 @dataclass(frozen=True)
 class GossipConfig:
     interval: float = 1.0
+    fanout: int = 3
 
 
 @dataclass(frozen=True)

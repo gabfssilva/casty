@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 class GossipMessage:
     state: ClusterState
     from_node: NodeAddress
+    is_reply: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,14 +74,15 @@ def gossip_actor(
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
     logger: logging.Logger | None = None,
+    fanout: int = 3,
 ) -> Behavior[GossipMsg]:
     log = logger or logging.getLogger(f"casty.gossip.{system_name}")
 
     def active(state: ClusterState) -> Behavior[GossipMsg]:
         async def receive(ctx: Any, msg: GossipMsg) -> Any:
             match msg:
-                case GossipMessage(remote_state, from_node):
-                    log.debug("Gossip from %s:%d (members=%d)", from_node.host, from_node.port, len(remote_state.members))
+                case GossipMessage(remote_state, from_node, is_reply):
+                    log.debug("Gossip from %s:%d (members=%d, reply=%s)", from_node.host, from_node.port, len(remote_state.members), is_reply)
                     merged_version = state.version.merge(remote_state.version)
                     all_addresses = {m.address for m in state.members} | {
                         m.address for m in remote_state.members
@@ -132,6 +134,17 @@ def gossip_actor(
                         allocation_epoch=merged_epoch,
                         seen=merged_seen,
                     )
+
+                    if not is_reply and remote_transport is not None:
+                        reply_addr = ActorAddress(
+                            system=system_name,
+                            path="/_cluster/_gossip",
+                            host=from_node.host,
+                            port=from_node.port,
+                        )
+                        reply_ref: ActorRef[Any] = remote_transport.make_ref(reply_addr)
+                        reply_ref.tell(GossipMessage(state=new_state, from_node=self_node, is_reply=True))
+
                     return active(new_state)
 
                 case GetClusterState(reply_to):
@@ -192,16 +205,18 @@ def gossip_actor(
                         ]
                         if peers:
                             unseen = [p for p in peers if p not in state.seen]
-                            target_node = random.choice(unseen) if unseen else random.choice(peers)
-                            log.debug("Gossip -> %s:%d", target_node.host, target_node.port)
-                            gossip_addr = ActorAddress(
-                                system=system_name,
-                                path="/_cluster/_gossip",
-                                host=target_node.host,
-                                port=target_node.port,
-                            )
-                            gossip_ref: ActorRef[Any] = remote_transport.make_ref(gossip_addr)
-                            gossip_ref.tell(GossipMessage(state=state, from_node=self_node))
+                            candidates = unseen if unseen else peers
+                            targets = random.sample(candidates, min(fanout, len(candidates)))
+                            for target_node in targets:
+                                log.debug("Gossip -> %s:%d", target_node.host, target_node.port)
+                                gossip_addr = ActorAddress(
+                                    system=system_name,
+                                    path="/_cluster/_gossip",
+                                    host=target_node.host,
+                                    port=target_node.port,
+                                )
+                                gossip_ref: ActorRef[Any] = remote_transport.make_ref(gossip_addr)
+                                gossip_ref.tell(GossipMessage(state=state, from_node=self_node))
                     return Behaviors.same()
 
                 case PromoteMember(address):

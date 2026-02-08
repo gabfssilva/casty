@@ -55,7 +55,7 @@ wheels = [
 
 [[package]]
 name = "casty"
-version = "0.4.1.dev1+gff56b15e8.d20260208"
+version = "0.5.1.dev2+ga073cd375.d20260208"
 source = { directory = "../../" }
 
 [package.metadata]
@@ -68,6 +68,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.25" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "pytest-sugar", specifier = ">=1.1.1" },
+    { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff", specifier = ">=0.9" },
     { name = "testcontainers", specifier = ">=4.14.1" },

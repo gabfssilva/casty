@@ -1,0 +1,14 @@
+{
+  "label": "single-node ask latency (142,076 round-trips in 10s)",
+  "machine_id": "878f8d4fe070",
+  "platform": "macOS-26.2-arm64-arm-64bit-Mach-O",
+  "node": "gabs-macbook-air.local",
+  "stats": {
+    "total_s": 9.886839575,
+    "ops": 142076,
+    "ops_per_sec": 14370.213951812808,
+    "mean_ms": 0.06958838632140545,
+    "p50_ms": 0.067209,
+    "p99_ms": 0.089667
+  }
+}

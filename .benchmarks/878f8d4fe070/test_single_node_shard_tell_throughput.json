@@ -1,0 +1,11 @@
+{
+  "label": "single-node tell throughput (965,670 msgs in 10s)",
+  "machine_id": "878f8d4fe070",
+  "platform": "macOS-26.2-arm64-arm-64bit-Mach-O",
+  "node": "gabs-macbook-air.local",
+  "stats": {
+    "total_s": 10.012645208,
+    "ops": 965670,
+    "ops_per_sec": 96445.0432367702
+  }
+}

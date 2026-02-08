@@ -1,0 +1,11 @@
+{
+  "label": "two-node cluster formation",
+  "machine_id": "878f8d4fe070",
+  "platform": "macOS-26.2-arm64-arm-64bit-Mach-O",
+  "node": "gabs-macbook-air.local",
+  "stats": {
+    "total_s": 1.003694375,
+    "ops": 1,
+    "ops_per_sec": 0.9963192231699016
+  }
+}
