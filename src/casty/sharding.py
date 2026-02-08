@@ -214,6 +214,7 @@ class ClusteredActorSystem(ActorSystem):
         config: CastyConfig | None = None,
         server_ssl: ssl.SSLContext | None = None,
         client_ssl: ssl.SSLContext | None = None,
+        required_quorum: int | None = None,
     ) -> None:
         super().__init__(name=name, config=config)
         self._host = host
@@ -223,6 +224,7 @@ class ClusteredActorSystem(ActorSystem):
         self._roles = roles
         self._self_node = NodeAddress(host=host, port=port)
         self._coordinators: dict[str, ActorRef[CoordinatorMsg]] = {}
+        self._required_quorum = required_quorum
         self._logger = logging.getLogger(f"casty.sharding.{name}")
 
         # Serialization + transport
@@ -258,6 +260,7 @@ class ClusteredActorSystem(ActorSystem):
         bind_host: str | None = None,
         server_ssl: ssl.SSLContext | None = None,
         client_ssl: ssl.SSLContext | None = None,
+        required_quorum: int | None = None,
     ) -> ClusteredActorSystem:
         cluster = config.cluster
         if cluster is None:
@@ -274,6 +277,7 @@ class ClusteredActorSystem(ActorSystem):
             config=config,
             server_ssl=server_ssl,
             client_ssl=client_ssl,
+            required_quorum=required_quorum,
         )
 
     async def __aenter__(self) -> ClusteredActorSystem:
@@ -320,6 +324,12 @@ class ClusteredActorSystem(ActorSystem):
         )
 
         self._logger.info("Started on %s:%d", self._host, self._port)
+
+        if self._required_quorum is not None:
+            self._logger.info("Waiting for %d nodes...", self._required_quorum)
+            await self.wait_for(self._required_quorum)
+            self._logger.info("Cluster ready (%d nodes up)", self._required_quorum)
+
         return self
 
     def _get_ref_transport(self) -> MessageTransport | None:

@@ -62,6 +62,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         port=_config.casty_port,
         seed_nodes=_config.seed_nodes,
         bind_host="0.0.0.0",
+        required_quorum=_config.node_count,
     ) as system:
         _system = system
 
@@ -78,8 +79,6 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             "ping",
         )
 
-        # Let the cluster stabilize
-        await asyncio.sleep(1.0)
         logger.info("Node %d ready", _config.node_index)
         yield
 

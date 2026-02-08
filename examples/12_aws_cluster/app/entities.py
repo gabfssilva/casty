@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import random
 import socket
 import time
 from dataclasses import dataclass
@@ -35,6 +37,8 @@ def ping_listener() -> Behavior[PingMsg]:
     async def receive(_ctx: Any, msg: PingMsg) -> Behavior[PingMsg]:
         match msg:
             case Ping(seq=seq, sent_at=sent_at, reply_to=reply_to):
+                delay = random.uniform(1.0, 3.0)
+                await asyncio.sleep(delay)
                 latency_ms = (time.time() - sent_at) * 1000.0
                 reply_to.tell(Pong(seq=seq, from_node=node, latency_ms=latency_ms))
         return Behaviors.same()

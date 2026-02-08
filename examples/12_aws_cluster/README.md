@@ -96,6 +96,7 @@ Environment variables:
 | `SEED_IPS` | `127.0.0.1` | Comma-separated seed node IPs |
 | `CASTY_PORT` | `25520` | Casty TCP port |
 | `HTTP_PORT` | `8000` | FastAPI HTTP port |
+| `NODE_COUNT` | `10` | Required quorum — startup blocks until N nodes are UP |
 
 Pulumi config:
 

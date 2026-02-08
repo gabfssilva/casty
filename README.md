@@ -1024,6 +1024,7 @@ async with ClusteredActorSystem(
     host="10.0.0.1",
     port=25520,
     seed_nodes=[("10.0.0.2", 25520), ("10.0.0.3", 25520)],
+    required_quorum=3,  # startup blocks until 3 nodes are UP
 ) as system:
     system.event_stream.subscribe(
         MemberUp, lambda e: log.info(f"Worker joined: {e.member.address}")
@@ -1033,7 +1034,7 @@ async with ClusteredActorSystem(
     )
 ```
 
-Every node in the cluster runs the same code. There is no distinction between "broker" and "worker" — every node is both. The cluster forms automatically as nodes start and discover each other through the seed list.
+Every node in the cluster runs the same code. There is no distinction between "broker" and "worker" — every node is both. The cluster forms automatically as nodes start and discover each other through the seed list. The `required_quorum` parameter blocks startup inside `__aenter__` until the specified number of nodes have status `up` — no more guessing with `asyncio.sleep()`. When omitted, startup completes immediately after the local node initializes.
 
 ### Work Distribution
 
