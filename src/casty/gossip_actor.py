@@ -97,8 +97,14 @@ def gossip_actor(
                         if local_m and remote_m:
                             if state.version.is_before(remote_state.version):
                                 merged_members.add(remote_m)
-                            else:
+                            elif remote_state.version.is_before(state.version):
                                 merged_members.add(local_m)
+                            else:
+                                # Concurrent: higher status wins (joining < up < leaving < down < removed)
+                                if remote_m.status.value > local_m.status.value:
+                                    merged_members.add(remote_m)
+                                else:
+                                    merged_members.add(local_m)
                         elif local_m:
                             merged_members.add(local_m)
                         elif remote_m:
@@ -112,12 +118,19 @@ def gossip_actor(
                         merged_allocs = state.shard_allocations
                         merged_epoch = state.allocation_epoch
 
+                    members_changed = frozenset(merged_members) != state.members
+                    if members_changed:
+                        merged_seen = frozenset({self_node, from_node})
+                    else:
+                        merged_seen = state.seen | remote_state.seen | {self_node, from_node}
+
                     new_state = ClusterState(
                         members=frozenset(merged_members),
                         unreachable=state.unreachable | remote_state.unreachable,
                         version=merged_version.increment(self_node),
                         shard_allocations=merged_allocs,
                         allocation_epoch=merged_epoch,
+                        seen=merged_seen,
                     )
                     return active(new_state)
 
@@ -143,6 +156,7 @@ def gossip_actor(
                         version=state.version.increment(self_node),
                         shard_allocations=state.shard_allocations,
                         allocation_epoch=state.allocation_epoch,
+                        seen=frozenset({self_node}),
                     )
                     if reply_to is not None:
                         reply_to.tell(JoinAccepted(state=new_state))
@@ -164,6 +178,7 @@ def gossip_actor(
                         version=merged_version.increment(self_node),
                         shard_allocations=merged_allocs,
                         allocation_epoch=merged_epoch,
+                        seen=frozenset({self_node}),
                     )
                     return active(new_state)
 
@@ -176,7 +191,8 @@ def gossip_actor(
                             and m.status in (MemberStatus.up, MemberStatus.joining)
                         ]
                         if peers:
-                            target_node = random.choice(peers)
+                            unseen = [p for p in peers if p not in state.seen]
+                            target_node = random.choice(unseen) if unseen else random.choice(peers)
                             log.debug("Gossip -> %s:%d", target_node.host, target_node.port)
                             gossip_addr = ActorAddress(
                                 system=system_name,
@@ -203,6 +219,7 @@ def gossip_actor(
                             version=state.version.increment(self_node),
                             shard_allocations=state.shard_allocations,
                             allocation_epoch=state.allocation_epoch,
+                            seen=frozenset({self_node}),
                         )
                         return active(new_state)
                     return Behaviors.same()

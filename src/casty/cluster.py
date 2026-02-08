@@ -227,8 +227,8 @@ def cluster_receive(
                 if state.diff(cluster_state):
                     logger.info("Cluster topology update: %s", state)
 
-                # Leader promotes joining → up
-                if state.leader == self_node:
+                # Leader promotes joining → up only when state is converged
+                if state.leader == self_node and state.is_converged:
                     for m in state.members:
                         if m.status == MemberStatus.joining:
                             logger.info("Promoting member %s:%d", m.address.host, m.address.port)

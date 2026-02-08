@@ -91,6 +91,17 @@ class ClusterState:
         default_factory=lambda: {}  # noqa: C408
     )
     allocation_epoch: int = 0
+    seen: frozenset[NodeAddress] = field(
+        default_factory=lambda: frozenset[NodeAddress]()
+    )
+
+    @property
+    def is_converged(self) -> bool:
+        active = frozenset(
+            m.address for m in self.members
+            if m.status not in (MemberStatus.down, MemberStatus.removed)
+        )
+        return active <= self.seen
 
     def add_member(self, member: Member) -> ClusterState:
         filtered = frozenset(m for m in self.members if m.address != member.address)
@@ -100,6 +111,7 @@ class ClusterState:
             version=self.version,
             shard_allocations=self.shard_allocations,
             allocation_epoch=self.allocation_epoch,
+            seen=self.seen,
         )
 
     def merge_members(self, other: ClusterState) -> frozenset[Member]:
@@ -122,6 +134,7 @@ class ClusterState:
             version=self.version,
             shard_allocations=self.shard_allocations,
             allocation_epoch=self.allocation_epoch,
+            seen=self.seen,
         )
 
     def mark_unreachable(self, address: NodeAddress) -> ClusterState:
@@ -131,6 +144,7 @@ class ClusterState:
             version=self.version,
             shard_allocations=self.shard_allocations,
             allocation_epoch=self.allocation_epoch,
+            seen=self.seen,
         )
 
     def mark_reachable(self, address: NodeAddress) -> ClusterState:
@@ -140,6 +154,7 @@ class ClusterState:
             version=self.version,
             shard_allocations=self.shard_allocations,
             allocation_epoch=self.allocation_epoch,
+            seen=self.seen,
         )
 
     def with_allocations(
@@ -155,6 +170,7 @@ class ClusterState:
             version=self.version,
             shard_allocations=new_shard_allocs,
             allocation_epoch=epoch,
+            seen=self.seen,
         )
 
     def __str__(self) -> str:
