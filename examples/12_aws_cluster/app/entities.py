@@ -1,9 +1,45 @@
 from __future__ import annotations
 
+import socket
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from casty import ActorRef, Behavior, Behaviors
+
+
+# --- Ping listener (broadcasted) ---
+
+
+@dataclass(frozen=True)
+class Ping:
+    seq: int
+    from_node: str
+    sent_at: float
+    reply_to: ActorRef[Pong]
+
+
+@dataclass(frozen=True)
+class Pong:
+    seq: int
+    from_node: str
+    latency_ms: float
+
+
+type PingMsg = Ping
+
+
+def ping_listener() -> Behavior[PingMsg]:
+    node = socket.gethostname()
+
+    async def receive(_ctx: Any, msg: PingMsg) -> Behavior[PingMsg]:
+        match msg:
+            case Ping(seq=seq, sent_at=sent_at, reply_to=reply_to):
+                latency_ms = (time.time() - sent_at) * 1000.0
+                reply_to.tell(Pong(seq=seq, from_node=node, latency_ms=latency_ms))
+        return Behaviors.same()
+
+    return Behaviors.receive(receive)
 
 
 # --- Counter entity ---

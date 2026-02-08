@@ -84,6 +84,7 @@ uv run pulumi stack rm dev
 | GET | `/counter/{entity_id}` | Get counter value |
 | PUT | `/kv/{entity_id}/{key}` | Set KV entry (body: `{"value": "..."}`) |
 | GET | `/kv/{entity_id}/{key}` | Get KV entry |
+| POST | `/broadcast/ping` | Ping all nodes via broadcast, returns latencies |
 
 ## Configuration
 

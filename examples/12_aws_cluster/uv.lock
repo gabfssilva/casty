@@ -55,7 +55,7 @@ wheels = [
 
 [[package]]
 name = "casty"
-version = "0.1.0"
+version = "0.4.1.dev0+gb0f260fbe.d20260208"
 source = { directory = "../../" }
 
 [package.metadata]

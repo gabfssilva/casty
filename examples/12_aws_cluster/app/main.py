@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from casty import Behaviors
+from casty import Behaviors, BroadcastRef
 from casty.ref import ActorRef
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
 
@@ -19,9 +20,13 @@ from .entities import (
     GetCounter,
     Increment,
     KVMsg,
+    Ping,
+    PingMsg,
+    Pong,
     Put,
     counter_entity,
     kv_entity,
+    ping_listener,
 )
 
 logger = logging.getLogger("casty.aws_cluster")
@@ -31,6 +36,7 @@ logger = logging.getLogger("casty.aws_cluster")
 _system: ClusteredActorSystem | None = None
 _counter_proxy: ActorRef[ShardEnvelope[CounterMsg]] | None = None
 _kv_proxy: ActorRef[ShardEnvelope[KVMsg]] | None = None
+_ping_ref: BroadcastRef[PingMsg] | None = None
 _config: AppConfig | None = None
 
 
@@ -39,7 +45,7 @@ _config: AppConfig | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
-    global _system, _counter_proxy, _kv_proxy, _config
+    global _system, _counter_proxy, _kv_proxy, _ping_ref, _config
 
     _config = AppConfig.from_env()
     logger.info(
@@ -67,6 +73,10 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             Behaviors.sharded(entity_factory=kv_entity, num_shards=20),
             "kv",
         )
+        _ping_ref = system.spawn(
+            Behaviors.broadcasted(ping_listener()),
+            "ping",
+        )
 
         # Let the cluster stabilize
         await asyncio.sleep(1.0)
@@ -76,6 +86,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     _system = None
     _counter_proxy = None
     _kv_proxy = None
+    _ping_ref = None
 
 
 app = FastAPI(title="Casty AWS Cluster", lifespan=lifespan)
@@ -120,6 +131,17 @@ class ClusterStatusResponse(BaseModel):
     node: int
     members: list[dict[str, Any]]
     unreachable: list[str]
+
+
+class PongResponse(BaseModel):
+    from_node: str
+    latency_ms: float
+
+
+class BroadcastPingResponse(BaseModel):
+    seq: int
+    responded: int
+    pongs: list[PongResponse]
 
 
 # --- Routes ---
@@ -207,3 +229,28 @@ async def kv_get(entity_id: str, key: str) -> KVResponse:
         return KVResponse(entity_id=entity_id, key=key, value=value)
     except asyncio.TimeoutError:
         raise HTTPException(504, "Timeout reading KV") from None
+
+
+_ping_seq = 0
+
+
+@app.post("/broadcast/ping")
+async def broadcast_ping() -> BroadcastPingResponse:
+    global _ping_seq
+    if not _system or not _ping_ref:
+        raise HTTPException(503, "System not ready")
+    _ping_seq += 1
+    seq = _ping_seq
+    try:
+        pongs: tuple[Pong, ...] = await _system.ask(
+            _ping_ref,
+            lambda r, s=seq: Ping(seq=s, from_node=_config.host_ip if _config else "?", sent_at=time.time(), reply_to=r),
+            timeout=5.0,
+        )
+        return BroadcastPingResponse(
+            seq=seq,
+            responded=len(pongs),
+            pongs=[PongResponse(from_node=p.from_node, latency_ms=round(p.latency_ms, 2)) for p in pongs],
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "Timeout waiting for broadcast pongs") from None
