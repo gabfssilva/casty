@@ -237,6 +237,7 @@ class ActorSystem:
             ref_transport=self._get_ref_transport(),
             ref_host=self._get_ref_host(),
             ref_port=self._get_ref_port(),
+            ref_node_id=self._get_ref_node_id(),
         )
         if mailbox is not None:
             cell.mailbox = mailbox
@@ -399,6 +400,9 @@ class ActorSystem:
         return None
 
     def _get_ref_port(self) -> int | None:
+        return None
+
+    def _get_ref_node_id(self) -> str | None:
         return None
 
     async def shutdown(self) -> None:

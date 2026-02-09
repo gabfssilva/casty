@@ -63,6 +63,7 @@ async def run_node(
         host=host,
         port=port,
         bind_host=bind_host,
+        node_id=f"node-{host}-{port}",
         seed_nodes=seed_nodes,
     ) as system:
         proxy = system.spawn(

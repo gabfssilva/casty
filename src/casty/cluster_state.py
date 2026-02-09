@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from casty.replication import ShardAllocation
 
 
+type NodeId = str
+
+
 class MemberStatus(Enum):
     """Lifecycle status of a cluster member.
 
@@ -87,10 +90,12 @@ class Member:
         Current lifecycle status.
     roles : frozenset[str]
         Roles advertised by this member (e.g. ``{"frontend", "backend"}``).
+    id : NodeId
+        Human-readable identifier for this node (e.g. ``"worker-1"``).
 
     Examples
     --------
-    >>> m = Member(NodeAddress("10.0.0.1", 2551), MemberStatus.up, frozenset())
+    >>> m = Member(NodeAddress("10.0.0.1", 2551), MemberStatus.up, frozenset(), id="node-1")
     >>> m.status
     <MemberStatus.up: ...>
     """
@@ -98,6 +103,7 @@ class Member:
     address: NodeAddress
     status: MemberStatus
     roles: frozenset[str]
+    id: NodeId
 
 
 @dataclass(frozen=True)
@@ -254,7 +260,7 @@ class ClusterState:
     Examples
     --------
     >>> node = NodeAddress("10.0.0.1", 2551)
-    >>> m = Member(node, MemberStatus.up, frozenset())
+    >>> m = Member(node, MemberStatus.up, frozenset(), id="node-1")
     >>> s1 = ClusterState().add_member(m)
     >>> s2 = ClusterState().add_member(m)
     >>> merged = s1.merge_members(s2)
@@ -353,7 +359,7 @@ class ClusterState:
             New state with the updated member.
         """
         new_members = frozenset(
-            Member(address=m.address, status=status, roles=m.roles)
+            Member(address=m.address, status=status, roles=m.roles, id=m.id)
             if m.address == address
             else m
             for m in self.members
@@ -445,7 +451,7 @@ class ClusterState:
 
     def __str__(self) -> str:
         nodes = ", ".join(
-            f"{m.address.host}:{m.address.port}({m.status.name})"
+            f"{m.id}@{m.address.host}:{m.address.port}({m.status.name})"
             for m in sorted(self.members, key=lambda m: m.address)
         )
         leader = self.leader

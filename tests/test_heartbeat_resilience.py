@@ -59,6 +59,7 @@ NODE_SCRIPT = textwrap.dedent("""\
     async def run_seed(host: str, port: int, bind_host: str, n_workers: int) -> None:
         async with ClusteredActorSystem(
             name="test-cluster", host=host, port=port, bind_host=bind_host,
+            node_id="seed",
             config=CLUSTER_CONFIG,
         ) as system:
             total = n_workers + 1
@@ -78,6 +79,7 @@ NODE_SCRIPT = textwrap.dedent("""\
     ) -> None:
         async with ClusteredActorSystem(
             name="test-cluster", host=host, port=port, bind_host=bind_host,
+            node_id=f"worker-{host}-{port}",
             seed_nodes=[(seed_host, seed_port)],
             config=CLUSTER_CONFIG,
         ) as system:

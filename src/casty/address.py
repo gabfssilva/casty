@@ -53,6 +53,7 @@ class ActorAddress:
     path: str
     host: str | None = None
     port: int | None = None
+    node_id: str | None = None
 
     @property
     def is_local(self) -> bool:

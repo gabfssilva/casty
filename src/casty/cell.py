@@ -66,6 +66,7 @@ class CellContext[M]:
             ref_transport=self._cell.ref_transport,
             ref_host=self._cell.ref_host,
             ref_port=self._cell.ref_port,
+            ref_node_id=self._cell.ref_node_id,
         )
         if mailbox is not None:
             child.mailbox = mailbox
@@ -123,6 +124,7 @@ class ActorCell[M]:
         ref_transport: MessageTransport | None = None,
         ref_host: str | None = None,
         ref_port: int | None = None,
+        ref_node_id: str | None = None,
     ) -> None:
         self._initial_behavior: Behavior[M] = behavior
         self._name = name
@@ -133,6 +135,7 @@ class ActorCell[M]:
         self._ref_transport = ref_transport
         self._ref_host = ref_host
         self._ref_port = ref_port
+        self._ref_node_id = ref_node_id
         self._mailbox: Mailbox[Any] = Mailbox()
         self._logger = logging.getLogger(f"casty.actor.{name}")
 
@@ -169,7 +172,8 @@ class ActorCell[M]:
         # Create the ref with address + transport
         effective_transport: MessageTransport = ref_transport or local_transport
         addr = ActorAddress(
-            system=system_name, path=f"/{name}", host=ref_host, port=ref_port
+            system=system_name, path=f"/{name}", host=ref_host, port=ref_port,
+            node_id=ref_node_id,
         )
         self._ref: ActorRef[M] = ActorRef(address=addr, _transport=effective_transport)
         # Always register locally for TCP inbound delivery
@@ -210,6 +214,10 @@ class ActorCell[M]:
     @property
     def ref_port(self) -> int | None:
         return self._ref_port
+
+    @property
+    def ref_node_id(self) -> str | None:
+        return self._ref_node_id
 
     @property
     def logger(self) -> logging.Logger:

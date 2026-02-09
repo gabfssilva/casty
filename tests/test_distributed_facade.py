@@ -9,7 +9,7 @@ from casty.sharding import ClusteredActorSystem
 
 async def test_distributed_counter() -> None:
     """Create counter via d.counter('hits'), increment, get."""
-    async with ClusteredActorSystem(name="dist-counter", host="127.0.0.1", port=0) as system:
+    async with ClusteredActorSystem(name="dist-counter", host="127.0.0.1", port=0, node_id="node-1") as system:
         d = Distributed(system)
         await asyncio.sleep(0.1)
 
@@ -23,7 +23,7 @@ async def test_distributed_counter() -> None:
 
 async def test_distributed_map_bracket_syntax() -> None:
     """Create map via d.map[str, str]('users'), put, get."""
-    async with ClusteredActorSystem(name="dist-map", host="127.0.0.1", port=0) as system:
+    async with ClusteredActorSystem(name="dist-map", host="127.0.0.1", port=0, node_id="node-1") as system:
         d = Distributed(system)
         await asyncio.sleep(0.1)
 
@@ -38,7 +38,7 @@ async def test_distributed_map_bracket_syntax() -> None:
 
 async def test_distributed_set_bracket_syntax() -> None:
     """Create set via d.set[str]('tags'), add, contains."""
-    async with ClusteredActorSystem(name="dist-set", host="127.0.0.1", port=0) as system:
+    async with ClusteredActorSystem(name="dist-set", host="127.0.0.1", port=0, node_id="node-1") as system:
         d = Distributed(system)
         await asyncio.sleep(0.1)
 
@@ -56,7 +56,7 @@ async def test_distributed_set_bracket_syntax() -> None:
 
 async def test_distributed_queue_bracket_syntax() -> None:
     """Create queue via d.queue[str]('jobs'), enqueue, dequeue."""
-    async with ClusteredActorSystem(name="dist-queue", host="127.0.0.1", port=0) as system:
+    async with ClusteredActorSystem(name="dist-queue", host="127.0.0.1", port=0, node_id="node-1") as system:
         d = Distributed(system)
         await asyncio.sleep(0.1)
 
@@ -77,7 +77,7 @@ async def test_distributed_queue_bracket_syntax() -> None:
 
 async def test_distributed_lock_acquire_release() -> None:
     """Acquire then release a distributed lock."""
-    async with ClusteredActorSystem(name="dist-lock-1", host="127.0.0.1", port=0) as system:
+    async with ClusteredActorSystem(name="dist-lock-1", host="127.0.0.1", port=0, node_id="node-1") as system:
         d = Distributed(system)
         await asyncio.sleep(0.1)
 
@@ -89,7 +89,7 @@ async def test_distributed_lock_acquire_release() -> None:
 
 async def test_distributed_lock_try_acquire() -> None:
     """try_acquire returns True when free, False when held."""
-    async with ClusteredActorSystem(name="dist-lock-2", host="127.0.0.1", port=0) as system:
+    async with ClusteredActorSystem(name="dist-lock-2", host="127.0.0.1", port=0, node_id="node-1") as system:
         d = Distributed(system)
         await asyncio.sleep(0.1)
 
@@ -105,7 +105,7 @@ async def test_distributed_lock_try_acquire() -> None:
 
 async def test_distributed_lock_wrong_owner_release() -> None:
     """Releasing a lock held by someone else returns False."""
-    async with ClusteredActorSystem(name="dist-lock-3", host="127.0.0.1", port=0) as system:
+    async with ClusteredActorSystem(name="dist-lock-3", host="127.0.0.1", port=0, node_id="node-1") as system:
         d = Distributed(system)
         await asyncio.sleep(0.1)
 
@@ -122,7 +122,7 @@ async def test_distributed_lock_wrong_owner_release() -> None:
 
 async def test_distributed_lock_fifo_waiters() -> None:
     """Blocked acquirers are granted in FIFO order."""
-    async with ClusteredActorSystem(name="dist-lock-4", host="127.0.0.1", port=0) as system:
+    async with ClusteredActorSystem(name="dist-lock-4", host="127.0.0.1", port=0, node_id="node-1") as system:
         d = Distributed(system)
         await asyncio.sleep(0.1)
 
@@ -156,7 +156,7 @@ async def test_distributed_lock_fifo_waiters() -> None:
 
 async def test_distributed_semaphore_permits() -> None:
     """N permits allow N concurrent holders; N+1th blocks."""
-    async with ClusteredActorSystem(name="dist-sem-1", host="127.0.0.1", port=0) as system:
+    async with ClusteredActorSystem(name="dist-sem-1", host="127.0.0.1", port=0, node_id="node-1") as system:
         d = Distributed(system)
         await asyncio.sleep(0.1)
 
@@ -182,7 +182,7 @@ async def test_distributed_semaphore_permits() -> None:
 
 async def test_distributed_semaphore_wrong_owner_release() -> None:
     """Releasing a semaphore not held by this owner returns False."""
-    async with ClusteredActorSystem(name="dist-sem-2", host="127.0.0.1", port=0) as system:
+    async with ClusteredActorSystem(name="dist-sem-2", host="127.0.0.1", port=0, node_id="node-1") as system:
         d = Distributed(system)
         await asyncio.sleep(0.1)
 
@@ -199,7 +199,7 @@ async def test_distributed_semaphore_wrong_owner_release() -> None:
 
 async def test_distributed_barrier_via_facade() -> None:
     """Barrier through the Distributed facade."""
-    async with ClusteredActorSystem(name="dist-barrier", host="127.0.0.1", port=0) as system:
+    async with ClusteredActorSystem(name="dist-barrier", host="127.0.0.1", port=0, node_id="node-1") as system:
         d = Distributed(system)
         await asyncio.sleep(0.1)
 

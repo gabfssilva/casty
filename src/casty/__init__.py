@@ -37,9 +37,11 @@ from casty.cluster_state import (
     Member,
     MemberStatus,
     NodeAddress,
+    NodeId,
     VectorClock,
 )
 from casty.context import ActorContext
+from casty.gossip_actor import ResolveNode
 from casty.distributed import Barrier, Counter, Dict, Distributed, Lock, Queue, Semaphore, Set
 from casty.events import (
     ActorRestarted,
@@ -162,7 +164,10 @@ __all__ = [
     "Member",
     "MemberStatus",
     "NodeAddress",
+    "NodeId",
     "VectorClock",
+    # Gossip
+    "ResolveNode",
     # Replication
     "ReplicationConfig",
     "ShardAllocation",

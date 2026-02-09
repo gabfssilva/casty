@@ -66,7 +66,7 @@ async def test_event_sourced_sharding_workflow() -> None:
     _journal = InMemoryJournal()
 
     async with ClusteredActorSystem(
-        name="bank", host="127.0.0.1", port=25520
+        name="bank", host="127.0.0.1", port=25520, node_id="node-1"
     ) as system:
         proxy = system.spawn(
             Behaviors.sharded(entity_factory=account_entity, num_shards=10),
@@ -116,7 +116,7 @@ async def test_sharded_with_replication_config() -> None:
         )
 
     async with ClusteredActorSystem(
-        name="bank-repl", host="127.0.0.1", port=25530
+        name="bank-repl", host="127.0.0.1", port=25530, node_id="node-1"
     ) as system:
         proxy = system.spawn(
             Behaviors.sharded(

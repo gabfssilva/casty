@@ -18,15 +18,18 @@ from .entities import (
     CounterMsg,
     Get,
     GetCounter,
+    GetStatus,
     Increment,
     KVMsg,
     Ping,
     PingMsg,
     Pong,
     Put,
+    WorkerStatus,
     counter_entity,
     kv_entity,
     ping_listener,
+    worker_actor,
 )
 
 logger = logging.getLogger("casty.aws_cluster")
@@ -60,6 +63,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         name="aws-cluster",
         host=_config.host_ip,
         port=_config.casty_port,
+        node_id=f"node-{_config.node_index}",
         seed_nodes=_config.seed_nodes,
         bind_host="0.0.0.0",
         required_quorum=_config.node_count,
@@ -78,6 +82,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             Behaviors.broadcasted(ping_listener()),
             "ping",
         )
+        system.spawn(worker_actor(), "worker")
 
         logger.info("Node %d ready", _config.node_index)
         yield
@@ -135,6 +140,11 @@ class ClusterStatusResponse(BaseModel):
 class PongResponse(BaseModel):
     from_node: str
     latency_ms: float
+
+
+class NodeStatusResponse(BaseModel):
+    node_id: str
+    processed: int
 
 
 class BroadcastPingResponse(BaseModel):
@@ -228,6 +238,24 @@ async def kv_get(entity_id: str, key: str) -> KVResponse:
         return KVResponse(entity_id=entity_id, key=key, value=value)
     except asyncio.TimeoutError:
         raise HTTPException(504, "Timeout reading KV") from None
+
+
+@app.get("/nodes/{node_id}/status")
+async def node_status(node_id: str) -> NodeStatusResponse:
+    if not _system:
+        raise HTTPException(503, "System not ready")
+    ref = _system.lookup("/worker", node=node_id)
+    if ref is None:
+        raise HTTPException(404, f"Node {node_id} not found")
+    try:
+        status: WorkerStatus = await _system.ask(
+            ref,
+            lambda r: GetStatus(reply_to=r),
+            timeout=5.0,
+        )
+        return NodeStatusResponse(node_id=status.node_id, processed=status.processed)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, f"Timeout reaching node {node_id}") from None
 
 
 _ping_seq = 0

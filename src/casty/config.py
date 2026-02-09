@@ -453,10 +453,12 @@ def load_config(path: Path | None = None) -> CastyConfig:
         seed_nodes_raw: list[str] = cluster_raw.get("seed_nodes", [])
         seed_nodes = [parse_seed_node(s) for s in seed_nodes_raw]
         roles_raw: list[str] = cluster_raw.get("roles", [])
+        node_id: str = cluster_raw.get("node_id", f"{cluster_raw['host']}:{cluster_raw['port']}")
         cluster = ClusterConfig(
             host=cluster_raw["host"],
             port=cluster_raw["port"],
             seed_nodes=seed_nodes,
+            node_id=node_id,
             roles=frozenset(roles_raw),
         )
 

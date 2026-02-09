@@ -58,7 +58,7 @@ DURATION_S = 10.0
 async def test_single_node_shard_tell_throughput(bench: BenchmarkResult) -> None:
     """Send as many tell(ShardEnvelope) as possible within DURATION_S seconds."""
     async with ClusteredActorSystem(
-        name="bench-tell", host="127.0.0.1", port=0
+        name="bench-tell", host="127.0.0.1", port=0, node_id="node-1"
     ) as system:
         proxy = system.spawn(
             Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
@@ -110,7 +110,7 @@ async def test_single_node_shard_tell_throughput(bench: BenchmarkResult) -> None
 async def test_single_node_shard_ask_latency(bench: BenchmarkResult) -> None:
     """Run ask() round-trips for DURATION_S seconds, measure p50/p99 latency."""
     async with ClusteredActorSystem(
-        name="bench-ask", host="127.0.0.1", port=0
+        name="bench-ask", host="127.0.0.1", port=0, node_id="node-1"
     ) as system:
         proxy = system.spawn(
             Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
@@ -144,7 +144,7 @@ async def test_cluster_formation_time(bench: BenchmarkResult, num_nodes: int) ->
     """Measure time from startup to gossip convergence for N nodes."""
     nodes: list[ClusteredActorSystem] = []
     try:
-        seed = ClusteredActorSystem(name="bench-cluster", host="127.0.0.1", port=0)
+        seed = ClusteredActorSystem(name="bench-cluster", host="127.0.0.1", port=0, node_id="node-1")
         await seed.__aenter__()
         nodes.append(seed)
         seed_port = seed.self_node.port
@@ -152,11 +152,12 @@ async def test_cluster_formation_time(bench: BenchmarkResult, num_nodes: int) ->
         bench.label = f"{num_nodes}-node cluster formation"
         bench.ops = 1
 
-        async def start_node() -> ClusteredActorSystem:
+        async def start_node(idx: int) -> ClusteredActorSystem:
             node = ClusteredActorSystem(
                 name="bench-cluster",
                 host="127.0.0.1",
                 port=0,
+                node_id=f"node-{idx}",
                 seed_nodes=[("127.0.0.1", seed_port)],
                 required_quorum=num_nodes,
             )
@@ -164,7 +165,7 @@ async def test_cluster_formation_time(bench: BenchmarkResult, num_nodes: int) ->
             return node
 
         start = time.perf_counter_ns()
-        others = await asyncio.gather(*(start_node() for _ in range(num_nodes - 1)))
+        others = await asyncio.gather(*(start_node(i + 2) for i in range(num_nodes - 1)))
         await seed.wait_for(num_nodes, timeout=30.0)
         bench.total_ns = time.perf_counter_ns() - start
 

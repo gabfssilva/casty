@@ -74,10 +74,12 @@ async def main() -> None:
     async with (
         ClusteredActorSystem(
             name="bank", host="127.0.0.1", port=25520,
+            node_id="node-1",
             seed_nodes=[("127.0.0.1", 25521)],
         ) as s1,
         ClusteredActorSystem(
             name="bank", host="127.0.0.1", port=25521,
+            node_id="node-2",
             seed_nodes=[("127.0.0.1", 25520)],
         ) as s2,
     ):

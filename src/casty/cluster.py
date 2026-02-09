@@ -18,6 +18,7 @@ from casty.cluster_state import (
     Member,
     MemberStatus,
     NodeAddress,
+    NodeId,
 )
 from casty.gossip_actor import (
     GossipMsg,
@@ -115,12 +116,14 @@ class ClusterConfig:
     seed_nodes : list[tuple[str, int]]
         Initial contact points for cluster formation.  An empty list means
         this node forms a new single-node cluster.
+    node_id : NodeId
+        Human-readable identifier for this node (e.g. ``"worker-1"``).
     roles : frozenset[str]
         Roles to advertise for this node.
 
     Examples
     --------
-    >>> cfg = ClusterConfig("127.0.0.1", 2551, [("127.0.0.1", 2552)])
+    >>> cfg = ClusterConfig("127.0.0.1", 2551, [("127.0.0.1", 2552)], node_id="node-1")
     >>> cfg.host, cfg.port
     ('127.0.0.1', 2551)
     """
@@ -128,6 +131,7 @@ class ClusterConfig:
     host: str
     port: int
     seed_nodes: list[tuple[str, int]]
+    node_id: NodeId
     roles: frozenset[str] = field(default_factory=lambda: frozenset[str]())
 
 
@@ -140,6 +144,7 @@ def cluster_receive(
     heartbeat_ref: ActorRef[HeartbeatMsg],
     scheduler_ref: ActorRef[SchedulerMsg],
     self_node: NodeAddress,
+    node_id: NodeId,
     roles: frozenset[str],
     seed_refs: tuple[ActorRef[GossipMsg], ...],
     logger: logging.Logger,
@@ -177,6 +182,7 @@ def cluster_receive(
             heartbeat_ref=heartbeat_ref,
             scheduler_ref=scheduler_ref,
             self_node=self_node,
+            node_id=node_id,
             roles=roles,
             seed_refs=seed_refs,
             logger=logger,
@@ -301,6 +307,7 @@ def cluster_receive(
                             JoinRequest(
                                 node=self_node,
                                 roles=roles,
+                                node_id=node_id,
                                 reply_to=gossip_ref,  # type: ignore[arg-type]
                             )
                         )
@@ -335,7 +342,7 @@ def cluster_actor(
     async def setup(ctx: ActorContext[ClusterCmd]) -> Behavior[ClusterCmd]:
         self_node = NodeAddress(host=config.host, port=config.port)
         initial_member = Member(
-            address=self_node, status=MemberStatus.up, roles=config.roles
+            address=self_node, status=MemberStatus.up, roles=config.roles, id=config.node_id
         )
         initial_state = ClusterState().add_member(initial_member)
 
@@ -433,6 +440,7 @@ def cluster_actor(
                 heartbeat_ref=heartbeat_ref,
                 scheduler_ref=scheduler_ref,
                 self_node=self_node,
+                node_id=config.node_id,
                 roles=config.roles,
                 seed_refs=seed_refs,
                 logger=logger,

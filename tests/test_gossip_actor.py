@@ -23,7 +23,7 @@ async def test_gossip_actor_join_adds_member() -> None:
     """JoinRequest adds a new member in Joining state."""
     self_node = NodeAddress(host="127.0.0.1", port=25520)
     initial_state = ClusterState().add_member(
-        Member(address=self_node, status=MemberStatus.up, roles=frozenset())
+        Member(address=self_node, status=MemberStatus.up, roles=frozenset(), id="self")
     )
 
     async with ActorSystem(name="test") as system:
@@ -34,7 +34,7 @@ async def test_gossip_actor_join_adds_member() -> None:
         await asyncio.sleep(0.1)
 
         new_node = NodeAddress(host="127.0.0.2", port=25520)
-        gossip_ref.tell(JoinRequest(node=new_node, roles=frozenset()))
+        gossip_ref.tell(JoinRequest(node=new_node, roles=frozenset(), node_id="new"))
         await asyncio.sleep(0.1)
 
         state = await system.ask(
@@ -51,13 +51,13 @@ async def test_gossip_merge_updates_state() -> None:
     other_node = NodeAddress(host="127.0.0.2", port=25520)
 
     initial_state = ClusterState().add_member(
-        Member(address=self_node, status=MemberStatus.up, roles=frozenset())
+        Member(address=self_node, status=MemberStatus.up, roles=frozenset(), id="self")
     )
 
     remote_state = (
         ClusterState()
-        .add_member(Member(address=self_node, status=MemberStatus.up, roles=frozenset()))
-        .add_member(Member(address=other_node, status=MemberStatus.up, roles=frozenset()))
+        .add_member(Member(address=self_node, status=MemberStatus.up, roles=frozenset(), id="self"))
+        .add_member(Member(address=other_node, status=MemberStatus.up, roles=frozenset(), id="other"))
     )
     remote_state = ClusterState(
         members=remote_state.members,

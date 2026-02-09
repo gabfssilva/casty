@@ -112,6 +112,7 @@ async def test_unhandled_message_event() -> None:
 
 def _dummy_member() -> Member:
     return Member(
+        id="node-1",
         address=NodeAddress(host="127.0.0.1", port=2551),
         status=MemberStatus.up,
         roles=frozenset({"backend"}),
@@ -127,6 +128,7 @@ async def test_member_up_event() -> None:
 
 async def test_member_left_event() -> None:
     member = Member(
+        id="node-1",
         address=NodeAddress(host="127.0.0.1", port=2551),
         status=MemberStatus.leaving,
         roles=frozenset(),

@@ -41,12 +41,13 @@ async def main() -> None:
 
     # Start 5 nodes
     systems: list[ClusteredActorSystem] = []
-    for port in ports:
+    for idx, port in enumerate(ports, start=1):
         others = [(h, p) for h, p in seed_nodes if p != port]
         s = ClusteredActorSystem(
             name="ddata-cluster",
             host="127.0.0.1",
             port=port,
+            node_id=f"node-{idx}",
             seed_nodes=others,
         )
         await s.__aenter__()

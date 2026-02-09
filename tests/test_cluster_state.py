@@ -52,13 +52,13 @@ def test_vector_clock_concurrent() -> None:
 
 def test_member_creation() -> None:
     addr = NodeAddress(host="10.0.0.1", port=25520)
-    member = Member(address=addr, status=MemberStatus.up, roles=frozenset())
+    member = Member(address=addr, status=MemberStatus.up, roles=frozenset(), id="node-1")
     assert member.status == MemberStatus.up
 
 
 def test_cluster_state_add_member() -> None:
     addr = NodeAddress(host="10.0.0.1", port=25520)
-    member = Member(address=addr, status=MemberStatus.joining, roles=frozenset())
+    member = Member(address=addr, status=MemberStatus.joining, roles=frozenset(), id="node-1")
     state = ClusterState()
     new_state = state.add_member(member)
     assert member in new_state.members
@@ -66,7 +66,7 @@ def test_cluster_state_add_member() -> None:
 
 def test_cluster_state_update_member_status() -> None:
     addr = NodeAddress(host="10.0.0.1", port=25520)
-    member = Member(address=addr, status=MemberStatus.joining, roles=frozenset())
+    member = Member(address=addr, status=MemberStatus.joining, roles=frozenset(), id="node-1")
     state = ClusterState().add_member(member)
     new_state = state.update_status(addr, MemberStatus.up)
     updated = next(m for m in new_state.members if m.address == addr)
@@ -75,7 +75,7 @@ def test_cluster_state_update_member_status() -> None:
 
 def test_cluster_state_mark_unreachable() -> None:
     addr = NodeAddress(host="10.0.0.1", port=25520)
-    member = Member(address=addr, status=MemberStatus.up, roles=frozenset())
+    member = Member(address=addr, status=MemberStatus.up, roles=frozenset(), id="node-1")
     state = ClusterState().add_member(member)
     new_state = state.mark_unreachable(addr)
     assert addr in new_state.unreachable
@@ -86,8 +86,8 @@ def test_cluster_state_leader_is_lowest_up_address() -> None:
     addr_b = NodeAddress(host="10.0.0.2", port=25520)
     state = (
         ClusterState()
-        .add_member(Member(address=addr_a, status=MemberStatus.up, roles=frozenset()))
-        .add_member(Member(address=addr_b, status=MemberStatus.up, roles=frozenset()))
+        .add_member(Member(address=addr_a, status=MemberStatus.up, roles=frozenset(), id="node-a"))
+        .add_member(Member(address=addr_b, status=MemberStatus.up, roles=frozenset(), id="node-b"))
     )
     assert state.leader == addr_a
 

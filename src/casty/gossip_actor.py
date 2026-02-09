@@ -13,6 +13,7 @@ from casty.cluster_state import (
     Member,
     MemberStatus,
     NodeAddress,
+    NodeId,
 )
 from casty.ref import ActorRef
 
@@ -37,6 +38,7 @@ class GetClusterState:
 class JoinRequest:
     node: NodeAddress
     roles: frozenset[str]
+    node_id: NodeId
     reply_to: ActorRef[JoinAccepted] | None = None
 
 
@@ -64,7 +66,14 @@ class UpdateShardAllocations:
     epoch: int
 
 
-type GossipMsg = GossipMessage | GetClusterState | JoinRequest | JoinAccepted | GossipTick | PromoteMember | UpdateShardAllocations
+@dataclass(frozen=True)
+class ResolveNode:
+    """Query to resolve a ``NodeId`` to its ``NodeAddress``."""
+    node_id: NodeId
+    reply_to: ActorRef[NodeAddress | None]
+
+
+type GossipMsg = GossipMessage | GetClusterState | JoinRequest | JoinAccepted | GossipTick | PromoteMember | UpdateShardAllocations | ResolveNode
 
 
 def gossip_actor(
@@ -78,7 +87,12 @@ def gossip_actor(
 ) -> Behavior[GossipMsg]:
     log = logger or logging.getLogger(f"casty.gossip.{system_name}")
 
-    def active(state: ClusterState) -> Behavior[GossipMsg]:
+    def build_node_index(members: frozenset[Member]) -> dict[NodeId, NodeAddress]:
+        return {m.id: m.address for m in members}
+
+    def active(state: ClusterState, nodes: dict[NodeId, NodeAddress] | None = None) -> Behavior[GossipMsg]:
+        if nodes is None:
+            nodes = build_node_index(state.members)
         async def receive(ctx: Any, msg: GossipMsg) -> Any:
             match msg:
                 case GossipMessage(remote_state, from_node, is_reply):
@@ -151,16 +165,17 @@ def gossip_actor(
                     reply_to.tell(state)
                     return Behaviors.same()
 
-                case JoinRequest(node, roles, reply_to):
+                case JoinRequest(node=node, roles=roles, node_id=nid, reply_to=reply_to):
                     if node == self_node:
                         if reply_to is not None:
                             reply_to.tell(JoinAccepted(state=state))
                         return Behaviors.same()
-                    log.info("Join request from %s:%d", node.host, node.port)
+                    log.info("Join request from %s:%d (id=%s)", node.host, node.port, nid)
                     new_member = Member(
                         address=node,
                         status=MemberStatus.joining,
                         roles=roles,
+                        id=nid,
                     )
                     existing = frozenset(m for m in state.members if m.address != node)
                     new_state = ClusterState(
@@ -221,7 +236,7 @@ def gossip_actor(
 
                 case PromoteMember(address):
                     promoted = frozenset(
-                        Member(address=m.address, status=MemberStatus.up, roles=m.roles)
+                        Member(address=m.address, status=MemberStatus.up, roles=m.roles, id=m.id)
                         if m.address == address and m.status == MemberStatus.joining
                         else m
                         for m in state.members
@@ -246,6 +261,10 @@ def gossip_actor(
                             shard_type, allocations, epoch
                         )
                         return active(new_state)
+                    return Behaviors.same()
+
+                case ResolveNode(node_id=nid, reply_to=reply_to):
+                    reply_to.tell(nodes.get(nid))
                     return Behaviors.same()
 
                 case _:

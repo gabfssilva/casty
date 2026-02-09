@@ -307,20 +307,59 @@ class RemoteTransport:
         self._local_port = local_port
         self._system_name = system_name
         self._logger = logging.getLogger(f"casty.remote_transport.{system_name}")
+        self._node_index: dict[str, tuple[str, int]] = {}
+        self._local_node_id: str | None = None
 
         # Wire ref_factory so deserialized ActorRefs get the right transport
         self._serializer.set_ref_factory(self._make_ref_from_address)
 
+    def set_local_node_id(self, node_id: str) -> None:
+        """Set the local node ID for ``node_id``-based locality checks.
+
+        Parameters
+        ----------
+        node_id : str
+            This node's human-readable identifier.
+        """
+        self._local_node_id = node_id
+
+    def update_node_index(self, index: dict[str, tuple[str, int]]) -> None:
+        """Replace the node index used for ``node_id`` resolution.
+
+        Parameters
+        ----------
+        index : dict[str, tuple[str, int]]
+            Mapping from node ID to ``(host, port)``.
+        """
+        self._node_index = index
+
     def _is_local(self, address: ActorAddress) -> bool:
+        if address.node_id is not None:
+            return address.node_id == self._local_node_id
         if address.host is None:
             return True
         return address.host == self._local_host and address.port == self._local_port
+
+    def _resolve_address(self, address: ActorAddress) -> ActorAddress | None:
+        """Resolve a ``node_id``-based address to one with ``host`` and ``port``."""
+        if address.host is not None and address.port is not None:
+            return address
+        if address.node_id is not None:
+            resolved = self._node_index.get(address.node_id)
+            if resolved is not None:
+                host, port = resolved
+                return ActorAddress(
+                    system=address.system, path=address.path,
+                    host=host, port=port, node_id=address.node_id,
+                )
+        return None
 
     def deliver(self, address: ActorAddress, msg: Any) -> None:
         """Deliver a message to the given address.
 
         Local addresses are routed through ``LocalTransport``; remote
-        addresses are serialized and sent via TCP.
+        addresses are serialized and sent via TCP.  Addresses using
+        ``node_id`` are resolved from the shared node index.
 
         Parameters
         ----------
@@ -332,9 +371,13 @@ class RemoteTransport:
         if self._is_local(address):
             self._local.deliver(address, msg)
         else:
+            resolved = self._resolve_address(address)
+            if resolved is None:
+                self._logger.warning("Cannot resolve address: %s", address)
+                return
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._send_remote(address, msg))
+                loop.create_task(self._send_remote(resolved, msg))
             except RuntimeError:
                 self._logger.warning("No running loop for remote deliver to %s", address)
 

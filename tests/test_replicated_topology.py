@@ -51,7 +51,7 @@ def test_cluster_state_with_allocations() -> None:
 
 def test_cluster_state_with_allocations_preserves_members() -> None:
     node = NodeAddress(host="10.0.0.1", port=25520)
-    member = Member(address=node, status=MemberStatus.up, roles=frozenset())
+    member = Member(address=node, status=MemberStatus.up, roles=frozenset(), id="node-1")
     state = ClusterState().add_member(member)
     alloc = ShardAllocation(primary=node)
     new_state = state.with_allocations("counters", {0: alloc}, epoch=1)
@@ -66,7 +66,7 @@ def test_cluster_state_mutations_preserve_allocations() -> None:
     alloc = ShardAllocation(primary=node_a)
     base = ClusterState().with_allocations("test", {0: alloc}, epoch=5)
 
-    member = Member(address=node_b, status=MemberStatus.joining, roles=frozenset())
+    member = Member(address=node_b, status=MemberStatus.joining, roles=frozenset(), id="node-b")
     s1 = base.add_member(member)
     assert s1.allocation_epoch == 5
     assert s1.shard_allocations["test"][0] == alloc
@@ -96,7 +96,7 @@ async def test_gossip_merge_higher_epoch_wins() -> None:
         # Local gossip has epoch=1
         local_state = (
             ClusterState()
-            .add_member(Member(address=node_a, status=MemberStatus.up, roles=frozenset()))
+            .add_member(Member(address=node_a, status=MemberStatus.up, roles=frozenset(), id="node-a"))
             .with_allocations("shard", {0: alloc_a}, epoch=1)
         )
         gossip_ref = system.spawn(
@@ -108,7 +108,7 @@ async def test_gossip_merge_higher_epoch_wins() -> None:
         # Remote state has epoch=3 — should win
         remote_state = (
             ClusterState()
-            .add_member(Member(address=node_b, status=MemberStatus.up, roles=frozenset()))
+            .add_member(Member(address=node_b, status=MemberStatus.up, roles=frozenset(), id="node-b"))
             .with_allocations("shard", {0: alloc_b}, epoch=3)
         )
         gossip_ref.tell(GossipMessage(state=remote_state, from_node=node_b))
@@ -134,7 +134,7 @@ async def test_gossip_merge_lower_epoch_keeps_local() -> None:
     async with ActorSystem(name="test") as system:
         local_state = (
             ClusterState()
-            .add_member(Member(address=node_a, status=MemberStatus.up, roles=frozenset()))
+            .add_member(Member(address=node_a, status=MemberStatus.up, roles=frozenset(), id="node-a"))
             .with_allocations("shard", {0: alloc_a}, epoch=5)
         )
         gossip_ref = system.spawn(
@@ -145,7 +145,7 @@ async def test_gossip_merge_lower_epoch_keeps_local() -> None:
 
         remote_state = (
             ClusterState()
-            .add_member(Member(address=node_b, status=MemberStatus.up, roles=frozenset()))
+            .add_member(Member(address=node_b, status=MemberStatus.up, roles=frozenset(), id="node-b"))
             .with_allocations("shard", {0: alloc_b}, epoch=2)
         )
         gossip_ref.tell(GossipMessage(state=remote_state, from_node=node_b))
@@ -167,7 +167,7 @@ async def test_gossip_update_shard_allocations() -> None:
 
     async with ActorSystem(name="test") as system:
         initial = ClusterState().add_member(
-            Member(address=node, status=MemberStatus.up, roles=frozenset())
+            Member(address=node, status=MemberStatus.up, roles=frozenset(), id="node-1")
         )
         gossip_ref = system.spawn(
             gossip_actor(self_node=node, initial_state=initial),
@@ -200,7 +200,7 @@ async def test_gossip_update_shard_allocations_stale_epoch_ignored() -> None:
     async with ActorSystem(name="test") as system:
         initial = (
             ClusterState()
-            .add_member(Member(address=node, status=MemberStatus.up, roles=frozenset()))
+            .add_member(Member(address=node, status=MemberStatus.up, roles=frozenset(), id="node-1"))
             .with_allocations("counters", {0: alloc_new}, epoch=5)
         )
         gossip_ref = system.spawn(
@@ -239,7 +239,7 @@ def test_serialization_shard_allocations_round_trip() -> None:
     alloc = ShardAllocation(primary=node, replicas=(NodeAddress("10.0.0.2", 25520),))
     state = (
         ClusterState()
-        .add_member(Member(address=node, status=MemberStatus.up, roles=frozenset()))
+        .add_member(Member(address=node, status=MemberStatus.up, roles=frozenset(), id="node-1"))
         .with_allocations("counters", {0: alloc, 1: alloc}, epoch=42)
     )
 
@@ -536,7 +536,7 @@ async def test_cluster_actor_sends_set_role_to_registered_coordinators() -> None
         # Create cluster_actor
         cluster_ref: ActorRef[ClusterCmd] = system.spawn(
             cluster_actor(
-                config=ClusterConfig(host="127.0.0.1", port=25520, seed_nodes=[]),
+                config=ClusterConfig(host="127.0.0.1", port=25520, seed_nodes=[], node_id="node-1"),
                 scheduler_ref=system.scheduler,
             ),
             "_cluster",
@@ -568,7 +568,7 @@ async def test_cluster_actor_forwards_publish_allocations_to_gossip() -> None:
     async with ActorSystem(name="test") as system:
         cluster_ref: ActorRef[ClusterCmd] = system.spawn(
             cluster_actor(
-                config=ClusterConfig(host="127.0.0.1", port=25520, seed_nodes=[]),
+                config=ClusterConfig(host="127.0.0.1", port=25520, seed_nodes=[], node_id="node-1"),
                 scheduler_ref=system.scheduler,
             ),
             "_cluster",
@@ -601,7 +601,7 @@ async def test_gossip_updates_state_via_update_shard_allocations() -> None:
 
     async with ActorSystem(name="test") as system:
         initial_state = ClusterState().add_member(
-            Member(address=node, status=MemberStatus.up, roles=frozenset())
+            Member(address=node, status=MemberStatus.up, roles=frozenset(), id="node-1")
         )
         gossip_ref: ActorRef[GossipMsg] = system.spawn(
             gossip_actor(self_node=node, initial_state=initial_state),

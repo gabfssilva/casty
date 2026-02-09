@@ -52,7 +52,7 @@ def counter_entity(entity_id: str) -> Behavior[CounterMsg]:
 async def test_clustered_system_starts_tcp_server() -> None:
     """ClusteredActorSystem starts TCP server on configured port."""
     async with ClusteredActorSystem(
-        name="test-tcp", host="127.0.0.1", port=0
+        name="test-tcp", host="127.0.0.1", port=0, node_id="node-1"
     ) as system:
         assert system.self_node.port > 0
         assert system.self_node.host == "127.0.0.1"
@@ -61,7 +61,7 @@ async def test_clustered_system_starts_tcp_server() -> None:
 async def test_spawned_actor_ref_has_host_port() -> None:
     """Spawned actor's ref address has host:port."""
     async with ClusteredActorSystem(
-        name="test-ref", host="127.0.0.1", port=0
+        name="test-ref", host="127.0.0.1", port=0, node_id="node-1"
     ) as system:
 
         async def noop(_ctx: Any, _msg: Any) -> Any:
@@ -76,7 +76,7 @@ async def test_spawned_actor_ref_has_host_port() -> None:
 async def test_single_system_sharded_entity() -> None:
     """Backward compat: single system with sharded entities works via TCP."""
     async with ClusteredActorSystem(
-        name="single", host="127.0.0.1", port=0
+        name="single", host="127.0.0.1", port=0, node_id="node-1"
     ) as system:
         proxy = system.spawn(
             Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
@@ -99,7 +99,7 @@ async def test_single_system_sharded_entity() -> None:
 async def test_cross_system_tell_via_tcp() -> None:
     """Two systems on different ports — actor on A, tell from B arrives via TCP."""
     async with ClusteredActorSystem(
-        name="node-a", host="127.0.0.1", port=0
+        name="node-a", host="127.0.0.1", port=0, node_id="node-1"
     ) as system_a:
         port_a = system_a.self_node.port
 
@@ -107,6 +107,7 @@ async def test_cross_system_tell_via_tcp() -> None:
             name="node-b",
             host="127.0.0.1",
             port=0,
+            node_id="node-2",
             seed_nodes=[("127.0.0.1", port_a)],
         ) as system_b:
             received: list[str] = []
@@ -147,12 +148,14 @@ async def test_cross_system_sharded_entity() -> None:
         name="cluster",
         host="127.0.0.1",
         port=0,
+        node_id="node-1",
     ) as system_a:
         port_a = system_a.self_node.port
         async with ClusteredActorSystem(
             name="cluster",
             host="127.0.0.1",
             port=0,
+            node_id="node-2",
             seed_nodes=[("127.0.0.1", port_a)],
         ) as system_b:
             # Wait for gossip convergence
@@ -184,7 +187,7 @@ async def test_cross_system_sharded_entity() -> None:
 async def test_barrier_single_node() -> None:
     """Barrier with n=1 returns immediately on a single node."""
     async with ClusteredActorSystem(
-        name="barrier-1", host="127.0.0.1", port=0
+        name="barrier-1", host="127.0.0.1", port=0, node_id="node-1"
     ) as system:
         await system.barrier("phase-1", 1, timeout=3.0)
 
@@ -192,13 +195,14 @@ async def test_barrier_single_node() -> None:
 async def test_barrier_two_nodes() -> None:
     """Barrier blocks until both nodes arrive, then releases both."""
     async with ClusteredActorSystem(
-        name="barrier-2", host="127.0.0.1", port=0
+        name="barrier-2", host="127.0.0.1", port=0, node_id="node-1"
     ) as system_a:
         port_a = system_a.self_node.port
         async with ClusteredActorSystem(
             name="barrier-2",
             host="127.0.0.1",
             port=0,
+            node_id="node-2",
             seed_nodes=[("127.0.0.1", port_a)],
         ) as system_b:
             await system_a.wait_for(2)
@@ -216,7 +220,7 @@ async def test_barrier_two_nodes() -> None:
 async def test_barrier_reusable() -> None:
     """Same barrier name can be used multiple times in sequence."""
     async with ClusteredActorSystem(
-        name="barrier-reuse", host="127.0.0.1", port=0
+        name="barrier-reuse", host="127.0.0.1", port=0, node_id="node-1"
     ) as system:
         await system.barrier("gate", 1, timeout=3.0)
         await system.barrier("gate", 1, timeout=3.0)
@@ -227,7 +231,7 @@ async def test_remote_ask_timeout() -> None:
     import pytest
 
     async with ClusteredActorSystem(
-        name="timeout-test", host="127.0.0.1", port=0
+        name="timeout-test", host="127.0.0.1", port=0, node_id="node-1"
     ) as system:
         # Spawn an actor that ignores all messages (never replies)
         async def black_hole(_ctx: Any, _msg: Any) -> Any:

@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from casty.actor import Behavior, Behaviors, BroadcastedBehavior, ShardedBehavior
 from casty.address import ActorAddress
-from casty.cluster_state import ClusterState, MemberStatus, NodeAddress
+from casty.cluster_state import ClusterState, MemberStatus, NodeAddress, NodeId
 from casty.mailbox import Mailbox
 from casty.ref import ActorRef, BroadcastRef
 from casty.cluster import (
@@ -289,6 +289,7 @@ class ClusteredActorSystem(ActorSystem):
         name: str,
         host: str,
         port: int,
+        node_id: NodeId,
         seed_nodes: list[tuple[str, int]] | None = None,
         roles: frozenset[str] = frozenset(),
         bind_host: str | None = None,
@@ -300,6 +301,7 @@ class ClusteredActorSystem(ActorSystem):
         super().__init__(name=name, config=config)
         self._host = host
         self._port: int = port
+        self._node_id = node_id
         self._bind_host = bind_host or host
         self._seed_nodes = seed_nodes or []
         self._roles = roles
@@ -338,6 +340,7 @@ class ClusteredActorSystem(ActorSystem):
         *,
         host: str | None = None,
         port: int | None = None,
+        node_id: NodeId | None = None,
         seed_nodes: list[tuple[str, int]] | None = None,
         bind_host: str | None = None,
         server_ssl: ssl.SSLContext | None = None,
@@ -377,6 +380,7 @@ class ClusteredActorSystem(ActorSystem):
             name=config.system_name,
             host=host or cluster.host,
             port=port if port is not None else cluster.port,
+            node_id=node_id or cluster.node_id,
             seed_nodes=seed_nodes if seed_nodes is not None else cluster.seed_nodes,
             roles=cluster.roles,
             bind_host=bind_host,
@@ -402,6 +406,7 @@ class ClusteredActorSystem(ActorSystem):
                 host=self._host,
                 port=self._port,
                 seed_nodes=self._seed_nodes,
+                node_id=self._node_id,
                 roles=self._roles,
             )
             from casty.config import CastyConfig as _CastyConfig
@@ -422,6 +427,11 @@ class ClusteredActorSystem(ActorSystem):
         except BaseException:
             await self._remote_transport.stop()
             raise
+
+        self._remote_transport.set_local_node_id(self._node_id)
+        self._remote_transport.update_node_index(
+            {self._node_id: (self._host, self._port)}
+        )
 
         from casty.distributed.barrier import BarrierMsg, barrier_entity
 
@@ -447,6 +457,9 @@ class ClusteredActorSystem(ActorSystem):
 
     def _get_ref_port(self) -> int | None:
         return self._port
+
+    def _get_ref_node_id(self) -> str | None:
+        return self._node_id
 
     @overload
     def spawn[M](
@@ -704,7 +717,14 @@ class ClusteredActorSystem(ActorSystem):
         >>> len(state.members)
         3
         """
-        return await self._cluster.get_state(timeout=timeout)
+        state = await self._cluster.get_state(timeout=timeout)
+        self._update_node_index(state)
+        return state
+
+    def _update_node_index(self, state: ClusterState) -> None:
+        self._remote_transport.update_node_index(
+            {m.id: (m.address.host, m.address.port) for m in state.members}
+        )
 
     async def wait_for(self, n: int, *, timeout: float = 60.0) -> ClusterState:
         """Block until at least *n* members have status ``up``.
@@ -725,11 +745,13 @@ class ClusteredActorSystem(ActorSystem):
         --------
         >>> state = await system.wait_for(3, timeout=30.0)
         """
-        return await self.ask(
+        state: ClusterState = await self.ask(
             self._cluster.ref,
             lambda r: WaitForMembers(n=n, reply_to=r),
             timeout=timeout,
         )
+        self._update_node_index(state)
+        return state
 
     async def barrier(self, name: str, n: int, *, timeout: float = 60.0) -> None:
         """Distributed barrier -- blocks until *n* nodes have reached this point.
@@ -757,37 +779,43 @@ class ClusteredActorSystem(ActorSystem):
         )
 
     def lookup(
-        self, path: str, *, node: NodeAddress | None = None,
+        self, path: str, *, node: NodeId | NodeAddress | None = None,
     ) -> ActorRef[Any] | None:
         """Look up an actor by path, optionally on a remote node.
 
-        When *node* is ``None`` or points to this node, performs a local
-        lookup (may return ``None`` if no actor exists at *path*).
-        When *node* points to a different cluster member, constructs a
-        remote ``ActorRef`` -- the actor is assumed to exist.
+        When *node* is ``None``, performs a local lookup.
+        When *node* is a ``NodeId``, constructs an address with ``node_id``
+        and lets the transport resolve it.
+        When *node* is a ``NodeAddress``, constructs a host/port address.
 
         Parameters
         ----------
         path : str
             Actor path (e.g. ``"/my-actor"``).
-        node : NodeAddress | None
+        node : NodeId | NodeAddress | None
             Target node.  ``None`` means local.
 
         Returns
         -------
         ActorRef[Any] | None
-            The actor reference, or ``None`` for missing local actors.
 
         Examples
         --------
         >>> ref = system.lookup("/my-actor")
+        >>> remote = system.lookup("/my-actor", node="worker-1")
         >>> remote = system.lookup("/my-actor", node=NodeAddress("10.0.0.2", 25520))
         """
-        if node is None or node == self._self_node:
+        if node is None:
             return super().lookup(path)
-        addr = ActorAddress(
-            system=self._name, path=path, host=node.host, port=node.port,
-        )
+        if isinstance(node, NodeAddress):
+            addr = ActorAddress(
+                system=self._name, path=path,
+                host=node.host, port=node.port,
+            )
+        else:
+            addr = ActorAddress(
+                system=self._name, path=path, node_id=node,
+            )
         return self._remote_transport.make_ref(addr)
 
     def distributed(self, *, journal: EventJournal | None = None) -> Distributed:

@@ -10,6 +10,38 @@ from typing import Any
 from casty import ActorRef, Behavior, Behaviors
 
 
+# --- Worker (one per node, addressable by node_id via lookup) ---
+
+
+@dataclass(frozen=True)
+class GetStatus:
+    reply_to: ActorRef[WorkerStatus]
+
+
+@dataclass(frozen=True)
+class WorkerStatus:
+    node_id: str
+    processed: int
+
+
+type WorkerMsg = GetStatus
+
+
+def worker_actor() -> Behavior[WorkerMsg]:
+    def active(processed: int) -> Behavior[WorkerMsg]:
+        async def receive(ctx: Any, msg: WorkerMsg) -> Behavior[WorkerMsg]:
+            match msg:
+                case GetStatus(reply_to=reply_to):
+                    node_id = ctx.self.address.node_id or "unknown"
+                    reply_to.tell(WorkerStatus(node_id=node_id, processed=processed))
+                    return active(processed + 1)
+            return Behaviors.same()
+
+        return Behaviors.receive(receive)
+
+    return active(0)
+
+
 # --- Ping listener (broadcasted) ---
 
 
