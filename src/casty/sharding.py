@@ -1,3 +1,9 @@
+"""Cluster-aware actor system with automatic shard routing.
+
+Extends the core ``ActorSystem`` with transparent sharding, broadcast actors,
+and remote ``ask()`` support over TCP.  ``ClusteredActorSystem`` is the main
+entry point for multi-node deployments.
+"""
 # src/casty/sharding.py
 from __future__ import annotations
 
@@ -46,12 +52,47 @@ from casty.shard_coordinator_actor import (
 
 @dataclass(frozen=True)
 class ShardEnvelope[M]:
+    """Envelope that routes a message to a specific entity within a shard region.
+
+    Wraps a message ``M`` together with an ``entity_id`` used for deterministic
+    shard assignment.  The shard proxy computes the target shard from the
+    ``entity_id`` and forwards the envelope to the owning node.
+
+    Parameters
+    ----------
+    entity_id : str
+        Logical identifier of the target entity.
+    message : M
+        The payload message delivered to the entity actor.
+
+    Examples
+    --------
+    >>> ref.tell(ShardEnvelope("user-42", Deposit(amount=100)))
+    """
     entity_id: str
     message: M
 
 
 def entity_shard(entity_id: str, num_shards: int) -> int:
-    """Deterministic shard assignment — consistent across processes."""
+    """Deterministic shard assignment -- consistent across processes.
+
+    Parameters
+    ----------
+    entity_id : str
+        The entity identifier to hash.
+    num_shards : int
+        Total number of shards.
+
+    Returns
+    -------
+    int
+        Shard index in ``[0, num_shards)``.
+
+    Examples
+    --------
+    >>> entity_shard("user-42", 100)
+    72
+    """
     digest = hashlib.md5(entity_id.encode(), usedforsecurity=False).digest()
     return int.from_bytes(digest[:4], "big") % num_shards
 
@@ -202,6 +243,46 @@ def broadcast_proxy_behavior(
 
 
 class ClusteredActorSystem(ActorSystem):
+    """Actor system with cluster membership, sharding, and remote messaging.
+
+    Extends ``ActorSystem`` to transparently distribute ``ShardedBehavior``
+    actors across cluster nodes.  Handles gossip-based membership, failure
+    detection, shard coordination, and TCP transport.
+
+    Use as an async context manager to start/stop the cluster lifecycle.
+
+    Parameters
+    ----------
+    name : str
+        Logical system name (shared across cluster nodes).
+    host : str
+        Advertised hostname for this node.
+    port : int
+        Advertised port for this node (use ``0`` for auto-assignment).
+    seed_nodes : list[tuple[str, int]] | None
+        Initial contact points for cluster join.
+    roles : frozenset[str]
+        Roles assigned to this node (for role-aware shard placement).
+    bind_host : str | None
+        Network interface to bind to (defaults to *host*).
+    config : CastyConfig | None
+        Full configuration object.
+    server_ssl : ssl.SSLContext | None
+        TLS context for inbound connections.
+    client_ssl : ssl.SSLContext | None
+        TLS context for outbound connections.
+    required_quorum : int | None
+        If set, ``__aenter__`` blocks until this many nodes are ``up``.
+
+    Examples
+    --------
+    >>> async with ClusteredActorSystem(
+    ...     name="my-app", host="127.0.0.1", port=25520,
+    ...     seed_nodes=[("127.0.0.1", 25520)],
+    ... ) as system:
+    ...     ref = system.spawn(Behaviors.sharded(my_entity, num_shards=50), "things")
+    ...     ref.tell(ShardEnvelope("abc", DoSomething()))
+    """
     def __init__(
         self,
         *,
@@ -247,6 +328,7 @@ class ClusteredActorSystem(ActorSystem):
 
     @property
     def self_node(self) -> NodeAddress:
+        """The ``NodeAddress`` representing this cluster member."""
         return self._self_node
 
     @classmethod
@@ -262,6 +344,30 @@ class ClusteredActorSystem(ActorSystem):
         client_ssl: ssl.SSLContext | None = None,
         required_quorum: int | None = None,
     ) -> ClusteredActorSystem:
+        """Create a ``ClusteredActorSystem`` from a ``CastyConfig``.
+
+        Reads host, port, seed nodes, and roles from the ``[cluster]``
+        section of the config.  Keyword arguments override config values.
+
+        Parameters
+        ----------
+        config : CastyConfig
+            Parsed configuration (typically from ``load_config``).
+
+        Returns
+        -------
+        ClusteredActorSystem
+
+        Raises
+        ------
+        ValueError
+            If the config has no ``[cluster]`` section.
+
+        Examples
+        --------
+        >>> config = load_config(Path("casty.toml"))
+        >>> system = ClusteredActorSystem.from_config(config)
+        """
         cluster = config.cluster
         if cluster is None:
             msg = "CastyConfig has no [cluster] section"
@@ -585,11 +691,40 @@ class ClusteredActorSystem(ActorSystem):
             self._local_transport.unregister(temp_path)
 
     async def get_cluster_state(self, *, timeout: float = 5.0) -> ClusterState:
-        """Query the current cluster membership state."""
+        """Query the current cluster membership state.
+
+        Returns
+        -------
+        ClusterState
+            Snapshot of members, their statuses, and the vector clock.
+
+        Examples
+        --------
+        >>> state = await system.get_cluster_state()
+        >>> len(state.members)
+        3
+        """
         return await self._cluster.get_state(timeout=timeout)
 
     async def wait_for(self, n: int, *, timeout: float = 60.0) -> ClusterState:
-        """Block until at least *n* members have status ``up``."""
+        """Block until at least *n* members have status ``up``.
+
+        Parameters
+        ----------
+        n : int
+            Minimum number of ``up`` members required.
+        timeout : float
+            Seconds to wait before raising ``TimeoutError``.
+
+        Returns
+        -------
+        ClusterState
+            The cluster state once the quorum is reached.
+
+        Examples
+        --------
+        >>> state = await system.wait_for(3, timeout=30.0)
+        """
         return await self.ask(
             self._cluster.ref,
             lambda r: WaitForMembers(n=n, reply_to=r),
@@ -597,7 +732,21 @@ class ClusteredActorSystem(ActorSystem):
         )
 
     async def barrier(self, name: str, n: int, *, timeout: float = 60.0) -> None:
-        """Distributed barrier — blocks until *n* nodes have reached this point."""
+        """Distributed barrier -- blocks until *n* nodes have reached this point.
+
+        Parameters
+        ----------
+        name : str
+            Barrier name (shared across nodes).
+        n : int
+            Number of nodes that must arrive before all are released.
+        timeout : float
+            Seconds to wait before raising ``TimeoutError``.
+
+        Examples
+        --------
+        >>> await system.barrier("setup-done", n=3)
+        """
         from casty.distributed.barrier import BarrierArrive
 
         node_id = f"{self._host}:{self._port}"
@@ -615,7 +764,24 @@ class ClusteredActorSystem(ActorSystem):
         When *node* is ``None`` or points to this node, performs a local
         lookup (may return ``None`` if no actor exists at *path*).
         When *node* points to a different cluster member, constructs a
-        remote ``ActorRef`` — the actor is assumed to exist.
+        remote ``ActorRef`` -- the actor is assumed to exist.
+
+        Parameters
+        ----------
+        path : str
+            Actor path (e.g. ``"/my-actor"``).
+        node : NodeAddress | None
+            Target node.  ``None`` means local.
+
+        Returns
+        -------
+        ActorRef[Any] | None
+            The actor reference, or ``None`` for missing local actors.
+
+        Examples
+        --------
+        >>> ref = system.lookup("/my-actor")
+        >>> remote = system.lookup("/my-actor", node=NodeAddress("10.0.0.2", 25520))
         """
         if node is None or node == self._self_node:
             return super().lookup(path)
@@ -625,12 +791,28 @@ class ClusteredActorSystem(ActorSystem):
         return self._remote_transport.make_ref(addr)
 
     def distributed(self, *, journal: EventJournal | None = None) -> Distributed:
-        """Create a :class:`Distributed` facade for this system."""
+        """Create a ``Distributed`` facade for this system.
+
+        Parameters
+        ----------
+        journal : EventJournal | None
+            If provided, data structures use event sourcing for persistence.
+
+        Returns
+        -------
+        Distributed
+
+        Examples
+        --------
+        >>> d = system.distributed()
+        >>> counter = d.counter("hits")
+        """
         from casty.distributed import Distributed
 
         return Distributed(self, journal=journal)
 
     async def shutdown(self) -> None:
+        """Shut down the cluster node, closing transport and all actors."""
         self._logger.info("Shutting down")
         self._coordinators.clear()
         await super().shutdown()

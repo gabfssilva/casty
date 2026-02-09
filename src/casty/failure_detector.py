@@ -1,3 +1,10 @@
+"""Phi accrual failure detection for cluster heartbeat monitoring.
+
+Implements the phi accrual failure detector described by Hayashibara et al.,
+which outputs a continuous suspicion level rather than a binary alive/dead
+decision.  This allows each consumer to choose its own threshold.
+"""
+
 from __future__ import annotations
 
 import math
@@ -7,11 +14,36 @@ from collections import deque
 
 
 class PhiAccrualFailureDetector:
-    """Phi Accrual Failure Detector (Hayashibara et al.)
+    """Phi accrual failure detector (Hayashibara et al.).
 
-    Outputs a continuous suspicion level (phi) instead of binary alive/dead.
-    phi = -log10(1 - CDF(elapsed_time)) where CDF is normal distribution
-    fitted to heartbeat interval history.
+    Outputs a continuous suspicion level (phi) instead of a binary alive/dead
+    signal.  ``phi = -log10(1 - CDF(elapsed))`` where CDF is the normal
+    distribution fitted to the observed heartbeat interval history.
+
+    Parameters
+    ----------
+    threshold : float
+        Phi value above which a node is considered unreachable.  Higher values
+        tolerate more jitter but detect failures more slowly.
+    max_sample_size : int
+        Maximum number of heartbeat intervals to keep per node.
+    min_std_deviation_ms : float
+        Floor for the standard deviation estimate, preventing overly
+        aggressive detection when intervals are very stable.
+    acceptable_heartbeat_pause_ms : float
+        Additional grace period added to the mean estimate, accounting for
+        expected pauses (e.g. GC).
+    first_heartbeat_estimate_ms : float
+        Assumed mean interval before enough samples have been collected.
+
+    Examples
+    --------
+    >>> fd = PhiAccrualFailureDetector(threshold=8.0)
+    >>> fd.heartbeat("node-1")
+    >>> fd.is_available("node-1")
+    True
+    >>> fd.phi("unknown-node")
+    0.0
     """
 
     def __init__(
@@ -32,7 +64,13 @@ class PhiAccrualFailureDetector:
         self._history: dict[str, deque[float]] = {}
 
     def heartbeat(self, node: str) -> None:
-        """Record arrival of a heartbeat from a node."""
+        """Record arrival of a heartbeat from a node.
+
+        Parameters
+        ----------
+        node : str
+            Identifier of the node that sent the heartbeat.
+        """
         now = time.monotonic()
         if node in self._last_heartbeat:
             interval_ms = (now - self._last_heartbeat[node]) * 1000.0
@@ -42,7 +80,19 @@ class PhiAccrualFailureDetector:
         self._last_heartbeat[node] = now
 
     def phi(self, node: str) -> float:
-        """Calculate phi (suspicion level) for a node. Higher = more suspect."""
+        """Calculate the suspicion level for *node*.
+
+        Parameters
+        ----------
+        node : str
+            Identifier of the node to evaluate.
+
+        Returns
+        -------
+        float
+            The phi value.  ``0.0`` if *node* has never sent a heartbeat;
+            ``inf`` if the node is almost certainly down.
+        """
         if node not in self._last_heartbeat:
             return 0.0
 
@@ -70,9 +120,26 @@ class PhiAccrualFailureDetector:
 
     @property
     def tracked_nodes(self) -> frozenset[str]:
-        """Return the set of node keys that have received at least one heartbeat."""
+        """Return the set of node keys that have received at least one heartbeat.
+
+        Returns
+        -------
+        frozenset[str]
+            Node identifiers currently being tracked.
+        """
         return frozenset(self._last_heartbeat.keys())
 
     def is_available(self, node: str) -> bool:
-        """Check if a node is considered available (phi below threshold)."""
+        """Check if a node is considered available (phi below threshold).
+
+        Parameters
+        ----------
+        node : str
+            Identifier of the node to check.
+
+        Returns
+        -------
+        bool
+            ``True`` if ``phi(node) < threshold``.
+        """
         return self.phi(node) < self._threshold

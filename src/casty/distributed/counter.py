@@ -1,3 +1,8 @@
+"""Distributed counter backed by a sharded actor entity.
+
+Each counter is a single entity within a shard region.  Supports optional
+event sourcing via ``persistent_counter_entity``.
+"""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -137,7 +142,30 @@ def counter_behavior(*, num_shards: int = 100) -> ShardedBehavior[CounterMsg]:
 
 
 class Counter:
-    """Client for a distributed counter backed by a sharded actor."""
+    """Client for a distributed counter backed by a sharded actor.
+
+    Provides ``increment``, ``decrement``, and ``get`` operations that
+    route through the shard proxy to the correct entity.
+
+    Parameters
+    ----------
+    system : ActorSystem
+        The actor system for sending messages.
+    region_ref : ActorRef[ShardEnvelope[CounterMsg]]
+        Reference to the shard proxy / region.
+    name : str
+        Counter name (used as entity ID).
+    timeout : float
+        Default timeout for each operation.
+
+    Examples
+    --------
+    >>> counter = d.counter("hits")
+    >>> await counter.increment(5)
+    5
+    >>> await counter.get()
+    5
+    """
 
     def __init__(
         self,
@@ -153,7 +181,23 @@ class Counter:
         self._timeout = timeout
 
     async def increment(self, amount: int = 1) -> int:
-        """Increment the counter by amount and return the new value."""
+        """Increment the counter and return the new value.
+
+        Parameters
+        ----------
+        amount : int
+            Value to add (default ``1``).
+
+        Returns
+        -------
+        int
+            The counter value after incrementing.
+
+        Examples
+        --------
+        >>> await counter.increment()
+        1
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -163,7 +207,23 @@ class Counter:
         )
 
     async def decrement(self, amount: int = 1) -> int:
-        """Decrement the counter by amount and return the new value."""
+        """Decrement the counter and return the new value.
+
+        Parameters
+        ----------
+        amount : int
+            Value to subtract (default ``1``).
+
+        Returns
+        -------
+        int
+            The counter value after decrementing.
+
+        Examples
+        --------
+        >>> await counter.decrement()
+        -1
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -173,7 +233,17 @@ class Counter:
         )
 
     async def get(self) -> int:
-        """Get the current counter value."""
+        """Get the current counter value.
+
+        Returns
+        -------
+        int
+
+        Examples
+        --------
+        >>> await counter.get()
+        0
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(self._name, GetValue(reply_to=reply_to)),

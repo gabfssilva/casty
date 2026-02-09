@@ -51,6 +51,10 @@ dev = [
     "pytest-xdist>=3.8.0",
     "pytest-timeout>=2.4.0",
 ]
+docs = [
+    "mkdocs-material>=9.7.1",
+    "mkdocstrings[python]>=1.0.3",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

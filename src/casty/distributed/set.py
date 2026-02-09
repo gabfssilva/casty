@@ -1,3 +1,7 @@
+"""Distributed set backed by a sharded actor entity.
+
+Supports optional event sourcing via ``persistent_set_entity``.
+"""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -159,7 +163,27 @@ def set_behavior(*, num_shards: int = 100) -> ShardedBehavior[SetMsg]:
 
 
 class Set[V]:
-    """Client for a distributed set backed by a sharded actor."""
+    """Client for a distributed set backed by a sharded actor.
+
+    Parameters
+    ----------
+    system : ActorSystem
+        The actor system for sending messages.
+    region_ref : ActorRef[ShardEnvelope[SetMsg]]
+        Reference to the shard proxy / region.
+    name : str
+        Set name (used as entity ID).
+    timeout : float
+        Default timeout for each operation.
+
+    Examples
+    --------
+    >>> tags = d.set[str]("tags")
+    >>> await tags.add("python")
+    True
+    >>> await tags.contains("python")
+    True
+    """
 
     def __init__(
         self,
@@ -175,7 +199,18 @@ class Set[V]:
         self._timeout = timeout
 
     async def add(self, value: V) -> bool:
-        """Add a value to the set. Returns True if added, False if already present."""
+        """Add a value to the set.
+
+        Returns
+        -------
+        bool
+            ``True`` if added, ``False`` if already present.
+
+        Examples
+        --------
+        >>> await tags.add("python")
+        True
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -185,7 +220,18 @@ class Set[V]:
         )
 
     async def remove(self, value: V) -> bool:
-        """Remove a value from the set. Returns True if removed, False if not present."""
+        """Remove a value from the set.
+
+        Returns
+        -------
+        bool
+            ``True`` if removed, ``False`` if not present.
+
+        Examples
+        --------
+        >>> await tags.remove("python")
+        True
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -195,7 +241,17 @@ class Set[V]:
         )
 
     async def contains(self, value: V) -> bool:
-        """Check if a value is in the set."""
+        """Check if a value is in the set.
+
+        Returns
+        -------
+        bool
+
+        Examples
+        --------
+        >>> await tags.contains("python")
+        True
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -205,7 +261,17 @@ class Set[V]:
         )
 
     async def size(self) -> int:
-        """Get the number of elements in the set."""
+        """Get the number of elements in the set.
+
+        Returns
+        -------
+        int
+
+        Examples
+        --------
+        >>> await tags.size()
+        1
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(

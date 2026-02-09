@@ -1,0 +1,100 @@
+site_name: Casty
+site_url: https://gabfssilva.github.io/casty/
+site_description: A minimalist, type-safe actor framework for Python 3.12+ inspired by Akka Typed
+repo_url: https://github.com/gabfssilva/casty
+repo_name: gabfssilva/casty
+
+theme:
+  name: material
+  logo: logo.png
+  favicon: logo.png
+  palette:
+    - scheme: slate
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_root_heading: true
+            show_source: false
+            docstring_style: numpy
+            members_order: source
+            show_if_no_docstring: true
+            heading_level: 2
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - toc:
+      permalink: true
+  - attr_list
+  - md_in_html
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started/index.md
+  - Concepts:
+      - Actors and Messages: concepts/actors-and-messages.md
+      - Behaviors as Values: concepts/behaviors.md
+      - Functional State: concepts/functional-state.md
+      - Request-Reply: concepts/request-reply.md
+      - Actor Hierarchies: concepts/actor-hierarchies.md
+      - Supervision: concepts/supervision.md
+      - State Machines: concepts/state-machines.md
+      - Actor Runtime: concepts/actor-runtime.md
+  - Persistence:
+      - Event Sourcing: persistence/event-sourcing.md
+  - Clustering:
+      - Cluster Sharding: clustering/cluster-sharding.md
+      - Cluster Broadcast: clustering/cluster-broadcast.md
+      - Shard Replication: clustering/shard-replication.md
+      - Distributed Data Structures: clustering/distributed-data-structures.md
+      - Cluster Backend: clustering/cluster-backend.md
+  - Configuration: configuration/index.md
+  - API Reference:
+      - Core:
+          - Behaviors: reference/behaviors.md
+          - ActorRef: reference/ref.md
+          - ActorContext: reference/context.md
+          - ActorSystem: reference/system.md
+      - Supervision: reference/supervision.md
+      - Mailbox: reference/mailbox.md
+      - Events: reference/events.md
+      - Event Sourcing: reference/journal.md
+      - Scheduler: reference/scheduler.md
+      - Cluster:
+          - Cluster: reference/cluster.md
+          - Cluster State: reference/cluster-state.md
+          - Failure Detector: reference/failure-detector.md
+      - Sharding: reference/sharding.md
+      - Remoting:
+          - Address: reference/address.md
+          - Transport: reference/transport.md
+          - Serialization: reference/serialization.md
+      - Distributed: reference/distributed.md
+      - Configuration: reference/config.md

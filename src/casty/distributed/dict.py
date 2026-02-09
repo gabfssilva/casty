@@ -1,3 +1,7 @@
+"""Distributed key-value map backed by sharded actors (one entity per key).
+
+Supports optional event sourcing via ``persistent_map_entity``.
+"""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -146,7 +150,28 @@ def map_behavior(*, num_shards: int = 100) -> ShardedBehavior[MapEntryMsg]:
 
 
 class Dict[K, V]:
-    """Client for a distributed key-value map backed by sharded actors (entity-per-key)."""
+    """Client for a distributed key-value map backed by sharded actors.
+
+    Each key maps to a separate entity actor (entity-per-key pattern).
+
+    Parameters
+    ----------
+    system : ActorSystem
+        The actor system for sending messages.
+    region_ref : ActorRef[ShardEnvelope[MapEntryMsg]]
+        Reference to the shard proxy / region.
+    name : str
+        Map name prefix (combined with key for entity ID).
+    timeout : float
+        Default timeout for each operation.
+
+    Examples
+    --------
+    >>> users = d.map[str, dict]("users")
+    >>> await users.put("alice", {"age": 30})
+    >>> await users.get("alice")
+    {'age': 30}
+    """
 
     def __init__(
         self,
@@ -165,7 +190,17 @@ class Dict[K, V]:
         return f"{self._name}:{key}"
 
     async def put(self, key: K, value: V) -> V | None:
-        """Store a value for the key. Returns the previous value, or None if new."""
+        """Store a value for the key.
+
+        Returns
+        -------
+        V | None
+            The previous value, or ``None`` if the key was new.
+
+        Examples
+        --------
+        >>> await users.put("alice", {"age": 30})
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -175,9 +210,23 @@ class Dict[K, V]:
         )
 
     async def get(self, key: K, *, local: bool = False) -> V | None:
-        """Get the value for the key, or None if not set.
+        """Get the value for the key, or ``None`` if not set.
 
-        The ``local`` parameter is accepted but not yet used.
+        Parameters
+        ----------
+        key : K
+            The key to look up.
+        local : bool
+            Reserved for future local-read optimization (currently unused).
+
+        Returns
+        -------
+        V | None
+
+        Examples
+        --------
+        >>> await users.get("alice")
+        {'age': 30}
         """
         return await self._system.ask(
             self._region_ref,
@@ -188,7 +237,18 @@ class Dict[K, V]:
         )
 
     async def delete(self, key: K) -> bool:
-        """Delete the key. Returns True if it existed, False otherwise."""
+        """Delete the key.
+
+        Returns
+        -------
+        bool
+            ``True`` if the key existed, ``False`` otherwise.
+
+        Examples
+        --------
+        >>> await users.delete("alice")
+        True
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -198,7 +258,17 @@ class Dict[K, V]:
         )
 
     async def contains(self, key: K) -> bool:
-        """Check whether the key exists."""
+        """Check whether the key exists.
+
+        Returns
+        -------
+        bool
+
+        Examples
+        --------
+        >>> await users.contains("alice")
+        True
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(

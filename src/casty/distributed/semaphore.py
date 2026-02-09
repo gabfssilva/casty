@@ -1,3 +1,8 @@
+"""Distributed counting semaphore backed by a sharded actor entity.
+
+Allows up to *max_permits* concurrent holders.  Additional acquirers are
+queued and granted a permit as existing holders release.
+"""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -129,7 +134,29 @@ def semaphore_active(
 
 
 class Semaphore:
-    """Client for a distributed semaphore backed by a sharded actor."""
+    """Client for a distributed counting semaphore.
+
+    Each ``Semaphore`` instance has a unique owner ID.  ``acquire`` blocks
+    until a permit is available; ``try_acquire`` returns immediately.
+
+    Parameters
+    ----------
+    system : ActorSystem
+        The actor system for sending messages.
+    region_ref : ActorRef[ShardEnvelope[SemaphoreMsg]]
+        Reference to the shard proxy / region.
+    name : str
+        Semaphore name (used as entity ID).
+    timeout : float
+        Default timeout for each operation.
+
+    Examples
+    --------
+    >>> sem = d.semaphore("pool", permits=3)
+    >>> await sem.acquire()
+    >>> await sem.release()
+    True
+    """
 
     def __init__(
         self,
@@ -146,7 +173,12 @@ class Semaphore:
         self._owner = uuid4().hex
 
     async def acquire(self) -> None:
-        """Block until a permit is acquired."""
+        """Block until a permit is acquired.
+
+        Examples
+        --------
+        >>> await sem.acquire()
+        """
         await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -157,7 +189,18 @@ class Semaphore:
         )
 
     async def try_acquire(self) -> bool:
-        """Try to acquire a permit without blocking. Returns True if acquired."""
+        """Try to acquire a permit without blocking.
+
+        Returns
+        -------
+        bool
+            ``True`` if a permit was acquired, ``False`` if none available.
+
+        Examples
+        --------
+        >>> await sem.try_acquire()
+        True
+        """
         result: SemaphoreTryResult = await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -169,7 +212,18 @@ class Semaphore:
         return result.acquired
 
     async def release(self) -> bool:
-        """Release a permit. Returns False if not a holder."""
+        """Release a permit.
+
+        Returns
+        -------
+        bool
+            ``True`` if released, ``False`` if this instance was not a holder.
+
+        Examples
+        --------
+        >>> await sem.release()
+        True
+        """
         result: SemaphoreReleased = await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(

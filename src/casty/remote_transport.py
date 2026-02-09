@@ -1,3 +1,10 @@
+"""TCP-based remote transport for cross-node actor communication.
+
+Provides ``TcpTransport`` for raw TCP framing, ``MessageEnvelope`` for
+wire-format serialization, and ``RemoteTransport`` which bridges the
+``MessageTransport`` protocol to TCP for remote addresses.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -23,12 +30,43 @@ class InboundHandler(Protocol):
 
 @dataclass(frozen=True)
 class MessageEnvelope:
+    """Wire-format envelope for messages sent over TCP.
+
+    Serializes to binary as ``[header_len:4][header_json][payload]``.
+
+    Parameters
+    ----------
+    target : str
+        URI of the target actor.
+    sender : str
+        URI of the sending actor or system.
+    payload : bytes
+        Serialized message body.
+    type_hint : str
+        Fully-qualified type name of the message.
+
+    Examples
+    --------
+    >>> env = MessageEnvelope(target="casty://sys/user/a", sender="casty://sys/",
+    ...                       payload=b'{"x":1}', type_hint="mymod.Msg")
+    >>> data = env.to_bytes()
+    >>> MessageEnvelope.from_bytes(data).target
+    'casty://sys/user/a'
+    """
+
     target: str
     sender: str
     payload: bytes
     type_hint: str
 
     def to_bytes(self) -> bytes:
+        """Serialize the envelope to binary wire format.
+
+        Returns
+        -------
+        bytes
+            Binary data: ``[header_len:4][header_json][payload]``.
+        """
         header = json.dumps({
             "target": self.target,
             "sender": self.sender,
@@ -39,6 +77,17 @@ class MessageEnvelope:
 
     @staticmethod
     def from_bytes(data: bytes) -> MessageEnvelope:
+        """Deserialize a ``MessageEnvelope`` from binary wire format.
+
+        Parameters
+        ----------
+        data : bytes
+            Binary data produced by ``to_bytes()``.
+
+        Returns
+        -------
+        MessageEnvelope
+        """
         header_len = struct.unpack("!I", data[:4])[0]
         header_bytes = data[4 : 4 + header_len]
         payload = data[4 + header_len :]
@@ -52,6 +101,32 @@ class MessageEnvelope:
 
 
 class TcpTransport:
+    """Low-level TCP transport with binary length-prefix framing.
+
+    Each message is sent as ``[msg_len:4][msg_bytes]``. Manages a connection
+    pool for outbound connections and an asyncio server for inbound.
+
+    Parameters
+    ----------
+    host : str
+        Bind address for the server.
+    port : int
+        Bind port (use 0 for OS-assigned).
+    logger : logging.Logger or None
+        Logger instance. Defaults to ``casty.tcp``.
+    server_ssl : ssl.SSLContext or None
+        TLS context for the inbound server.
+    client_ssl : ssl.SSLContext or None
+        TLS context for outbound connections.
+
+    Examples
+    --------
+    >>> tcp = TcpTransport("127.0.0.1", 0)
+    >>> # await tcp.start(handler)  # starts listening
+    >>> # await tcp.send(host, port, data)  # sends raw bytes
+    >>> # await tcp.stop()
+    """
+
     def __init__(
         self,
         host: str,
@@ -75,10 +150,12 @@ class TcpTransport:
 
     @property
     def host(self) -> str:
+        """Return the bind address of this transport."""
         return self._host
 
     @property
     def port(self) -> int:
+        """Return the actual listening port (resolved after bind)."""
         if self._server is not None:
             sockets = self._server.sockets
             if sockets:
@@ -93,6 +170,13 @@ class TcpTransport:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     async def start(self, handler: InboundHandler) -> None:
+        """Start the TCP server and begin accepting connections.
+
+        Parameters
+        ----------
+        handler : InboundHandler
+            Callback object whose ``on_message`` is called for each inbound frame.
+        """
         self._handler = handler
         self._server = await asyncio.start_server(
             self._handle_connection, self._host, self._port, ssl=self._server_ssl
@@ -119,6 +203,19 @@ class TcpTransport:
                 self._inbound_writers.remove(writer)
 
     async def send(self, host: str, port: int, data: bytes) -> None:
+        """Send raw bytes to a remote host with length-prefix framing.
+
+        Opens a new connection if needed. Retries once on connection failure.
+
+        Parameters
+        ----------
+        host : str
+            Remote hostname.
+        port : int
+            Remote port.
+        data : bytes
+            Raw bytes to send.
+        """
         key = (host, port)
         try:
             if key not in self._connections:
@@ -140,6 +237,7 @@ class TcpTransport:
             await writer.drain()
 
     async def stop(self) -> None:
+        """Close all connections and shut down the server."""
         for _, writer in self._connections.values():
             writer.close()
             try:
@@ -160,7 +258,37 @@ class TcpTransport:
 
 
 class RemoteTransport:
-    """Bridges MessageTransport protocol to TcpTransport for remote addresses."""
+    """Bridge between ``MessageTransport`` and ``TcpTransport``.
+
+    Routes local messages through ``LocalTransport`` and remote messages
+    through TCP serialization. Also acts as an ``InboundHandler`` to
+    receive and deserialize inbound TCP frames.
+
+    Parameters
+    ----------
+    local : LocalTransport
+        Transport for in-process delivery.
+    tcp : TcpTransport
+        Transport for remote delivery.
+    serializer : Serializer
+        Serializer for encoding/decoding messages.
+    local_host : str
+        This node's hostname.
+    local_port : int
+        This node's TCP port.
+    system_name : str
+        Name of the actor system.
+
+    Examples
+    --------
+    >>> rt = RemoteTransport(
+    ...     local=local_transport, tcp=tcp_transport,
+    ...     serializer=json_ser, local_host="127.0.0.1",
+    ...     local_port=25520, system_name="my-system",
+    ... )
+    >>> # await rt.start()  # binds TCP server
+    >>> # rt.deliver(address, msg)  # routes local or remote
+    """
 
     def __init__(
         self,
@@ -189,7 +317,18 @@ class RemoteTransport:
         return address.host == self._local_host and address.port == self._local_port
 
     def deliver(self, address: ActorAddress, msg: Any) -> None:
-        """MessageTransport protocol. Local -> LocalTransport, remote -> TCP."""
+        """Deliver a message to the given address.
+
+        Local addresses are routed through ``LocalTransport``; remote
+        addresses are serialized and sent via TCP.
+
+        Parameters
+        ----------
+        address : ActorAddress
+            Target actor address.
+        msg : Any
+            The message to deliver.
+        """
         if self._is_local(address):
             self._local.deliver(address, msg)
         else:
@@ -223,7 +362,13 @@ class RemoteTransport:
             self._logger.warning("Failed to send remote message to %s", address, exc_info=True)
 
     async def on_message(self, data: bytes) -> None:
-        """InboundHandler protocol. TCP -> deserialize -> LocalTransport."""
+        """Handle an inbound TCP frame by deserializing and delivering locally.
+
+        Parameters
+        ----------
+        data : bytes
+            Raw frame bytes from ``TcpTransport``.
+        """
         try:
             envelope = MessageEnvelope.from_bytes(data)
             msg = self._serializer.deserialize(envelope.payload)
@@ -235,7 +380,20 @@ class RemoteTransport:
             self._logger.warning("Failed to handle inbound message", exc_info=True)
 
     def make_ref(self, address: ActorAddress) -> ActorRef[Any]:
-        """Create ActorRef with appropriate transport for the address."""
+        """Create an ``ActorRef`` with the appropriate transport for the address.
+
+        Local addresses get ``LocalTransport``; remote addresses get this
+        ``RemoteTransport``.
+
+        Parameters
+        ----------
+        address : ActorAddress
+            Target actor address.
+
+        Returns
+        -------
+        ActorRef[Any]
+        """
         from casty.ref import ActorRef as _ActorRef
         if self._is_local(address):
             return _ActorRef[Any](address=address, _transport=self._local)
@@ -246,13 +404,21 @@ class RemoteTransport:
         return self.make_ref(address)
 
     def set_local_port(self, port: int) -> None:
-        """Update local port after binding to OS-assigned port."""
+        """Update local port after binding to an OS-assigned port.
+
+        Parameters
+        ----------
+        port : int
+            The actual port assigned by the OS.
+        """
         self._local_port = port
 
     async def start(self) -> None:
+        """Start the underlying TCP server and begin accepting connections."""
         await self._tcp.start(self)
         self._logger.info("Started on %s:%d", self._local_host, self._tcp.port)
 
     async def stop(self) -> None:
+        """Shut down the TCP server and close all connections."""
         self._logger.info("Stopping")
         await self._tcp.stop()

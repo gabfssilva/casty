@@ -1,3 +1,8 @@
+"""Distributed mutual-exclusion lock backed by a sharded actor entity.
+
+Waiters are queued in order and granted the lock as the current holder
+releases it.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -112,7 +117,29 @@ def lock_held(
 
 
 class Lock:
-    """Client for a distributed lock backed by a sharded actor."""
+    """Client for a distributed mutual-exclusion lock.
+
+    Each ``Lock`` instance has a unique owner ID.  ``acquire`` blocks until
+    the lock is granted; ``try_acquire`` returns immediately.
+
+    Parameters
+    ----------
+    system : ActorSystem
+        The actor system for sending messages.
+    region_ref : ActorRef[ShardEnvelope[LockMsg]]
+        Reference to the shard proxy / region.
+    name : str
+        Lock name (used as entity ID).
+    timeout : float
+        Default timeout for each operation.
+
+    Examples
+    --------
+    >>> lock = d.lock("my-resource")
+    >>> await lock.acquire()
+    >>> await lock.release()
+    True
+    """
 
     def __init__(
         self,
@@ -129,7 +156,12 @@ class Lock:
         self._owner = uuid4().hex
 
     async def acquire(self) -> None:
-        """Block until the lock is acquired."""
+        """Block until the lock is acquired.
+
+        Examples
+        --------
+        >>> await lock.acquire()
+        """
         await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -140,7 +172,18 @@ class Lock:
         )
 
     async def try_acquire(self) -> bool:
-        """Try to acquire the lock without blocking. Returns True if acquired."""
+        """Try to acquire the lock without blocking.
+
+        Returns
+        -------
+        bool
+            ``True`` if the lock was acquired, ``False`` if already held.
+
+        Examples
+        --------
+        >>> await lock.try_acquire()
+        True
+        """
         result: LockTryResult = await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -152,7 +195,18 @@ class Lock:
         return result.acquired
 
     async def release(self) -> bool:
-        """Release the lock. Returns False if not the holder."""
+        """Release the lock.
+
+        Returns
+        -------
+        bool
+            ``True`` if released, ``False`` if this instance was not the holder.
+
+        Examples
+        --------
+        >>> await lock.release()
+        True
+        """
         result: LockReleased = await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(

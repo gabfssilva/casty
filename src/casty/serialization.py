@@ -1,3 +1,10 @@
+"""Message serialization for actor communication.
+
+Provides the ``Serializer`` protocol and concrete implementations
+(``JsonSerializer``, ``PickleSerializer``), plus ``TypeRegistry`` for
+mapping between type names and Python classes.
+"""
+
 from __future__ import annotations
 
 import dataclasses
@@ -15,20 +22,77 @@ logger = logging.getLogger("casty.serialization")
 
 
 class TypeRegistry:
+    """Bidirectional mapping between fully-qualified type names and Python classes.
+
+    Supports both explicit registration and auto-resolution via
+    ``importlib``.
+
+    Examples
+    --------
+    >>> from dataclasses import dataclass
+    >>> @dataclass(frozen=True)
+    ... class Ping:
+    ...     value: int
+    >>> registry = TypeRegistry()
+    >>> registry.register(Ping)
+    >>> registry.resolve(registry.type_name(Ping)) is Ping
+    True
+    """
+
     def __init__(self) -> None:
         self._name_to_type: dict[str, type] = {}
         self._type_to_name: dict[type, str] = {}
 
     def register(self, cls: type) -> None:
+        """Register a type for serialization.
+
+        Parameters
+        ----------
+        cls : type
+            The class to register.
+        """
         name = f"{cls.__module__}.{cls.__qualname__}"
         self._name_to_type[name] = cls
         self._type_to_name[cls] = name
 
     def register_all(self, *types: type) -> None:
+        """Register multiple types at once.
+
+        Parameters
+        ----------
+        *types : type
+            Classes to register.
+
+        Examples
+        --------
+        >>> registry = TypeRegistry()
+        >>> registry.register_all(int, str)
+        >>> registry.is_registered(int)
+        True
+        """
         for cls in types:
             self.register(cls)
 
     def resolve(self, name: str) -> type:
+        """Resolve a fully-qualified type name to a Python class.
+
+        Falls back to auto-resolution via ``importlib`` if the name is
+        not explicitly registered.
+
+        Parameters
+        ----------
+        name : str
+            Fully-qualified type name (e.g. ``mymod.MyClass``).
+
+        Returns
+        -------
+        type
+
+        Raises
+        ------
+        KeyError
+            If the type cannot be resolved.
+        """
         if name in self._name_to_type:
             return self._name_to_type[name]
         cls = self._auto_resolve(name)
@@ -36,6 +100,18 @@ class TypeRegistry:
         return cls
 
     def type_name(self, cls: type) -> str:
+        """Return the fully-qualified name for a type, registering it if needed.
+
+        Parameters
+        ----------
+        cls : type
+            The class to look up.
+
+        Returns
+        -------
+        str
+            Fully-qualified name (e.g. ``mymod.MyClass``).
+        """
         if cls not in self._type_to_name:
             self.register(cls)
         return self._type_to_name[cls]
@@ -59,17 +135,80 @@ class TypeRegistry:
         raise KeyError(msg)
 
     def is_registered(self, cls: type) -> bool:
+        """Return ``True`` if the type is already registered.
+
+        Parameters
+        ----------
+        cls : type
+            The class to check.
+
+        Returns
+        -------
+        bool
+
+        Examples
+        --------
+        >>> registry = TypeRegistry()
+        >>> registry.is_registered(int)
+        False
+        >>> registry.register(int)
+        >>> registry.is_registered(int)
+        True
+        """
         return cls in self._type_to_name
 
 
 @runtime_checkable
 class Serializer(Protocol):
-    def serialize(self, obj: Any) -> bytes: ...
-    def deserialize(self, data: bytes) -> Any: ...
-    def set_ref_factory(self, factory: Callable[[ActorAddress], Any]) -> None: ...
+    """Protocol for message serialization and deserialization.
+
+    Implementations must handle ``ActorRef`` round-tripping via a
+    ref factory set with ``set_ref_factory``.
+
+    Examples
+    --------
+    Minimal implementation:
+
+    >>> class MySerializer:
+    ...     def serialize(self, obj: object) -> bytes: ...
+    ...     def deserialize(self, data: bytes) -> object: ...
+    ...     def set_ref_factory(self, factory) -> None: ...
+    """
+
+    def serialize(self, obj: Any) -> bytes:
+        """Serialize an object to bytes."""
+        ...
+
+    def deserialize(self, data: bytes) -> Any:
+        """Deserialize bytes back to an object."""
+        ...
+
+    def set_ref_factory(self, factory: Callable[[ActorAddress], Any]) -> None:
+        """Set the factory used to reconstruct ``ActorRef`` during deserialization."""
+        ...
 
 
 class JsonSerializer:
+    """JSON-based serializer with recursive handling of Casty types.
+
+    Handles ``ActorRef``, ``frozenset``, ``Enum``, ``dict``, ``tuple``,
+    and frozen dataclasses registered in the ``TypeRegistry``.
+
+    Parameters
+    ----------
+    registry : TypeRegistry
+        Registry for resolving type names.
+    ref_factory : Callable or None
+        Optional factory for reconstructing ``ActorRef`` instances.
+
+    Examples
+    --------
+    >>> registry = TypeRegistry()
+    >>> ser = JsonSerializer(registry)
+    >>> ser.deserialize(ser.serialize({"key": "value"}))
+    {'key': 'value'}
+    """
+
     def __init__(
         self,
         registry: TypeRegistry,
@@ -81,16 +220,47 @@ class JsonSerializer:
 
     @property
     def registry(self) -> TypeRegistry:
+        """Return the underlying type registry."""
         return self._registry
 
     def set_ref_factory(self, factory: Callable[[ActorAddress], Any]) -> None:
+        """Set the factory used to reconstruct ``ActorRef`` during deserialization.
+
+        Parameters
+        ----------
+        factory : Callable[[ActorAddress], Any]
+            A callable that creates an ``ActorRef`` from an ``ActorAddress``.
+        """
         self._ref_factory = factory
 
     def serialize(self, obj: Any) -> bytes:
+        """Serialize an object to JSON bytes.
+
+        Parameters
+        ----------
+        obj : Any
+            Object to serialize.
+
+        Returns
+        -------
+        bytes
+            UTF-8 encoded JSON.
+        """
         payload = self._to_dict(obj)
         return json.dumps(payload).encode("utf-8")
 
     def deserialize(self, data: bytes) -> Any:
+        """Deserialize JSON bytes back to a Python object.
+
+        Parameters
+        ----------
+        data : bytes
+            UTF-8 encoded JSON from ``serialize``.
+
+        Returns
+        -------
+        Any
+        """
         payload: object = json.loads(data.decode("utf-8"))
         return self._from_dict(payload)
 
@@ -170,17 +340,63 @@ class JsonSerializer:
 
 
 class PickleSerializer:
+    """Pickle-based serializer using protocol 5.
+
+    Faster than JSON but not human-readable. Suitable for trusted
+    environments where all nodes run the same code.
+
+    Parameters
+    ----------
+    ref_factory : Callable or None
+        Optional factory for reconstructing ``ActorRef`` instances.
+
+    Examples
+    --------
+    >>> ser = PickleSerializer()
+    >>> ser.deserialize(ser.serialize({"key": "value"}))
+    {'key': 'value'}
+    """
+
     def __init__(self, *, ref_factory: Callable[[ActorAddress], Any] | None = None) -> None:
         self._ref_factory = ref_factory
 
     def set_ref_factory(self, factory: Callable[[ActorAddress], Any]) -> None:
+        """Set the factory used to reconstruct ``ActorRef`` during deserialization.
+
+        Parameters
+        ----------
+        factory : Callable[[ActorAddress], Any]
+            A callable that creates an ``ActorRef`` from an ``ActorAddress``.
+        """
         from casty import ref as _ref_module
 
         self._ref_factory = factory
         _ref_module.ref_restore_hook = lambda uri: factory(ActorAddress.from_uri(uri))
 
     def serialize(self, obj: Any) -> bytes:
+        """Serialize an object to pickle bytes (protocol 5).
+
+        Parameters
+        ----------
+        obj : Any
+            Object to serialize.
+
+        Returns
+        -------
+        bytes
+        """
         return pickle.dumps(obj, protocol=5)
 
     def deserialize(self, data: bytes) -> Any:
+        """Deserialize pickle bytes back to a Python object.
+
+        Parameters
+        ----------
+        data : bytes
+            Bytes produced by ``serialize``.
+
+        Returns
+        -------
+        Any
+        """
         return pickle.loads(data)  # noqa: S301

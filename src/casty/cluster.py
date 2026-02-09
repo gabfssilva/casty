@@ -1,3 +1,10 @@
+"""Cluster membership management and coordination.
+
+Provides ``ClusterConfig`` for cluster setup and ``Cluster`` as a thin wrapper
+around the internal cluster actor.  The cluster actor orchestrates gossip-based
+membership, heartbeat failure detection, and leader-driven member promotion.
+"""
+
 # src/casty/cluster.py
 from __future__ import annotations
 
@@ -97,6 +104,27 @@ type ClusterCmd = (
 
 @dataclass(frozen=True)
 class ClusterConfig:
+    """Configuration for joining or forming a cluster.
+
+    Parameters
+    ----------
+    host : str
+        Bind address for this node.
+    port : int
+        TCP port for this node.
+    seed_nodes : list[tuple[str, int]]
+        Initial contact points for cluster formation.  An empty list means
+        this node forms a new single-node cluster.
+    roles : frozenset[str]
+        Roles to advertise for this node.
+
+    Examples
+    --------
+    >>> cfg = ClusterConfig("127.0.0.1", 2551, [("127.0.0.1", 2552)])
+    >>> cfg.host, cfg.port
+    ('127.0.0.1', 2551)
+    """
+
     host: str
     port: int
     seed_nodes: list[tuple[str, int]]
@@ -422,6 +450,41 @@ def cluster_actor(
 
 
 class Cluster:
+    """High-level handle for starting and querying a cluster on an ``ActorSystem``.
+
+    Wraps the internal cluster actor, providing ``start``, ``get_state``, and
+    ``shutdown`` methods.
+
+    Parameters
+    ----------
+    system : ActorSystem
+        The actor system that will host the cluster actor.
+    config : ClusterConfig
+        Cluster network and seed configuration.
+    remote_transport : RemoteTransport or None
+        Transport for cross-node communication.  ``None`` for local-only.
+    system_name : str
+        Logical name of the actor system (used in actor addresses).
+    gossip_interval : float
+        Seconds between gossip rounds.
+    gossip_fanout : int
+        Number of peers contacted per gossip round.
+    heartbeat_interval : float
+        Seconds between heartbeat state polls.
+    availability_interval : float
+        Seconds between failure-detector availability checks.
+    failure_detector_config : FailureDetectorConfig or None
+        Tuning for the phi accrual failure detector.
+
+    Examples
+    --------
+    >>> cluster = Cluster(system, ClusterConfig("127.0.0.1", 2551, []))
+    >>> await cluster.start()
+    >>> state = await cluster.get_state()
+    >>> len(state.members)
+    1
+    """
+
     def __init__(
         self,
         system: ActorSystem,
@@ -448,12 +511,29 @@ class Cluster:
 
     @property
     def ref(self) -> ActorRef[ClusterCmd]:
+        """The cluster actor's ref.
+
+        Returns
+        -------
+        ActorRef[ClusterCmd]
+            Reference to the running cluster actor.
+
+        Raises
+        ------
+        RuntimeError
+            If the cluster has not been started yet.
+        """
         if self._ref is None:
             msg = "Cluster not started"
             raise RuntimeError(msg)
         return self._ref
 
     async def start(self) -> None:
+        """Spawn the cluster actor and begin membership protocol.
+
+        After this method returns the cluster is actively gossiping and
+        monitoring heartbeats.
+        """
         self._ref = self._system.spawn(
             cluster_actor(
                 config=self._config,
@@ -470,6 +550,18 @@ class Cluster:
         )
 
     async def get_state(self, *, timeout: float = 5.0) -> ClusterState:
+        """Request the current cluster state from the gossip actor.
+
+        Parameters
+        ----------
+        timeout : float
+            Maximum seconds to wait for a reply.
+
+        Returns
+        -------
+        ClusterState
+            The latest cluster state snapshot.
+        """
         return await self._system.ask(
             self.ref,
             lambda r: GetState(reply_to=r),
@@ -477,4 +569,5 @@ class Cluster:
         )
 
     async def shutdown(self) -> None:
+        """Gracefully shut down the cluster actor."""
         pass

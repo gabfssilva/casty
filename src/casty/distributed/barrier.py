@@ -1,3 +1,8 @@
+"""Distributed barrier backed by a sharded actor entity.
+
+Blocks callers until a specified number of nodes have arrived, then releases
+all waiters simultaneously.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -47,7 +52,29 @@ def barrier_waiting(
 
 
 class Barrier:
-    """Client for a distributed barrier backed by a sharded actor."""
+    """Client for a distributed barrier backed by a sharded actor.
+
+    Multiple nodes call ``arrive(expected)`` and all block until *expected*
+    nodes have arrived.
+
+    Parameters
+    ----------
+    system : ActorSystem
+        The actor system for sending messages.
+    region_ref : ActorRef[ShardEnvelope[BarrierMsg]]
+        Reference to the shard proxy / region.
+    name : str
+        Barrier name (used as entity ID).
+    node_id : str
+        Identifier for this node (typically ``host:port``).
+    timeout : float
+        Default timeout for the barrier wait.
+
+    Examples
+    --------
+    >>> barrier = d.barrier("init-sync")
+    >>> await barrier.arrive(expected=3)
+    """
 
     def __init__(
         self,
@@ -65,7 +92,17 @@ class Barrier:
         self._timeout = timeout
 
     async def arrive(self, expected: int) -> None:
-        """Block until *expected* nodes have reached this barrier."""
+        """Block until *expected* nodes have reached this barrier.
+
+        Parameters
+        ----------
+        expected : int
+            Number of nodes that must arrive before all are released.
+
+        Examples
+        --------
+        >>> await barrier.arrive(expected=3)
+        """
         await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(

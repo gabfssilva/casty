@@ -1,3 +1,9 @@
+"""TOML-based configuration for Casty actor systems.
+
+Provides ``load_config`` / ``discover_config`` for loading ``casty.toml`` and
+a hierarchy of frozen dataclasses for mailbox, supervision, sharding, gossip,
+heartbeat, failure-detector, and per-actor override settings.
+"""
 from __future__ import annotations
 
 import re
@@ -32,17 +38,60 @@ type MailboxStrategy = Literal["drop_new", "drop_oldest", "backpressure"]
 
 @dataclass(frozen=True)
 class TransportConfig:
+    """Transport-layer tuning.
+
+    Parameters
+    ----------
+    max_pending_per_path : int
+        Maximum queued outbound messages per remote actor path.
+
+    Examples
+    --------
+    >>> TransportConfig(max_pending_per_path=128)
+    TransportConfig(max_pending_per_path=128)
+    """
     max_pending_per_path: int = 64
 
 
 @dataclass(frozen=True)
 class MailboxConfig:
+    """Default mailbox settings applied to every actor unless overridden.
+
+    Parameters
+    ----------
+    capacity : int
+        Maximum number of messages in the mailbox.
+    strategy : MailboxStrategy
+        Backpressure strategy: ``"drop_new"``, ``"drop_oldest"``, or
+        ``"backpressure"``.
+
+    Examples
+    --------
+    >>> MailboxConfig(capacity=500, strategy="drop_oldest")
+    MailboxConfig(capacity=500, strategy='drop_oldest')
+    """
     capacity: int = 1000
     strategy: MailboxStrategy = "drop_new"
 
 
 @dataclass(frozen=True)
 class SupervisionConfig:
+    """Default supervision settings for child actors.
+
+    Parameters
+    ----------
+    strategy : str
+        One of ``"restart"``, ``"stop"``, or ``"escalate"``.
+    max_restarts : int
+        Maximum restarts allowed within the time window.
+    within_seconds : float
+        Rolling window (seconds) for restart counting.
+
+    Examples
+    --------
+    >>> SupervisionConfig(strategy="stop")
+    SupervisionConfig(strategy='stop', max_restarts=3, within_seconds=60.0)
+    """
     strategy: str = "restart"
     max_restarts: int = 3
     within_seconds: float = 60.0
@@ -50,11 +99,43 @@ class SupervisionConfig:
 
 @dataclass(frozen=True)
 class ShardingConfig:
+    """Default sharding settings.
+
+    Parameters
+    ----------
+    num_shards : int
+        Number of virtual shards to distribute across the cluster.
+
+    Examples
+    --------
+    >>> ShardingConfig(num_shards=512)
+    ShardingConfig(num_shards=512)
+    """
     num_shards: int = 256
 
 
 @dataclass(frozen=True)
 class FailureDetectorConfig:
+    """Phi accrual failure detector tuning (Hayashibara et al.).
+
+    Parameters
+    ----------
+    threshold : float
+        Phi value above which a node is considered unreachable.
+    max_sample_size : int
+        Maximum heartbeat interval samples to retain.
+    min_std_deviation_ms : float
+        Floor for the standard deviation estimate (ms).
+    acceptable_heartbeat_pause_ms : float
+        Grace period added to the heartbeat interval estimate (ms).
+    first_heartbeat_estimate_ms : float
+        Initial heartbeat interval estimate before real samples arrive (ms).
+
+    Examples
+    --------
+    >>> FailureDetectorConfig(threshold=12.0, max_sample_size=500)
+    FailureDetectorConfig(threshold=12.0, max_sample_size=500, ...)
+    """
     threshold: float = 8.0
     max_sample_size: int = 200
     min_std_deviation_ms: float = 100.0
@@ -64,18 +145,76 @@ class FailureDetectorConfig:
 
 @dataclass(frozen=True)
 class GossipConfig:
+    """Gossip protocol tuning.
+
+    Parameters
+    ----------
+    interval : float
+        Seconds between gossip rounds.
+    fanout : int
+        Number of peers contacted per gossip round.
+
+    Examples
+    --------
+    >>> GossipConfig(interval=0.5, fanout=5)
+    GossipConfig(interval=0.5, fanout=5)
+    """
     interval: float = 1.0
     fanout: int = 3
 
 
 @dataclass(frozen=True)
 class HeartbeatConfig:
+    """Heartbeat exchange tuning.
+
+    Parameters
+    ----------
+    interval : float
+        Seconds between heartbeat sends to each monitored peer.
+    availability_check_interval : float
+        Seconds between phi-accrual availability checks.
+
+    Examples
+    --------
+    >>> HeartbeatConfig(interval=1.0, availability_check_interval=5.0)
+    HeartbeatConfig(interval=1.0, availability_check_interval=5.0)
+    """
     interval: float = 0.5
     availability_check_interval: float = 2.0
 
 
 @dataclass(frozen=True)
 class ActorConfig:
+    """Per-actor configuration override matched by name pattern.
+
+    When ``CastyConfig.resolve_actor(name)`` is called, the first
+    ``ActorConfig`` whose ``pattern`` matches *name* supplies overrides
+    for mailbox, supervision, sharding, and replication settings.
+
+    Parameters
+    ----------
+    pattern : re.Pattern[str]
+        Regex matched against actor names via ``fullmatch``.
+    mailbox_overrides : dict[str, Any]
+        Fields to override in ``MailboxConfig``.
+    supervision_overrides : dict[str, Any]
+        Fields to override in ``SupervisionConfig``.
+    sharding_overrides : dict[str, Any]
+        Fields to override in ``ShardingConfig``.
+    replication_overrides : dict[str, Any]
+        Fields to override in ``ReplicationConfig``.
+
+    Examples
+    --------
+    >>> ActorConfig(
+    ...     pattern=re.compile("worker-.*"),
+    ...     mailbox_overrides={"capacity": 5000},
+    ...     supervision_overrides={},
+    ...     sharding_overrides={},
+    ...     replication_overrides={},
+    ... )
+    ActorConfig(pattern=..., ...)
+    """
     pattern: re.Pattern[str]
     mailbox_overrides: dict[str, Any]
     supervision_overrides: dict[str, Any]
@@ -85,6 +224,29 @@ class ActorConfig:
 
 @dataclass(frozen=True)
 class ResolvedActorConfig:
+    """Fully resolved configuration for a single actor.
+
+    Produced by ``CastyConfig.resolve_actor(name)`` by merging per-actor
+    overrides on top of the system defaults.
+
+    Parameters
+    ----------
+    mailbox : MailboxConfig
+        Resolved mailbox settings.
+    supervision : SupervisionConfig
+        Resolved supervision settings.
+    sharding : ShardingConfig
+        Resolved sharding settings.
+    replication : ReplicationConfig
+        Resolved replication settings.
+
+    Examples
+    --------
+    >>> cfg = CastyConfig()
+    >>> resolved = cfg.resolve_actor("my-actor")
+    >>> resolved.mailbox.capacity
+    1000
+    """
     mailbox: MailboxConfig
     supervision: SupervisionConfig
     sharding: ShardingConfig
@@ -93,6 +255,44 @@ class ResolvedActorConfig:
 
 @dataclass(frozen=True)
 class CastyConfig:
+    """Top-level configuration container for a Casty actor system.
+
+    Holds system-wide defaults, cluster settings, and per-actor overrides.
+    Typically created via ``load_config()`` but can be constructed manually.
+
+    Parameters
+    ----------
+    system_name : str
+        Logical name of the actor system.
+    cluster : ClusterConfig | None
+        Cluster settings (``None`` for local-only systems).
+    transport : TransportConfig
+        Transport-layer tuning.
+    gossip : GossipConfig
+        Gossip protocol tuning.
+    heartbeat : HeartbeatConfig
+        Heartbeat exchange tuning.
+    failure_detector : FailureDetectorConfig
+        Phi accrual failure detector tuning.
+    defaults_mailbox : MailboxConfig
+        System-wide default mailbox settings.
+    defaults_supervision : SupervisionConfig
+        System-wide default supervision settings.
+    defaults_sharding : ShardingConfig
+        System-wide default sharding settings.
+    defaults_replication : ReplicationConfig
+        System-wide default replication settings.
+    actors : tuple[ActorConfig, ...]
+        Per-actor overrides matched by name pattern.
+
+    Examples
+    --------
+    >>> config = CastyConfig(system_name="my-app")
+    >>> config.system_name
+    'my-app'
+
+    >>> config = load_config(Path("casty.toml"))
+    """
     system_name: str = "casty"
     cluster: ClusterConfig | None = None
     transport: TransportConfig = field(default_factory=TransportConfig)
@@ -108,6 +308,27 @@ class CastyConfig:
     actors: tuple[ActorConfig, ...] = ()
 
     def resolve_actor(self, name: str) -> ResolvedActorConfig:
+        """Resolve the effective configuration for an actor by name.
+
+        Merges the first matching ``ActorConfig`` override (if any) on top
+        of the system defaults.
+
+        Parameters
+        ----------
+        name : str
+            Actor name to resolve.
+
+        Returns
+        -------
+        ResolvedActorConfig
+
+        Examples
+        --------
+        >>> cfg = CastyConfig()
+        >>> resolved = cfg.resolve_actor("my-actor")
+        >>> resolved.supervision.strategy
+        'restart'
+        """
         mailbox_overrides: dict[str, Any] = {}
         supervision_overrides: dict[str, Any] = {}
         sharding_overrides: dict[str, Any] = {}
@@ -143,6 +364,23 @@ def parse_seed_node(raw: str) -> tuple[str, int]:
 
 
 def discover_config(start: Path | None = None) -> Path | None:
+    """Walk up from *start* (default: cwd) looking for ``casty.toml``.
+
+    Parameters
+    ----------
+    start : Path | None
+        Directory to start searching from.
+
+    Returns
+    -------
+    Path | None
+        Path to the discovered config file, or ``None`` if not found.
+
+    Examples
+    --------
+    >>> discover_config(Path("/my/project"))
+    PosixPath('/my/project/casty.toml')
+    """
     current = start or Path.cwd()
     current = current.resolve()
     while True:
@@ -156,6 +394,32 @@ def discover_config(start: Path | None = None) -> Path | None:
 
 
 def load_config(path: Path | None = None) -> CastyConfig:
+    """Load a ``CastyConfig`` from a TOML file.
+
+    If *path* is ``None``, auto-discovers ``casty.toml`` by walking up from
+    the current working directory.  Returns default config if no file is found.
+
+    Parameters
+    ----------
+    path : Path | None
+        Explicit path to a TOML config file.
+
+    Returns
+    -------
+    CastyConfig
+
+    Raises
+    ------
+    FileNotFoundError
+        If an explicit *path* is given but does not exist.
+
+    Examples
+    --------
+    >>> config = load_config()
+    >>> config = load_config(Path("casty.toml"))
+    >>> config.system_name
+    'casty'
+    """
     if path is None:
         discovered = discover_config()
         if discovered is None:

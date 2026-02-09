@@ -1,3 +1,7 @@
+"""Distributed FIFO queue backed by a sharded actor entity.
+
+Supports optional event sourcing via ``persistent_queue_entity``.
+"""
 from __future__ import annotations
 
 from collections import deque
@@ -174,7 +178,26 @@ def queue_behavior(*, num_shards: int = 100) -> ShardedBehavior[QueueMsg]:
 
 
 class Queue[V]:
-    """Client for a distributed queue backed by a sharded actor."""
+    """Client for a distributed FIFO queue backed by a sharded actor.
+
+    Parameters
+    ----------
+    system : ActorSystem
+        The actor system for sending messages.
+    region_ref : ActorRef[ShardEnvelope[QueueMsg]]
+        Reference to the shard proxy / region.
+    name : str
+        Queue name (used as entity ID).
+    timeout : float
+        Default timeout for each operation.
+
+    Examples
+    --------
+    >>> jobs = d.queue[str]("jobs")
+    >>> await jobs.enqueue("task-1")
+    >>> await jobs.dequeue()
+    'task-1'
+    """
 
     def __init__(
         self,
@@ -190,7 +213,12 @@ class Queue[V]:
         self._timeout = timeout
 
     async def enqueue(self, value: V) -> None:
-        """Append a value to the back of the queue."""
+        """Append a value to the back of the queue.
+
+        Examples
+        --------
+        >>> await jobs.enqueue("task-1")
+        """
         await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -200,7 +228,17 @@ class Queue[V]:
         )
 
     async def dequeue(self) -> V | None:
-        """Remove and return the front value, or None if empty."""
+        """Remove and return the front value, or ``None`` if empty.
+
+        Returns
+        -------
+        V | None
+
+        Examples
+        --------
+        >>> await jobs.dequeue()
+        'task-1'
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -210,7 +248,17 @@ class Queue[V]:
         )
 
     async def peek(self) -> V | None:
-        """Return the front value without removing, or None if empty."""
+        """Return the front value without removing, or ``None`` if empty.
+
+        Returns
+        -------
+        V | None
+
+        Examples
+        --------
+        >>> await jobs.peek()
+        'task-1'
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
@@ -220,7 +268,17 @@ class Queue[V]:
         )
 
     async def size(self) -> int:
-        """Return the number of items in the queue."""
+        """Return the number of items in the queue.
+
+        Returns
+        -------
+        int
+
+        Examples
+        --------
+        >>> await jobs.size()
+        0
+        """
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
