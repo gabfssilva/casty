@@ -171,10 +171,13 @@ async def run_node(
 
     log.info("Starting...")
 
+    node_id = socket.gethostname()
+
     async with ClusteredActorSystem.from_config(
         config,
         host=host,
         port=port,
+        node_id=node_id,
         seed_nodes=seed_nodes,
         bind_host=bind_host,
     ) as system:

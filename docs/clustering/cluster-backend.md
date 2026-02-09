@@ -18,6 +18,7 @@ async with ClusteredActorSystem(
     name="task-queue",
     host="10.0.0.1",
     port=25520,
+    node_id="worker-1",
     seed_nodes=[("10.0.0.2", 25520), ("10.0.0.3", 25520)],
     required_quorum=3,  # startup blocks until 3 nodes are UP
 ) as system:

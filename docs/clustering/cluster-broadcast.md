@@ -30,6 +30,7 @@ def listener() -> Behavior[Announcement]:
 async def main() -> None:
     async with ClusteredActorSystem(
         name="demo", host="127.0.0.1", port=25520,
+        node_id="node-1",
     ) as system:
         # BroadcastRef — tell/ask fan out to ALL nodes
         ref: BroadcastRef[Announcement] = system.spawn(

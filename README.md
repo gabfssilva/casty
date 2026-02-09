@@ -792,11 +792,11 @@ async def main() -> None:
     async with (
         ClusteredActorSystem(
             name="bank", host="127.0.0.1", port=25520,
-            seed_nodes=[("127.0.0.1", 25521)],
+            node_id="node-1", seed_nodes=[("127.0.0.1", 25521)],
         ) as node1,
         ClusteredActorSystem(
             name="bank", host="127.0.0.1", port=25521,
-            seed_nodes=[("127.0.0.1", 25520)],
+            node_id="node-2", seed_nodes=[("127.0.0.1", 25520)],
         ) as node2,
     ):
         accounts1 = node1.spawn(Behaviors.sharded(account_entity, num_shards=100), "accounts")
@@ -823,7 +823,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Every node in the cluster runs the same code — only `host` and `port` differ. `ShardEnvelope(entity_id, message)` wraps a message with the entity ID for routing. The proxy actor on each node caches shard-to-node mappings and forwards messages to the correct region, whether local or remote.
+Every node in the cluster runs the same code — only `host`, `port`, and `node_id` differ. Each node has a human-readable `node_id` that is propagated through gossip and can be used with `system.lookup("/actor", node="node-1")` to address actors on specific nodes. `ShardEnvelope(entity_id, message)` wraps a message with the entity ID for routing. The proxy actor on each node caches shard-to-node mappings and forwards messages to the correct region, whether local or remote.
 
 `ClusteredActorSystem` extends `ActorSystem`. Spawning a `ShardedBehavior` (produced by `Behaviors.sharded()`) returns an `ActorRef[ShardEnvelope[M]]`. All other spawns work identically to the local `ActorSystem`. This means existing actors that don't need distribution require no changes when moving to a clustered deployment.
 
@@ -859,6 +859,7 @@ def listener() -> Behavior[Announcement]:
 async def main() -> None:
     async with ClusteredActorSystem(
         name="demo", host="127.0.0.1", port=25520,
+        node_id="node-1",
     ) as system:
         # BroadcastRef — tell/ask fan out to ALL nodes
         ref: BroadcastRef[Announcement] = system.spawn(
@@ -932,7 +933,7 @@ class User:
 async def main() -> None:
     async with ClusteredActorSystem(
         name="my-app", host="127.0.0.1", port=25520,
-        seed_nodes=[("127.0.0.1", 25521)],
+        node_id="node-1", seed_nodes=[("127.0.0.1", 25521)],
     ) as system:
         d = system.distributed()
 
@@ -1023,6 +1024,7 @@ async with ClusteredActorSystem(
     name="task-queue",
     host="10.0.0.1",
     port=25520,
+    node_id="worker-1",
     seed_nodes=[("10.0.0.2", 25520), ("10.0.0.3", 25520)],
     required_quorum=3,  # startup blocks until 3 nodes are UP
 ) as system:

@@ -256,6 +256,7 @@ async def run_node(
         config,
         host=host,
         port=port,
+        node_id=worker_id,
         seed_nodes=seed_nodes,
         bind_host=bind_host,
     ) as system:

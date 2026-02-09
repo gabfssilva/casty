@@ -10,4 +10,4 @@ WORKDIR /app
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
 RUN uv sync --no-dev
 
-ENTRYPOINT ["uv", "run", "python", "examples/11_multi_process_cluster/main.py"]
+ENTRYPOINT ["/app/.venv/bin/python3", "examples/11_multi_process_cluster/main.py"]

@@ -18,7 +18,7 @@ class User:
 async def main() -> None:
     async with ClusteredActorSystem(
         name="my-app", host="127.0.0.1", port=25520,
-        seed_nodes=[("127.0.0.1", 25521)],
+        node_id="node-1", seed_nodes=[("127.0.0.1", 25521)],
     ) as system:
         d = system.distributed()
 
