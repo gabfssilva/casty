@@ -26,7 +26,7 @@ wheels = [
 
 [[package]]
 name = "casty"
-version = "0.6.1.dev0+g421e849b3.d20260209"
+version = "0.6.1.dev4+g76f5372f9.d20260209"
 source = { editable = "." }
 
 [package.optional-dependencies]
