@@ -1,12 +1,12 @@
 [project]
 name = "casty"
 dynamic = ["version"]
-description = "A minimalist, type-safe actor framework for Python 3.12+ inspired by Akka Typed"
+description = "Typed, clustered actor framework for Python. Pure asyncio, zero dependencies."
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [{name = "Gabriel Francisco"}]
-keywords = ["actor", "async", "actor-model", "akka", "concurrency"]
+keywords = ["actor", "async", "actor-model", "asyncio", "concurrency", "cluster", "distributed"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

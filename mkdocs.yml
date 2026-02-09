@@ -1,6 +1,6 @@
 site_name: Casty
 site_url: https://gabfssilva.github.io/casty/
-site_description: A minimalist, type-safe actor framework for Python 3.12+ inspired by Akka Typed
+site_description: Typed, clustered actor framework for Python. Pure asyncio, zero dependencies.
 repo_url: https://github.com/gabfssilva/casty
 repo_name: gabfssilva/casty
 
@@ -101,3 +101,4 @@ nav:
           - Serialization: reference/serialization.md
       - Distributed: reference/distributed.md
       - Configuration: reference/config.md
+  - Acknowledgments: acknowledgments.md

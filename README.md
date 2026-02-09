@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Minimalist, type-safe actor framework for Python 3.12+</strong>
+  <strong>Typed, clustered actor framework for Python</strong>
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 
 ---
 
-Casty is an actor framework inspired by [Akka Typed](https://doc.akka.io/libraries/akka-core/current/typed/index.html) that brings the behavior-driven, functional actor model to Python. Instead of threads, locks, and shared mutable state, you model your system as independent actors that communicate exclusively through messages.
+Casty is a typed, clustered actor framework for Python built on asyncio. Instead of threads, locks, and shared mutable state, you model your system as independent actors that communicate exclusively through immutable messages, from a single process to a distributed cluster.
 
 ## Quick Start
 
@@ -82,6 +82,10 @@ Full documentation is available at **[gabfssilva.github.io/casty](https://gabfss
 | [Clustering](https://gabfssilva.github.io/casty/clustering/cluster-sharding/) | Sharding, broadcast, replication, distributed data structures |
 | [Configuration](https://gabfssilva.github.io/casty/configuration/) | TOML-based configuration with per-actor overrides |
 | [API Reference](https://gabfssilva.github.io/casty/reference/behaviors/) | Complete API documentation |
+
+## Acknowledgments
+
+Casty builds on the actor model (Hewitt, 1973), Erlang/OTP's supervision philosophy, Akka Typed's functional behavior API, and distributed systems research including phi accrual failure detection, gossip protocols, CRDTs, and vector clocks. See the full [Acknowledgments](https://gabfssilva.github.io/casty/acknowledgments/) page for details and references.
 
 ## Contributing
 

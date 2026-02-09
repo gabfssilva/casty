@@ -1,6 +1,6 @@
 # Configuration
 
-Every parameter shown in previous sections — mailbox capacity, supervision strategy, gossip interval, failure detector threshold — can be set programmatically. But when deploying the same codebase across environments (dev, staging, production), hardcoding these values becomes impractical. Casty supports TOML-based configuration via a `casty.toml` file, inspired by Akka's `application.conf`.
+Every parameter shown in previous sections — mailbox capacity, supervision strategy, gossip interval, failure detector threshold — can be set programmatically. But when deploying the same codebase across environments (dev, staging, production), hardcoding these values becomes impractical. Casty supports TOML-based configuration via a `casty.toml` file.
 
 Configuration is always optional. When absent, all parameters use the same defaults as the programmatic API. When present, the TOML file produces the existing dataclasses — `ClusterConfig`, `ReplicationConfig`, etc. — through a pure loader function. No global state, no singletons, no magic.
 

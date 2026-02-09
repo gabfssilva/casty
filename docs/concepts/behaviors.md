@@ -1,6 +1,6 @@
 # Behaviors as Values
 
-In most actor frameworks, an actor is defined by subclassing a base class and overriding a `receive` method. Casty takes a different approach, inspired by Akka Typed: **behaviors are values**, not classes.
+In most actor frameworks, an actor is defined by subclassing a base class and overriding a `receive` method. Casty takes a different approach: **behaviors are values**, not classes.
 
 A behavior is a frozen dataclass that describes how an actor processes messages. You compose behaviors using the `Behaviors` factory:
 
