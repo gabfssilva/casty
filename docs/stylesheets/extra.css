@@ -1,3 +1,20 @@
+/* ── Zoom ── */
+
+body {
+  zoom: 1.2;
+}
+
+/* ── Hide TOC, swap content and nav ── */
+
+.md-sidebar--secondary {
+  display: none !important;
+}
+
+.md-main__inner {
+  display: flex;
+  flex-direction: row-reverse;
+}
+
 /* ── Monochrome palette ── */
 
 /* Dark mode */
@@ -70,6 +87,20 @@
   color: var(--md-primary-bg-color) !important;
 }
 
+/* ── Sidebar section titles ── */
+
+.md-nav--lifted > .md-nav__list > .md-nav__item--active > label.md-nav__link,
+.md-nav--lifted > .md-nav__list > .md-nav__item--active > .md-nav > .md-nav__list > .md-nav__item--section > label.md-nav__link {
+  text-decoration: underline;
+  text-decoration-color: rgba(128, 128, 128, 0.4);
+  text-underline-offset: 3px;
+}
+
+.md-nav--lifted > .md-nav__list > .md-nav__item--active > .md-nav > .md-nav__list > .md-nav__item--section {
+  margin-top: 1rem;
+}
+
+
 /* ── Sidebar nav ── */
 
 .md-nav__title {
@@ -78,8 +109,4 @@
 
 .md-nav__item .md-nav__link {
   font-size: 0.72rem;
-}
-
-.md-sidebar--secondary .md-nav__link {
-  font-size: 0.68rem;
 }

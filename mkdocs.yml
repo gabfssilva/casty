@@ -67,7 +67,7 @@ markdown_extensions:
 
 nav:
   - Home:
-      - Home: index.md
+      - Meet Casty: index.md
       - Getting Started: getting-started/index.md
       - Concepts:
           - Actors and Messages: concepts/actors-and-messages.md
