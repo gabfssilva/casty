@@ -108,7 +108,7 @@ async def test_spy_observes_messages() -> None:
         assert "/echo" in events[0].actor_path
 
 
-async def test_spy_reports_terminated() -> None:
+async def test_spy_reports_stop_message() -> None:
     async with ActorSystem("spy-term") as system:
         observer: ActorRef[CollectorMsg] = system.spawn(
             queryable_collector(), "observer"
@@ -128,10 +128,7 @@ async def test_spy_reports_terminated() -> None:
         )
 
         spy_events = [e for e in events if isinstance(e.event, Stop)]
-        terminated_events = [e for e in events if isinstance(e.event, Terminated)]
-
         assert len(spy_events) == 1
-        assert len(terminated_events) == 1
 
 
 async def test_spy_is_transparent_to_replies() -> None:
@@ -413,3 +410,62 @@ async def test_spy_children_false_does_not_spy_children() -> None:
 
         child_events = [e for e in events if "/parent/child" in e.actor_path]
         assert len(child_events) == 0
+
+
+@dataclass(frozen=True)
+class KillChild:
+    pass
+
+
+type WatcherMsg = SpawnChild | KillChild | Terminated
+
+
+def watcher_parent() -> Behavior[WatcherMsg]:
+    def active(child_ref: ActorRef[ChildMsg] | None = None) -> Behavior[WatcherMsg]:
+        async def receive(
+            ctx: ActorContext[WatcherMsg], msg: WatcherMsg
+        ) -> Behavior[WatcherMsg]:
+            match msg:
+                case SpawnChild():
+                    ref = ctx.spawn(child_behavior(), "watched-child")
+                    ctx.watch(ref)
+                    return active(ref)
+                case KillChild():
+                    if child_ref is not None:
+                        ctx.stop(child_ref)
+                    return Behaviors.same()
+                case Terminated():
+                    return Behaviors.same()
+                case _:
+                    return Behaviors.unhandled()
+
+        return Behaviors.receive(receive)
+
+    return active()
+
+
+async def test_spy_captures_terminated_from_watched_child() -> None:
+    async with ActorSystem("spy-watch") as system:
+        observer: ActorRef[AnyCollectorMsg] = system.spawn(
+            any_collector(), "observer"
+        )
+
+        spied = system.spawn(
+            Behaviors.spy(watcher_parent(), observer),  # type: ignore[arg-type]
+            "watcher",
+        )
+
+        spied.tell(SpawnChild())
+        await asyncio.sleep(0.1)
+
+        spied.tell(KillChild())
+        await asyncio.sleep(0.1)
+
+        events: tuple[SpyEvent[Any], ...] = await system.ask(
+            observer, lambda r: GetAnyCollected(reply_to=r), timeout=2.0
+        )
+
+        watcher_events = [e for e in events if e.actor_path == "/watcher"]
+        terminated_events = [e for e in watcher_events if isinstance(e.event, Terminated)]
+
+        assert len(terminated_events) == 1

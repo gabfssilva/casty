@@ -76,17 +76,16 @@ class BroadcastedBehavior[M]:
 
 @dataclass(frozen=True)
 class SpyEvent[M]:
-    """Event emitted by a spy wrapper for each message an actor receives.
+    """Event emitted by a spy wrapper for each message an actor processes.
 
-    Contains the actor's path, the observed event (either a message or
-    a ``Terminated`` signal), and a monotonic timestamp.
+    Contains the actor's path, the observed message, and a monotonic timestamp.
 
     Parameters
     ----------
     actor_path : str
         Path of the spied actor.
     event : M | Terminated
-        The message received by the actor, or ``Terminated`` when it stops.
+        The message processed by the actor.
     timestamp : float
         Monotonic timestamp from ``time.monotonic()``.
     """

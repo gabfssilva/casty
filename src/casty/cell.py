@@ -626,14 +626,6 @@ class ActorCell[M]:
             except Exception:
                 self._logger.exception("Error notifying watcher")
 
-        # Emit spy event for termination
-        if self._spy_observer is not None:
-            self._spy_observer.tell(SpyEvent(
-                actor_path=self._ref.address.path,
-                event=Terminated(ref=self._ref),
-                timestamp=_time.monotonic(),
-            ))
-
         # Publish ActorStopped event
         await self._event_stream.publish(ActorStopped(ref=self._ref))
 

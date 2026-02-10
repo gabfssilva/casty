@@ -2,13 +2,13 @@
 
 Actors are opaque by design — you send messages in and observe effects out, but you can't see what an actor received, in what order, or when. This makes it difficult to trace message flows, verify that routing is correct, or understand why an actor reached a particular state.
 
-`Behaviors.spy()` wraps any behavior with a transparent observer. The spy is a **cell-level wrapper** — like `SupervisedBehavior` or `LifecycleBehavior` — so the cell itself emits a `SpyEvent` after processing each message. This means **all** messages are captured, including self-tells (`ctx.self.tell(...)`) and `Terminated` signals when the actor stops.
+`Behaviors.spy()` wraps any behavior with a transparent observer. The spy is a **cell-level wrapper** — like `SupervisedBehavior` or `LifecycleBehavior` — so the cell itself emits a `SpyEvent` after processing each message. This means **all** messages are captured, including self-tells (`ctx.self.tell(...)`).
 
 ```python
 import asyncio
 from dataclasses import dataclass
 
-from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, SpyEvent, Terminated
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, SpyEvent
 
 
 @dataclass(frozen=True)
@@ -38,11 +38,7 @@ def log_observer() -> Behavior[SpyEvent[AccountMsg]]:
     async def receive(
         ctx: ActorContext[SpyEvent[AccountMsg]], event: SpyEvent[AccountMsg]
     ) -> Behavior[SpyEvent[AccountMsg]]:
-        match event.event:
-            case Terminated():
-                print(f"[spy] {event.actor_path} terminated at t={event.timestamp:.4f}")
-            case msg:
-                print(f"[spy] {event.actor_path} received {msg} at t={event.timestamp:.4f}")
+        print(f"[spy] {event.actor_path} received {event.event} at t={event.timestamp:.4f}")
         return Behaviors.same()
 
     return Behaviors.receive(receive)
@@ -84,7 +80,7 @@ The spy is completely transparent: the target actor processes messages normally,
 | Field | Type | Description |
 |-------|------|-------------|
 | `actor_path` | `str` | Path of the spied actor (e.g. `"/account"`) |
-| `event` | `M \| Terminated` | The message received, or `Terminated` when the actor stops |
+| `event` | `M \| Terminated` | The message received by the actor |
 | `timestamp` | `float` | Monotonic timestamp via `time.monotonic()` |
 
 The spy composes freely with other behavior wrappers. Spy a supervised actor to observe crash-restart cycles. Spy a lifecycle-wrapped actor to see the messages that arrive between start and stop:

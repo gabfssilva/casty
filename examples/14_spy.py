@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, SpyEvent, Terminated
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, SpyEvent
 
 
 # ---------------------------------------------------------------------------
@@ -41,11 +41,7 @@ def log_observer() -> Behavior[SpyEvent[Any]]:
     async def receive(
         ctx: ActorContext[SpyEvent[Any]], event: SpyEvent[Any]
     ) -> Behavior[SpyEvent[Any]]:
-        match event.event:
-            case Terminated():
-                print(f"[spy] {event.actor_path} terminated at t={event.timestamp:.4f}")
-            case msg:
-                print(f"[spy] {event.actor_path} received {msg} at t={event.timestamp:.4f}")
+        print(f"[spy] {event.actor_path} received {event.event} at t={event.timestamp:.4f}")
         return Behaviors.same()
 
     return Behaviors.receive(receive)
