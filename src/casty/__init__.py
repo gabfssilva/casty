@@ -13,6 +13,7 @@ from casty.actor import (
     ShardedBehavior,
     SnapshotEvery,
     SnapshotPolicy,
+    SpyBehavior,
     SpyEvent,
     StoppedBehavior,
     SupervisedBehavior,
@@ -103,6 +104,7 @@ __all__ = [
     "PersistedBehavior",
     "SnapshotEvery",
     "SnapshotPolicy",
+    "SpyBehavior",
     "SpyEvent",
     # System
     "ActorSystem",

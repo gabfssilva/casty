@@ -15,6 +15,8 @@ from casty.actor import (
     RestartBehavior,
     SameBehavior,
     SetupBehavior,
+    SpyBehavior,
+    SpyEvent,
     StoppedBehavior,
     SupervisedBehavior,
     UnhandledBehavior,
@@ -166,6 +168,9 @@ class ActorCell[M]:
         self._es_replication: Any = None
         self._ack_queue: asyncio.Queue[Any] = asyncio.Queue()
 
+        # Spy
+        self._spy_observer: ActorRef[SpyEvent[Any]] | None = None
+
         # Context
         self._ctx: CellContext[M] = CellContext(self)
 
@@ -283,11 +288,16 @@ class ActorCell[M]:
         self._pre_restart = None
         self._post_restart = None
         self._strategy = None
+        self._spy_observer = None
         await self._unwrap_behavior(behavior)
 
     async def _unwrap_behavior(self, behavior: Behavior[M]) -> None:
         """Recursively process behavior layers."""
         match behavior:
+            case SpyBehavior(inner_behavior, observer):
+                self._spy_observer = observer
+                await self._unwrap_behavior(inner_behavior)
+
             case SupervisedBehavior(inner_behavior, strategy):
                 self._strategy = strategy
                 await self._unwrap_behavior(inner_behavior)
@@ -375,8 +385,21 @@ class ActorCell[M]:
                     else:
                         next_behavior = await self._current_handler(self._ctx, msg)
                 except Exception as exc:
+                    if self._spy_observer is not None:
+                        self._spy_observer.tell(SpyEvent(
+                            actor_path=self._ref.address.path,
+                            event=msg,
+                            timestamp=_time.monotonic(),
+                        ))
                     await self._handle_failure(exc)
                     continue
+
+                if self._spy_observer is not None:
+                    self._spy_observer.tell(SpyEvent(
+                        actor_path=self._ref.address.path,
+                        event=msg,
+                        timestamp=_time.monotonic(),
+                    ))
 
                 # Handle PersistedBehavior for event-sourced actors
                 match next_behavior:
@@ -585,6 +608,14 @@ class ActorCell[M]:
                 watcher._deliver(Terminated(ref=self._ref))
             except Exception:
                 self._logger.exception("Error notifying watcher")
+
+        # Emit spy event for termination
+        if self._spy_observer is not None:
+            self._spy_observer.tell(SpyEvent(
+                actor_path=self._ref.address.path,
+                event=Terminated(ref=self._ref),
+                timestamp=_time.monotonic(),
+            ))
 
         # Publish ActorStopped event
         await self._event_stream.publish(ActorStopped(ref=self._ref))

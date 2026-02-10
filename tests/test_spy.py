@@ -162,6 +162,86 @@ async def test_spy_is_transparent_to_replies() -> None:
         assert replies == ["pong"]
 
 
+@dataclass(frozen=True)
+class SelfTell:
+    value: int
+
+
+@dataclass(frozen=True)
+class Trigger:
+    pass
+
+
+type SelfTellMsg = SelfTell | Trigger
+
+
+def self_tell_behavior() -> Behavior[SelfTellMsg]:
+    async def receive(
+        ctx: ActorContext[SelfTellMsg], msg: SelfTellMsg
+    ) -> Behavior[SelfTellMsg]:
+        match msg:
+            case Trigger():
+                ctx.self.tell(SelfTell(value=42))
+                return Behaviors.same()
+            case SelfTell():
+                return Behaviors.same()
+            case _:
+                return Behaviors.unhandled()
+
+    return Behaviors.receive(receive)
+
+
+@dataclass(frozen=True)
+class GetSelfTellCollected:
+    reply_to: ActorRef[tuple[SpyEvent[SelfTellMsg], ...]]
+
+
+type SelfTellCollectorMsg = SpyEvent[SelfTellMsg] | GetSelfTellCollected
+
+
+def self_tell_collector(
+    collected: tuple[SpyEvent[SelfTellMsg], ...] = (),
+) -> Behavior[SelfTellCollectorMsg]:
+    async def receive(
+        ctx: ActorContext[SelfTellCollectorMsg], msg: SelfTellCollectorMsg
+    ) -> Behavior[SelfTellCollectorMsg]:
+        match msg:
+            case GetSelfTellCollected(reply_to=reply_to):
+                reply_to.tell(collected)
+                return Behaviors.same()
+            case SpyEvent() as event:
+                return self_tell_collector((*collected, event))
+            case _:
+                return Behaviors.unhandled()
+
+    return Behaviors.receive(receive)
+
+
+async def test_spy_captures_self_tell() -> None:
+    async with ActorSystem("spy-self") as system:
+        observer: ActorRef[SelfTellCollectorMsg] = system.spawn(
+            self_tell_collector(), "observer"
+        )
+
+        spied = system.spawn(
+            Behaviors.spy(self_tell_behavior(), observer),  # type: ignore[arg-type]
+            "self-teller",
+        )
+
+        spied.tell(Trigger())
+
+        await asyncio.sleep(0.1)
+
+        events: tuple[SpyEvent[SelfTellMsg], ...] = await system.ask(
+            observer, lambda r: GetSelfTellCollected(reply_to=r), timeout=2.0
+        )
+
+        assert len(events) == 2
+        assert isinstance(events[0].event, Trigger)
+        assert isinstance(events[1].event, SelfTell)
+        assert events[1].event.value == 42
+
+
 async def test_spy_with_supervision() -> None:
     call_count = 0
 

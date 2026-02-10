@@ -2,7 +2,7 @@
 
 Actors are opaque by design — you send messages in and observe effects out, but you can't see what an actor received, in what order, or when. This makes it difficult to trace message flows, verify that routing is correct, or understand why an actor reached a particular state.
 
-`Behaviors.spy()` wraps any behavior with a transparent observer. The spy is the **parent** of the target actor: it spawns the real actor as a child, forwards every message, and emits a `SpyEvent` to an observer for each message received — including a `Terminated` signal when the target stops.
+`Behaviors.spy()` wraps any behavior with a transparent observer. The spy is a **cell-level wrapper** — like `SupervisedBehavior` or `LifecycleBehavior` — so the cell itself emits a `SpyEvent` after processing each message. This means **all** messages are captured, including self-tells (`ctx.self.tell(...)`) and `Terminated` signals when the actor stops.
 
 ```python
 import asyncio
@@ -77,7 +77,7 @@ Output:
 Balance: 150
 ```
 
-The spy is completely transparent: the target actor processes messages normally, replies reach their destination, and supervision works as expected. Because the spy is a pure userland wrapper — it spawns the target as a child and forwards messages — no internal runtime changes are needed.
+The spy is completely transparent: the target actor processes messages normally, replies reach their destination, and supervision works as expected. Because the spy is a cell-level behavior wrapper, it captures every message the actor actually processes — including self-tells that a forwarding proxy would miss.
 
 `SpyEvent` contains three fields:
 

@@ -10,7 +10,6 @@ with updated closure-captured state, rather than mutating variables in place.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
@@ -95,6 +94,22 @@ class SpyEvent[M]:
     actor_path: str
     event: M | Terminated
     timestamp: float
+
+
+@dataclass(frozen=True)
+class SpyBehavior[M]:
+    """Behavior wrapper that observes all messages processed by the actor.
+
+    Parameters
+    ----------
+    inner : Behavior[M]
+        The behavior to spy on.
+    observer : ActorRef[SpyEvent[M]]
+        Ref that receives ``SpyEvent`` for every observed message.
+    """
+
+    inner: Behavior[M]
+    observer: ActorRef[SpyEvent[M]]
 
 
 @dataclass(frozen=True)
@@ -385,6 +400,7 @@ type Behavior[M] = (
     | RestartBehavior
     | LifecycleBehavior[M]
     | SupervisedBehavior[M]
+    | SpyBehavior[M]
     | EventSourcedBehavior[M, Any, Any]
     | PersistedBehavior[M, Any]
 )
@@ -778,12 +794,12 @@ class Behaviors:
     def spy[M](
         behavior: Behavior[M],
         observer: ActorRef[SpyEvent[M]],
-    ) -> SetupBehavior[M]:
+    ) -> SpyBehavior[M]:
         """Wrap a behavior with a spy that reports all messages to an observer.
 
-        The spy is a parent actor that spawns the target as a child named
-        ``"target"``, forwards every message, and emits ``SpyEvent`` to the
-        observer for each message and when the target terminates.
+        The spy is a cell-level wrapper: the cell emits ``SpyEvent`` after
+        processing each message, including self-tells. This captures all
+        messages the actor actually processes, not just forwarded ones.
 
         Parameters
         ----------
@@ -794,31 +810,12 @@ class Behaviors:
 
         Returns
         -------
-        SetupBehavior[M]
-            A setup behavior that creates the spy wrapper.
+        SpyBehavior[M]
+            A behavior wrapper that observes all processed messages.
 
         Examples
         --------
         >>> spy_behavior = Behaviors.spy(my_behavior, observer_ref)
         >>> ref = system.spawn(spy_behavior, "my-actor")
         """
-        from casty.messages import Terminated as TerminatedMsg
-
-        async def setup(ctx: ActorContext[M]) -> Behavior[M]:
-            child = ctx.spawn(behavior, "target")
-            ctx.watch(child)
-            actor_path = ctx.self.address.path
-
-            async def receive(ctx: ActorContext[M], msg: M) -> Behavior[M]:
-                match msg:
-                    case TerminatedMsg():
-                        observer.tell(SpyEvent(actor_path=actor_path, event=msg, timestamp=time.monotonic()))
-                        return Behaviors.stopped()
-                    case _:
-                        observer.tell(SpyEvent(actor_path=actor_path, event=msg, timestamp=time.monotonic()))
-                        child.tell(msg)
-                        return Behaviors.same()
-
-            return Behaviors.receive(receive)
-
-        return SetupBehavior(setup)
+        return SpyBehavior(inner=behavior, observer=observer)
