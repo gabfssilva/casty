@@ -7,8 +7,8 @@
   --md-primary-fg-color--dark: #000000;
   --md-primary-bg-color: #ffffff;
   --md-primary-bg-color--light: #ffffffb3;
-  --md-accent-fg-color: #999999;
-  --md-accent-fg-color--transparent: #99999933;
+  --md-accent-fg-color: #cccccc;
+  --md-accent-fg-color--transparent: #cccccc33;
 }
 
 /* Light mode */
@@ -18,8 +18,32 @@
   --md-primary-fg-color--dark: #e0e0e0;
   --md-primary-bg-color: #111111;
   --md-primary-bg-color--light: #111111b3;
-  --md-accent-fg-color: #555555;
-  --md-accent-fg-color--transparent: #55555533;
+  --md-accent-fg-color: #333333;
+  --md-accent-fg-color--transparent: #33333333;
+}
+
+/* ── Content links ── */
+
+[data-md-color-scheme="slate"] .md-typeset a {
+  color: #ffffff;
+  text-decoration: underline;
+  text-decoration-color: #555555;
+  text-underline-offset: 2px;
+}
+
+[data-md-color-scheme="slate"] .md-typeset a:hover {
+  text-decoration-color: #ffffff;
+}
+
+[data-md-color-scheme="default"] .md-typeset a {
+  color: #000000;
+  text-decoration: underline;
+  text-decoration-color: #aaaaaa;
+  text-underline-offset: 2px;
+}
+
+[data-md-color-scheme="default"] .md-typeset a:hover {
+  text-decoration-color: #000000;
 }
 
 /* ── Headings ── */
