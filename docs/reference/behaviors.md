@@ -28,6 +28,8 @@
 
 ::: casty.ShardedBehavior
 
+::: casty.SpyEvent
+
 ::: casty.SnapshotPolicy
 
 ::: casty.SnapshotEvery

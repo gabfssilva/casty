@@ -10,6 +10,7 @@ with updated closure-captured state, rather than mutating variables in place.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
@@ -17,6 +18,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from casty.context import ActorContext
     from casty.journal import EventJournal
+    from casty.messages import Terminated
     from casty.ref import ActorRef
     from casty.replication import ReplicationConfig
     from casty.supervision import SupervisionStrategy
@@ -71,6 +73,28 @@ class BroadcastedBehavior[M]:
     """
 
     behavior: Behavior[M]
+
+
+@dataclass(frozen=True)
+class SpyEvent[M]:
+    """Event emitted by a spy wrapper for each message an actor receives.
+
+    Contains the actor's path, the observed event (either a message or
+    a ``Terminated`` signal), and a monotonic timestamp.
+
+    Parameters
+    ----------
+    actor_path : str
+        Path of the spied actor.
+    event : M | Terminated
+        The message received by the actor, or ``Terminated`` when it stops.
+    timestamp : float
+        Monotonic timestamp from ``time.monotonic()``.
+    """
+
+    actor_path: str
+    event: M | Terminated
+    timestamp: float
 
 
 @dataclass(frozen=True)
@@ -749,3 +773,52 @@ class Behaviors:
         return PersistedBehavior(
             events=tuple(events), then=then if then is not None else SameBehavior()
         )
+
+    @staticmethod
+    def spy[M](
+        behavior: Behavior[M],
+        observer: ActorRef[SpyEvent[M]],
+    ) -> SetupBehavior[M]:
+        """Wrap a behavior with a spy that reports all messages to an observer.
+
+        The spy is a parent actor that spawns the target as a child named
+        ``"target"``, forwards every message, and emits ``SpyEvent`` to the
+        observer for each message and when the target terminates.
+
+        Parameters
+        ----------
+        behavior : Behavior[M]
+            The behavior to spy on.
+        observer : ActorRef[SpyEvent[M]]
+            Ref that receives ``SpyEvent`` for every observed message.
+
+        Returns
+        -------
+        SetupBehavior[M]
+            A setup behavior that creates the spy wrapper.
+
+        Examples
+        --------
+        >>> spy_behavior = Behaviors.spy(my_behavior, observer_ref)
+        >>> ref = system.spawn(spy_behavior, "my-actor")
+        """
+        from casty.messages import Terminated as TerminatedMsg
+
+        async def setup(ctx: ActorContext[M]) -> Behavior[M]:
+            child = ctx.spawn(behavior, "target")
+            ctx.watch(child)
+            actor_path = ctx.self.address.path
+
+            async def receive(ctx: ActorContext[M], msg: M) -> Behavior[M]:
+                match msg:
+                    case TerminatedMsg():
+                        observer.tell(SpyEvent(actor_path=actor_path, event=msg, timestamp=time.monotonic()))
+                        return Behaviors.stopped()
+                    case _:
+                        observer.tell(SpyEvent(actor_path=actor_path, event=msg, timestamp=time.monotonic()))
+                        child.tell(msg)
+                        return Behaviors.same()
+
+            return Behaviors.receive(receive)
+
+        return SetupBehavior(setup)

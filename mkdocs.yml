@@ -70,6 +70,7 @@ nav:
       - Supervision: concepts/supervision.md
       - State Machines: concepts/state-machines.md
       - Actor Runtime: concepts/actor-runtime.md
+      - Spy: concepts/spy.md
   - Persistence:
       - Event Sourcing: persistence/event-sourcing.md
   - Clustering:
