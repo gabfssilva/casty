@@ -106,10 +106,14 @@ class SpyBehavior[M]:
         The behavior to spy on.
     observer : ActorRef[SpyEvent[M]]
         Ref that receives ``SpyEvent`` for every observed message.
+    spy_children : bool
+        When True, children spawned by this actor are also automatically
+        spied with the same observer, recursively. Default is False.
     """
 
     inner: Behavior[M]
     observer: ActorRef[SpyEvent[M]]
+    spy_children: bool = False
 
 
 @dataclass(frozen=True)
@@ -794,6 +798,8 @@ class Behaviors:
     def spy[M](
         behavior: Behavior[M],
         observer: ActorRef[SpyEvent[M]],
+        *,
+        spy_children: bool = False,
     ) -> SpyBehavior[M]:
         """Wrap a behavior with a spy that reports all messages to an observer.
 
@@ -807,6 +813,9 @@ class Behaviors:
             The behavior to spy on.
         observer : ActorRef[SpyEvent[M]]
             Ref that receives ``SpyEvent`` for every observed message.
+        spy_children : bool
+            When True, children spawned by this actor are also automatically
+            spied with the same observer, recursively. Default is False.
 
         Returns
         -------
@@ -818,4 +827,4 @@ class Behaviors:
         >>> spy_behavior = Behaviors.spy(my_behavior, observer_ref)
         >>> ref = system.spawn(spy_behavior, "my-actor")
         """
-        return SpyBehavior(inner=behavior, observer=observer)
+        return SpyBehavior(inner=behavior, observer=observer, spy_children=spy_children)

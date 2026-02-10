@@ -103,6 +103,19 @@ ref = system.spawn(
 
 The observer itself is an ordinary actor — you can write it to log, collect metrics, filter events, or forward to an external system.
 
+## Spying on children
+
+By default, only the wrapped actor is observed. Pass `spy_children=True` to automatically spy on every child the actor spawns — recursively. All children (and their children) report to the same observer:
+
+```python
+ref = system.spawn(
+    Behaviors.spy(parent_behavior(), observer, spy_children=True),
+    "parent",
+)
+```
+
+When the parent spawns a child via `ctx.spawn(...)`, the child is transparently wrapped with the same spy observer and `spy_children=True`, so the propagation continues down the entire subtree. The `actor_path` field in each `SpyEvent` distinguishes which actor produced the event (e.g. `"/parent"` vs `"/parent/worker-1"`).
+
 ---
 
 **Next:** [Event Sourcing](../persistence/event-sourcing.md)

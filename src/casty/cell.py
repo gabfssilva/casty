@@ -58,6 +58,12 @@ class CellContext[M]:
         *,
         mailbox: Mailbox[C] | None = None,
     ) -> ActorRef[C]:
+        if self._cell.spy_children and self._cell.spy_observer is not None:
+            behavior = SpyBehavior(
+                inner=behavior,
+                observer=self._cell.spy_observer,
+                spy_children=True,
+            )
         child: ActorCell[C] = ActorCell(
             behavior=behavior,
             name=f"{self._cell.cell_name}/{name}",
@@ -170,6 +176,7 @@ class ActorCell[M]:
 
         # Spy
         self._spy_observer: ActorRef[SpyEvent[Any]] | None = None
+        self._spy_children: bool = False
 
         # Context
         self._ctx: CellContext[M] = CellContext(self)
@@ -241,6 +248,14 @@ class ActorCell[M]:
         return self._parent
 
     @property
+    def spy_observer(self) -> ActorRef[SpyEvent[Any]] | None:
+        return self._spy_observer
+
+    @property
+    def spy_children(self) -> bool:
+        return self._spy_children
+
+    @property
     def mailbox(self) -> Mailbox[Any]:
         return self._mailbox
 
@@ -289,13 +304,15 @@ class ActorCell[M]:
         self._post_restart = None
         self._strategy = None
         self._spy_observer = None
+        self._spy_children = False
         await self._unwrap_behavior(behavior)
 
     async def _unwrap_behavior(self, behavior: Behavior[M]) -> None:
         """Recursively process behavior layers."""
         match behavior:
-            case SpyBehavior(inner_behavior, observer):
+            case SpyBehavior(inner_behavior, observer, spy_children):
                 self._spy_observer = observer
+                self._spy_children = spy_children
                 await self._unwrap_behavior(inner_behavior)
 
             case SupervisedBehavior(inner_behavior, strategy):

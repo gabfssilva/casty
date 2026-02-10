@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
+from typing import Any
+
 from casty import (
     ActorContext,
     ActorRef,
@@ -277,3 +279,137 @@ async def test_spy_with_supervision() -> None:
         await asyncio.sleep(0.3)
 
         assert call_count >= 2
+
+
+@dataclass(frozen=True)
+class SpawnChild:
+    pass
+
+
+@dataclass(frozen=True)
+class ChildMsg:
+    value: int
+
+
+@dataclass(frozen=True)
+class GetChildRef:
+    reply_to: ActorRef[ActorRef[ChildMsg]]
+
+
+type ParentMsg = SpawnChild | GetChildRef
+
+
+def child_behavior() -> Behavior[ChildMsg]:
+    async def receive(ctx: ActorContext[ChildMsg], msg: ChildMsg) -> Behavior[ChildMsg]:
+        return Behaviors.same()
+
+    return Behaviors.receive(receive)
+
+
+def parent_behavior() -> Behavior[ParentMsg]:
+    def active(child_ref: ActorRef[ChildMsg] | None = None) -> Behavior[ParentMsg]:
+        async def receive(
+            ctx: ActorContext[ParentMsg], msg: ParentMsg
+        ) -> Behavior[ParentMsg]:
+            match msg:
+                case SpawnChild():
+                    ref = ctx.spawn(child_behavior(), "child")
+                    return active(ref)
+                case GetChildRef(reply_to=reply_to):
+                    if child_ref is not None:
+                        reply_to.tell(child_ref)
+                    return Behaviors.same()
+                case _:
+                    return Behaviors.unhandled()
+
+        return Behaviors.receive(receive)
+
+    return active()
+
+
+@dataclass(frozen=True)
+class GetAnyCollected:
+    reply_to: ActorRef[tuple[SpyEvent[Any], ...]]
+
+
+type AnyCollectorMsg = SpyEvent[Any] | GetAnyCollected
+
+
+def any_collector(
+    collected: tuple[SpyEvent[Any], ...] = (),
+) -> Behavior[AnyCollectorMsg]:
+    async def receive(
+        ctx: ActorContext[AnyCollectorMsg], msg: AnyCollectorMsg
+    ) -> Behavior[AnyCollectorMsg]:
+        match msg:
+            case GetAnyCollected(reply_to=reply_to):
+                reply_to.tell(collected)
+                return Behaviors.same()
+            case SpyEvent() as event:
+                return any_collector((*collected, event))
+            case _:
+                return Behaviors.unhandled()
+
+    return Behaviors.receive(receive)
+
+
+async def test_spy_children_observes_child_messages() -> None:
+    async with ActorSystem("spy-children") as system:
+        observer: ActorRef[AnyCollectorMsg] = system.spawn(
+            any_collector(), "observer"
+        )
+
+        spied = system.spawn(
+            Behaviors.spy(parent_behavior(), observer, spy_children=True),  # type: ignore[arg-type]
+            "parent",
+        )
+
+        spied.tell(SpawnChild())
+        await asyncio.sleep(0.1)
+
+        child_ref: ActorRef[ChildMsg] = await system.ask(
+            spied, lambda r: GetChildRef(reply_to=r), timeout=2.0  # type: ignore[arg-type]
+        )
+
+        child_ref.tell(ChildMsg(value=42))
+        await asyncio.sleep(0.1)
+
+        events: tuple[SpyEvent[Any], ...] = await system.ask(
+            observer, lambda r: GetAnyCollected(reply_to=r), timeout=2.0
+        )
+
+        parent_events = [e for e in events if "/parent" == e.actor_path.rstrip("/")]
+        child_events = [e for e in events if "/parent/child" in e.actor_path]
+
+        assert len(parent_events) >= 1
+        assert len(child_events) >= 1
+        assert any(isinstance(e.event, ChildMsg) and e.event.value == 42 for e in child_events)
+
+
+async def test_spy_children_false_does_not_spy_children() -> None:
+    async with ActorSystem("spy-no-children") as system:
+        observer: ActorRef[AnyCollectorMsg] = system.spawn(
+            any_collector(), "observer"
+        )
+
+        spied = system.spawn(
+            Behaviors.spy(parent_behavior(), observer),  # type: ignore[arg-type]
+            "parent",
+        )
+
+        spied.tell(SpawnChild())
+        await asyncio.sleep(0.1)
+
+        child_ref: ActorRef[ChildMsg] = await system.ask(
+            spied, lambda r: GetChildRef(reply_to=r), timeout=2.0  # type: ignore[arg-type]
+        )
+
+        child_ref.tell(ChildMsg(value=99))
+        await asyncio.sleep(0.1)
+
+        events: tuple[SpyEvent[Any], ...] = await system.ask(
+            observer, lambda r: GetAnyCollected(reply_to=r), timeout=2.0
+        )
+
+        child_events = [e for e in events if "/parent/child" in e.actor_path]
+        assert len(child_events) == 0
