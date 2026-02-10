@@ -6,8 +6,8 @@ repo_name: gabfssilva/casty
 
 theme:
   name: material
-  logo: logo.png
-  favicon: logo.png
+  logo: logo_bw.png
+  favicon: logo_bw.png
   font:
     text: Space Grotesk
     code: Space Mono
