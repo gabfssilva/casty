@@ -22,6 +22,7 @@ theme:
         icon: material/brightness-7
         name: Switch to dark mode
   features:
+    - navigation.tabs
     - navigation.sections
     - navigation.expand
     - navigation.top
@@ -59,49 +60,49 @@ markdown_extensions:
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 nav:
-  - Home: index.md
-  - Getting Started: getting-started/index.md
-  - Concepts:
-      - Actors and Messages: concepts/actors-and-messages.md
-      - Behaviors as Values: concepts/behaviors.md
-      - Functional State: concepts/functional-state.md
-      - Request-Reply: concepts/request-reply.md
-      - Pipe to Self: concepts/pipe-to-self.md
-      - Actor Hierarchies: concepts/actor-hierarchies.md
-      - Supervision: concepts/supervision.md
-      - State Machines: concepts/state-machines.md
-      - Actor Runtime: concepts/actor-runtime.md
-      - Spy: concepts/spy.md
-  - Persistence:
-      - Event Sourcing: persistence/event-sourcing.md
-  - Clustering:
-      - Cluster Sharding: clustering/cluster-sharding.md
-      - Cluster Broadcast: clustering/cluster-broadcast.md
-      - Shard Replication: clustering/shard-replication.md
-      - Distributed Data Structures: clustering/distributed-data-structures.md
-      - TLS: clustering/tls.md
-      - Cluster Backend: clustering/cluster-backend.md
-  - Configuration: configuration/index.md
+  - Home:
+      - Home: index.md
+      - Getting Started: getting-started/index.md
+      - Concepts:
+          - Actors and Messages: concepts/actors-and-messages.md
+          - Behaviors as Values: concepts/behaviors.md
+          - Functional State: concepts/functional-state.md
+          - Request-Reply: concepts/request-reply.md
+          - Pipe to Self: concepts/pipe-to-self.md
+          - Actor Hierarchies: concepts/actor-hierarchies.md
+          - Supervision: concepts/supervision.md
+          - State Machines: concepts/state-machines.md
+          - Actor Runtime: concepts/actor-runtime.md
+          - Spy: concepts/spy.md
+          - Event Sourcing: persistence/event-sourcing.md
+      - Clustering:
+          - Cluster Sharding: clustering/cluster-sharding.md
+          - Cluster Broadcast: clustering/cluster-broadcast.md
+          - Shard Replication: clustering/shard-replication.md
+          - Distributed Data Structures: clustering/distributed-data-structures.md
+          - TLS: clustering/tls.md
+          - Cluster Backend: clustering/cluster-backend.md
+      - Configuration: configuration/index.md
+      - Acknowledgments: acknowledgments.md
   - API Reference:
       - Core:
           - Behaviors: reference/behaviors.md
           - ActorRef: reference/ref.md
           - ActorContext: reference/context.md
           - ActorSystem: reference/system.md
-      - Supervision: reference/supervision.md
-      - Mailbox: reference/mailbox.md
-      - Events: reference/events.md
-      - Event Sourcing: reference/journal.md
-      - Scheduler: reference/scheduler.md
-      - Cluster:
+          - Supervision: reference/supervision.md
+          - Mailbox: reference/mailbox.md
+          - Events: reference/events.md
+          - Scheduler: reference/scheduler.md
+          - Event Sourcing: reference/journal.md
+      - Clustering:
           - Cluster: reference/cluster.md
           - Cluster State: reference/cluster-state.md
           - Failure Detector: reference/failure-detector.md
-      - Sharding: reference/sharding.md
+          - Sharding: reference/sharding.md
+          - Distributed: reference/distributed.md
       - Remoting:
           - Address: reference/address.md
           - Transport: reference/transport.md
           - Serialization: reference/serialization.md
-      - Distributed: reference/distributed.md
       - Configuration: reference/config.md
-  - Acknowledgments: acknowledgments.md
