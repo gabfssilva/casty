@@ -112,6 +112,27 @@ class CellContext[M]:
                     sibling.watchers.discard(self._cell)
                     return
 
+    def pipe_to_self[T](
+        self,
+        coro: Awaitable[T],
+        mapper: Callable[[T], M],
+        on_failure: Callable[[Exception], M] | None = None,
+    ) -> None:
+        async def run() -> None:
+            try:
+                result = await coro
+                self._cell.ref.tell(mapper(result))
+            except Exception as exc:
+                if on_failure is not None:
+                    self._cell.ref.tell(on_failure(exc))
+                else:
+                    self._cell.logger.warning(
+                        "pipe_to_self failed (no on_failure handler): %s",
+                        exc,
+                    )
+
+        asyncio.get_running_loop().create_task(run())
+
 
 class ActorCell[M]:
     """Internal runtime engine for an actor.
@@ -184,7 +205,10 @@ class ActorCell[M]:
         # Create the ref with address + transport
         effective_transport: MessageTransport = ref_transport or local_transport
         addr = ActorAddress(
-            system=system_name, path=f"/{name}", host=ref_host, port=ref_port,
+            system=system_name,
+            path=f"/{name}",
+            host=ref_host,
+            port=ref_port,
             node_id=ref_node_id,
         )
         self._ref: ActorRef[M] = ActorRef(address=addr, _transport=effective_transport)
@@ -371,7 +395,9 @@ class ActorCell[M]:
         if snapshot is not None:
             self._es_state = snapshot.state
             self._es_sequence_nr = snapshot.sequence_nr
-            self._logger.debug("Recovering from snapshot seq_nr=%d", snapshot.sequence_nr)
+            self._logger.debug(
+                "Recovering from snapshot seq_nr=%d", snapshot.sequence_nr
+            )
 
         # Load and replay events after snapshot
         events = await self._es_journal.load(
@@ -381,7 +407,11 @@ class ActorCell[M]:
             self._es_state = self._es_on_event(self._es_state, persisted.event)
             self._es_sequence_nr = persisted.sequence_nr
         if events:
-            self._logger.debug("Recovered: replayed %d events to seq_nr=%d", len(events), self._es_sequence_nr)
+            self._logger.debug(
+                "Recovered: replayed %d events to seq_nr=%d",
+                len(events),
+                self._es_sequence_nr,
+            )
 
     async def _run_loop(self) -> None:
         """Main message processing loop."""
@@ -403,20 +433,24 @@ class ActorCell[M]:
                         next_behavior = await self._current_handler(self._ctx, msg)
                 except Exception as exc:
                     if self._spy_observer is not None:
-                        self._spy_observer.tell(SpyEvent(
-                            actor_path=self._ref.address.path,
-                            event=msg,
-                            timestamp=_time.monotonic(),
-                        ))
+                        self._spy_observer.tell(
+                            SpyEvent(
+                                actor_path=self._ref.address.path,
+                                event=msg,
+                                timestamp=_time.monotonic(),
+                            )
+                        )
                     await self._handle_failure(exc)
                     continue
 
                 if self._spy_observer is not None:
-                    self._spy_observer.tell(SpyEvent(
-                        actor_path=self._ref.address.path,
-                        event=msg,
-                        timestamp=_time.monotonic(),
-                    ))
+                    self._spy_observer.tell(
+                        SpyEvent(
+                            actor_path=self._ref.address.path,
+                            event=msg,
+                            timestamp=_time.monotonic(),
+                        )
+                    )
 
                 # Handle PersistedBehavior for event-sourced actors
                 match next_behavior:
@@ -482,7 +516,9 @@ class ActorCell[M]:
 
         # Persist to journal
         await self._es_journal.persist(self._es_entity_id, wrapped)
-        self._logger.debug("Persisted %d events (seq_nr=%d)", len(wrapped), self._es_sequence_nr)
+        self._logger.debug(
+            "Persisted %d events (seq_nr=%d)", len(wrapped), self._es_sequence_nr
+        )
 
         # Apply events to state
         for persisted_event in wrapped:
@@ -500,18 +536,27 @@ class ActorCell[M]:
                     )
                     await self._es_journal.save_snapshot(self._es_entity_id, snapshot)
                     self._es_events_since_snapshot = 0
-                    self._logger.debug("Snapshot saved at seq_nr=%d", self._es_sequence_nr)
+                    self._logger.debug(
+                        "Snapshot saved at seq_nr=%d", self._es_sequence_nr
+                    )
             case _:
                 pass
 
         # Push to replicas
         if self._es_replica_refs:
             from casty.replication import ReplicateEvents
+
             replication_msg = ReplicateEvents(
                 entity_id=self._es_entity_id,
                 shard_id=0,
                 events=tuple(wrapped),
-                reply_to=self._ref if (self._es_replication is not None and hasattr(self._es_replication, 'min_acks') and self._es_replication.min_acks > 0) else None,
+                reply_to=self._ref
+                if (
+                    self._es_replication is not None
+                    and hasattr(self._es_replication, "min_acks")
+                    and self._es_replication.min_acks > 0
+                )
+                else None,
             )
             for replica_ref in self._es_replica_refs:
                 replica_ref.tell(replication_msg)
@@ -519,8 +564,11 @@ class ActorCell[M]:
         # Wait for acks if required
         if self._es_replica_refs:
             from casty.replication import ReplicationConfig
+
             match self._es_replication:
-                case ReplicationConfig(min_acks=min_acks, ack_timeout=ack_timeout) if min_acks > 0:
+                case ReplicationConfig(min_acks=min_acks, ack_timeout=ack_timeout) if (
+                    min_acks > 0
+                ):
                     acks_needed = min(min_acks, len(self._es_replica_refs))
                     ack_count = 0
                     deadline = _time.monotonic() + ack_timeout
@@ -536,7 +584,9 @@ class ActorCell[M]:
                         except asyncio.TimeoutError:
                             self._logger.warning(
                                 "Replication ack timeout for %s: got %d/%d acks",
-                                self._es_entity_id, ack_count, acks_needed,
+                                self._es_entity_id,
+                                ack_count,
+                                acks_needed,
                             )
                             break
                 case _:

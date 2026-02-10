@@ -11,6 +11,8 @@ import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from casty.actor import Behavior
     from casty.mailbox import Mailbox
     from casty.ref import ActorRef
@@ -135,5 +137,39 @@ class ActorContext[M](Protocol):
         Examples
         --------
         >>> ctx.unwatch(worker_ref)
+        """
+        ...
+
+    def pipe_to_self[T](
+        self,
+        coro: Awaitable[T],
+        mapper: Callable[[T], M],
+        on_failure: Callable[[Exception], M] | None = None,
+    ) -> None:
+        """Run an async operation in background and send the result back as a message.
+
+        The coroutine runs as a detached ``asyncio.Task``. On success,
+        ``mapper(result)`` is sent to the actor via ``self.tell()``.
+        On failure, ``on_failure(exception)`` is sent instead — or if
+        ``on_failure`` is ``None``, a warning is logged and the exception
+        is discarded.
+
+        Parameters
+        ----------
+        coro : Awaitable[T]
+            The async operation to run in background.
+        mapper : Callable[[T], M]
+            Maps the successful result to a message for this actor.
+        on_failure : Callable[[Exception], M] or None
+            Maps a failure to a message. If ``None``, failures are logged
+            and discarded.
+
+        Examples
+        --------
+        >>> ctx.pipe_to_self(
+        ...     fetch_user(user_id),
+        ...     lambda user: UserFound(user),
+        ...     on_failure=lambda exc: UserFetchFailed(exc),
+        ... )
         """
         ...
