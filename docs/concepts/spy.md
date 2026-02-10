@@ -5,12 +5,6 @@ Actors are opaque by design — you send messages in and observe effects out, bu
 `Behaviors.spy()` wraps any behavior with a transparent observer. The spy is a **cell-level wrapper** — like `SupervisedBehavior` or `LifecycleBehavior` — so the cell itself emits a `SpyEvent` after processing each message. This means **all** messages are captured, including self-tells (`ctx.self.tell(...)`).
 
 ```python
-import asyncio
-from dataclasses import dataclass
-
-from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, SpyEvent
-
-
 @dataclass(frozen=True)
 class Deposit:
     amount: int

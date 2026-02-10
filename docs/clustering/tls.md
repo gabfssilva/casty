@@ -9,9 +9,6 @@ and event replication — every TCP connection the cluster opens.
 Pass a `Config` with paths to your certificate, CA, and (optionally) private key:
 
 ```python
-from casty.tls import Config
-from casty.sharding import ClusteredActorSystem
-
 async with ClusteredActorSystem(
     name="my-cluster",
     host="10.0.0.1",
@@ -59,9 +56,6 @@ suites, OCSP stapling, hardware-backed keys — build `ssl.SSLContext` objects a
 pass them directly:
 
 ```python
-import ssl
-from casty.tls import Config
-
 server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 server_ctx.load_cert_chain("certs/node.pem", "certs/node.key")
 server_ctx.verify_mode = ssl.CERT_REQUIRED
@@ -110,10 +104,6 @@ For **tests**, use [trustme](https://trustme.readthedocs.io/) to generate
 throwaway CAs and certificates in memory — no OpenSSL binary, no temp files:
 
 ```python
-import ssl
-import trustme
-from casty.tls import Config
-
 ca = trustme.CA()
 server_cert = ca.issue_cert("127.0.0.1")
 

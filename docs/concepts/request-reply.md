@@ -3,10 +3,6 @@
 Actors communicate via fire-and-forget `tell()` by default. When a response is needed, the actor model uses the **reply-to pattern**: the sender includes its own `ActorRef` in the message so the receiver can send a response back.
 
 ```python
-import asyncio
-from dataclasses import dataclass
-from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
-
 @dataclass(frozen=True)
 class Deposit:
     amount: int

@@ -7,8 +7,6 @@ The following concepts control the operational behavior of actors. They are grou
 Actors transition through a defined lifecycle: start, stop, and (if supervised) restart. Lifecycle hooks allow executing side effects at each boundary — acquiring resources on start, releasing them on stop, logging on restart:
 
 ```python
-from casty import ActorContext, Behavior, Behaviors
-
 def my_actor() -> Behavior[str]:
     async def pre_start(ctx: ActorContext[str]) -> None:
         ctx.log.info("Actor starting")
@@ -33,8 +31,6 @@ Available hooks: `pre_start` (before first message), `post_stop` (after final me
 The `EventStream` is a system-wide publish/subscribe bus for observability. Every significant actor lifecycle event is published automatically:
 
 ```python
-from casty import ActorStarted, ActorStopped, DeadLetter
-
 system.event_stream.subscribe(ActorStarted, lambda e: print(f"Started: {e.ref}"))
 system.event_stream.subscribe(ActorStopped, lambda e: print(f"Stopped: {e.ref}"))
 system.event_stream.subscribe(DeadLetter, lambda e: print(f"Dead letter: {e.message}"))
@@ -49,8 +45,6 @@ Available events: `ActorStarted`, `ActorStopped`, `ActorRestarted`, `DeadLetter`
 Each actor has a mailbox — a bounded queue that buffers incoming messages. When messages arrive faster than the actor can process them, the overflow strategy determines what happens:
 
 ```python
-from casty import Mailbox, MailboxOverflowStrategy
-
 ref = system.spawn(
     my_behavior(),
     "bounded-actor",

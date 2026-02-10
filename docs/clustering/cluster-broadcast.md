@@ -3,12 +3,6 @@
 Sharding routes messages to a **single** entity via its ID. But some scenarios require sending a message to **all** nodes — configuration updates, cache invalidation, system-wide announcements. `Behaviors.broadcasted()` wraps any behavior so that `tell()` automatically fans out to every cluster member and `ask()` collects all responses:
 
 ```python
-import asyncio
-import socket
-from dataclasses import dataclass
-from casty import ActorRef, Behavior, Behaviors, BroadcastRef
-from casty.sharding import ClusteredActorSystem
-
 @dataclass(frozen=True)
 class Announcement:
     text: str

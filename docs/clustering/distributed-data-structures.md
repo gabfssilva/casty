@@ -5,11 +5,6 @@ For common patterns that don't require custom entity actors, Casty provides high
 Every concept from the previous sections — actors, functional state, event sourcing, cluster sharding — converges here. A `Counter`, for example, is a sharded actor with a predefined message protocol, distributed transparently across the cluster.
 
 ```python
-import asyncio
-from dataclasses import dataclass
-from casty.sharding import ClusteredActorSystem
-from casty.journal import InMemoryJournal
-
 @dataclass(frozen=True)
 class User:
     name: str

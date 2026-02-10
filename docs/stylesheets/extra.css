@@ -1,0 +1,61 @@
+/* ── Monochrome palette ── */
+
+/* Dark mode */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #111111;
+  --md-primary-fg-color--light: #1a1a1a;
+  --md-primary-fg-color--dark: #000000;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: #ffffffb3;
+  --md-accent-fg-color: #999999;
+  --md-accent-fg-color--transparent: #99999933;
+}
+
+/* Light mode */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #ffffff;
+  --md-primary-fg-color--light: #f5f5f5;
+  --md-primary-fg-color--dark: #e0e0e0;
+  --md-primary-bg-color: #111111;
+  --md-primary-bg-color--light: #111111b3;
+  --md-accent-fg-color: #555555;
+  --md-accent-fg-color--transparent: #55555533;
+}
+
+/* ── Headings ── */
+
+.md-typeset h1 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.md-typeset h2 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.md-typeset h3 {
+  font-weight: 600;
+}
+
+/* ── Active nav items ── */
+
+.md-nav__link--active,
+.md-nav__item .md-nav__link--active {
+  font-weight: 700;
+  color: var(--md-primary-bg-color) !important;
+}
+
+/* ── Sidebar nav ── */
+
+.md-nav__title {
+  font-weight: 600;
+}
+
+.md-nav__item .md-nav__link {
+  font-size: 0.72rem;
+}
+
+.md-sidebar--secondary .md-nav__link {
+  font-size: 0.68rem;
+}

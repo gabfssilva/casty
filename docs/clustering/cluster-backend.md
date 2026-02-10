@@ -11,9 +11,6 @@ The following sections illustrate these capabilities through the lens of buildin
 `ClusteredActorSystem` establishes a cluster through seed nodes. Once started, nodes discover each other automatically via the gossip protocol. The event stream publishes membership events as nodes join and leave:
 
 ```python
-from casty import MemberUp, MemberLeft
-from casty.sharding import ClusteredActorSystem
-
 async with ClusteredActorSystem(
     name="task-queue",
     host="10.0.0.1",
@@ -37,8 +34,6 @@ Every node in the cluster runs the same code. There is no distinction between "b
 `Behaviors.sharded()` partitions work across nodes by entity ID. For a task queue, each task type or queue name can be an entity, and the cluster handles routing transparently:
 
 ```python
-from casty import Behaviors, ShardEnvelope
-
 def task_worker(entity_id: str) -> Behavior[TaskMsg]:
     def idle() -> Behavior[TaskMsg]:
         async def receive(ctx, msg):
@@ -64,8 +59,6 @@ The entity ID determines which node processes the task. Tasks with the same queu
 When a node becomes unreachable, the phi accrual failure detector identifies it and the coordinator reallocates its shards to surviving nodes. No manual intervention, no external health check service:
 
 ```python
-from casty import UnreachableMember
-
 system.event_stream.subscribe(
     UnreachableMember,
     lambda e: log.warning(f"Node unreachable: {e.member.address}, shards will be reallocated"),
@@ -91,10 +84,6 @@ Barriers, locks, and semaphores are also available through the `Distributed` fac
 Event sourcing combined with replication provides durable distributed state without a database. The primary persists events to its journal and pushes them to replicas on other nodes. If the primary fails, a replica is promoted with its full event history intact:
 
 ```python
-from casty import Behaviors
-from casty.journal import InMemoryJournal
-from casty.replication import ReplicationConfig
-
 journal = InMemoryJournal()  # replace with a database-backed journal in production
 
 tasks = system.spawn(

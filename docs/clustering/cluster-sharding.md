@@ -13,11 +13,6 @@ Cluster sharding has three components:
 Underneath the sharding layer, Casty implements a **gossip protocol** for cluster state propagation, a **phi accrual failure detector** (Hayashibara et al.) for identifying unresponsive nodes, and **vector clocks** for resolving conflicting state during network partitions.
 
 ```python
-import asyncio
-from dataclasses import dataclass
-from casty import ActorContext, ActorRef, Behavior, Behaviors, ShardEnvelope
-from casty.sharding import ClusteredActorSystem
-
 @dataclass(frozen=True)
 class Deposit:
     amount: int

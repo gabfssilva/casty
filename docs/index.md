@@ -27,10 +27,6 @@ Casty is a typed, clustered actor framework for Python built on asyncio. Pure Py
 ## Quick Example
 
 ```python
-import asyncio
-from dataclasses import dataclass
-from casty import ActorContext, ActorSystem, Behavior, Behaviors
-
 @dataclass(frozen=True)
 class Greet:
     name: str

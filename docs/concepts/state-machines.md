@@ -3,10 +3,6 @@
 Because behaviors are values and state transitions are function calls, finite state machines emerge as a natural pattern. Each state is a behavior function, each transition is a return value. No enum, no conditional dispatch on a status field — the behavior **is** the state.
 
 ```python
-import asyncio
-from dataclasses import dataclass
-from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
-
 @dataclass(frozen=True)
 class Item:
     name: str

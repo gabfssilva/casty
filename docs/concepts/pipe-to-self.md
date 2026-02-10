@@ -7,12 +7,6 @@ Actors process one message at a time. When an actor needs to call an async funct
 `ctx.pipe_to_self()` dispatches a coroutine as a background `asyncio.Task` and sends the mapped result back to the actor's mailbox, preserving the sequential message-processing guarantee without blocking.
 
 ```python
-import asyncio
-from dataclasses import dataclass
-
-from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
-
-
 @dataclass(frozen=True)
 class FetchUser:
     user_id: str

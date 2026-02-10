@@ -5,10 +5,6 @@ The actor model requires each actor to designate the behavior for its *next* mes
 Consider a bank account actor that tracks a balance:
 
 ```python
-import asyncio
-from dataclasses import dataclass
-from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
-
 @dataclass(frozen=True)
 class Deposit:
     amount: int

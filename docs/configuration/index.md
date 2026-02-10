@@ -81,8 +81,6 @@ name = "my-app"
 `load_config()` accepts an explicit path or discovers `casty.toml` automatically by walking up from the current working directory (like `pyproject.toml`):
 
 ```python
-from casty import load_config
-
 # Auto-discovery — walks up from CWD looking for casty.toml
 config = load_config()
 
@@ -93,8 +91,6 @@ config = load_config(Path("infra/casty.toml"))
 For a local `ActorSystem`, pass the config to the constructor:
 
 ```python
-from casty import ActorSystem, load_config
-
 config = load_config()
 
 async with ActorSystem(config=config) as system:
@@ -105,9 +101,6 @@ async with ActorSystem(config=config) as system:
 For a `ClusteredActorSystem`, use `from_config` to derive host, port, seed nodes, and cluster tuning from the `[cluster]` section:
 
 ```python
-from casty import load_config
-from casty.sharding import ClusteredActorSystem
-
 config = load_config()
 
 async with ClusteredActorSystem.from_config(config) as system:

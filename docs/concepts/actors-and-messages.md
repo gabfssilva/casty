@@ -11,9 +11,6 @@ That's the entire model. There is no shared memory between actors, no synchroniz
 A **message** is any value sent to an actor. In Casty, messages are frozen dataclasses — immutable by construction. Related messages are grouped using PEP 695 type aliases, which enables exhaustive pattern matching via `match` statements:
 
 ```python
-from dataclasses import dataclass
-from casty import ActorRef
-
 @dataclass(frozen=True)
 class Deposit:
     amount: int

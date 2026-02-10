@@ -12,9 +12,6 @@ The `min_acks` parameter controls the consistency/latency trade-off:
 | `1+` | The primary waits for N replica acknowledgments before confirming the command. Stronger durability at the cost of increased latency. |
 
 ```python
-from casty import Behaviors
-from casty.replication import ReplicationConfig
-
 accounts = node.spawn(
     Behaviors.sharded(
         account_entity,

@@ -5,10 +5,6 @@ Actors form a tree. When an actor spawns a child via `ctx.spawn()`, it becomes t
 `Behaviors.setup()` provides access to the `ActorContext` at initialization time, which is where children are typically spawned:
 
 ```python
-import asyncio
-from dataclasses import dataclass
-from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, Terminated
-
 @dataclass(frozen=True)
 class Task:
     description: str

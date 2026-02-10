@@ -11,10 +11,6 @@ Casty requires **Python 3.12+** and has zero external dependencies — stdlib on
 ## Your First Actor
 
 ```python
-import asyncio
-from dataclasses import dataclass
-from casty import ActorContext, ActorSystem, Behavior, Behaviors
-
 @dataclass(frozen=True)
 class Greet:
     name: str

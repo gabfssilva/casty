@@ -13,9 +13,6 @@ A supervisor is any actor that has spawned children. The supervision strategy de
 `OneForOneStrategy` supervises each child independently. It tracks restart counts within a configurable time window — if a child exceeds the limit, it is stopped instead of restarted:
 
 ```python
-import asyncio
-from casty import ActorContext, ActorSystem, Behavior, Behaviors, Directive, OneForOneStrategy
-
 def unreliable_worker() -> Behavior[str]:
     async def receive(ctx: ActorContext[str], msg: str) -> Behavior[str]:
         if msg == "crash":

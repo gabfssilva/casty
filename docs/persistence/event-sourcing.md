@@ -20,13 +20,6 @@ A regular Casty actor holds state in a closure — but closures cannot be replay
 - `on_command(ctx, state, command) -> Behavior` — An async function that receives the current state and a command, decides what events to persist, and returns `Behaviors.persisted(events=[...])`.
 
 ```python
-import asyncio
-from dataclasses import dataclass
-from typing import Any
-from casty import ActorRef, ActorSystem, Behavior, Behaviors
-from casty.actor import SnapshotEvery
-from casty.journal import InMemoryJournal
-
 # --- State ---
 
 @dataclass(frozen=True)
