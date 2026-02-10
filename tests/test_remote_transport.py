@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import ssl
-import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
+import trustme
 
 from casty.address import ActorAddress
 from casty.ref import ActorRef
@@ -285,44 +284,23 @@ async def test_tcp_transport_connection_retry() -> None:
 
 
 @pytest.fixture()
-def tls_certs(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """Generate self-signed CA + server cert for testing."""
-    ca_key = tmp_path / "ca.key"
-    ca_cert = tmp_path / "ca.pem"
-    srv_key = tmp_path / "server.key"
-    srv_csr = tmp_path / "server.csr"
-    srv_cert = tmp_path / "server.pem"
-
-    subprocess.run(
-        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(ca_key),
-         "-out", str(ca_cert), "-days", "1", "-nodes", "-subj", "/CN=TestCA"],
-        check=True, capture_output=True,
-    )
-    subprocess.run(
-        ["openssl", "req", "-newkey", "rsa:2048", "-keyout", str(srv_key),
-         "-out", str(srv_csr), "-nodes", "-subj", "/CN=127.0.0.1"],
-        check=True, capture_output=True,
-    )
-    # Sign with SAN for IP
-    ext_file = tmp_path / "ext.cnf"
-    ext_file.write_text("subjectAltName=IP:127.0.0.1\n")
-    subprocess.run(
-        ["openssl", "x509", "-req", "-in", str(srv_csr), "-CA", str(ca_cert),
-         "-CAkey", str(ca_key), "-CAcreateserial", "-out", str(srv_cert),
-         "-days", "1", "-extfile", str(ext_file)],
-        check=True, capture_output=True,
-    )
-    return srv_cert, srv_key, ca_cert
-
-
-async def test_tcp_transport_tls(tls_certs: tuple[Path, Path, Path]) -> None:
-    srv_cert, srv_key, ca_cert = tls_certs
+def tls_contexts() -> tuple[ssl.SSLContext, ssl.SSLContext]:
+    """Generate TLS contexts for testing using trustme."""
+    ca = trustme.CA()
+    server_cert = ca.issue_cert("127.0.0.1")
 
     server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_ctx.load_cert_chain(str(srv_cert), str(srv_key))
+    server_cert.configure_cert(server_ctx)
+    ca.configure_trust(server_ctx)
 
     client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    client_ctx.load_verify_locations(str(ca_cert))
+    ca.configure_trust(client_ctx)
+
+    return server_ctx, client_ctx
+
+
+async def test_tcp_transport_tls(tls_contexts: tuple[ssl.SSLContext, ssl.SSLContext]) -> None:
+    server_ctx, client_ctx = tls_contexts
 
     received: list[bytes] = []
 

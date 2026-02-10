@@ -81,6 +81,7 @@ from casty.serialization import JsonSerializer, PickleSerializer, Serializer, Ty
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
 from casty.supervision import Directive, OneForOneStrategy, SupervisionStrategy
 from casty.system import ActorSystem
+from casty import tls
 from casty.transport import LocalTransport, MessageTransport
 
 __all__ = [
@@ -188,6 +189,8 @@ __all__ = [
     "ClusteredActorSystem",
     "ShardedBehavior",
     "ShardEnvelope",
+    # TLS
+    "tls",
     # Distributed Data Structures
     "Distributed",
     "Barrier",

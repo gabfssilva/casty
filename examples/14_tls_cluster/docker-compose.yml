@@ -1,0 +1,70 @@
+x-node: &node
+  build:
+    context: ../..
+    dockerfile: examples/14_tls_cluster/Dockerfile
+
+services:
+  node-1:
+    <<: *node
+    hostname: node-1
+    command:
+      [
+        "--port", "25520",
+        "--host", "node-1",
+        "--bind-host", "0.0.0.0",
+        "--nodes", "5",
+        "--certfile", "certs/node-1.pem",
+        "--cafile", "certs/ca.pem",
+      ]
+  node-2:
+    <<: *node
+    hostname: node-2
+    command:
+      [
+        "--port", "25520",
+        "--host", "node-2",
+        "--bind-host", "0.0.0.0",
+        "--seed", "node-1:25520",
+        "--nodes", "5",
+        "--certfile", "certs/node-2.pem",
+        "--cafile", "certs/ca.pem",
+      ]
+  node-3:
+    <<: *node
+    hostname: node-3
+    command:
+      [
+        "--port", "25520",
+        "--host", "node-3",
+        "--bind-host", "0.0.0.0",
+        "--seed", "node-1:25520",
+        "--nodes", "5",
+        "--certfile", "certs/node-3.pem",
+        "--cafile", "certs/ca.pem",
+      ]
+  node-4:
+    <<: *node
+    hostname: node-4
+    command:
+      [
+        "--port", "25520",
+        "--host", "node-4",
+        "--bind-host", "0.0.0.0",
+        "--seed", "node-1:25520",
+        "--nodes", "5",
+        "--certfile", "certs/node-4.pem",
+        "--cafile", "certs/ca.pem",
+      ]
+  node-5:
+    <<: *node
+    hostname: node-5
+    command:
+      [
+        "--port", "25520",
+        "--host", "node-5",
+        "--bind-host", "0.0.0.0",
+        "--seed", "node-1:25520",
+        "--nodes", "5",
+        "--certfile", "certs/node-5.pem",
+        "--cafile", "certs/ca.pem",
+      ]

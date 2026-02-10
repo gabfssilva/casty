@@ -44,6 +44,11 @@ interval = 1.0
 interval = 0.5
 availability_check_interval = 2.0
 
+[cluster.tls]
+certfile = "certs/node.pem"
+cafile = "certs/ca.pem"
+# keyfile = "certs/node.key"  # optional, if key is separate from certfile
+
 [cluster.failure_detector]
 threshold = 8.0
 max_sample_size = 200
@@ -106,7 +111,7 @@ from casty.sharding import ClusteredActorSystem
 config = load_config()
 
 async with ClusteredActorSystem.from_config(config) as system:
-    # host, port, seed_nodes, roles, gossip interval,
+    # host, port, seed_nodes, roles, TLS, gossip interval,
     # heartbeat interval, failure detector — all from casty.toml
     ...
 ```

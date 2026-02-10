@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from casty.cluster import ClusterConfig
 from casty.replication import ReplicationConfig
+from casty.tls import Config as TlsConfig
 
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "ResolvedActorConfig",
     "ShardingConfig",
     "SupervisionConfig",
+    "TlsConfig",
     "TransportConfig",
     "discover_config",
     "load_config",
@@ -295,6 +297,7 @@ class CastyConfig:
     """
     system_name: str = "casty"
     cluster: ClusterConfig | None = None
+    tls: TlsConfig | None = None
     transport: TransportConfig = field(default_factory=TransportConfig)
     gossip: GossipConfig = field(default_factory=GossipConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
@@ -449,6 +452,17 @@ def load_config(path: Path | None = None) -> CastyConfig:
     heartbeat = HeartbeatConfig(**cluster_raw.get("heartbeat", {}))
     failure_detector = FailureDetectorConfig(**cluster_raw.get("failure_detector", {}))
 
+    tls_raw: dict[str, Any] = cluster_raw.get("tls", {})
+    tls: TlsConfig | None = (
+        TlsConfig.from_paths(
+            certfile=tls_raw["certfile"],
+            cafile=tls_raw["cafile"],
+            keyfile=tls_raw.get("keyfile"),
+        )
+        if tls_raw
+        else None
+    )
+
     if "host" in cluster_raw:
         seed_nodes_raw: list[str] = cluster_raw.get("seed_nodes", [])
         seed_nodes = [parse_seed_node(s) for s in seed_nodes_raw]
@@ -483,6 +497,7 @@ def load_config(path: Path | None = None) -> CastyConfig:
     return CastyConfig(
         system_name=system_name,
         cluster=cluster,
+        tls=tls,
         transport=transport,
         gossip=gossip,
         heartbeat=heartbeat,

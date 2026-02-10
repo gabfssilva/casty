@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import ssl
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING, cast, overload
 from uuid import uuid4
@@ -38,6 +37,8 @@ if TYPE_CHECKING:
     from casty.config import CastyConfig
     from casty.distributed import Distributed
     from casty.journal import EventJournal
+
+from casty.tls import Config as TlsConfig
 
 from casty.shard_coordinator_actor import (
     CoordinatorMsg,
@@ -267,10 +268,11 @@ class ClusteredActorSystem(ActorSystem):
         Network interface to bind to (defaults to *host*).
     config : CastyConfig | None
         Full configuration object.
-    server_ssl : ssl.SSLContext | None
-        TLS context for inbound connections.
-    client_ssl : ssl.SSLContext | None
-        TLS context for outbound connections.
+    tls : TlsConfig | None
+        TLS configuration for inter-node communication.  Use
+        ``TlsConfig.from_paths(...)`` for file-based setup or pass
+        pre-built ``ssl.SSLContext`` via ``TlsConfig(server_context=...,
+        client_context=...)``.
     required_quorum : int | None
         If set, ``__aenter__`` blocks until this many nodes are ``up``.
 
@@ -294,8 +296,7 @@ class ClusteredActorSystem(ActorSystem):
         roles: frozenset[str] = frozenset(),
         bind_host: str | None = None,
         config: CastyConfig | None = None,
-        server_ssl: ssl.SSLContext | None = None,
-        client_ssl: ssl.SSLContext | None = None,
+        tls: TlsConfig | None = None,
         required_quorum: int | None = None,
     ) -> None:
         super().__init__(name=name, config=config)
@@ -315,8 +316,8 @@ class ClusteredActorSystem(ActorSystem):
             self._bind_host,
             port,
             logger=logging.getLogger(f"casty.remote_transport.{name}"),
-            server_ssl=server_ssl,
-            client_ssl=client_ssl,
+            server_ssl=tls.server_context if tls else None,
+            client_ssl=tls.client_context if tls else None,
         )
         self._serializer = PickleSerializer()
         self._remote_transport = RemoteTransport(
@@ -343,8 +344,7 @@ class ClusteredActorSystem(ActorSystem):
         node_id: NodeId | None = None,
         seed_nodes: list[tuple[str, int]] | None = None,
         bind_host: str | None = None,
-        server_ssl: ssl.SSLContext | None = None,
-        client_ssl: ssl.SSLContext | None = None,
+        tls: TlsConfig | None = None,
         required_quorum: int | None = None,
     ) -> ClusteredActorSystem:
         """Create a ``ClusteredActorSystem`` from a ``CastyConfig``.
@@ -385,8 +385,7 @@ class ClusteredActorSystem(ActorSystem):
             roles=cluster.roles,
             bind_host=bind_host,
             config=config,
-            server_ssl=server_ssl,
-            client_ssl=client_ssl,
+            tls=tls if tls is not None else config.tls,
             required_quorum=required_quorum,
         )
 
