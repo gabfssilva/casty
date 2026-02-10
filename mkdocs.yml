@@ -66,6 +66,7 @@ nav:
       - Behaviors as Values: concepts/behaviors.md
       - Functional State: concepts/functional-state.md
       - Request-Reply: concepts/request-reply.md
+      - Pipe to Self: concepts/pipe-to-self.md
       - Actor Hierarchies: concepts/actor-hierarchies.md
       - Supervision: concepts/supervision.md
       - State Machines: concepts/state-machines.md
@@ -78,6 +79,7 @@ nav:
       - Cluster Broadcast: clustering/cluster-broadcast.md
       - Shard Replication: clustering/shard-replication.md
       - Distributed Data Structures: clustering/distributed-data-structures.md
+      - TLS: clustering/tls.md
       - Cluster Backend: clustering/cluster-backend.md
   - Configuration: configuration/index.md
   - API Reference:
