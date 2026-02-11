@@ -109,3 +109,8 @@ async def test_dict_delete_and_contains() -> None:
         # Delete again -> False (was already gone)
         deleted = await dmap.delete("key1")
         assert deleted is False
+
+        # Re-use deleted key — entity is re-spawned from scratch
+        await dmap.put("key1", "world")
+        val = await dmap.get("key1")
+        assert val == "world"

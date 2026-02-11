@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from casty.actor import Behavior, Behaviors
+from casty.messages import Terminated
 from casty.ref import ActorRef
 from casty.sharding import ShardEnvelope
 
@@ -23,7 +24,10 @@ def shard_region_actor(
     """
     log = logger or logging.getLogger("casty.region")
 
-    def active(entities: dict[str, ActorRef[Any]]) -> Behavior[Any]:
+    def active(
+        entities: dict[str, ActorRef[Any]],
+        refs_to_ids: dict[ActorRef[Any], str],
+    ) -> Behavior[Any]:
         async def receive(ctx: Any, msg: Any) -> Any:
             match msg:
                 case ShardEnvelope():
@@ -34,15 +38,24 @@ def shard_region_actor(
                         ref = ctx.spawn(
                             entity_factory(entity_id), f"entity-{entity_id}"
                         )
+                        ctx.watch(ref)
                         new_entities = {**entities, entity_id: ref}
+                        new_refs = {**refs_to_ids, ref: entity_id}
                         new_entities[entity_id].tell(envelope.message)
-                        return active(new_entities)
+                        return active(new_entities, new_refs)
                     entities[entity_id].tell(envelope.message)
                     return Behaviors.same()
+
+                case Terminated(ref=ref) if ref in refs_to_ids:
+                    entity_id = refs_to_ids[ref]
+                    log.debug("Entity stopped: %s", entity_id)
+                    new_entities = {k: v for k, v in entities.items() if k != entity_id}
+                    new_refs = {k: v for k, v in refs_to_ids.items() if k != ref}
+                    return active(new_entities, new_refs)
 
                 case _:
                     return Behaviors.same()
 
         return Behaviors.receive(receive)
 
-    return active({})
+    return active({}, {})

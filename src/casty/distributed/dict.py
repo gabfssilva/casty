@@ -59,7 +59,7 @@ def map_entity(entity_id: str) -> Behavior[MapEntryMsg]:
                 case Delete(reply_to):
                     existed = value is not None
                     reply_to.tell(existed)
-                    return active(None)
+                    return Behaviors.stopped()
                 case Contains(reply_to):
                     reply_to.tell(value is not None)
                     return Behaviors.same()
