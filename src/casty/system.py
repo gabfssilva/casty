@@ -415,6 +415,8 @@ class ActorSystem:
         >>> await system.shutdown()
         """
         self._system_logger.info("Shutting down (%d root actors)", len(self._root_cells))
+        if self._config is not None and self._config.suppress_dead_letters_on_shutdown:
+            self._event_stream.suppress_dead_letters_on_shutdown = True
         for cell in list(self._root_cells.values()):
             await cell.stop()
         self._root_cells.clear()

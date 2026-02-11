@@ -292,17 +292,17 @@ class ActorCell[M]:
         from casty.replication import ReplicateEventsAck
 
         if self._stopped:
-            self._logger.warning("Dead letter: %s", type(msg).__name__)
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(
-                    self._event_stream.publish(
-                        DeadLetter(message=msg, intended_ref=self._ref)
+            if not self._event_stream.suppress_dead_letters_on_shutdown:
+                self._logger.warning("Dead letter: %s", type(msg).__name__)
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        self._event_stream.publish(
+                            DeadLetter(message=msg, intended_ref=self._ref)
+                        )
                     )
-                )
-            except RuntimeError:
-                # No running event loop — silently drop
-                pass
+                except RuntimeError:
+                    pass
             return
         # Route ack messages to the dedicated queue to avoid polluting the main mailbox
         if isinstance(msg, ReplicateEventsAck):

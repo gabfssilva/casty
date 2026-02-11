@@ -12,6 +12,7 @@ from casty import (
     ActorSystem,
     Behavior,
     Behaviors,
+    CastyConfig,
     DeadLetter,
     Directive,
     Mailbox,
@@ -206,6 +207,26 @@ async def test_dead_letters() -> None:
 
     assert len(dead) >= 1
     assert any(d.message == "after-death" for d in dead)
+
+
+async def test_suppress_dead_letters_on_shutdown() -> None:
+    """Config flag suppresses dead letter logs and events during shutdown."""
+    dead: list[DeadLetter] = []
+    config = CastyConfig(suppress_dead_letters_on_shutdown=True)
+
+    system = ActorSystem(config=config)
+    system.event_stream.subscribe(DeadLetter, lambda e: dead.append(e))  # type: ignore[arg-type,return-value]
+
+    ref = system.spawn(
+        Behaviors.receive(lambda ctx, msg: Behaviors.same()), "sticky"
+    )
+    await asyncio.sleep(0.05)
+
+    await system.shutdown()
+    ref.tell("after-shutdown")
+    await asyncio.sleep(0.05)
+
+    assert dead == []
 
 
 async def test_ask_timeout_raises() -> None:

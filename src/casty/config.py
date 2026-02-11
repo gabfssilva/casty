@@ -308,6 +308,7 @@ class CastyConfig:
     defaults_supervision: SupervisionConfig = field(default_factory=SupervisionConfig)
     defaults_sharding: ShardingConfig = field(default_factory=ShardingConfig)
     defaults_replication: ReplicationConfig = field(default_factory=ReplicationConfig)
+    suppress_dead_letters_on_shutdown: bool = False
     actors: tuple[ActorConfig, ...] = ()
 
     def resolve_actor(self, name: str) -> ResolvedActorConfig:
@@ -436,7 +437,9 @@ def load_config(path: Path | None = None) -> CastyConfig:
     with path.open("rb") as f:
         raw = tomllib.load(f)
 
-    system_name = raw.get("system", {}).get("name", "casty")
+    system_raw = raw.get("system", {})
+    system_name = system_raw.get("name", "casty")
+    suppress_dead_letters_on_shutdown = system_raw.get("suppress_dead_letters_on_shutdown", False)
 
     transport = TransportConfig(**raw.get("transport", {}))
 
@@ -496,6 +499,7 @@ def load_config(path: Path | None = None) -> CastyConfig:
 
     return CastyConfig(
         system_name=system_name,
+        suppress_dead_letters_on_shutdown=suppress_dead_letters_on_shutdown,
         cluster=cluster,
         tls=tls,
         transport=transport,

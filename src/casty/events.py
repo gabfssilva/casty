@@ -213,6 +213,7 @@ class EventStream:
 
     def __init__(self) -> None:
         self._subscribers: dict[type, list[EventHandler[Any]]] = defaultdict(list)
+        self.suppress_dead_letters_on_shutdown: bool = False
 
     def subscribe[E](self, event_type: type[E], handler: EventHandler[E]) -> None:
         """Register a handler for a specific event type.
