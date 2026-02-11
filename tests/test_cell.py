@@ -10,8 +10,26 @@ from casty.events import EventStream, ActorStarted, ActorStopped, DeadLetter
 from casty.messages import Terminated
 from casty.ref import ActorRef
 from casty.supervision import OneForOneStrategy
+from casty.task_runner import TaskRunnerMsg, task_runner
 from casty.transport import LocalTransport
 from casty.cell import ActorCell
+
+
+async def make_task_runner(
+    event_stream: EventStream, transport: LocalTransport,
+) -> ActorCell[TaskRunnerMsg]:
+    """Create a self-referencing task runner cell for direct-cell tests."""
+    cell: ActorCell[TaskRunnerMsg] = ActorCell(
+        behavior=task_runner(),
+        name="_task_runner",
+        parent=None,
+        event_stream=event_stream,
+        system_name="test",
+        local_transport=transport,
+    )
+    cell._task_runner = cell.ref  # pyright: ignore[reportPrivateUsage]
+    await cell.start()
+    return cell
 
 
 @dataclass(frozen=True)
@@ -163,6 +181,7 @@ async def test_cell_spawns_children() -> None:
 
     event_stream = EventStream()
     transport = LocalTransport()
+    tr = await make_task_runner(event_stream, transport)
     cell: ActorCell[str] = ActorCell(
         behavior=Behaviors.setup(parent_setup),
         name="parent",
@@ -170,6 +189,7 @@ async def test_cell_spawns_children() -> None:
         event_stream=event_stream,
         system_name="test",
         local_transport=transport,
+        task_runner=tr.ref,
     )
     await cell.start()
     await asyncio.sleep(0.05)
@@ -180,6 +200,7 @@ async def test_cell_spawns_children() -> None:
     assert child_received == ["hi from parent"]
 
     await cell.stop()
+    await tr.stop()
 
 
 async def test_cell_parent_stop_stops_children() -> None:
@@ -189,6 +210,7 @@ async def test_cell_parent_stop_stops_children() -> None:
 
     event_stream = EventStream()
     transport = LocalTransport()
+    tr = await make_task_runner(event_stream, transport)
     parent = ActorCell(
         behavior=Behaviors.setup(parent_setup),
         name="parent",
@@ -196,6 +218,7 @@ async def test_cell_parent_stop_stops_children() -> None:
         event_stream=event_stream,
         system_name="test",
         local_transport=transport,
+        task_runner=tr.ref,
     )
     await parent.start()
     await asyncio.sleep(0.05)
@@ -207,6 +230,7 @@ async def test_cell_parent_stop_stops_children() -> None:
 
     for child in parent._children.values():
         assert child.is_stopped
+    await tr.stop()
 
 
 async def test_cell_watch_receives_terminated() -> None:
@@ -309,6 +333,7 @@ async def test_cell_dead_letter_on_tell_after_stop() -> None:
     event_stream.subscribe(DeadLetter, lambda e: dead.append(e))
 
     transport = LocalTransport()
+    tr = await make_task_runner(event_stream, transport)
     cell: ActorCell[str] = ActorCell(
         behavior=Behaviors.receive(lambda ctx, msg: Behaviors.same()),
         name="dead",
@@ -316,6 +341,7 @@ async def test_cell_dead_letter_on_tell_after_stop() -> None:
         event_stream=event_stream,
         system_name="test",
         local_transport=transport,
+        task_runner=tr.ref,
     )
     await cell.start()
     await asyncio.sleep(0.05)
@@ -324,7 +350,8 @@ async def test_cell_dead_letter_on_tell_after_stop() -> None:
     await asyncio.sleep(0.05)
 
     cell.ref.tell("after-death")
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.1)
 
     assert len(dead) == 1
     assert dead[0].message == "after-death"
+    await tr.stop()

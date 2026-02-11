@@ -400,6 +400,9 @@ class ClusteredActorSystem(ActorSystem):
         try:
             await super().__aenter__()
 
+            # Wire task runner into remote transport now that the system is live
+            self._remote_transport.set_task_runner(self._ensure_task_runner())
+
             # Start cluster membership (gossip, heartbeat, failure detection)
             cluster_config = ClusterConfig(
                 host=self._host,

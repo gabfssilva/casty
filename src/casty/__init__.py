@@ -79,6 +79,14 @@ from casty.ref import ActorRef, BroadcastRef
 from casty.remote_transport import MessageEnvelope, RemoteTransport, TcpTransport
 from casty.serialization import JsonSerializer, PickleSerializer, Serializer, TypeRegistry
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
+from casty.task_runner import (
+    RunTask,
+    TaskCancelled,
+    TaskCompleted,
+    TaskFailed,
+    TaskResult,
+    TaskRunnerMsg,
+)
 from casty.supervision import Directive, OneForOneStrategy, SupervisionStrategy
 from casty.system import ActorSystem
 from casty import tls
@@ -189,6 +197,13 @@ __all__ = [
     "ClusteredActorSystem",
     "ShardedBehavior",
     "ShardEnvelope",
+    # Task Runner
+    "RunTask",
+    "TaskCancelled",
+    "TaskCompleted",
+    "TaskFailed",
+    "TaskResult",
+    "TaskRunnerMsg",
     # TLS
     "tls",
     # Distributed Data Structures

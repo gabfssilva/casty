@@ -34,6 +34,7 @@ from casty.mailbox import Mailbox
 from casty.messages import Terminated
 from casty.ref import ActorRef
 from casty.supervision import Directive, SupervisionStrategy
+from casty.task_runner import RunTask, TaskRunnerMsg
 from casty.transport import LocalTransport, MessageTransport
 
 
@@ -75,6 +76,7 @@ class CellContext[M]:
             ref_host=self._cell.ref_host,
             ref_port=self._cell.ref_port,
             ref_node_id=self._cell.ref_node_id,
+            task_runner=self._cell.task_runner,
         )
         if mailbox is not None:
             child.mailbox = mailbox
@@ -83,9 +85,9 @@ class CellContext[M]:
         return child.ref
 
     def stop(self, ref: ActorRef[Any]) -> None:
-        for _name, child in self._cell.children.items():
+        for child in self._cell.children.values():
             if child.ref == ref:
-                asyncio.get_running_loop().create_task(child.stop())
+                self._cell.task_runner.tell(RunTask(child.stop()))
                 return
 
     def watch(self, ref: ActorRef[Any]) -> None:
@@ -150,7 +152,7 @@ class CellContext[M]:
                         exc,
                     )
 
-        asyncio.get_running_loop().create_task(run())
+        self._cell.task_runner.tell(RunTask(run()))
 
 
 class ActorCell[M]:
@@ -173,6 +175,7 @@ class ActorCell[M]:
         ref_host: str | None = None,
         ref_port: int | None = None,
         ref_node_id: str | None = None,
+        task_runner: ActorRef[TaskRunnerMsg] | None = None,
     ) -> None:
         self._initial_behavior: Behavior[M] = behavior
         self._name = name
@@ -184,6 +187,7 @@ class ActorCell[M]:
         self._ref_host = ref_host
         self._ref_port = ref_port
         self._ref_node_id = ref_node_id
+        self._task_runner = task_runner
         self._mailbox: Mailbox[Any] = Mailbox()
         self._logger = logging.getLogger(f"casty.actor.{name}")
 
@@ -275,6 +279,11 @@ class ActorCell[M]:
         return self._ref_node_id
 
     @property
+    def task_runner(self) -> ActorRef[TaskRunnerMsg]:
+        assert self._task_runner is not None
+        return self._task_runner
+
+    @property
     def logger(self) -> logging.Logger:
         return self._logger
 
@@ -313,15 +322,14 @@ class ActorCell[M]:
         if self._stopped:
             if not self._event_stream.suppress_dead_letters_on_shutdown:
                 self._logger.warning("Dead letter: %s", type(msg).__name__)
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(
-                        self._event_stream.publish(
-                            DeadLetter(message=msg, intended_ref=self._ref)
+                if self._task_runner is not None:
+                    self._task_runner.tell(
+                        RunTask(
+                            self._event_stream.publish(
+                                DeadLetter(message=msg, intended_ref=self._ref)
+                            )
                         )
                     )
-                except RuntimeError:
-                    pass
             return
         # Route ack messages to the dedicated queue to avoid polluting the main mailbox
         if isinstance(msg, ReplicateEventsAck):

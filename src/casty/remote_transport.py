@@ -22,6 +22,7 @@ from casty.transport import LocalTransport
 
 if TYPE_CHECKING:
     from casty.ref import ActorRef
+    from casty.task_runner import TaskRunnerMsg
 
 
 class InboundHandler(Protocol):
@@ -299,6 +300,7 @@ class RemoteTransport:
         local_host: str,
         local_port: int,
         system_name: str,
+        task_runner: ActorRef[TaskRunnerMsg] | None = None,
     ) -> None:
         self._local = local
         self._tcp = tcp
@@ -306,12 +308,23 @@ class RemoteTransport:
         self._local_host = local_host
         self._local_port = local_port
         self._system_name = system_name
+        self._task_runner = task_runner
         self._logger = logging.getLogger(f"casty.remote_transport.{system_name}")
         self._node_index: dict[str, tuple[str, int]] = {}
         self._local_node_id: str | None = None
 
         # Wire ref_factory so deserialized ActorRefs get the right transport
         self._serializer.set_ref_factory(self._make_ref_from_address)
+
+    def set_task_runner(self, task_runner: ActorRef[TaskRunnerMsg]) -> None:
+        """Set the task runner ref after system bootstrap.
+
+        Parameters
+        ----------
+        task_runner : ActorRef[TaskRunnerMsg]
+            Reference to the system's task runner actor.
+        """
+        self._task_runner = task_runner
 
     def set_local_node_id(self, node_id: str) -> None:
         """Set the local node ID for ``node_id``-based locality checks.
@@ -375,11 +388,15 @@ class RemoteTransport:
             if resolved is None:
                 self._logger.warning("Cannot resolve address: %s", address)
                 return
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._send_remote(resolved, msg))
-            except RuntimeError:
-                self._logger.warning("No running loop for remote deliver to %s", address)
+            if self._task_runner is not None:
+                from casty.task_runner import RunTask
+
+                self._task_runner.tell(RunTask(self._send_remote(resolved, msg)))
+            else:
+                try:
+                    asyncio.get_running_loop().create_task(self._send_remote(resolved, msg))
+                except RuntimeError:
+                    self._logger.warning("No running loop for remote deliver to %s", address)
 
     async def _send_remote(self, address: ActorAddress, msg: Any) -> None:
         host = address.host

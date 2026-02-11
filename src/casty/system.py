@@ -28,6 +28,7 @@ from casty.scheduler import (
     ScheduleTick,
     scheduler as scheduler_behavior,
 )
+from casty.task_runner import TaskRunnerMsg, task_runner as task_runner_behavior
 from casty.transport import LocalTransport, MessageTransport
 
 
@@ -72,6 +73,7 @@ class ActorSystem:
         max_pending = config.transport.max_pending_per_path if config is not None else 64
         self._local_transport = LocalTransport(max_pending_per_path=max_pending)
         self._scheduler: ActorRef[SchedulerMsg] | None = None
+        self._task_runner_ref: ActorRef[TaskRunnerMsg] | None = None
         self._system_logger = logging.getLogger(f"casty.system.{name}")
 
     @property
@@ -182,6 +184,35 @@ class ActorSystem:
     async def __aexit__(self, *exc: object) -> None:
         await self.shutdown()
 
+    def _ensure_task_runner(self) -> ActorRef[TaskRunnerMsg]:
+        """Spawn the ``_task_runner`` actor if it doesn't exist yet.
+
+        The TaskRunner cell is created with ``task_runner=None``, then
+        immediately patched to point to itself so every cell always has
+        a non-None task runner ref.
+        """
+        if self._task_runner_ref is not None:
+            return self._task_runner_ref
+
+        cell: ActorCell[TaskRunnerMsg] = ActorCell(
+            behavior=task_runner_behavior(),
+            name="_task_runner",
+            parent=None,
+            event_stream=self._event_stream,
+            system_name=self._name,
+            local_transport=self._local_transport,
+            ref_transport=self._get_ref_transport(),
+            ref_host=self._get_ref_host(),
+            ref_port=self._get_ref_port(),
+            ref_node_id=self._get_ref_node_id(),
+        )
+        cell._task_runner = cell.ref  # pyright: ignore[reportPrivateUsage]
+        self._root_cells["_task_runner"] = cell
+        asyncio.get_running_loop().create_task(cell.start())
+        self._task_runner_ref = cell.ref
+        self._system_logger.info("Spawning root actor: _task_runner")
+        return cell.ref
+
     def spawn[M](
         self,
         behavior: Behavior[M],
@@ -227,6 +258,8 @@ class ActorSystem:
                 overflow=MailboxOverflowStrategy[resolved.mailbox.strategy],
             )
 
+        task_runner_ref = self._ensure_task_runner()
+
         cell: ActorCell[M] = ActorCell(
             behavior=behavior,
             name=name,
@@ -238,6 +271,7 @@ class ActorSystem:
             ref_host=self._get_ref_host(),
             ref_port=self._get_ref_port(),
             ref_node_id=self._get_ref_node_id(),
+            task_runner=task_runner_ref,
         )
         if mailbox is not None:
             cell.mailbox = mailbox
@@ -417,6 +451,9 @@ class ActorSystem:
         self._system_logger.info("Shutting down (%d root actors)", len(self._root_cells))
         if self._config is not None and self._config.suppress_dead_letters_on_shutdown:
             self._event_stream.suppress_dead_letters_on_shutdown = True
-        for cell in list(self._root_cells.values()):
-            await cell.stop()
+        for name, cell in list(self._root_cells.items()):
+            if name != "_task_runner":
+                await cell.stop()
+        if "_task_runner" in self._root_cells:
+            await self._root_cells["_task_runner"].stop()
         self._root_cells.clear()
