@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time as _time
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import Any, cast, overload
 
 from casty.actor import (
     Behavior,
@@ -112,16 +112,35 @@ class CellContext[M]:
                     sibling.watchers.discard(self._cell)
                     return
 
+    @overload
+    def pipe_to_self(
+        self,
+        coro: Awaitable[M],
+        *,
+        on_failure: Callable[[Exception], M] | None = None,
+    ) -> None: ...
+
+    @overload
     def pipe_to_self[T](
         self,
         coro: Awaitable[T],
         mapper: Callable[[T], M],
         on_failure: Callable[[Exception], M] | None = None,
+    ) -> None: ...
+
+    def pipe_to_self[T](
+        self,
+        coro: Awaitable[T],
+        mapper: Callable[[T], M] | None = None,
+        on_failure: Callable[[Exception], M] | None = None,
     ) -> None:
         async def run() -> None:
             try:
                 result = await coro
-                self._cell.ref.tell(mapper(result))
+                if mapper is not None:
+                    self._cell.ref.tell(mapper(result))
+                else:
+                    self._cell.ref.tell(cast(M, result))
             except Exception as exc:
                 if on_failure is not None:
                     self._cell.ref.tell(on_failure(exc))

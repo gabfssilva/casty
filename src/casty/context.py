@@ -8,7 +8,7 @@ and death-watch.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, overload
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -140,10 +140,26 @@ class ActorContext[M](Protocol):
         """
         ...
 
+    @overload
+    def pipe_to_self(
+        self,
+        coro: Awaitable[M],
+        *,
+        on_failure: Callable[[Exception], M] | None = None,
+    ) -> None: ...
+
+    @overload
     def pipe_to_self[T](
         self,
         coro: Awaitable[T],
         mapper: Callable[[T], M],
+        on_failure: Callable[[Exception], M] | None = None,
+    ) -> None: ...
+
+    def pipe_to_self[T](
+        self,
+        coro: Awaitable[T],
+        mapper: Callable[[T], M] | None = None,
         on_failure: Callable[[Exception], M] | None = None,
     ) -> None:
         """Run an async operation in background and send the result back as a message.
@@ -154,12 +170,16 @@ class ActorContext[M](Protocol):
         ``on_failure`` is ``None``, a warning is logged and the exception
         is discarded.
 
+        When ``mapper`` is omitted, the result of the coroutine is sent
+        directly — the coroutine must return a value of type ``M``.
+
         Parameters
         ----------
         coro : Awaitable[T]
             The async operation to run in background.
-        mapper : Callable[[T], M]
+        mapper : Callable[[T], M] or None
             Maps the successful result to a message for this actor.
+            If ``None``, the result is sent directly (``T`` must be ``M``).
         on_failure : Callable[[Exception], M] or None
             Maps a failure to a message. If ``None``, failures are logged
             and discarded.
@@ -171,5 +191,9 @@ class ActorContext[M](Protocol):
         ...     lambda user: UserFound(user),
         ...     on_failure=lambda exc: UserFetchFailed(exc),
         ... )
+
+        When the coroutine already returns a valid message:
+
+        >>> ctx.pipe_to_self(produce_message())
         """
         ...

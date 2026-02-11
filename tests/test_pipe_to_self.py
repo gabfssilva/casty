@@ -221,6 +221,62 @@ def concurrent_actor(results: tuple[int, ...] = ()) -> Behavior[ConcurrentMsg]:
 # --- Tests ---
 
 
+@dataclass(frozen=True)
+class DirectStart:
+    pass
+
+
+@dataclass(frozen=True)
+class DirectResult:
+    value: str
+
+
+@dataclass(frozen=True)
+class GetDirectResult:
+    reply_to: ActorRef[str]
+
+
+type DirectMsg = DirectStart | DirectResult | GetDirectResult
+
+
+async def produce_direct_result() -> DirectResult:
+    await asyncio.sleep(0.01)
+    return DirectResult(value="direct")
+
+
+def direct_actor(result: str = "") -> Behavior[DirectMsg]:
+    async def receive(
+        ctx: ActorContext[DirectMsg], msg: DirectMsg
+    ) -> Behavior[DirectMsg]:
+        match msg:
+            case DirectStart():
+                ctx.pipe_to_self(produce_direct_result())
+                return Behaviors.same()
+            case DirectResult(value=v):
+                return direct_actor(result=v)
+            case GetDirectResult(reply_to=reply_to):
+                reply_to.tell(result)
+                return Behaviors.same()
+            case _:
+                return Behaviors.unhandled()
+
+    return Behaviors.receive(receive)
+
+
+async def test_pipe_to_self_without_mapper() -> None:
+    async with ActorSystem("pipe-direct") as system:
+        ref = system.spawn(direct_actor(), "direct")
+
+        ref.tell(DirectStart())
+        await asyncio.sleep(0.1)
+
+        result: str = await system.ask(
+            ref, lambda r: GetDirectResult(reply_to=r), timeout=2.0
+        )
+
+        assert result == "direct"
+
+
 async def test_pipe_to_self_sends_result_to_actor() -> None:
     async with ActorSystem("pipe-ok") as system:
         ref = system.spawn(fetcher_behavior(), "fetcher")
