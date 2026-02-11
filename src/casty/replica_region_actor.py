@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from casty.actor import Behavior, Behaviors
-from casty.journal import EventJournal
+from casty.journal import EventJournal, JournalKind
 from casty.replication import ReplicateEvents, ReplicateEventsAck
 
 
@@ -35,7 +35,8 @@ def replica_region_actor[S, E](
                 ):
                     state = entity_states.get(entity_id, initial_state)
 
-                    await journal.persist(entity_id, events)
+                    if journal.kind == JournalKind.local:
+                        await journal.persist(entity_id, events)
 
                     highest_seq = entity_sequence_nrs.get(entity_id, 0)
                     for persisted in events:

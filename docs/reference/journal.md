@@ -2,7 +2,11 @@
 
 ::: casty.EventJournal
 
+::: casty.JournalKind
+
 ::: casty.InMemoryJournal
+
+::: casty.SqliteJournal
 
 ::: casty.PersistedEvent
 

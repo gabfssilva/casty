@@ -7,9 +7,32 @@ event-sourcing layer.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+import pickle
+import sqlite3
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
 from typing import Any, Protocol
+
+
+class JournalKind(Enum):
+    """Declares whether a journal backend is node-local or centralized.
+
+    ``local``
+        Each node has its own independent store (e.g. SQLite file).
+        Replicas must persist events they receive via ``ReplicateEvents``.
+
+    ``centralized``
+        All nodes share the same durable store (e.g. PostgreSQL, S3).
+        Replicas skip persistence — the primary's write is already visible
+        to every node.
+    """
+
+    local = "local"
+    centralized = "centralized"
 
 
 @dataclass(frozen=True)
@@ -70,11 +93,20 @@ class EventJournal(Protocol):
     Any class that implements ``persist``, ``load``, ``save_snapshot``, and
     ``load_snapshot`` satisfies this protocol via structural subtyping.
 
+    The ``kind`` property tells the replication layer whether replicas need
+    to persist events themselves (``local``) or can skip persistence because
+    the store is shared (``centralized``).
+
     Examples
     --------
     >>> from casty import InMemoryJournal
     >>> journal: EventJournal = InMemoryJournal()
     """
+
+    @property
+    def kind(self) -> JournalKind:
+        """Whether this journal is node-local or centralized."""
+        ...
 
     async def persist(
         self, entity_id: str, events: Sequence[PersistedEvent[Any]]
@@ -164,6 +196,8 @@ class InMemoryJournal:
     Stores events and snapshots in plain dictionaries. Data is lost when
     the process exits. Satisfies the ``EventJournal`` protocol.
 
+    Always ``local`` — each process has its own independent store.
+
     Examples
     --------
     >>> from casty import InMemoryJournal, PersistedEvent
@@ -177,6 +211,10 @@ class InMemoryJournal:
     def __init__(self) -> None:
         self._events: dict[str, list[PersistedEvent[Any]]] = {}
         self._snapshots: dict[str, Snapshot[Any]] = {}
+
+    @property
+    def kind(self) -> JournalKind:
+        return JournalKind.local
 
     async def persist(
         self, entity_id: str, events: Sequence[PersistedEvent[Any]]
@@ -260,3 +298,146 @@ class InMemoryJournal:
         >>> snap = await journal.load_snapshot("e1")
         """
         return self._snapshots.get(entity_id)
+
+
+class SqliteJournal:
+    """SQLite-backed event journal for durable persistence.
+
+    Uses Python's stdlib ``sqlite3`` with WAL mode for concurrent reads and
+    ``asyncio.to_thread`` for non-blocking I/O. A ``threading.Lock`` serializes
+    all writes.
+
+    Parameters
+    ----------
+    path : str | Path
+        Path to the SQLite database file, or ``":memory:"`` for an in-memory
+        database (useful for testing).
+    serialize : Callable[[Any], bytes]
+        Serializer for events and snapshot state. Defaults to ``pickle.dumps``.
+    deserialize : Callable[[bytes], Any]
+        Deserializer for events and snapshot state. Defaults to ``pickle.loads``.
+
+    Examples
+    --------
+    >>> from casty import SqliteJournal, PersistedEvent
+    >>> journal = SqliteJournal()
+    >>> await journal.persist("e1", [PersistedEvent(1, "created", 0.0)])
+    >>> events = await journal.load("e1")
+    >>> len(events)
+    1
+    """
+
+    def __init__(
+        self,
+        path: str | Path = ":memory:",
+        *,
+        serialize: Callable[[Any], bytes] = pickle.dumps,
+        deserialize: Callable[[bytes], Any] = pickle.loads,  # noqa: S301
+    ) -> None:
+        self._serialize = serialize
+        self._deserialize = deserialize
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                entity_id   TEXT    NOT NULL,
+                sequence_nr INTEGER NOT NULL,
+                event_data  BLOB    NOT NULL,
+                timestamp   REAL    NOT NULL,
+                PRIMARY KEY (entity_id, sequence_nr)
+            );
+            CREATE TABLE IF NOT EXISTS snapshots (
+                entity_id   TEXT    NOT NULL PRIMARY KEY,
+                sequence_nr INTEGER NOT NULL,
+                state_data  BLOB    NOT NULL,
+                timestamp   REAL    NOT NULL
+            );
+            """
+        )
+
+    @property
+    def kind(self) -> JournalKind:
+        return JournalKind.local
+
+    async def persist(
+        self, entity_id: str, events: Sequence[PersistedEvent[Any]]
+    ) -> None:
+        rows = [
+            (entity_id, e.sequence_nr, self._serialize(e.event), e.timestamp)
+            for e in events
+        ]
+        await asyncio.to_thread(self._persist_sync, rows)
+
+    def _persist_sync(self, rows: list[tuple[str, int, bytes, float]]) -> None:
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO events (entity_id, sequence_nr, event_data, timestamp) VALUES (?, ?, ?, ?)",
+                rows,
+            )
+            self._conn.commit()
+
+    async def load(
+        self, entity_id: str, from_sequence_nr: int = 0
+    ) -> list[PersistedEvent[Any]]:
+        return await asyncio.to_thread(self._load_sync, entity_id, from_sequence_nr)
+
+    def _load_sync(
+        self, entity_id: str, from_sequence_nr: int
+    ) -> list[PersistedEvent[Any]]:
+        cursor = self._conn.execute(
+            "SELECT sequence_nr, event_data, timestamp FROM events "
+            "WHERE entity_id = ? AND sequence_nr >= ? ORDER BY sequence_nr",
+            (entity_id, from_sequence_nr),
+        )
+        return [
+            PersistedEvent(
+                sequence_nr=row[0],
+                event=self._deserialize(row[1]),
+                timestamp=row[2],
+            )
+            for row in cursor
+        ]
+
+    async def save_snapshot(
+        self, entity_id: str, snapshot: Snapshot[Any]
+    ) -> None:
+        data = self._serialize(snapshot.state)
+        await asyncio.to_thread(
+            self._save_snapshot_sync, entity_id, snapshot.sequence_nr, data, snapshot.timestamp
+        )
+
+    def _save_snapshot_sync(
+        self, entity_id: str, sequence_nr: int, state_data: bytes, timestamp: float
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO snapshots (entity_id, sequence_nr, state_data, timestamp) "
+                "VALUES (?, ?, ?, ?)",
+                (entity_id, sequence_nr, state_data, timestamp),
+            )
+            self._conn.commit()
+
+    async def load_snapshot(
+        self, entity_id: str
+    ) -> Snapshot[Any] | None:
+        return await asyncio.to_thread(self._load_snapshot_sync, entity_id)
+
+    def _load_snapshot_sync(self, entity_id: str) -> Snapshot[Any] | None:
+        cursor = self._conn.execute(
+            "SELECT sequence_nr, state_data, timestamp FROM snapshots WHERE entity_id = ?",
+            (entity_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return Snapshot(
+            sequence_nr=row[0],
+            state=self._deserialize(row[1]),
+            timestamp=row[2],
+        )
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection."""
+        self._conn.close()

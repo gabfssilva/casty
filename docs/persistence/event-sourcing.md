@@ -133,7 +133,86 @@ In Phase 2, a new actor is spawned with the same `entity_id`. The framework auto
 
 The `SnapshotEvery(n_events=100)` policy periodically saves the current state to the journal. Without snapshots, recovery requires replaying every event from the beginning — acceptable for entities with few events, but expensive for long-lived entities with thousands.
 
-The `EventJournal` protocol is storage-agnostic. `InMemoryJournal` is included for testing and development. For production, implement the protocol for any database backend — the interface requires four methods: `persist`, `load`, `save_snapshot`, and `load_snapshot`.
+## Journal Backends
+
+The `EventJournal` protocol is storage-agnostic — four methods (`persist`, `load`, `save_snapshot`, `load_snapshot`) and a `kind` property. Casty ships two implementations:
+
+| Backend | Durability | Use case |
+|---------|-----------|----------|
+| `InMemoryJournal` | None (process-scoped) | Tests, prototyping |
+| `SqliteJournal` | File on disk | Single-node production, local development |
+
+### SqliteJournal
+
+Durable event sourcing backed by stdlib `sqlite3`. Zero external dependencies.
+
+```python
+from casty import SqliteJournal
+
+journal = SqliteJournal("data/events.db")
+
+def bank_account(entity_id: str) -> Behavior[AccountCommand]:
+    return Behaviors.event_sourced(
+        entity_id=entity_id,
+        journal=journal,
+        initial_state=AccountState(balance=0, tx_count=0),
+        on_event=on_event,
+        on_command=on_command,
+    )
+```
+
+WAL mode is enabled for concurrent reads. All writes go through `asyncio.to_thread` so the event loop is never blocked. Serialization defaults to `pickle` but is pluggable:
+
+```python
+import json
+
+journal = SqliteJournal(
+    "data/events.db",
+    serialize=lambda obj: json.dumps(obj, default=str).encode(),
+    deserialize=lambda data: json.loads(data),
+)
+```
+
+### JournalKind — Local vs Centralized
+
+Every journal declares its `kind`: `local` or `centralized`.
+
+```
+local (SQLite, InMemory)           centralized (PostgreSQL, S3, ...)
+────────────────────────           ──────────────────────────────────
+Each node has its own store.       All nodes share one store.
+Replicas must persist events       Replicas skip persist — the
+they receive from the primary.     primary's write is already
+                                   visible to every node.
+```
+
+`InMemoryJournal` and `SqliteJournal` are both `local`. When you implement a journal backed by a shared database (PostgreSQL, DynamoDB, S3), set `kind` to `centralized` — the replication layer will automatically skip redundant writes on replica nodes:
+
+```python
+from casty import JournalKind
+
+class PostgresJournal:
+    @property
+    def kind(self) -> JournalKind:
+        return JournalKind.centralized
+
+    async def persist(self, entity_id, events): ...
+    async def load(self, entity_id, from_sequence_nr=0): ...
+    async def save_snapshot(self, entity_id, snapshot): ...
+    async def load_snapshot(self, entity_id): ...
+```
+
+With a centralized journal, replicas still receive `ReplicateEvents` messages and maintain in-memory state (hot standby for fast failover), but they don't write to the journal since the data is already there.
+
+### Custom Backends
+
+Implement the `EventJournal` protocol for any storage:
+
+1. Define `persist`, `load`, `save_snapshot`, `load_snapshot` with matching signatures.
+2. Set `kind` to `local` (node-local store) or `centralized` (shared store).
+3. Pass the instance to `Behaviors.event_sourced(journal=...)`.
+
+No inheritance needed — structural subtyping handles the rest.
 
 ---
 

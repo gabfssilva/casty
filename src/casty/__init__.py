@@ -59,7 +59,7 @@ from casty.events import (
     UnreachableMember,
 )
 from casty.failure_detector import PhiAccrualFailureDetector
-from casty.journal import EventJournal, InMemoryJournal, PersistedEvent, Snapshot
+from casty.journal import EventJournal, InMemoryJournal, JournalKind, PersistedEvent, Snapshot, SqliteJournal
 from casty.mailbox import Mailbox, MailboxOverflowStrategy
 from casty.scheduler import (
     CancelSchedule,
@@ -154,6 +154,8 @@ __all__ = [
     # Journal / Event Sourcing
     "EventJournal",
     "InMemoryJournal",
+    "SqliteJournal",
+    "JournalKind",
     "PersistedEvent",
     "Snapshot",
     # Failure Detection

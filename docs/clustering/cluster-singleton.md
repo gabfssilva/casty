@@ -117,18 +117,6 @@ ref = system.spawn(
 
 Without event sourcing, the singleton restarts from scratch on the new leader — the factory is called with no prior state. Choose based on whether state loss is acceptable during failover.
 
-## Singleton vs Sharding
-
-| | Singleton | Sharding |
-|---|---|---|
-| Instances | Exactly 1 | N entities across M nodes |
-| Message type | `ActorRef[M]` | `ActorRef[ShardEnvelope[M]]` |
-| Routing | Leader node | Hash-based shard assignment |
-| Failover | Respawn on new leader | Shard rebalancing |
-| Use case | Coordinator, lock manager, feed ingester | User sessions, IoT devices, accounts |
-
-Use singleton when uniqueness is the requirement. Use sharding when scale is the requirement.
-
 ---
 
 **Next:** [Shard Replication](shard-replication.md)

@@ -7,7 +7,7 @@ from typing import Any
 
 from casty import ActorRef, ActorSystem, Behaviors
 from casty.actor import Behavior, SnapshotEvery
-from casty.journal import InMemoryJournal, PersistedEvent, Snapshot
+from casty.journal import InMemoryJournal, JournalKind, PersistedEvent, Snapshot
 
 
 @dataclass(frozen=True)
@@ -277,3 +277,44 @@ async def test_event_sourced_fire_and_forget_replication() -> None:
         # Primary should respond quickly even though replica is slow
         value = await system.ask(ref, lambda r: GetValue(reply_to=r), timeout=5.0)
         assert value == 10
+
+
+async def test_centralized_journal_replica_skips_persist() -> None:
+    """With a centralized journal, replicas apply events but skip persist."""
+    from casty.replica_region_actor import replica_region_actor
+    from casty.replication import ReplicateEvents, ReplicateEventsAck
+
+    class CentralizedJournal(InMemoryJournal):
+        @property
+        def kind(self) -> JournalKind:
+            return JournalKind.centralized
+
+    replica_journal = CentralizedJournal()
+
+    events = (
+        PersistedEvent(sequence_nr=1, event=Incremented(10), timestamp=1.0),
+        PersistedEvent(sequence_nr=2, event=Incremented(5), timestamp=2.0),
+    )
+
+    async with ActorSystem(name="test") as system:
+        replica = system.spawn(
+            replica_region_actor(
+                journal=replica_journal,
+                on_event=apply_event,
+                initial_state=CounterState(value=0),
+            ),
+            "replica",
+        )
+        await asyncio.sleep(0.1)
+
+        # Simulate primary sending ReplicateEvents
+        ack_ref: ActorRef[ReplicateEventsAck] = system.spawn(
+            Behaviors.receive(lambda ctx, msg: Behaviors.same()), "ack-sink"
+        )
+        await asyncio.sleep(0.1)
+
+        replica.tell(ReplicateEvents(entity_id="c1", shard_id=0, events=events, reply_to=ack_ref))
+        await asyncio.sleep(0.1)
+
+        loaded = await replica_journal.load("c1")
+        assert loaded == []
