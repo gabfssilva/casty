@@ -75,6 +75,34 @@ system.cancel_schedule("report")
 
 Scheduled tasks are identified by a string key. Scheduling a new task with the same key cancels the previous one.
 
+## Task Runner
+
+The task runner is a system-level actor (`_task_runner`) that centralizes fire-and-forget coroutine execution. Instead of scattering bare `asyncio.create_task` calls — which produce orphan tasks that generate warnings on shutdown — all fire-and-forget work is routed through the task runner. It tracks every running task and cancels them all when it stops.
+
+The system spawns the task runner automatically on the first `spawn()` call. You can also use it directly for your own fire-and-forget work:
+
+```python
+from casty import RunTask, TaskCompleted, TaskResult
+
+# Fire and forget — no notification
+system.lookup("/_task_runner").tell(RunTask(some_coroutine()))
+
+# With completion notification
+@dataclass(frozen=True)
+class MyMsg:
+    result: TaskResult
+
+task_runner_ref.tell(RunTask(
+    coro=some_coroutine(),
+    reply_to=my_actor_ref,
+    key="my-job",
+))
+# my_actor_ref will receive TaskCompleted("my-job"),
+# TaskFailed("my-job", exc), or TaskCancelled("my-job")
+```
+
+The task runner is stopped last during shutdown, ensuring that fire-and-forget tasks from other actors are properly cancelled rather than orphaned.
+
 ---
 
 **Next:** [Spy](spy.md)
