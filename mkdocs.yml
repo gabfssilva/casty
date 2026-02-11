@@ -82,8 +82,9 @@ nav:
           - Spy: concepts/spy.md
           - Event Sourcing: persistence/event-sourcing.md
       - Clustering:
-          - Cluster Sharding: clustering/cluster-sharding.md
-          - Cluster Broadcast: clustering/cluster-broadcast.md
+          - Sharding: clustering/cluster-sharding.md
+          - Broadcast: clustering/cluster-broadcast.md
+          - Singleton: clustering/cluster-singleton.md
           - Shard Replication: clustering/shard-replication.md
           - Distributed Data Structures: clustering/distributed-data-structures.md
           - TLS: clustering/tls.md

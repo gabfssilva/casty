@@ -47,4 +47,4 @@ Under the hood, each node spawns a local copy of the actor at `/_bcast-{name}` a
 
 ---
 
-**Next:** [Shard Replication](shard-replication.md)
+**Next:** [Cluster Singleton](cluster-singleton.md)

@@ -14,7 +14,13 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING, cast, overload
 from uuid import uuid4
 
-from casty.actor import Behavior, Behaviors, BroadcastedBehavior, ShardedBehavior
+from casty.actor import (
+    Behavior,
+    Behaviors,
+    BroadcastedBehavior,
+    ShardedBehavior,
+    SingletonBehavior,
+)
 from casty.address import ActorAddress
 from casty.cluster_state import ClusterState, MemberStatus, NodeAddress, NodeId
 from casty.mailbox import Mailbox
@@ -24,6 +30,7 @@ from casty.cluster import (
     ClusterConfig,
     RegisterBroadcast,
     RegisterCoordinator,
+    RegisterSingletonManager,
     WaitForMembers,
 )
 from casty.remote_transport import RemoteTransport, TcpTransport
@@ -475,6 +482,11 @@ class ClusteredActorSystem(ActorSystem):
 
     @overload
     def spawn[M](
+        self, behavior: SingletonBehavior[M], name: str
+    ) -> ActorRef[M]: ...
+
+    @overload
+    def spawn[M](
         self,
         behavior: Behavior[M],
         name: str,
@@ -484,7 +496,7 @@ class ClusteredActorSystem(ActorSystem):
 
     def spawn[M](
         self,
-        behavior: BroadcastedBehavior[M] | ShardedBehavior[M] | Behavior[M],
+        behavior: BroadcastedBehavior[M] | ShardedBehavior[M] | SingletonBehavior[M] | Behavior[M],
         name: str,
         *,
         mailbox: Mailbox[M] | None = None,
@@ -494,6 +506,8 @@ class ClusteredActorSystem(ActorSystem):
                 return self._spawn_broadcasted(behavior, name)
             case ShardedBehavior():
                 return self._spawn_sharded(behavior, name)
+            case SingletonBehavior():
+                return self._spawn_singleton(behavior, name)
             case _:
                 return super().spawn(behavior, name, mailbox=mailbox)
 
@@ -542,6 +556,31 @@ class ClusteredActorSystem(ActorSystem):
         )
 
         return cast(ActorRef[ShardEnvelope[M]], proxy_ref)
+
+    def _spawn_singleton[M](
+        self, singleton: SingletonBehavior[M], name: str
+    ) -> ActorRef[M]:
+        from casty.singleton import singleton_manager_actor
+
+        self._logger.info("Singleton: %s", name)
+
+        manager_ref: ActorRef[Any] = super().spawn(
+            singleton_manager_actor(
+                factory=singleton.factory,
+                name=name,
+                remote_transport=self._remote_transport,
+                system_name=self._name,
+                logger=logging.getLogger(f"casty.singleton.{self._name}"),
+            ),
+            f"_singleton-{name}",
+        )
+
+        self._cluster.ref.tell(RegisterSingletonManager(  # type: ignore[arg-type]
+            name=name,
+            manager_ref=manager_ref,
+        ))
+
+        return cast(ActorRef[M], manager_ref)
 
     def _spawn_broadcasted[M](
         self, broadcasted: BroadcastedBehavior[M], name: str

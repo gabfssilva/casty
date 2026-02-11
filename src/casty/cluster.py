@@ -21,6 +21,7 @@ from casty.cluster_state import (
     NodeId,
 )
 from casty.gossip_actor import (
+    DownMember,
     GossipMsg,
     GossipTick,
     GetClusterState,
@@ -90,13 +91,22 @@ class RegisterBroadcast:
 
 
 @dataclass(frozen=True)
+class RegisterSingletonManager:
+    """Registers a singleton manager with the cluster actor."""
+
+    name: str
+    manager_ref: ActorRef[Any]
+
+
+@dataclass(frozen=True)
 class JoinRetry:
     pass
 
 
 type ClusterCmd = (
     GetState | WaitForMembers | NodeUnreachable | PublishAllocations
-    | RegisterCoordinator | RegisterBroadcast | JoinRetry | ClusterState
+    | RegisterCoordinator | RegisterBroadcast | RegisterSingletonManager
+    | JoinRetry | ClusterState
 )
 
 
@@ -150,6 +160,7 @@ def cluster_receive(
     logger: logging.Logger,
     coordinators: dict[str, ActorRef[CoordinatorMsg]],
     broadcast_proxies: dict[str, ActorRef[Any]],
+    singleton_managers: dict[str, ActorRef[Any]],
     cluster_state: ClusterState | None,
     waiters: tuple[WaitForMembers, ...] = (),
 ) -> Behavior[ClusterCmd]:
@@ -174,6 +185,7 @@ def cluster_receive(
         *,
         new_coordinators: dict[str, ActorRef[CoordinatorMsg]] | None = None,
         new_broadcast_proxies: dict[str, ActorRef[Any]] | None = None,
+        new_singleton_managers: dict[str, ActorRef[Any]] | None = None,
         new_cluster_state: ClusterState | None = None,
         new_waiters: tuple[WaitForMembers, ...] | None = None,
     ) -> Behavior[ClusterCmd]:
@@ -192,6 +204,9 @@ def cluster_receive(
             broadcast_proxies=new_broadcast_proxies
             if new_broadcast_proxies is not None
             else broadcast_proxies,
+            singleton_managers=new_singleton_managers
+            if new_singleton_managers is not None
+            else singleton_managers,
             cluster_state=new_cluster_state
             if new_cluster_state is not None
             else cluster_state,
@@ -216,6 +231,7 @@ def cluster_receive(
 
             case NodeUnreachable(node):
                 logger.warning("Node unreachable: %s:%d", node.host, node.port)
+                gossip_ref.tell(DownMember(address=node))
                 for coord_ref in coordinators.values():
                     coord_ref.tell(NodeDown(node=node))
                 return Behaviors.same()
@@ -257,6 +273,19 @@ def cluster_receive(
                     proxy_ref.tell(cluster_state)
                 return _next(new_broadcast_proxies=new_proxies)
 
+            case RegisterSingletonManager(name=sm_name, manager_ref=manager_ref):
+                logger.info("Registered singleton manager: %s", sm_name)
+                new_managers = {**singleton_managers, sm_name: manager_ref}
+                if cluster_state is not None:
+                    is_leader = cluster_state.leader == self_node
+                    manager_ref.tell(
+                        SetRole(
+                            is_leader=is_leader,
+                            leader_node=cluster_state.leader,
+                        )
+                    )
+                return _next(new_singleton_managers=new_managers)
+
             case ClusterState() as state:
                 if state.diff(cluster_state):
                     logger.info("Cluster topology update: %s", state)
@@ -294,6 +323,12 @@ def cluster_receive(
                         )
                     )
                     coord_ref.tell(UpdateTopology(available_nodes=up_nodes))
+                is_leader_role = SetRole(
+                    is_leader=state.leader == self_node,
+                    leader_node=state.leader,
+                )
+                for manager_ref in singleton_managers.values():
+                    manager_ref.tell(is_leader_role)
                 for proxy_ref in broadcast_proxies.values():
                     proxy_ref.tell(state)
                 remaining = _notify_waiters(state, waiters)
@@ -446,6 +481,7 @@ def cluster_actor(
                 logger=logger,
                 coordinators={},
                 broadcast_proxies={},
+                singleton_managers={},
                 cluster_state=initial_cluster_state,
             ),
             post_stop=cancel_schedules,

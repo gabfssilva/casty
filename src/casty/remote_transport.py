@@ -239,6 +239,10 @@ class TcpTransport:
 
     async def stop(self) -> None:
         """Close all connections and shut down the server."""
+        # Stop accepting new connections first
+        if self._server is not None:
+            self._server.close()
+        # Close outbound connections
         for _, writer in self._connections.values():
             writer.close()
             try:
@@ -246,7 +250,8 @@ class TcpTransport:
             except (ConnectionError, OSError):
                 pass
         self._connections.clear()
-        for writer in self._inbound_writers:
+        # Close inbound connections (terminates _handle_connection tasks)
+        for writer in list(self._inbound_writers):
             writer.close()
             try:
                 await writer.wait_closed()
@@ -254,7 +259,6 @@ class TcpTransport:
                 pass
         self._inbound_writers.clear()
         if self._server is not None:
-            self._server.close()
             await self._server.wait_closed()
 
 

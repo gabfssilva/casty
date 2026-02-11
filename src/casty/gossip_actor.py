@@ -59,6 +59,12 @@ class PromoteMember:
 
 
 @dataclass(frozen=True)
+class DownMember:
+    """Mark a member as down (unreachable → removed from leader election)."""
+    address: NodeAddress
+
+
+@dataclass(frozen=True)
 class UpdateShardAllocations:
     """Published by coordinator leader → gossip for cluster-wide propagation."""
     shard_type: str
@@ -73,7 +79,7 @@ class ResolveNode:
     reply_to: ActorRef[NodeAddress | None]
 
 
-type GossipMsg = GossipMessage | GetClusterState | JoinRequest | JoinAccepted | GossipTick | PromoteMember | UpdateShardAllocations | ResolveNode
+type GossipMsg = GossipMessage | GetClusterState | JoinRequest | JoinAccepted | GossipTick | PromoteMember | DownMember | UpdateShardAllocations | ResolveNode
 
 
 def gossip_actor(
@@ -246,6 +252,26 @@ def gossip_actor(
                         new_state = ClusterState(
                             members=promoted,
                             unreachable=state.unreachable,
+                            version=state.version.increment(self_node),
+                            shard_allocations=state.shard_allocations,
+                            allocation_epoch=state.allocation_epoch,
+                            seen=frozenset({self_node}),
+                        )
+                        return active(new_state)
+                    return Behaviors.same()
+
+                case DownMember(address):
+                    downed = frozenset(
+                        Member(address=m.address, status=MemberStatus.down, roles=m.roles, id=m.id)
+                        if m.address == address and m.status in (MemberStatus.up, MemberStatus.joining, MemberStatus.leaving)
+                        else m
+                        for m in state.members
+                    )
+                    if downed != state.members:
+                        log.info("Marked %s:%d -> down", address.host, address.port)
+                        new_state = ClusterState(
+                            members=downed,
+                            unreachable=state.unreachable | {address},
                             version=state.version.increment(self_node),
                             shard_allocations=state.shard_allocations,
                             allocation_epoch=state.allocation_epoch,

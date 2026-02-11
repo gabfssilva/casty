@@ -11,6 +11,7 @@ from casty.actor import (
     SameBehavior,
     SetupBehavior,
     ShardedBehavior,
+    SingletonBehavior,
     SnapshotEvery,
     SnapshotPolicy,
     SpyBehavior,
@@ -197,6 +198,8 @@ __all__ = [
     "ClusteredActorSystem",
     "ShardedBehavior",
     "ShardEnvelope",
+    # Singleton
+    "SingletonBehavior",
     # Task Runner
     "RunTask",
     "TaskCancelled",

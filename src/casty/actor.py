@@ -53,6 +53,29 @@ class ShardedBehavior[M]:
 
 
 @dataclass(frozen=True)
+class SingletonBehavior[M]:
+    """Behavior that runs exactly one actor instance across the cluster.
+
+    The singleton is hosted on the current leader node and automatically
+    migrates when leadership changes.  If the wrapped factory returns an
+    ``EventSourcedBehavior``, state is recovered from the journal on the
+    new leader.
+
+    Parameters
+    ----------
+    factory : Callable[[], Behavior[M]]
+        Zero-argument factory that creates the singleton's behavior.
+
+    Examples
+    --------
+    >>> ref = system.spawn(Behaviors.singleton(lambda: my_behavior()), "my-singleton")
+    >>> ref.tell(DoSomething())
+    """
+
+    factory: Callable[[], Behavior[M]]
+
+
+@dataclass(frozen=True)
 class BroadcastedBehavior[M]:
     """Behavior wrapper that enables broadcasting messages to all instances.
 
@@ -696,6 +719,33 @@ class Behaviors:
             num_shards=num_shards,
             replication=replication,
         )
+
+    @staticmethod
+    def singleton[M](
+        factory: Callable[[], Behavior[M]],
+    ) -> SingletonBehavior[M]:
+        """Create a singleton behavior — exactly one instance across the cluster.
+
+        The singleton runs on the leader node and automatically migrates
+        on leadership change.  Combine with ``Behaviors.event_sourced``
+        for state recovery on failover.
+
+        Parameters
+        ----------
+        factory : Callable[[], Behavior[M]]
+            Zero-argument factory that creates the singleton's behavior.
+
+        Returns
+        -------
+        SingletonBehavior[M]
+            A behavior that runs as a cluster singleton.
+
+        Examples
+        --------
+        >>> ref = system.spawn(Behaviors.singleton(lambda: my_behavior()), "my-singleton")
+        >>> ref.tell(DoSomething())
+        """
+        return SingletonBehavior(factory=factory)
 
     @staticmethod
     def event_sourced[M, E, S](
