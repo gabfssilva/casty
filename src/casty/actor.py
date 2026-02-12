@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from casty.context import ActorContext
     from casty.journal import EventJournal
     from casty.messages import Terminated
+    from casty.receptionist import ServiceKey
     from casty.ref import ActorRef
     from casty.replication import ReplicationConfig
     from casty.supervision import SupervisionStrategy
@@ -95,6 +96,37 @@ class BroadcastedBehavior[M]:
     """
 
     behavior: Behavior[M]
+
+
+@dataclass(frozen=True)
+class DiscoverableBehavior[M]:
+    """Behavior wrapper that auto-registers the actor with the cluster receptionist.
+
+    When spawned via ``ClusteredActorSystem.spawn()``, the system spawns the
+    inner behavior and immediately registers the resulting ref under the given
+    ``ServiceKey``.  Deregistration is automatic — the receptionist watches
+    ``ActorStopped`` events.
+
+    Only supported at the system level (``ClusteredActorSystem.spawn``), not
+    via ``ctx.spawn()``.
+
+    Parameters
+    ----------
+    behavior : Behavior[M]
+        The underlying behavior to spawn.
+    key : ServiceKey[M]
+        Service key to register under.
+
+    Examples
+    --------
+    >>> ref = system.spawn(
+    ...     Behaviors.discoverable(my_behavior, key=ServiceKey("chat-user")),
+    ...     "user-1",
+    ... )
+    """
+
+    behavior: Behavior[M]
+    key: ServiceKey[M]
 
 
 @dataclass(frozen=True)
@@ -842,6 +874,39 @@ class Behaviors:
         return PersistedBehavior(
             events=tuple(events), then=then if then is not None else SameBehavior()
         )
+
+    @staticmethod
+    def discoverable[M](
+        behavior: Behavior[M],
+        *,
+        key: ServiceKey[M],
+    ) -> DiscoverableBehavior[M]:
+        """Wrap a behavior for automatic service registration on spawn.
+
+        When spawned via ``ClusteredActorSystem.spawn()``, the actor is
+        registered with the cluster receptionist under *key*.
+        Deregistration happens automatically when the actor stops.
+
+        Parameters
+        ----------
+        behavior : Behavior[M]
+            The behavior to spawn and register.
+        key : ServiceKey[M]
+            Service key to register under.
+
+        Returns
+        -------
+        DiscoverableBehavior[M]
+            A spawn-time wrapper recognized by ``ClusteredActorSystem``.
+
+        Examples
+        --------
+        >>> ref = system.spawn(
+        ...     Behaviors.discoverable(my_behavior, key=ServiceKey("chat")),
+        ...     "chat-service",
+        ... )
+        """
+        return DiscoverableBehavior(behavior=behavior, key=key)
 
     @staticmethod
     def spy[M](

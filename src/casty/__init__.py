@@ -3,6 +3,7 @@ from casty.actor import (
     Behavior,
     Behaviors,
     BroadcastedBehavior,
+    DiscoverableBehavior,
     EventSourcedBehavior,
     LifecycleBehavior,
     PersistedBehavior,
@@ -112,6 +113,7 @@ __all__ = [
     "BroadcastRef",
     # Behavior types
     "BroadcastedBehavior",
+    "DiscoverableBehavior",
     "ReceiveBehavior",
     "SetupBehavior",
     "SameBehavior",

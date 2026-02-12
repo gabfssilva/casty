@@ -4,22 +4,23 @@ Chat Presence with Service Discovery
 
 Every node dynamically spawns "user" actors, registers them via the
 cluster receptionist, and monitors presence changes through ``Subscribe``.
-Users join with random Brazilian names, chat briefly, then leave —
+Users join with random Brazilian names, chat and reply, then leave —
 triggering auto-deregister via the EventStream.
 
 Demonstrates:
   - ``ServiceKey`` — typed registry keys
-  - ``Register`` / ``Subscribe`` — service discovery primitives
+  - ``Behaviors.discoverable()`` — auto-register on spawn
+  - ``Subscribe`` — continuous presence notifications
   - Auto-deregister on actor stop (via ``ActorStopped`` event)
   - Real-time presence diffs across cluster nodes
 
 Usage (local):
-    uv run python examples/16_chat_presence/main.py --port 25520
-    uv run python examples/16_chat_presence/main.py --port 25521 --seed 127.0.0.1:25520
-    uv run python examples/16_chat_presence/main.py --port 25522 --seed 127.0.0.1:25520
+    uv run python examples/16_service_discovery/main.py --port 25520
+    uv run python examples/16_service_discovery/main.py --port 25521 --seed 127.0.0.1:25520
+    uv run python examples/16_service_discovery/main.py --port 25522 --seed 127.0.0.1:25520
 
 Usage (Docker Compose):
-    cd examples/16_chat_presence
+    cd examples/16_service_discovery
     docker compose up --build
 """
 
@@ -42,7 +43,6 @@ from casty import (
     DeadLetter,
     Find,
     Listing,
-    Register,
     ServiceKey,
     Subscribe,
 )
@@ -137,6 +137,7 @@ class ColorFormatter(logging.Formatter):
 class ChatMessage:
     text: str
     from_user: str
+    reply_to: ActorRef[ChatMsg] | None = None
 
 
 @dataclass(frozen=True)
@@ -152,10 +153,13 @@ type ChatMsg = ChatMessage | Leave
 # ---------------------------------------------------------------------------
 
 
+REPLIES = ["haha", "valeu!", "show!", "opa!", "tmj!", "kk", "rs", "top!"]
+
+
 def user_actor(name: str) -> Behavior[ChatMsg]:
-    async def receive(_ctx: Any, msg: ChatMsg) -> Behavior[ChatMsg]:
+    async def receive(ctx: Any, msg: ChatMsg) -> Behavior[ChatMsg]:
         match msg:
-            case ChatMessage(text=text, from_user=sender):
+            case ChatMessage(text=text, from_user=sender, reply_to=reply_to):
                 log.info(
                     "💬 %s%s%s → %s%s%s: %s%s%s",
                     MAGENTA,
@@ -168,6 +172,13 @@ def user_actor(name: str) -> Behavior[ChatMsg]:
                     text,
                     RESET,
                 )
+                if reply_to is not None:
+                    reply_to.tell(
+                        ChatMessage(
+                            text=random.choice(REPLIES),
+                            from_user=name,
+                        )
+                    )
                 return Behaviors.same()
             case Leave():
                 return Behaviors.stopped()
@@ -237,8 +248,10 @@ async def spawn_loop(system: ClusteredActorSystem, num_users: int) -> None:
     for base_name in names:
         actor_name = f"{base_name}-{node}"
 
-        ref = system.spawn(user_actor(actor_name), actor_name)
-        system.receptionist.tell(Register(key=CHAT_USER_KEY, ref=ref))
+        ref = system.spawn(
+            Behaviors.discoverable(user_actor(actor_name), key=CHAT_USER_KEY),
+            actor_name,
+        )
 
         listing: Listing[ChatMsg] = await system.ask(
             system.receptionist,
@@ -254,7 +267,11 @@ async def spawn_loop(system: ClusteredActorSystem, num_users: int) -> None:
             target = random.choice(others)
             greetings = ["oi!", "e aí?", "bom dia!", "tudo bem?", "fala!"]
             target.ref.tell(
-                ChatMessage(text=random.choice(greetings), from_user=actor_name)
+                ChatMessage(
+                    text=random.choice(greetings),
+                    from_user=actor_name,
+                    reply_to=ref,
+                )
             )
 
         delay = random.uniform(3.0, 8.0)

@@ -4,7 +4,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from casty import ActorSystem, Behavior, Behaviors
+from casty import ActorRef, ActorSystem, Behavior, Behaviors, OneForOneStrategy
+from casty.sharding import ClusteredActorSystem
 from casty.cluster_state import NodeAddress, ServiceEntry
 from casty.receptionist import (
     Deregister,
@@ -215,3 +216,63 @@ async def test_auto_deregister_on_actor_stopped() -> None:
     listing = results[0]
     assert isinstance(listing, Listing)
     assert len(listing.instances) == 0
+
+
+# ---------------------------------------------------------------------------
+# Behaviors.discoverable() tests (require ClusteredActorSystem)
+# ---------------------------------------------------------------------------
+
+PING_KEY: ServiceKey[Ping] = ServiceKey("ping")
+
+
+async def test_discoverable_auto_registers() -> None:
+    """Spawning a discoverable behavior auto-registers with the receptionist."""
+    async with ClusteredActorSystem(
+        name="disc-reg", host="127.0.0.1", port=0, node_id="node-1",
+    ) as system:
+        ref: ActorRef[Ping] = system.spawn(
+            Behaviors.discoverable(collector([]), key=PING_KEY), "ping-svc",
+        )
+        await asyncio.sleep(0.3)
+
+        listing = await system.lookup(PING_KEY)
+        paths = {inst.ref.address.path for inst in listing.instances}
+        assert ref.address.path in paths
+
+
+async def test_discoverable_auto_deregisters_on_stop() -> None:
+    """When a discoverable actor stops, it is automatically deregistered."""
+    async with ClusteredActorSystem(
+        name="disc-dereg", host="127.0.0.1", port=0, node_id="node-1",
+    ) as system:
+        ref: ActorRef[Any] = system.spawn(
+            Behaviors.discoverable(stoppable(), key=PING_KEY), "ping-svc",
+        )
+        await asyncio.sleep(0.3)
+
+        listing = await system.lookup(PING_KEY)
+        assert len(listing.instances) == 1
+
+        ref.tell(Stop())
+        await asyncio.sleep(0.5)
+
+        listing = await system.lookup(PING_KEY)
+        assert len(listing.instances) == 0
+
+
+async def test_discoverable_composes_with_supervise() -> None:
+    """Discoverable wraps a supervised behavior — both work correctly."""
+    async with ClusteredActorSystem(
+        name="disc-sup", host="127.0.0.1", port=0, node_id="node-1",
+    ) as system:
+        supervised = Behaviors.supervise(
+            collector([]),
+            OneForOneStrategy(),
+        )
+        system.spawn(
+            Behaviors.discoverable(supervised, key=PING_KEY), "ping-svc",
+        )
+        await asyncio.sleep(0.3)
+
+        listing = await system.lookup(PING_KEY)
+        assert len(listing.instances) == 1

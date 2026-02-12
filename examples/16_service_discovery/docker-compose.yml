@@ -1,7 +1,7 @@
 x-node: &node
   build:
     context: ../..
-    dockerfile: examples/16_chat_presence/Dockerfile
+    dockerfile: examples/16_service_discovery/Dockerfile
   command:
     [
       "--port", "25520",
