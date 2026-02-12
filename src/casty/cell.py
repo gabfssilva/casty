@@ -87,7 +87,7 @@ class CellContext[M]:
     def stop(self, ref: ActorRef[Any]) -> None:
         for child in self._cell.children.values():
             if child.ref == ref:
-                self._cell.task_runner.tell(RunTask(child.stop()))
+                self._cell.task_runner.tell(RunTask(child.stop))
                 return
 
     def watch(self, ref: ActorRef[Any]) -> None:
@@ -152,7 +152,7 @@ class CellContext[M]:
                         exc,
                     )
 
-        self._cell.task_runner.tell(RunTask(run()))
+        self._cell.task_runner.tell(RunTask(run))
 
 
 class ActorCell[M]:
@@ -321,15 +321,19 @@ class ActorCell[M]:
 
         if self._stopped:
             if not self._event_stream.suppress_dead_letters_on_shutdown:
-                self._logger.warning("Dead letter: %s", type(msg).__name__)
-                if self._task_runner is not None:
+                has_listener = self._event_stream.has_subscribers(DeadLetter)
+                if has_listener and (
+                    self._task_runner is not None
+                    and self._task_runner.address != self._ref.address
+                ):
                     self._task_runner.tell(
                         RunTask(
-                            self._event_stream.publish(
-                                DeadLetter(message=msg, intended_ref=self._ref)
-                            )
+                            self._event_stream.publish,
+                            args=(DeadLetter(message=msg, intended_ref=self._ref),),
                         )
                     )
+                elif not has_listener:
+                    self._logger.warning("Dead letter: %s", type(msg).__name__)
             return
         # Route ack messages to the dedicated queue to avoid polluting the main mailbox
         if isinstance(msg, ReplicateEventsAck):

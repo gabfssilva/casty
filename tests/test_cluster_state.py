@@ -6,6 +6,7 @@ from casty.cluster_state import (
     Member,
     MemberStatus,
     ClusterState,
+    ServiceEntry,
 )
 
 
@@ -96,3 +97,46 @@ def test_node_address_ordering() -> None:
     a = NodeAddress(host="10.0.0.1", port=25520)
     b = NodeAddress(host="10.0.0.2", port=25520)
     assert a < b
+
+
+def test_cluster_state_has_registry_field() -> None:
+    state = ClusterState()
+    assert state.registry == frozenset()
+
+
+def test_cluster_state_registry_preserved_on_add_member() -> None:
+    node = NodeAddress(host="10.0.0.1", port=2551)
+    entry = ServiceEntry(key="payment", node=node, path="/payment")
+    state = ClusterState(registry=frozenset({entry}))
+    member = Member(address=node, status=MemberStatus.up, roles=frozenset(), id="n1")
+    new_state = state.add_member(member)
+    assert new_state.registry == frozenset({entry})
+
+
+def test_cluster_state_registry_preserved_on_update_status() -> None:
+    node = NodeAddress(host="10.0.0.1", port=2551)
+    entry = ServiceEntry(key="payment", node=node, path="/payment")
+    member = Member(address=node, status=MemberStatus.up, roles=frozenset(), id="n1")
+    state = ClusterState(
+        members=frozenset({member}), registry=frozenset({entry})
+    )
+    new_state = state.update_status(node, MemberStatus.leaving)
+    assert new_state.registry == frozenset({entry})
+
+
+def test_cluster_state_registry_preserved_on_mark_unreachable() -> None:
+    node = NodeAddress(host="10.0.0.1", port=2551)
+    entry = ServiceEntry(key="payment", node=node, path="/payment")
+    state = ClusterState(registry=frozenset({entry}))
+    new_state = state.mark_unreachable(node)
+    assert new_state.registry == frozenset({entry})
+
+
+def test_cluster_state_registry_preserved_on_mark_reachable() -> None:
+    node = NodeAddress(host="10.0.0.1", port=2551)
+    entry = ServiceEntry(key="payment", node=node, path="/payment")
+    state = ClusterState(
+        unreachable=frozenset({node}), registry=frozenset({entry})
+    )
+    new_state = state.mark_reachable(node)
+    assert new_state.registry == frozenset({entry})

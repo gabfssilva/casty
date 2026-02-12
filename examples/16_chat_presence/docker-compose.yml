@@ -1,0 +1,24 @@
+x-node: &node
+  build:
+    context: ../..
+    dockerfile: examples/16_chat_presence/Dockerfile
+  command:
+    [
+      "--port", "25520",
+      "--host", "auto",
+      "--bind-host", "0.0.0.0",
+      "--seed", "node-1:25520",
+      "--nodes", "3",
+      "--users", "10",
+    ]
+
+services:
+  node-1:
+    <<: *node
+    hostname: node-1
+  node-2:
+    <<: *node
+    hostname: node-2
+  node-3:
+    <<: *node
+    hostname: node-3

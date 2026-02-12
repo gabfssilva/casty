@@ -41,6 +41,7 @@ from casty.cluster_state import (
     MemberStatus,
     NodeAddress,
     NodeId,
+    ServiceEntry,
     VectorClock,
 )
 from casty.context import ActorContext
@@ -79,6 +80,15 @@ from casty.messages import Terminated
 from casty.ref import ActorRef, BroadcastRef
 from casty.remote_transport import MessageEnvelope, RemoteTransport, TcpTransport
 from casty.serialization import JsonSerializer, PickleSerializer, Serializer, TypeRegistry
+from casty.receptionist import (
+    Deregister,
+    Find,
+    Listing,
+    Register,
+    ServiceInstance,
+    ServiceKey,
+    Subscribe,
+)
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
 from casty.task_runner import (
     RunTask,
@@ -196,6 +206,15 @@ __all__ = [
     "ScheduleOnce",
     "CancelSchedule",
     "SchedulerMsg",
+    # Service Discovery
+    "ServiceKey",
+    "ServiceEntry",
+    "ServiceInstance",
+    "Listing",
+    "Register",
+    "Deregister",
+    "Subscribe",
+    "Find",
     # Sharding
     "ClusteredActorSystem",
     "ShardedBehavior",

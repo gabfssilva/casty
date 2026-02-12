@@ -234,6 +234,25 @@ class VectorClock:
 
 
 @dataclass(frozen=True)
+class ServiceEntry:
+    """A registered service in the cluster registry.
+
+    Parameters
+    ----------
+    key : str
+        Service name (e.g. ``"payment-service"``).
+    node : NodeAddress
+        Node where the actor lives.
+    path : str
+        Actor path on that node.
+    """
+
+    key: str
+    node: NodeAddress
+    path: str
+
+
+@dataclass(frozen=True)
 class ClusterState:
     """Immutable, CRDT-mergeable snapshot of cluster membership.
 
@@ -282,6 +301,9 @@ class ClusterState:
     seen: frozenset[NodeAddress] = field(
         default_factory=lambda: frozenset[NodeAddress]()
     )
+    registry: frozenset[ServiceEntry] = field(
+        default_factory=lambda: frozenset[ServiceEntry]()
+    )
 
     @property
     def is_converged(self) -> bool:
@@ -321,6 +343,7 @@ class ClusterState:
             shard_allocations=self.shard_allocations,
             allocation_epoch=self.allocation_epoch,
             seen=self.seen,
+            registry=self.registry,
         )
 
     def merge_members(self, other: ClusterState) -> frozenset[Member]:
@@ -371,6 +394,7 @@ class ClusterState:
             shard_allocations=self.shard_allocations,
             allocation_epoch=self.allocation_epoch,
             seen=self.seen,
+            registry=self.registry,
         )
 
     def mark_unreachable(self, address: NodeAddress) -> ClusterState:
@@ -393,6 +417,7 @@ class ClusterState:
             shard_allocations=self.shard_allocations,
             allocation_epoch=self.allocation_epoch,
             seen=self.seen,
+            registry=self.registry,
         )
 
     def mark_reachable(self, address: NodeAddress) -> ClusterState:
@@ -415,6 +440,7 @@ class ClusterState:
             shard_allocations=self.shard_allocations,
             allocation_epoch=self.allocation_epoch,
             seen=self.seen,
+            registry=self.registry,
         )
 
     def with_allocations(
@@ -447,6 +473,7 @@ class ClusterState:
             shard_allocations=new_shard_allocs,
             allocation_epoch=epoch,
             seen=self.seen,
+            registry=self.registry,
         )
 
     def __str__(self) -> str:

@@ -395,7 +395,7 @@ class RemoteTransport:
             if self._task_runner is not None:
                 from casty.task_runner import RunTask
 
-                self._task_runner.tell(RunTask(self._send_remote(resolved, msg)))
+                self._task_runner.tell(RunTask(self._send_remote, args=(resolved, msg)))
             else:
                 try:
                     asyncio.get_running_loop().create_task(self._send_remote(resolved, msg))

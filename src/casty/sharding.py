@@ -33,13 +33,14 @@ from casty.cluster import (
     RegisterSingletonManager,
     WaitForMembers,
 )
+from casty.receptionist import Find, Listing, ReceptionistMsg, ServiceKey
 from casty.remote_transport import RemoteTransport, TcpTransport
 from casty.serialization import PickleSerializer
 from casty.system import ActorSystem
 from casty.transport import MessageTransport
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Coroutine
 
     from casty.config import CastyConfig
     from casty.distributed import Distributed
@@ -315,6 +316,7 @@ class ClusteredActorSystem(ActorSystem):
         self._roles = roles
         self._self_node = NodeAddress(host=host, port=port)
         self._coordinators: dict[str, ActorRef[CoordinatorMsg]] = {}
+        self._receptionist_ref: ActorRef[ReceptionistMsg] | None = None
         self._required_quorum = required_quorum
         self._logger = logging.getLogger(f"casty.sharding.{name}")
 
@@ -335,6 +337,17 @@ class ClusteredActorSystem(ActorSystem):
             local_port=port,
             system_name=name,
         )
+
+    @property
+    def receptionist(self) -> ActorRef[ReceptionistMsg]:
+        """The cluster-wide receptionist for service discovery."""
+        if self._receptionist_ref is None:
+            ref = self.lookup("/_cluster/_receptionist")
+            if ref is None:
+                msg = "Receptionist not available yet"
+                raise RuntimeError(msg)
+            self._receptionist_ref = ref  # type: ignore[assignment]
+        return self._receptionist_ref
 
     @property
     def self_node(self) -> NodeAddress:
@@ -431,6 +444,7 @@ class ClusteredActorSystem(ActorSystem):
                 heartbeat_interval=cfg.heartbeat.interval,
                 availability_interval=cfg.heartbeat.availability_check_interval,
                 failure_detector_config=cfg.failure_detector,
+                event_stream=self.event_stream,
             )
             await self._cluster.start()
         except BaseException:
@@ -448,6 +462,10 @@ class ClusteredActorSystem(ActorSystem):
             Behaviors.sharded(entity_factory=barrier_entity, num_shards=10),
             "_barrier",
         )
+
+        # Wait for cluster_actor to spawn receptionist
+        while self.lookup("/_cluster/_receptionist") is None:
+            await asyncio.sleep(0.01)
 
         self._logger.info("Started on %s:%d", self._host, self._port)
 
@@ -819,45 +837,77 @@ class ClusteredActorSystem(ActorSystem):
             timeout=timeout,
         )
 
+    @overload
+    def lookup[M](
+        self, path: ServiceKey[M], *, timeout: float = 5.0,
+    ) -> Coroutine[Any, Any, Listing[M]]: ...
+
+    @overload
     def lookup(
         self, path: str, *, node: NodeId | NodeAddress | None = None,
-    ) -> ActorRef[Any] | None:
-        """Look up an actor by path, optionally on a remote node.
+    ) -> ActorRef[Any] | None: ...
 
-        When *node* is ``None``, performs a local lookup.
-        When *node* is a ``NodeId``, constructs an address with ``node_id``
-        and lets the transport resolve it.
-        When *node* is a ``NodeAddress``, constructs a host/port address.
+    def lookup[M](  # type: ignore[reportIncompatibleMethodOverride]
+        self,
+        path: str | ServiceKey[M],
+        *,
+        node: NodeId | NodeAddress | None = None,
+        timeout: float = 5.0,
+    ) -> ActorRef[Any] | None | Coroutine[Any, Any, Listing[M]]:
+        """Look up an actor by path or find services by key.
+
+        When *path* is a ``str``, performs a path-based lookup
+        (optionally on a remote *node*).  When it is a ``ServiceKey``,
+        queries the cluster receptionist and returns an awaitable
+        ``Listing``.
 
         Parameters
         ----------
-        path : str
-            Actor path (e.g. ``"/my-actor"``).
+        path : str | ServiceKey
+            Actor path (e.g. ``"/my-actor"``) or a typed service key.
         node : NodeId | NodeAddress | None
-            Target node.  ``None`` means local.
+            Target node for path-based lookup.  ``None`` means local.
+        timeout : float
+            Seconds to wait for the receptionist (only for ``ServiceKey``).
 
         Returns
         -------
-        ActorRef[Any] | None
+        ActorRef[Any] | None | Coroutine[Any, Any, Listing]
+            For path lookups, the actor reference or ``None``.
+            For service key lookups, an awaitable ``Listing``.
 
         Examples
         --------
         >>> ref = system.lookup("/my-actor")
         >>> remote = system.lookup("/my-actor", node="worker-1")
-        >>> remote = system.lookup("/my-actor", node=NodeAddress("10.0.0.2", 25520))
+        >>> listing = await system.lookup(ServiceKey[PaymentMsg]("payment"))
         """
-        if node is None:
-            return super().lookup(path)
-        if isinstance(node, NodeAddress):
-            addr = ActorAddress(
-                system=self._name, path=path,
-                host=node.host, port=node.port,
-            )
-        else:
-            addr = ActorAddress(
-                system=self._name, path=path, node_id=node,
-            )
-        return self._remote_transport.make_ref(addr)
+        match path:
+            case ServiceKey() as key:
+                return self._lookup_service(key, timeout=timeout)
+            case str() as actor_path:
+                match node:
+                    case None:
+                        return super().lookup(actor_path)
+                    case NodeAddress(host=host, port=port):
+                        addr = ActorAddress(
+                            system=self._name, path=actor_path,
+                            host=host, port=port,
+                        )
+                    case str() as node_id:
+                        addr = ActorAddress(
+                            system=self._name, path=actor_path, node_id=node_id,
+                        )
+                return self._remote_transport.make_ref(addr)
+
+    async def _lookup_service[M](
+        self, key: ServiceKey[M], *, timeout: float = 5.0,
+    ) -> Listing[M]:
+        return await self.ask(
+            self.receptionist,
+            lambda r: Find(key=key, reply_to=r),
+            timeout=timeout,
+        )
 
     def distributed(self, *, journal: EventJournal | None = None) -> Distributed:
         """Create a ``Distributed`` facade for this system.

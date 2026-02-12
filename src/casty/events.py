@@ -232,7 +232,24 @@ class EventStream:
         """
         self._subscribers[event_type].append(handler)
 
-    def unsubscribe(self, event_type: type[object], handler: EventHandler[object]) -> None:
+    def has_subscribers(self, event_type: type[object]) -> bool:
+        """Check if any handlers are registered for the given event type.
+
+        Parameters
+        ----------
+        event_type : type[object]
+            The event class to check.
+
+        Returns
+        -------
+        bool
+            True if at least one handler is subscribed.
+        """
+        return bool(self._subscribers.get(event_type))
+
+    def unsubscribe(
+        self, event_type: type[object], handler: EventHandler[object]
+    ) -> None:
         """Remove a previously registered handler.
 
         Parameters

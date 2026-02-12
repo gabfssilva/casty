@@ -10,7 +10,7 @@ tasks.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -48,12 +48,19 @@ type TaskResult = TaskCompleted | TaskFailed | TaskCancelled
 
 @dataclass(frozen=True)
 class RunTask:
-    """Request the task runner to execute a coroutine as a tracked task.
+    """Request the task runner to execute an async callable as a tracked task.
+
+    The coroutine is created lazily when the task runner processes the message.
+    If the message becomes a dead letter, no coroutine is leaked.
 
     Parameters
     ----------
-    coro : Coroutine[Any, Any, None]
-        The coroutine to run.
+    fn : Callable[..., Awaitable[Any]]
+        The async callable to invoke.
+    args : tuple[Any, ...]
+        Positional arguments for ``fn``.
+    kwargs : tuple[tuple[str, Any], ...]
+        Keyword arguments for ``fn`` as hashable pairs.
     reply_to : ActorRef[TaskResult] | None
         Optional ref to notify on completion, failure, or cancellation.
     key : str
@@ -61,11 +68,13 @@ class RunTask:
 
     Examples
     --------
-    >>> task_runner.tell(RunTask(some_async_work()))
-    >>> task_runner.tell(RunTask(work(), reply_to=ctx.self, key="job-1"))
+    >>> task_runner.tell(RunTask(some_async_work))
+    >>> task_runner.tell(RunTask(work, reply_to=ctx.self, key="job-1"))
     """
 
-    coro: Coroutine[Any, Any, None]
+    fn: Callable[..., Awaitable[Any]]
+    args: tuple[Any, ...] = ()
+    kwargs: tuple[tuple[str, Any], ...] = ()
     reply_to: ActorRef[TaskResult] | None = field(default=None)
     key: str = field(default="")
 
@@ -91,11 +100,11 @@ def task_runner() -> Behavior[TaskRunnerMsg]:
             ctx: ActorContext[TaskRunnerMsg], msg: TaskRunnerMsg
         ) -> Behavior[TaskRunnerMsg]:
             match msg:
-                case RunTask(coro=coro, reply_to=reply_to, key=key):
+                case RunTask(fn=fn, args=args, kwargs=kwargs, reply_to=reply_to, key=key):
 
                     async def tracked() -> None:
                         try:
-                            await coro
+                            await fn(*args, **dict(kwargs))
                             if reply_to is not None:
                                 reply_to.tell(TaskCompleted(key=key))
                         except asyncio.CancelledError:

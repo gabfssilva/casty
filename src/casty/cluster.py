@@ -58,6 +58,7 @@ from casty.ref import ActorRef
 if TYPE_CHECKING:
     from casty.config import FailureDetectorConfig
     from casty.context import ActorContext
+    from casty.events import EventStream
     from casty.remote_transport import RemoteTransport
     from casty.system import ActorSystem
 
@@ -99,6 +100,11 @@ class RegisterSingletonManager:
 
 
 @dataclass(frozen=True)
+class GetReceptionist:
+    reply_to: ActorRef[Any]
+
+
+@dataclass(frozen=True)
 class JoinRetry:
     pass
 
@@ -106,7 +112,7 @@ class JoinRetry:
 type ClusterCmd = (
     GetState | WaitForMembers | NodeUnreachable | PublishAllocations
     | RegisterCoordinator | RegisterBroadcast | RegisterSingletonManager
-    | JoinRetry | ClusterState
+    | GetReceptionist | JoinRetry | ClusterState
 )
 
 
@@ -161,6 +167,7 @@ def cluster_receive(
     coordinators: dict[str, ActorRef[CoordinatorMsg]],
     broadcast_proxies: dict[str, ActorRef[Any]],
     singleton_managers: dict[str, ActorRef[Any]],
+    receptionist_ref: ActorRef[Any] | None,
     cluster_state: ClusterState | None,
     waiters: tuple[WaitForMembers, ...] = (),
 ) -> Behavior[ClusterCmd]:
@@ -207,6 +214,7 @@ def cluster_receive(
             singleton_managers=new_singleton_managers
             if new_singleton_managers is not None
             else singleton_managers,
+            receptionist_ref=receptionist_ref,
             cluster_state=new_cluster_state
             if new_cluster_state is not None
             else cluster_state,
@@ -221,6 +229,10 @@ def cluster_receive(
         match msg:
             case GetState(reply_to):
                 gossip_ref.tell(GetClusterState(reply_to=reply_to))
+                return Behaviors.same()
+
+            case GetReceptionist(reply_to):
+                reply_to.tell(receptionist_ref)
                 return Behaviors.same()
 
             case WaitForMembers(n, reply_to):
@@ -331,6 +343,9 @@ def cluster_receive(
                     manager_ref.tell(is_leader_role)
                 for proxy_ref in broadcast_proxies.values():
                     proxy_ref.tell(state)
+                if receptionist_ref is not None:
+                    from casty.receptionist import RegistryUpdated
+                    receptionist_ref.tell(RegistryUpdated(registry=state.registry))
                 remaining = _notify_waiters(state, waiters)
                 return _next(new_cluster_state=state, new_waiters=remaining)
 
@@ -373,6 +388,7 @@ def cluster_actor(
     heartbeat_interval: float = 0.5,
     availability_interval: float = 2.0,
     failure_detector_config: FailureDetectorConfig | None = None,
+    event_stream: EventStream | None = None,
 ) -> Behavior[ClusterCmd]:
     async def setup(ctx: ActorContext[ClusterCmd]) -> Behavior[ClusterCmd]:
         self_node = NodeAddress(host=config.host, port=config.port)
@@ -415,6 +431,20 @@ def cluster_actor(
                 logger=heartbeat_logger,
             ),
             "_heartbeat",
+        )
+
+        # Receptionist — service discovery
+        from casty.receptionist import receptionist_actor
+
+        receptionist_ref: ActorRef[Any] = ctx.spawn(
+            receptionist_actor(
+                self_node=self_node,
+                gossip_ref=gossip_ref,
+                remote_transport=remote_transport,
+                system_name=system_name,
+                event_stream=event_stream,
+            ),
+            "_receptionist",
         )
 
         # Build seed refs for join retry
@@ -482,6 +512,7 @@ def cluster_actor(
                 coordinators={},
                 broadcast_proxies={},
                 singleton_managers={},
+                receptionist_ref=receptionist_ref,
                 cluster_state=initial_cluster_state,
             ),
             post_stop=cancel_schedules,
@@ -541,6 +572,7 @@ class Cluster:
         heartbeat_interval: float = 0.5,
         availability_interval: float = 2.0,
         failure_detector_config: FailureDetectorConfig | None = None,
+        event_stream: EventStream | None = None,
     ) -> None:
         self._system = system
         self._config = config
@@ -551,6 +583,7 @@ class Cluster:
         self._heartbeat_interval = heartbeat_interval
         self._availability_interval = availability_interval
         self._failure_detector_config = failure_detector_config
+        self._event_stream = event_stream
         self._ref: ActorRef[ClusterCmd] | None = None
 
     @property
@@ -589,6 +622,7 @@ class Cluster:
                 heartbeat_interval=self._heartbeat_interval,
                 availability_interval=self._availability_interval,
                 failure_detector_config=self._failure_detector_config,
+                event_stream=self._event_stream,
             ),
             "_cluster",
         )
@@ -609,6 +643,14 @@ class Cluster:
         return await self._system.ask(
             self.ref,
             lambda r: GetState(reply_to=r),
+            timeout=timeout,
+        )
+
+    async def get_receptionist(self, *, timeout: float = 5.0) -> ActorRef[Any]:
+        """Ask the cluster actor for the receptionist ref."""
+        return await self._system.ask(
+            self.ref,
+            lambda r: GetReceptionist(reply_to=r),
             timeout=timeout,
         )
 

@@ -24,3 +24,16 @@ async def test_cluster_single_node_becomes_leader() -> None:
         assert state.leader is not None
 
         await cluster.shutdown()
+
+
+async def test_cluster_actor_spawns_receptionist() -> None:
+    """Cluster actor spawns a receptionist child that is reachable via lookup."""
+    config = ClusterConfig(host="127.0.0.1", port=0, node_id="node-1", seed_nodes=[])
+
+    async with ActorSystem(name="test") as system:
+        cluster = Cluster(system=system, config=config, event_stream=system.event_stream)
+        await cluster.start()
+        await asyncio.sleep(0.3)
+
+        rec_ref = system.lookup("/_cluster/_receptionist")
+        assert rec_ref is not None

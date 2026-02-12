@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from casty import Behaviors, ActorRef, Behavior
+from casty.receptionist import Find, Listing, Register, ServiceKey
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
 
 
@@ -250,3 +251,115 @@ async def test_remote_ask_timeout() -> None:
                 lambda r: AskMsg(reply_to=r),
                 timeout=0.3,
             )
+
+
+async def test_clustered_system_has_receptionist() -> None:
+    """ClusteredActorSystem should expose a receptionist property."""
+    async with ClusteredActorSystem(
+        name="test-rec", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system:
+        assert system.receptionist is not None
+
+
+async def test_register_and_find_via_receptionist() -> None:
+    """Register a service via receptionist, then find it."""
+    async with ClusteredActorSystem(
+        name="test-rec", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system:
+
+        async def noop(_ctx: Any, _msg: Any) -> Any:
+            return Behaviors.same()
+
+        echo_ref = system.spawn(Behaviors.receive(noop), "echo")
+
+        key = ServiceKey(name="echo")
+        system.receptionist.tell(Register(key=key, ref=echo_ref))
+        await asyncio.sleep(0.1)
+
+        listing: Listing[str] = await system.ask(
+            system.receptionist,
+            lambda r: Find(key=key, reply_to=r),
+            timeout=5.0,
+        )
+        assert len(listing.instances) == 1
+
+
+async def test_lookup_service_key() -> None:
+    """system.lookup(key) returns a Listing with registered instances."""
+    async with ClusteredActorSystem(
+        name="test-find", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system:
+
+        async def noop(_ctx: Any, _msg: Any) -> Any:
+            return Behaviors.same()
+
+        echo_ref = system.spawn(Behaviors.receive(noop), "echo")
+
+        key = ServiceKey(name="echo-svc")
+        system.receptionist.tell(Register(key=key, ref=echo_ref))
+        await asyncio.sleep(0.1)
+
+        listing = await system.lookup(key)
+        assert len(listing.instances) == 1
+        instance = next(iter(listing.instances))
+        assert instance.ref.address.path == echo_ref.address.path
+
+
+async def test_lookup_service_key_returns_empty_when_missing() -> None:
+    """system.lookup(key) returns an empty Listing for unregistered keys."""
+    async with ClusteredActorSystem(
+        name="test-find-empty", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system:
+        key = ServiceKey(name="nonexistent")
+        listing = await system.lookup(key)
+        assert len(listing.instances) == 0
+
+
+async def test_lookup_by_path_still_works() -> None:
+    """Path-based lookup continues to work alongside ServiceKey lookup."""
+    async with ClusteredActorSystem(
+        name="test-lookup-path", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system:
+
+        async def noop(_ctx: Any, _msg: Any) -> Any:
+            return Behaviors.same()
+
+        system.spawn(Behaviors.receive(noop), "my-actor")
+        ref = system.lookup("/my-actor")
+        assert ref is not None
+        assert ref.address.path == "/my-actor"
+
+
+async def test_cross_node_service_discovery() -> None:
+    """Service registered on node A should be discoverable from node B."""
+    async with ClusteredActorSystem(
+        name="cluster", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system_a:
+        port_a = system_a.self_node.port
+
+        async with ClusteredActorSystem(
+            name="cluster",
+            host="127.0.0.1",
+            port=0,
+            node_id="node-2",
+            seed_nodes=[("127.0.0.1", port_a)],
+        ) as system_b:
+            await system_a.wait_for(2, timeout=10.0)
+
+            # Register on node A
+            async def noop(_ctx: Any, _msg: Any) -> Any:
+                return Behaviors.same()
+
+            echo_ref = system_a.spawn(Behaviors.receive(noop), "echo")
+            key: ServiceKey[str] = ServiceKey(name="echo")
+            system_a.receptionist.tell(Register(key=key, ref=echo_ref))
+
+            # Wait for gossip to propagate registry
+            await asyncio.sleep(2.0)
+
+            # Find from node B
+            listing = await system_b.lookup(key)
+
+            assert len(listing.instances) >= 1
+            nodes = {inst.node for inst in listing.instances}
+            assert system_a.self_node in nodes

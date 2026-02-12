@@ -14,6 +14,7 @@ from casty.cluster_state import (
     MemberStatus,
     NodeAddress,
     NodeId,
+    ServiceEntry,
 )
 from casty.ref import ActorRef
 
@@ -79,7 +80,13 @@ class ResolveNode:
     reply_to: ActorRef[NodeAddress | None]
 
 
-type GossipMsg = GossipMessage | GetClusterState | JoinRequest | JoinAccepted | GossipTick | PromoteMember | DownMember | UpdateShardAllocations | ResolveNode
+@dataclass(frozen=True)
+class UpdateRegistry:
+    """Update the local service registry (from receptionist)."""
+    entries: frozenset[ServiceEntry]
+
+
+type GossipMsg = GossipMessage | GetClusterState | JoinRequest | JoinAccepted | GossipTick | PromoteMember | DownMember | UpdateShardAllocations | ResolveNode | UpdateRegistry
 
 
 def gossip_actor(
@@ -140,6 +147,16 @@ def gossip_actor(
                         merged_allocs = state.shard_allocations
                         merged_epoch = state.allocation_epoch
 
+                    # Merge registry: union, then prune entries from down/removed nodes
+                    down_nodes = frozenset(
+                        m.address for m in merged_members
+                        if m.status in (MemberStatus.down, MemberStatus.removed)
+                    )
+                    merged_registry = frozenset(
+                        e for e in (state.registry | remote_state.registry)
+                        if e.node not in down_nodes
+                    )
+
                     members_changed = frozenset(merged_members) != state.members
                     if members_changed:
                         merged_seen = frozenset({self_node, from_node})
@@ -153,6 +170,7 @@ def gossip_actor(
                         shard_allocations=merged_allocs,
                         allocation_epoch=merged_epoch,
                         seen=merged_seen,
+                        registry=merged_registry,
                     )
 
                     if not is_reply and remote_transport is not None:
@@ -191,6 +209,7 @@ def gossip_actor(
                         shard_allocations=state.shard_allocations,
                         allocation_epoch=state.allocation_epoch,
                         seen=frozenset({self_node}),
+                        registry=state.registry,
                     )
                     if reply_to is not None:
                         reply_to.tell(JoinAccepted(state=new_state))
@@ -213,6 +232,7 @@ def gossip_actor(
                         shard_allocations=merged_allocs,
                         allocation_epoch=merged_epoch,
                         seen=frozenset({self_node}),
+                        registry=state.registry | accepted_state.registry,
                     )
                     return active(new_state)
 
@@ -256,6 +276,7 @@ def gossip_actor(
                             shard_allocations=state.shard_allocations,
                             allocation_epoch=state.allocation_epoch,
                             seen=frozenset({self_node}),
+                            registry=state.registry,
                         )
                         return active(new_state)
                     return Behaviors.same()
@@ -269,6 +290,7 @@ def gossip_actor(
                     )
                     if downed != state.members:
                         log.info("Marked %s:%d -> down", address.host, address.port)
+                        pruned_registry = frozenset(e for e in state.registry if e.node != address)
                         new_state = ClusterState(
                             members=downed,
                             unreachable=state.unreachable | {address},
@@ -276,6 +298,7 @@ def gossip_actor(
                             shard_allocations=state.shard_allocations,
                             allocation_epoch=state.allocation_epoch,
                             seen=frozenset({self_node}),
+                            registry=pruned_registry,
                         )
                         return active(new_state)
                     return Behaviors.same()
@@ -288,6 +311,19 @@ def gossip_actor(
                         )
                         return active(new_state)
                     return Behaviors.same()
+
+                case UpdateRegistry(entries=entries):
+                    new_registry = state.registry | entries
+                    new_state = ClusterState(
+                        members=state.members,
+                        unreachable=state.unreachable,
+                        version=state.version.increment(self_node),
+                        shard_allocations=state.shard_allocations,
+                        allocation_epoch=state.allocation_epoch,
+                        seen=frozenset({self_node}),
+                        registry=new_registry,
+                    )
+                    return active(new_state)
 
                 case ResolveNode(node_id=nid, reply_to=reply_to):
                     reply_to.tell(nodes.get(nid))
