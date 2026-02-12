@@ -36,7 +36,12 @@ class GetValue:
     reply_to: ActorRef[int]
 
 
-type CounterMsg = Increment | Decrement | GetValue
+@dataclass(frozen=True)
+class DestroyCounter:
+    reply_to: ActorRef[bool]
+
+
+type CounterMsg = Increment | Decrement | GetValue | DestroyCounter
 
 
 def counter_entity(entity_id: str) -> Behavior[CounterMsg]:
@@ -58,6 +63,9 @@ def counter_entity(entity_id: str) -> Behavior[CounterMsg]:
                 case GetValue(reply_to):
                     reply_to.tell(value)
                     return Behaviors.same()
+                case DestroyCounter(reply_to):
+                    reply_to.tell(True)
+                    return Behaviors.stopped()
 
         return Behaviors.receive(receive)
 
@@ -124,6 +132,9 @@ def persistent_counter_entity(
                 case GetValue(reply_to):
                     reply_to.tell(state)
                     return Behaviors.same()
+                case DestroyCounter(reply_to):
+                    reply_to.tell(True)
+                    return Behaviors.stopped()
 
         return Behaviors.event_sourced(
             entity_id=entity_id,
@@ -228,6 +239,22 @@ class Counter:
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name, Decrement(amount=amount, reply_to=reply_to)
+            ),
+            timeout=self._timeout,
+        )
+
+    async def destroy(self) -> bool:
+        """Destroy this counter, stopping the backing entity actor.
+
+        Returns
+        -------
+        bool
+            ``True`` if destroyed.
+        """
+        return await self._system.ask(
+            self._region_ref,
+            lambda reply_to: ShardEnvelope(
+                self._name, DestroyCounter(reply_to=reply_to)
             ),
             timeout=self._timeout,
         )

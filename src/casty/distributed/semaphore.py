@@ -56,7 +56,12 @@ class SemaphoreReleased:
     released: bool
 
 
-type SemaphoreMsg = SemaphoreAcquire | SemaphoreTryAcquire | SemaphoreRelease
+@dataclass(frozen=True)
+class DestroySemaphore:
+    reply_to: ActorRef[bool]
+
+
+type SemaphoreMsg = SemaphoreAcquire | SemaphoreTryAcquire | SemaphoreRelease | DestroySemaphore
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +129,9 @@ def semaphore_active(
             case SemaphoreRelease(reply_to=reply_to):
                 reply_to.tell(SemaphoreReleased(released=False))
                 return Behaviors.same()
+            case DestroySemaphore(reply_to=reply_to):
+                reply_to.tell(True)
+                return Behaviors.stopped()
 
     return Behaviors.receive(receive)
 
@@ -171,6 +179,22 @@ class Semaphore:
         self._name = name
         self._timeout = timeout
         self._owner = uuid4().hex
+
+    async def destroy(self) -> bool:
+        """Destroy this semaphore, stopping the backing entity actor.
+
+        Returns
+        -------
+        bool
+            ``True`` if destroyed.
+        """
+        return await self._system.ask(
+            self._region_ref,
+            lambda reply_to: ShardEnvelope(
+                self._name, DestroySemaphore(reply_to=reply_to),
+            ),
+            timeout=self._timeout,
+        )
 
     async def acquire(self) -> None:
         """Block until a permit is acquired.

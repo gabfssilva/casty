@@ -55,7 +55,12 @@ class LockReleased:
     released: bool
 
 
-type LockMsg = LockAcquire | LockTryAcquire | LockRelease
+@dataclass(frozen=True)
+class DestroyLock:
+    reply_to: ActorRef[bool]
+
+
+type LockMsg = LockAcquire | LockTryAcquire | LockRelease | DestroyLock
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +84,9 @@ def lock_free() -> Behavior[LockMsg]:
             case LockRelease(reply_to=reply_to):
                 reply_to.tell(LockReleased(released=False))
                 return Behaviors.same()
+            case DestroyLock(reply_to=reply_to):
+                reply_to.tell(True)
+                return Behaviors.stopped()
 
     return Behaviors.receive(receive)
 
@@ -107,6 +115,9 @@ def lock_held(
             case LockRelease(reply_to=reply_to):
                 reply_to.tell(LockReleased(released=False))
                 return Behaviors.same()
+            case DestroyLock(reply_to=reply_to):
+                reply_to.tell(True)
+                return Behaviors.stopped()
 
     return Behaviors.receive(receive)
 
@@ -154,6 +165,22 @@ class Lock:
         self._name = name
         self._timeout = timeout
         self._owner = uuid4().hex
+
+    async def destroy(self) -> bool:
+        """Destroy this lock, stopping the backing entity actor.
+
+        Returns
+        -------
+        bool
+            ``True`` if destroyed.
+        """
+        return await self._system.ask(
+            self._region_ref,
+            lambda reply_to: ShardEnvelope(
+                self._name, DestroyLock(reply_to=reply_to),
+            ),
+            timeout=self._timeout,
+        )
 
     async def acquire(self) -> None:
         """Block until the lock is acquired.

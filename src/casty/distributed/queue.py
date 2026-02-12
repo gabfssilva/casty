@@ -45,7 +45,12 @@ class QueueSize:
     reply_to: ActorRef[int]
 
 
-type QueueMsg = Enqueue | Dequeue | Peek | QueueSize
+@dataclass(frozen=True)
+class DestroyQueue:
+    reply_to: ActorRef[bool]
+
+
+type QueueMsg = Enqueue | Dequeue | Peek | QueueSize | DestroyQueue
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +81,9 @@ def queue_entity(entity_id: str) -> Behavior[QueueMsg]:
             case QueueSize(reply_to):
                 reply_to.tell(len(items))
                 return Behaviors.same()
+            case DestroyQueue(reply_to):
+                reply_to.tell(True)
+                return Behaviors.stopped()
 
     return Behaviors.receive(receive)
 
@@ -150,6 +158,9 @@ def persistent_queue_entity(
                 case QueueSize(reply_to):
                     reply_to.tell(len(state))
                     return Behaviors.same()
+                case DestroyQueue(reply_to):
+                    reply_to.tell(True)
+                    return Behaviors.stopped()
 
         return Behaviors.event_sourced(
             entity_id=entity_id,
@@ -211,6 +222,22 @@ class Queue[V]:
         self._region_ref = region_ref
         self._name = name
         self._timeout = timeout
+
+    async def destroy(self) -> bool:
+        """Destroy this queue, stopping the backing entity actor.
+
+        Returns
+        -------
+        bool
+            ``True`` if destroyed.
+        """
+        return await self._system.ask(
+            self._region_ref,
+            lambda reply_to: ShardEnvelope(
+                self._name, DestroyQueue(reply_to=reply_to)
+            ),
+            timeout=self._timeout,
+        )
 
     async def enqueue(self, value: V) -> None:
         """Append a value to the back of the queue.

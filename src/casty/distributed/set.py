@@ -41,7 +41,12 @@ class SetSize:
     reply_to: ActorRef[int]
 
 
-type SetMsg = Add | Remove | SetContains | SetSize
+@dataclass(frozen=True)
+class DestroySet:
+    reply_to: ActorRef[bool]
+
+
+type SetMsg = Add | Remove | SetContains | SetSize | DestroySet
 
 
 def set_entity(entity_id: str) -> Behavior[SetMsg]:
@@ -70,6 +75,9 @@ def set_entity(entity_id: str) -> Behavior[SetMsg]:
                 case SetSize(reply_to):
                     reply_to.tell(len(items))
                     return Behaviors.same()
+                case DestroySet(reply_to):
+                    reply_to.tell(True)
+                    return Behaviors.stopped()
 
         return Behaviors.receive(receive)
 
@@ -145,6 +153,9 @@ def persistent_set_entity(
                 case SetSize(reply_to):
                     reply_to.tell(len(state))
                     return Behaviors.same()
+                case DestroySet(reply_to):
+                    reply_to.tell(True)
+                    return Behaviors.stopped()
 
         return Behaviors.event_sourced(
             entity_id=entity_id,
@@ -197,6 +208,22 @@ class Set[V]:
         self._region_ref = region_ref
         self._name = name
         self._timeout = timeout
+
+    async def destroy(self) -> bool:
+        """Destroy this set, stopping the backing entity actor.
+
+        Returns
+        -------
+        bool
+            ``True`` if destroyed.
+        """
+        return await self._system.ask(
+            self._region_ref,
+            lambda reply_to: ShardEnvelope(
+                self._name, DestroySet(reply_to=reply_to)
+            ),
+            timeout=self._timeout,
+        )
 
     async def add(self, value: V) -> bool:
         """Add a value to the set.

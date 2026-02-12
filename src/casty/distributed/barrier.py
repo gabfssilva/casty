@@ -28,7 +28,12 @@ class BarrierReleased:
     pass
 
 
-type BarrierMsg = BarrierArrive
+@dataclass(frozen=True)
+class DestroyBarrier:
+    reply_to: ActorRef[bool]
+
+
+type BarrierMsg = BarrierArrive | DestroyBarrier
 
 
 def barrier_entity(entity_id: str) -> Behavior[BarrierMsg]:
@@ -47,6 +52,9 @@ def barrier_waiting(
                         ref.tell(BarrierReleased())
                     return barrier_waiting({})
                 return barrier_waiting(new_waiters)
+            case DestroyBarrier(reply_to=reply_to):
+                reply_to.tell(True)
+                return Behaviors.stopped()
 
     return Behaviors.receive(receive)
 
@@ -90,6 +98,22 @@ class Barrier:
         self._name = name
         self._node_id = node_id
         self._timeout = timeout
+
+    async def destroy(self) -> bool:
+        """Destroy this barrier, stopping the backing entity actor.
+
+        Returns
+        -------
+        bool
+            ``True`` if destroyed.
+        """
+        return await self._system.ask(
+            self._region_ref,
+            lambda reply_to: ShardEnvelope(
+                self._name, DestroyBarrier(reply_to=reply_to),
+            ),
+            timeout=self._timeout,
+        )
 
     async def arrive(self, expected: int) -> None:
         """Block until *expected* nodes have reached this barrier.

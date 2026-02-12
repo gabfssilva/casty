@@ -205,3 +205,54 @@ async def test_distributed_barrier_via_facade() -> None:
 
         b = d.barrier("gate")
         await b.arrive(expected=1)
+
+
+async def test_destroy_stops_entity_and_allows_respawn() -> None:
+    """Destroy frees the entity actor; subsequent use re-spawns from scratch."""
+    async with ClusteredActorSystem(name="dist-destroy", host="127.0.0.1", port=0, node_id="node-1") as system:
+        d = Distributed(system)
+        await asyncio.sleep(0.1)
+
+        counter = d.counter("ephemeral", shards=10)
+        await counter.increment(10)
+        assert await counter.get() == 10
+
+        assert await counter.destroy() is True
+        await asyncio.sleep(0.05)
+
+        assert await counter.get() == 0
+
+        tags = d.set[str]("ephemeral-set", shards=10)
+        await tags.add("a")
+        assert await tags.contains("a") is True
+
+        assert await tags.destroy() is True
+        await asyncio.sleep(0.05)
+
+        assert await tags.contains("a") is False
+
+        jobs = d.queue[str]("ephemeral-queue", shards=10)
+        await jobs.enqueue("x")
+        assert await jobs.destroy() is True
+        await asyncio.sleep(0.05)
+
+        assert await jobs.dequeue() is None
+
+        lock = d.lock("ephemeral-lock", shards=10)
+        await lock.acquire()
+        assert await lock.destroy() is True
+        await asyncio.sleep(0.05)
+
+        got = await lock.try_acquire()
+        assert got is True
+
+        sem = d.semaphore("ephemeral-sem", permits=1, shards=10)
+        await sem.acquire()
+        assert await sem.destroy() is True
+        await asyncio.sleep(0.05)
+
+        got = await sem.try_acquire()
+        assert got is True
+
+        barrier = d.barrier("ephemeral-barrier")
+        assert await barrier.destroy() is True
