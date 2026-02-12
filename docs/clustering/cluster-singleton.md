@@ -119,4 +119,4 @@ Without event sourcing, the singleton restarts from scratch on the new leader â€
 
 ---
 
-**Next:** [Shard Replication](shard-replication.md)
+**Next:** [Service Discovery](service-discovery.md)

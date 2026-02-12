@@ -1,0 +1,120 @@
+# Service Discovery
+
+In a cluster, knowing which **nodes** exist isn't enough. You need to know which **services** are running and where. A payment processor on node-2, three chat handlers spread across the cluster, a monitoring agent that just came online — without discovery, every caller needs hardcoded paths and node addresses.
+
+The **receptionist** solves this. Actors register themselves under typed `ServiceKey`s, and other actors discover them via `Find` (one-shot) or `Subscribe` (continuous). The registry propagates through the existing gossip protocol — no extra round-trips, no external service registry.
+
+```python
+PAYMENT_KEY: ServiceKey[PaymentMsg] = ServiceKey("payment")
+
+async with ClusteredActorSystem(...) as system:
+    ref = system.spawn(payment_actor(), "payment")
+    system.receptionist.tell(Register(key=PAYMENT_KEY, ref=ref))
+
+    listing = await system.lookup(PAYMENT_KEY)
+    for instance in listing.instances:
+        instance.ref.tell(ProcessPayment(amount=100))
+```
+
+## Register and Find
+
+`Register` adds a local actor to the cluster-wide registry under a typed key. `Find` performs a one-shot query that returns the current `Listing` — a frozen set of all known instances across all nodes.
+
+```python
+@dataclass(frozen=True)
+class Ping:
+    reply_to: ActorRef[str]
+
+PING_KEY: ServiceKey[Ping] = ServiceKey("ping")
+
+async with ClusteredActorSystem(...) as system:
+    ref = system.spawn(ping_actor(), "ping-service")
+    system.receptionist.tell(Register(key=PING_KEY, ref=ref))
+
+    listing: Listing[Ping] = await system.ask(
+        system.receptionist,
+        lambda r: Find(key=PING_KEY, reply_to=r),
+        timeout=3.0,
+    )
+
+    for instance in listing.instances:
+        reply = await system.ask(
+            instance.ref,
+            lambda r: Ping(reply_to=r),
+            timeout=2.0,
+        )
+```
+
+`system.lookup(ServiceKey(...))` is a convenience that wraps `Find` + `ask` in a single call.
+
+## Subscribe for Continuous Updates
+
+`Find` gives you a snapshot. `Subscribe` gives you a live stream — the subscriber immediately receives the current `Listing`, then gets notified every time an instance is added or removed.
+
+```python
+def presence_monitor() -> Behavior[Listing[ChatMsg]]:
+    def active(prev: frozenset[str]) -> Behavior[Listing[ChatMsg]]:
+        async def receive(
+            ctx: ActorContext[Listing[ChatMsg]], msg: Listing[ChatMsg],
+        ) -> Behavior[Listing[ChatMsg]]:
+            current = frozenset(i.ref.address.path for i in msg.instances)
+            for path in current - prev:
+                print(f"joined: {path}")
+            for path in prev - current:
+                print(f"left: {path}")
+            return active(current)
+
+        return Behaviors.receive(receive)
+
+    return active(frozenset())
+
+monitor = system.spawn(presence_monitor(), "monitor")
+system.receptionist.tell(Subscribe(key=CHAT_KEY, reply_to=monitor))
+```
+
+The monitor reacts to changes — no polling, no timers. When a user actor registers on any node in the cluster, the monitor receives an updated `Listing` within one gossip round (~1-3 seconds).
+
+## Auto-Deregister on Stop
+
+When a registered actor stops, it is automatically deregistered. The receptionist subscribes to `ActorStopped` events on the EventStream and removes the entry. Subscribers are notified with an updated `Listing` that no longer includes the stopped actor.
+
+```python
+ref = system.spawn(user_actor("Alice"), "alice")
+system.receptionist.tell(Register(key=USER_KEY, ref=ref))
+
+ref.tell(Leave())
+```
+
+No explicit `Deregister` needed — stopping the actor is enough. `Deregister` exists for cases where you want to remove an actor from the registry while keeping it alive.
+
+## How It Works
+
+The receptionist is a regular actor spawned by `ClusteredActorSystem` at startup, accessible via `system.receptionist`. It maintains two sets of entries:
+
+- **Local entries** — actors registered on this node via `Register`.
+- **Cluster entries** — actors on remote nodes, received via gossip.
+
+When a `Register` arrives, the receptionist adds a `ServiceEntry` to its local set and tells the gossip actor to include it in the next round. Remote nodes receive the entry through normal gossip merge and notify their own subscribers.
+
+The registry piggybacks on the existing gossip protocol. `ClusterState` carries a `registry: frozenset[ServiceEntry]` field that merges with the same CRDT rules as membership — union of entries, pruning of entries from `down` nodes. No additional network messages, no extra protocol.
+
+## Cross-Node Discovery
+
+A service registered on node A becomes discoverable from node B after gossip convergence:
+
+```python
+# Node A
+ref = system_a.spawn(echo_actor(), "echo")
+system_a.receptionist.tell(Register(key=ECHO_KEY, ref=ref))
+
+# Node B (after gossip propagation)
+listing = await system_b.lookup(ECHO_KEY)
+for instance in listing.instances:
+    instance.ref.tell(Echo("hello"))
+```
+
+The `ActorRef` in the `Listing` is a remote ref — `tell()` transparently serializes the message and sends it over TCP. No special handling needed by the caller.
+
+---
+
+**Next:** [Shard Replication](shard-replication.md)

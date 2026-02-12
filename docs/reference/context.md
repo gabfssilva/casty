@@ -1,3 +1,0 @@
-# ActorContext
-
-::: casty.ActorContext

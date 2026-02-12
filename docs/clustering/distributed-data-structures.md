@@ -86,4 +86,4 @@ These structures are intentionally simple. For domain-specific entities — bank
 
 ---
 
-**Next:** [Casty as a Cluster Backend](cluster-backend.md)
+**Next:** [TLS](tls.md)

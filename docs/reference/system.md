@@ -1,3 +1,0 @@
-# ActorSystem
-
-::: casty.ActorSystem

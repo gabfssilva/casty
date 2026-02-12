@@ -37,6 +37,9 @@ extra_css:
 
 plugins:
   - search
+  - gen-files:
+      scripts:
+        - docs/scripts/gen_ref_pages.py
   - mkdocstrings:
       handlers:
         python:
@@ -85,6 +88,7 @@ nav:
           - Sharding: clustering/cluster-sharding.md
           - Broadcast: clustering/cluster-broadcast.md
           - Singleton: clustering/cluster-singleton.md
+          - Service Discovery: clustering/service-discovery.md
           - Shard Replication: clustering/shard-replication.md
           - Distributed Data Structures: clustering/distributed-data-structures.md
           - TLS: clustering/tls.md
@@ -102,11 +106,13 @@ nav:
           - Events: reference/events.md
           - Scheduler: reference/scheduler.md
           - Event Sourcing: reference/journal.md
+          - Task Runner: reference/task-runner.md
       - Clustering:
           - Cluster: reference/cluster.md
           - Cluster State: reference/cluster-state.md
           - Failure Detector: reference/failure-detector.md
           - Sharding: reference/sharding.md
+          - Receptionist: reference/receptionist.md
           - Distributed: reference/distributed.md
       - Remoting:
           - Address: reference/address.md

@@ -122,4 +122,4 @@ tls = Config(server_context=server_ctx, client_context=client_ctx)
 
 ---
 
-**Next:** [Configuration](../configuration/index.md)
+**Next:** [Casty as a Cluster Backend](cluster-backend.md)
