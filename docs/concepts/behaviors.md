@@ -17,6 +17,10 @@ A behavior is a frozen dataclass that describes how an actor processes messages.
 | `Behaviors.event_sourced(...)` | Persist actor state as a sequence of events |
 | `Behaviors.persisted(events)` | Return from a command handler to persist events and update state |
 | `Behaviors.sharded(entity_factory, ...)` | Distribute entities across cluster nodes via sharding |
+| `Behaviors.singleton(factory)` | Run exactly one actor instance across the cluster |
+| `Behaviors.broadcasted(behavior)` | Enable broadcasting messages to all instances across the cluster |
+| `Behaviors.discoverable(behavior, key=...)` | Auto-register the actor with the cluster receptionist on spawn |
+| `Behaviors.spy(behavior, observer)` | Observe all messages an actor processes |
 
 Because behaviors are values, they compose naturally. A behavior can be wrapped with supervision, decorated with lifecycle hooks, and backed by event sourcing — all through function composition, not class inheritance.
 

@@ -459,6 +459,7 @@ type Behavior[M] = (
     | LifecycleBehavior[M]
     | SupervisedBehavior[M]
     | SpyBehavior[M]
+    | DiscoverableBehavior[M]
     | EventSourcedBehavior[M, Any, Any]
     | PersistedBehavior[M, Any]
 )

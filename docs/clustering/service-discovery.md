@@ -8,17 +8,51 @@ The **receptionist** solves this. Actors register themselves under typed `Servic
 PAYMENT_KEY: ServiceKey[PaymentMsg] = ServiceKey("payment")
 
 async with ClusteredActorSystem(...) as system:
-    ref = system.spawn(payment_actor(), "payment")
-    system.receptionist.tell(Register(key=PAYMENT_KEY, ref=ref))
+    ref = system.spawn(
+        Behaviors.discoverable(payment_actor(), key=PAYMENT_KEY),
+        "payment",
+    )
 
     listing = await system.lookup(PAYMENT_KEY)
     for instance in listing.instances:
         instance.ref.tell(ProcessPayment(amount=100))
 ```
 
+## Behaviors.discoverable()
+
+The most common pattern — spawn an actor and register it — is a single call with `Behaviors.discoverable()`:
+
+```python
+ref = system.spawn(
+    Behaviors.discoverable(my_behavior, key=MY_KEY),
+    "my-service",
+)
+```
+
+This is equivalent to:
+
+```python
+ref = system.spawn(my_behavior, "my-service")
+system.receptionist.tell(Register(key=MY_KEY, ref=ref))
+```
+
+`discoverable()` composes with other wrappers:
+
+```python
+ref = system.spawn(
+    Behaviors.discoverable(
+        Behaviors.supervise(my_behavior, OneForOneStrategy()),
+        key=MY_KEY,
+    ),
+    "supervised-service",
+)
+```
+
+Deregistration is automatic — when the actor stops, the receptionist removes it from the registry and notifies all subscribers.
+
 ## Register and Find
 
-`Register` adds a local actor to the cluster-wide registry under a typed key. `Find` performs a one-shot query that returns the current `Listing` — a frozen set of all known instances across all nodes.
+For cases where you need manual control — registering an existing actor, or registering via `ctx.spawn()` — use `Register` directly. `Find` performs a one-shot query that returns the current `Listing` — a frozen set of all known instances across all nodes.
 
 ```python
 @dataclass(frozen=True)
@@ -79,8 +113,10 @@ The monitor reacts to changes — no polling, no timers. When a user actor regis
 When a registered actor stops, it is automatically deregistered. The receptionist subscribes to `ActorStopped` events on the EventStream and removes the entry. Subscribers are notified with an updated `Listing` that no longer includes the stopped actor.
 
 ```python
-ref = system.spawn(user_actor("Alice"), "alice")
-system.receptionist.tell(Register(key=USER_KEY, ref=ref))
+ref = system.spawn(
+    Behaviors.discoverable(user_actor("Alice"), key=USER_KEY),
+    "alice",
+)
 
 ref.tell(Leave())
 ```
@@ -104,8 +140,10 @@ A service registered on node A becomes discoverable from node B after gossip con
 
 ```python
 # Node A
-ref = system_a.spawn(echo_actor(), "echo")
-system_a.receptionist.tell(Register(key=ECHO_KEY, ref=ref))
+ref = system_a.spawn(
+    Behaviors.discoverable(echo_actor(), key=ECHO_KEY),
+    "echo",
+)
 
 # Node B (after gossip propagation)
 listing = await system_b.lookup(ECHO_KEY)

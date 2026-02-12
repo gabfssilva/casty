@@ -8,6 +8,7 @@ from typing import Any, cast, overload
 
 from casty.actor import (
     Behavior,
+    DiscoverableBehavior,
     EventSourcedBehavior,
     LifecycleBehavior,
     PersistedBehavior,
@@ -77,6 +78,7 @@ class CellContext[M]:
             ref_port=self._cell.ref_port,
             ref_node_id=self._cell.ref_node_id,
             task_runner=self._cell.task_runner,
+            receptionist_ref=self._cell.receptionist_ref,
         )
         if mailbox is not None:
             child.mailbox = mailbox
@@ -176,6 +178,7 @@ class ActorCell[M]:
         ref_port: int | None = None,
         ref_node_id: str | None = None,
         task_runner: ActorRef[TaskRunnerMsg] | None = None,
+        receptionist_ref: ActorRef[Any] | None = None,
     ) -> None:
         self._initial_behavior: Behavior[M] = behavior
         self._name = name
@@ -188,6 +191,7 @@ class ActorCell[M]:
         self._ref_port = ref_port
         self._ref_node_id = ref_node_id
         self._task_runner = task_runner
+        self._receptionist_ref = receptionist_ref
         self._mailbox: Mailbox[Any] = Mailbox()
         self._logger = logging.getLogger(f"casty.actor.{name}")
 
@@ -308,6 +312,10 @@ class ActorCell[M]:
         return self._spy_children
 
     @property
+    def receptionist_ref(self) -> ActorRef[Any] | None:
+        return self._receptionist_ref
+
+    @property
     def mailbox(self) -> Mailbox[Any]:
         return self._mailbox
 
@@ -347,6 +355,10 @@ class ActorCell[M]:
         if self._es_entity_id is not None:
             await self._recover_event_sourced()
         self._loop_task = asyncio.get_running_loop().create_task(self._run_loop())
+        if self._discoverable_key is not None and self._receptionist_ref is not None:
+            from casty.receptionist import Register
+
+            self._receptionist_ref.tell(Register(key=self._discoverable_key, ref=self._ref))
         await self._event_stream.publish(ActorStarted(ref=self._ref))
         self._logger.info("Started")
 
@@ -360,6 +372,7 @@ class ActorCell[M]:
         self._strategy = None
         self._spy_observer = None
         self._spy_children = False
+        self._discoverable_key: Any | None = None
         await self._unwrap_behavior(behavior)
 
     async def _unwrap_behavior(self, behavior: Behavior[M]) -> None:
@@ -369,6 +382,10 @@ class ActorCell[M]:
                 self._spy_observer = observer
                 self._spy_children = spy_children
                 await self._unwrap_behavior(inner_behavior)
+
+            case DiscoverableBehavior(behavior=inner, key=key):
+                self._discoverable_key = key
+                await self._unwrap_behavior(inner)
 
             case SupervisedBehavior(inner_behavior, strategy):
                 self._strategy = strategy

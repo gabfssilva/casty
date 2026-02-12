@@ -272,6 +272,7 @@ class ActorSystem:
             ref_port=self._get_ref_port(),
             ref_node_id=self._get_ref_node_id(),
             task_runner=task_runner_ref,
+            receptionist_ref=self._get_receptionist_ref(),
         )
         if mailbox is not None:
             cell.mailbox = mailbox
@@ -437,6 +438,9 @@ class ActorSystem:
         return None
 
     def _get_ref_node_id(self) -> str | None:
+        return None
+
+    def _get_receptionist_ref(self) -> ActorRef[Any] | None:
         return None
 
     async def shutdown(self) -> None:

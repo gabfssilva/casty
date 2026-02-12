@@ -276,3 +276,37 @@ async def test_discoverable_composes_with_supervise() -> None:
 
         listing = await system.lookup(PING_KEY)
         assert len(listing.instances) == 1
+
+
+async def test_discoverable_via_ctx_spawn() -> None:
+    """A parent actor that ctx.spawn()s a discoverable child auto-registers it."""
+
+    @dataclass(frozen=True)
+    class SpawnChild:
+        pass
+
+    def parent_actor() -> Behavior[SpawnChild]:
+        async def receive(ctx: Any, msg: SpawnChild) -> Any:
+            match msg:
+                case SpawnChild():
+                    ctx.spawn(
+                        Behaviors.discoverable(collector([]), key=PING_KEY),
+                        "child-svc",
+                    )
+                    return Behaviors.same()
+
+        return Behaviors.receive(receive)
+
+    async with ClusteredActorSystem(
+        name="disc-ctx", host="127.0.0.1", port=0, node_id="node-1",
+    ) as system:
+        parent = system.spawn(parent_actor(), "parent")
+        await asyncio.sleep(0.3)
+
+        parent.tell(SpawnChild())
+        await asyncio.sleep(0.3)
+
+        listing = await system.lookup(PING_KEY)
+        assert len(listing.instances) == 1
+        instance = next(iter(listing.instances))
+        assert "child-svc" in instance.ref.address.path

@@ -18,7 +18,6 @@ from casty.actor import (
     Behavior,
     Behaviors,
     BroadcastedBehavior,
-    DiscoverableBehavior,
     ShardedBehavior,
     SingletonBehavior,
 )
@@ -34,7 +33,7 @@ from casty.cluster import (
     RegisterSingletonManager,
     WaitForMembers,
 )
-from casty.receptionist import Find, Listing, ReceptionistMsg, Register, ServiceKey
+from casty.receptionist import Find, Listing, ReceptionistMsg, ServiceKey
 from casty.remote_transport import RemoteTransport, TcpTransport
 from casty.serialization import PickleSerializer
 from casty.system import ActorSystem
@@ -489,6 +488,12 @@ class ClusteredActorSystem(ActorSystem):
     def _get_ref_node_id(self) -> str | None:
         return self._node_id
 
+    def _get_receptionist_ref(self) -> ActorRef[Any] | None:
+        try:
+            return self.receptionist
+        except RuntimeError:
+            return None
+
     @overload
     def spawn[M](
         self, behavior: BroadcastedBehavior[M], name: str
@@ -506,11 +511,6 @@ class ClusteredActorSystem(ActorSystem):
 
     @overload
     def spawn[M](
-        self, behavior: DiscoverableBehavior[M], name: str
-    ) -> ActorRef[M]: ...
-
-    @overload
-    def spawn[M](
         self,
         behavior: Behavior[M],
         name: str,
@@ -520,7 +520,7 @@ class ClusteredActorSystem(ActorSystem):
 
     def spawn[M](
         self,
-        behavior: BroadcastedBehavior[M] | ShardedBehavior[M] | SingletonBehavior[M] | DiscoverableBehavior[M] | Behavior[M],
+        behavior: BroadcastedBehavior[M] | ShardedBehavior[M] | SingletonBehavior[M] | Behavior[M],
         name: str,
         *,
         mailbox: Mailbox[M] | None = None,
@@ -532,10 +532,6 @@ class ClusteredActorSystem(ActorSystem):
                 return self._spawn_sharded(behavior, name)
             case SingletonBehavior():
                 return self._spawn_singleton(behavior, name)
-            case DiscoverableBehavior(behavior=inner, key=key):
-                ref: ActorRef[M] = super().spawn(inner, name, mailbox=mailbox)
-                self.receptionist.tell(Register(key=key, ref=ref))
-                return ref
             case _:
                 return super().spawn(behavior, name, mailbox=mailbox)
 
