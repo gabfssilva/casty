@@ -55,6 +55,8 @@ plugins:
 markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
+  - pymdownx.snippets:
+      base_path: ["."]
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
@@ -96,6 +98,8 @@ nav:
           - Cluster Backend: clustering/cluster-backend.md
       - Configuration: configuration/index.md
       - Acknowledgments: acknowledgments.md
+  - Guides:
+      - Your First Actor: guides/your-first-actor.md
   - API Reference:
       - Core:
           - Behaviors: reference/behaviors.md
