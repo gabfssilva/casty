@@ -104,11 +104,11 @@ def create_network() -> dict:
                 to_port=8000,
                 security_groups=[alb_sg.id],
             ),
-            # EC2 ↔ EC2 on Casty TCP port
+            # EC2 ↔ EC2 internal traffic (Casty TCP + SSH tunnel reverse ports)
             aws.ec2.SecurityGroupIngressArgs(
                 protocol="tcp",
-                from_port=25520,
-                to_port=25520,
+                from_port=0,
+                to_port=65535,
                 cidr_blocks=["10.0.0.0/16"],
             ),
             # SSH (optional)

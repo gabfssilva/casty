@@ -361,6 +361,7 @@ class ClusteredActorSystem(ActorSystem):
         self._tcp_transport = TcpTransport(
             self._bind_host,
             port,
+            self_address=(host, port),
             logger=logging.getLogger(f"casty.remote_transport.{name}"),
             server_ssl=tls.server_context if tls else None,
             client_ssl=tls.client_context if tls else None,
@@ -454,6 +455,7 @@ class ClusteredActorSystem(ActorSystem):
             self._port = actual_port
             self._self_node = NodeAddress(host=self._host, port=actual_port)
             self._remote_transport.set_local_port(actual_port)
+            self._tcp_transport.set_self_address(self._host, actual_port)
         try:
             await super().__aenter__()
 

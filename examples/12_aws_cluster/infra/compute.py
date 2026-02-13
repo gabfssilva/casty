@@ -114,6 +114,10 @@ def _build_user_data(
 # Build: {image_id}
 set -ex
 
+# Enable GatewayPorts for SSH reverse tunnels (ClusterClient via SSH)
+echo 'GatewayPorts clientspecified' >> /etc/ssh/sshd_config
+systemctl restart sshd
+
 # Install Docker
 dnf install -y docker
 systemctl enable docker

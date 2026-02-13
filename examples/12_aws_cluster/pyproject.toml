@@ -16,6 +16,10 @@ infra = [
     "pulumi-aws>=7.19.0",
     "pulumi-docker>=4.11.0",
 ]
+client = [
+    "asyncssh>=2.21.0",
+    "cyclopts>=3.0.0",
+]
 
 [tool.uv.sources]
 casty = { path = "../../" }

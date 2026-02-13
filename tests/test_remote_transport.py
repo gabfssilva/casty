@@ -10,7 +10,7 @@ import trustme
 
 from casty.address import ActorAddress
 from casty.ref import ActorRef
-from casty.remote_transport import MessageEnvelope, RemoteTransport, TcpTransport
+from casty.remote_transport import FRAME_HANDSHAKE, FRAME_MESSAGE, MessageEnvelope, RemoteTransport, TcpTransport
 from casty.serialization import JsonSerializer, TypeRegistry
 from casty.transport import LocalTransport
 from casty.shard_coordinator_actor import GetShardLocation, ShardLocation
@@ -57,9 +57,11 @@ async def _start_remote_pair() -> tuple[RemoteTransport, RemoteTransport, LocalT
     port_a = tcp_a.port
     port_b = tcp_b.port
 
-    # Update local_port after start so routing works correctly
+    # Update local_port and self_address after start so routing works correctly
     remote_a._local_port = port_a
     remote_b._local_port = port_b
+    tcp_a.set_self_address("127.0.0.1", port_a)
+    tcp_b.set_self_address("127.0.0.1", port_b)
 
     return remote_a, remote_b, local_a, local_b, port_a, port_b
 
@@ -267,8 +269,11 @@ async def test_tcp_transport_connection_retry() -> None:
         await asyncio.sleep(0.1)
         assert len(received) == 1
 
-        # Manually clear connection to simulate stale connection
-        transport_a._connections.pop(("127.0.0.1", port_b), None)
+        # Manually clear peer to simulate stale connection
+        peer = transport_a._peers.pop(("127.0.0.1", port_b), None)
+        if peer is not None:
+            peer.read_task.cancel()
+            peer.writer.close()
 
         envelope2 = MessageEnvelope(
             target=f"casty://sys@127.0.0.1:{port_b}/actor",
@@ -300,15 +305,37 @@ def tls_contexts() -> tuple[ssl.SSLContext, ssl.SSLContext]:
     return server_ctx, client_ctx
 
 
+async def _read_raw_frame(reader: asyncio.StreamReader) -> bytes:
+    """Read a single length-prefixed frame from a raw TCP stream."""
+    length_bytes = await reader.readexactly(4)
+    msg_len = struct.unpack("!I", length_bytes)[0]
+    return await reader.readexactly(msg_len)
+
+
+def _make_server_handshake_frame(host: str, port: int) -> bytes:
+    """Build a handshake frame that a raw test server can send back."""
+    import json as _json
+
+    payload = _json.dumps({"host": host, "port": port}).encode("utf-8")
+    frame = bytes([FRAME_HANDSHAKE]) + payload
+    return struct.pack("!I", len(frame)) + frame
+
+
 async def test_tcp_address_map_translates_on_send() -> None:
     """TcpTransport with address_map connects to the mapped address, not the logical one."""
     received: list[bytes] = []
 
-    async def handle(reader: asyncio.StreamReader, _writer: asyncio.StreamWriter) -> None:
-        length_bytes = await reader.readexactly(4)
-        msg_len = struct.unpack("!I", length_bytes)[0]
-        data = await reader.readexactly(msg_len)
-        received.append(data)
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Read client handshake
+        handshake = await _read_raw_frame(reader)
+        assert handshake[0] == FRAME_HANDSHAKE
+        # Send server handshake back
+        writer.write(_make_server_handshake_frame("127.0.0.1", actual_port))
+        await writer.drain()
+        # Read message frame
+        frame = await _read_raw_frame(reader)
+        assert frame[0] == FRAME_MESSAGE
+        received.append(frame[1:])
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     actual_port = server.sockets[0].getsockname()[1]
@@ -332,11 +359,15 @@ async def test_remote_transport_sender_uses_advertised_address() -> None:
     """MessageEnvelope.sender uses advertised address, not bind address."""
     captured_data: list[bytes] = []
 
-    async def handle(reader: asyncio.StreamReader, _writer: asyncio.StreamWriter) -> None:
-        length_bytes = await reader.readexactly(4)
-        msg_len = struct.unpack("!I", length_bytes)[0]
-        data = await reader.readexactly(msg_len)
-        captured_data.append(data)
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Read client handshake
+        await _read_raw_frame(reader)
+        # Send server handshake back
+        writer.write(_make_server_handshake_frame("127.0.0.1", actual_port))
+        await writer.drain()
+        # Read message frame
+        frame = await _read_raw_frame(reader)
+        captured_data.append(frame[1:])  # strip frame_type byte
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     actual_port = server.sockets[0].getsockname()[1]
@@ -404,6 +435,140 @@ async def test_tcp_transport_tls(tls_contexts: tuple[ssl.SSLContext, ssl.SSLCont
         assert len(received) == 1
         restored = MessageEnvelope.from_bytes(received[0])
         assert restored.payload == b"hello-tls"
+    finally:
+        await transport_a.stop()
+        await transport_b.stop()
+
+
+# --- Bidirectional connection tests ---
+
+
+async def test_tcp_bidirectional_communication() -> None:
+    """A sends to B, B sends to A — verify single peer each direction."""
+    received_on_a: list[bytes] = []
+    received_on_b: list[bytes] = []
+
+    class HandlerA:
+        async def on_message(self, data: bytes) -> None:
+            received_on_a.append(data)
+
+    class HandlerB:
+        async def on_message(self, data: bytes) -> None:
+            received_on_b.append(data)
+
+    transport_a = TcpTransport(host="127.0.0.1", port=0)
+    transport_b = TcpTransport(host="127.0.0.1", port=0)
+
+    await transport_a.start(HandlerA())
+    await transport_b.start(HandlerB())
+
+    transport_a.set_self_address("127.0.0.1", transport_a.port)
+    transport_b.set_self_address("127.0.0.1", transport_b.port)
+
+    try:
+        # A sends to B
+        await transport_a.send("127.0.0.1", transport_b.port, b"hello-from-a")
+        await asyncio.sleep(0.2)
+        assert len(received_on_b) == 1
+        assert received_on_b[0] == b"hello-from-a"
+
+        # B sends to A — should reuse the inbound connection from A
+        await transport_b.send("127.0.0.1", transport_a.port, b"hello-from-b")
+        await asyncio.sleep(0.2)
+        assert len(received_on_a) == 1
+        assert received_on_a[0] == b"hello-from-b"
+
+        # Verify 1 peer on each side
+        assert len(transport_a._peers) == 1  # pyright: ignore[reportPrivateUsage]
+        assert len(transport_b._peers) == 1  # pyright: ignore[reportPrivateUsage]
+    finally:
+        await transport_a.stop()
+        await transport_b.stop()
+
+
+async def test_tcp_simultaneous_connect_race() -> None:
+    """Both sides send concurrently — race resolves to 1 peer each, then both directions work."""
+    received_on_a: list[bytes] = []
+    received_on_b: list[bytes] = []
+
+    class HandlerA:
+        async def on_message(self, data: bytes) -> None:
+            received_on_a.append(data)
+
+    class HandlerB:
+        async def on_message(self, data: bytes) -> None:
+            received_on_b.append(data)
+
+    transport_a = TcpTransport(host="127.0.0.1", port=0)
+    transport_b = TcpTransport(host="127.0.0.1", port=0)
+
+    await transport_a.start(HandlerA())
+    await transport_b.start(HandlerB())
+
+    transport_a.set_self_address("127.0.0.1", transport_a.port)
+    transport_b.set_self_address("127.0.0.1", transport_b.port)
+
+    try:
+        # Both send simultaneously to trigger a race
+        await asyncio.gather(
+            transport_a.send("127.0.0.1", transport_b.port, b"race-a"),
+            transport_b.send("127.0.0.1", transport_a.port, b"race-b"),
+        )
+        await asyncio.sleep(0.3)
+
+        # Race dedup: exactly 1 peer on each side
+        assert len(transport_a._peers) == 1  # pyright: ignore[reportPrivateUsage]
+        assert len(transport_b._peers) == 1  # pyright: ignore[reportPrivateUsage]
+
+        # After race resolution, bidirectional communication works
+        await transport_a.send("127.0.0.1", transport_b.port, b"from-a")
+        await transport_b.send("127.0.0.1", transport_a.port, b"from-b")
+        await asyncio.sleep(0.2)
+
+        assert b"from-a" in received_on_b
+        assert b"from-b" in received_on_a
+
+        # Still exactly 1 peer each
+        assert len(transport_a._peers) == 1  # pyright: ignore[reportPrivateUsage]
+        assert len(transport_b._peers) == 1  # pyright: ignore[reportPrivateUsage]
+    finally:
+        await transport_a.stop()
+        await transport_b.stop()
+
+
+async def test_tcp_hostname_ip_alias_reuses_peer() -> None:
+    """Sending via hostname then via IP reuses the same connection (alias)."""
+    received: list[bytes] = []
+
+    class Handler:
+        async def on_message(self, data: bytes) -> None:
+            received.append(data)
+
+    transport_a = TcpTransport(host="127.0.0.1", port=0)
+    transport_b = TcpTransport(host="127.0.0.1", port=0)
+
+    await transport_a.start(Handler())
+    await transport_b.start(Handler())
+
+    transport_a.set_self_address("127.0.0.1", transport_a.port)
+    transport_b.set_self_address("127.0.0.1", transport_b.port)
+
+    try:
+        # First send via "localhost" — connects and learns canonical (127.0.0.1, port_b)
+        await transport_a.send("localhost", transport_b.port, b"via-hostname")
+        await asyncio.sleep(0.2)
+        assert len(received) == 1
+
+        # Second send via "127.0.0.1" — should reuse via alias, no new connection
+        await transport_a.send("127.0.0.1", transport_b.port, b"via-ip")
+        await asyncio.sleep(0.2)
+        assert len(received) == 2
+
+        # Only 1 peer on A (canonical address), with an alias for the hostname
+        assert len(transport_a._peers) == 1  # pyright: ignore[reportPrivateUsage]
+        alias = transport_a._peer_aliases  # pyright: ignore[reportPrivateUsage]
+        assert ("localhost", transport_b.port) in alias
+        assert alias[("localhost", transport_b.port)] == ("127.0.0.1", transport_b.port)
     finally:
         await transport_a.stop()
         await transport_b.stop()

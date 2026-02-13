@@ -74,6 +74,55 @@ uv run pulumi destroy
 uv run pulumi stack rm dev
 ```
 
+## Remote Client (SSH Tunnel)
+
+Interact with the cluster directly over TCP using `ClusterClient` — no ALB or HTTP. The CLI opens SSH tunnels via asyncssh and routes messages to the correct shard node.
+
+### Prerequisites
+
+- SSH key configured during deploy: `uv run pulumi config set casty-aws-cluster:key_name your-key-name`
+- Public IP of any cluster node (use seed node): check AWS console or `uv run pulumi stack output`
+
+### Install
+
+```bash
+cd examples/12_aws_cluster
+uv sync --extra client
+```
+
+### Usage
+
+```bash
+# Get the seed node's public IP from AWS console or Pulumi output
+export SSH_HOST=<public-ip-of-seed-node>
+
+# Counter operations
+uv run python client.py counter increment order-1 --ssh-host $SSH_HOST --amount 5
+uv run python client.py counter increment order-1 --ssh-host $SSH_HOST --amount 3
+uv run python client.py counter get order-1 --ssh-host $SSH_HOST
+
+# KV operations
+uv run python client.py kv put user-1 name Alice --ssh-host $SSH_HOST
+uv run python client.py kv get user-1 name --ssh-host $SSH_HOST
+
+# Multiple seeds for redundancy
+uv run python client.py counter get order-1 --ssh-host $SSH_HOST --seeds 10.0.1.10,10.0.1.11
+```
+
+### How it works
+
+```
+Your machine                     EC2 (seed node)        Cluster VPC
+────────────                     ──────────────         ───────────
+client:5000 ←─reverse tunnel──── :auto
+             ──forward tunnel──→ :auto ──→ 10.0.1.10:25520 (seed)
+```
+
+1. asyncssh connects to the seed node's public IP
+2. Forward tunnels route `ClusterClient` traffic to cluster nodes via their private IPs
+3. A reverse tunnel lets the cluster send responses back to your machine
+4. `ClusterClient` receives topology updates and routes each `ShardEnvelope` to the correct node
+
 ## API Endpoints
 
 | Method | Path | Description |

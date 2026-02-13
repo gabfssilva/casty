@@ -492,9 +492,13 @@ class ClusterClient:
         self._last_snapshot: TopologySnapshot | None = None
         self._logger = logging.getLogger(f"casty.client.{system_name}")
 
+        effective_host = advertised_host or client_host
+        effective_port = advertised_port or client_port
         self._tcp_transport = TcpTransport(
             client_host,
             client_port,
+            self_address=(effective_host, effective_port),
+            client_only=True,
             logger=logging.getLogger(f"casty.client.tcp.{system_name}"),
             address_map=address_map,
         )
@@ -524,13 +528,6 @@ class ClusterClient:
         self._system.set_remote(self._remote_transport)
 
         await self._remote_transport.start()
-
-        actual_port = self._tcp_transport.port
-        if actual_port != self._client_port:
-            self._client_port = actual_port
-            self._remote_transport.set_local_port(actual_port)
-            self._system.set_port(actual_port)
-
         await self._system.__aenter__()
         self._remote_transport.set_task_runner(self._system._ensure_task_runner())  # pyright: ignore[reportPrivateUsage]
 

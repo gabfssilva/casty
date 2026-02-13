@@ -2,5 +2,5 @@ config:
   aws:region: us-east-1
   casty-aws-cluster:instance_type: t3.small
   casty-aws-cluster:node_count: "10"
-  casty-aws-cluster:key_name: ""
+  casty-aws-cluster:key_name: "gabriel-ed25519"
 encryptionsalt: v1:GMElJsx4lZk=:v1:1JPb/lKuR907W0jE:ERvbOHpvLeDZYWifYm/wZ5hOb8P86Q==
