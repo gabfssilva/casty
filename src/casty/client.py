@@ -17,7 +17,8 @@ from uuid import uuid4
 
 from casty.actor import Behavior, Behaviors
 from casty.address import ActorAddress
-from casty.cluster_state import NodeAddress
+from casty.cluster_state import NodeAddress, ServiceEntry
+from casty.receptionist import Listing, ServiceInstance, ServiceKey
 from casty.ref import ActorRef
 from casty.remote_transport import RemoteTransport, TcpTransport
 from casty.scheduler import ScheduleOnce, scheduler
@@ -270,6 +271,7 @@ def topology_subscriber(
     system_name: str,
     proxies: list[ActorRef[ClientProxyMsg]],
     logger: logging.Logger | None = None,
+    on_snapshot: Callable[[TopologySnapshot], None] | None = None,
 ) -> Behavior[TopologySubscriberMsg]:
     """Actor that subscribes to topology updates from a cluster contact point.
 
@@ -342,6 +344,8 @@ def topology_subscriber(
                         len(snapshot.shard_allocations),
                         snapshot.allocation_epoch,
                     )
+                    if on_snapshot is not None:
+                        on_snapshot(snapshot)
                     for proxy in registered_proxies:
                         proxy.tell(snapshot)
                     scheduler_ref.tell(
@@ -479,6 +483,7 @@ class ClusterClient:
         self._client_port = client_port
         self._proxies: dict[str, ActorRef[ClientProxyMsg]] = {}
         self._subscriber_ref: ActorRef[TopologySubscriberMsg] | None = None
+        self._last_snapshot: TopologySnapshot | None = None
         self._logger = logging.getLogger(f"casty.client.{system_name}")
 
         self._tcp_transport = TcpTransport(
@@ -527,6 +532,7 @@ class ClusterClient:
                 system_name=self._system_name,
                 proxies=[],
                 logger=self._logger,
+                on_snapshot=self._on_topology_update,
             ),
             "_topology_sub",
         )
@@ -550,10 +556,53 @@ class ClusterClient:
         for proxy_ref in self._proxies.values():
             proxy_ref.tell(msg)
 
+    def _on_topology_update(self, snapshot: TopologySnapshot) -> None:
+        self._last_snapshot = snapshot
+
     def _require_started(self) -> tuple[_RemoteActorSystem, RemoteTransport]:
         if self._system is None or self._remote_transport is None:
             raise RuntimeError("ClusterClient is not started — use 'async with'")
         return self._system, self._remote_transport
+
+    def lookup[M](self, key: ServiceKey[M]) -> Listing[M]:
+        """Look up service instances registered in the cluster.
+
+        Reads from the locally cached topology snapshot — no network
+        round-trip required.  Returns an empty ``Listing`` if no
+        topology has been received yet.
+
+        Parameters
+        ----------
+        key
+            Typed service key to search for.
+
+        Returns
+        -------
+        Listing[M]
+            Current set of instances matching the key.
+        """
+        _, remote_transport = self._require_started()
+        entries: frozenset[ServiceEntry] = (
+            self._last_snapshot.registry
+            if self._last_snapshot is not None
+            else frozenset()
+        )
+        instances = frozenset(
+            ServiceInstance(
+                ref=remote_transport.make_ref(
+                    ActorAddress(
+                        system=self._system_name,
+                        path=entry.path,
+                        host=entry.node.host,
+                        port=entry.node.port,
+                    )
+                ),
+                node=entry.node,
+            )
+            for entry in entries
+            if entry.key == key.name
+        )
+        return Listing(key=key, instances=instances)
 
     def entity_ref(
         self, shard_type: str, *, num_shards: int

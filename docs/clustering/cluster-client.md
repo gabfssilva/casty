@@ -43,6 +43,30 @@ balance = await client.ask(
 
 The temporary ref is cleaned up after the response or timeout.
 
+## Service Discovery
+
+`ClusterClient` can discover services registered with `Behaviors.discoverable()` — no cluster membership required. The `TopologySnapshot` already carries the service registry, so `lookup()` reads from the locally cached snapshot with no network round-trip:
+
+```python
+PAYMENT_KEY: ServiceKey[PaymentMsg] = ServiceKey("payment")
+
+async with ClusterClient(
+    contact_points=[("10.0.1.10", 25520)],
+    system_name="my-cluster",
+) as client:
+    listing = client.lookup(PAYMENT_KEY)
+    for instance in listing.instances:
+        instance.ref.tell(ProcessPayment(amount=100))
+
+    # Request-reply through a discovered service
+    result = await client.ask(
+        next(iter(listing.instances)).ref,
+        lambda r: GetStatus(reply_to=r),
+    )
+```
+
+`lookup()` is synchronous — it returns a `Listing[M]` immediately from the cached topology. If no topology has been received yet (e.g. called right after startup), it returns an empty `Listing`.
+
 ## Fault Tolerance
 
 The client includes a TCP circuit breaker. When a send to a node fails:
@@ -68,8 +92,8 @@ The subscriber also enriches its contact list from `TopologySnapshot` — if a s
 |----------|-----|
 | Process hosts sharded entities | `ClusteredActorSystem` |
 | Process sends work but doesn't host entities | `ClusterClient` |
-| Process needs leader election, singleton, service discovery | `ClusteredActorSystem` |
-| Process only needs to route messages to existing entities | `ClusterClient` |
+| Process needs leader election, singleton, or `Subscribe` for live updates | `ClusteredActorSystem` |
+| Process needs to route messages or discover services | `ClusterClient` |
 
 ---
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from casty import Behaviors, ActorRef, Behavior, ActorSystem, MemberStatus, Member
+from casty import ServiceKey, ServiceEntry
 from casty.client import (
     ClusterClient,
     NodeFailed,
@@ -525,3 +526,165 @@ async def test_subscriber_resets_liveness_on_snapshot() -> None:
             )
     finally:
         client_mod.SUBSCRIPTION_TIMEOUT = original_timeout
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for ClusterClient.lookup()
+# ---------------------------------------------------------------------------
+
+
+async def test_client_lookup_returns_empty_listing_without_topology() -> None:
+    """lookup() before receiving any snapshot returns an empty Listing."""
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        port = system.self_node.port
+
+        async with ClusterClient(
+            contact_points=[("127.0.0.1", port)],
+            system_name="cluster",
+        ) as client:
+            key: ServiceKey[int] = ServiceKey("my-service")
+            listing = client.lookup(key)
+            assert listing.key == key
+            assert listing.instances == frozenset()
+
+
+async def test_client_lookup_returns_matching_services() -> None:
+    """lookup() returns Listing with refs built from registry entries."""
+    node_a = NodeAddress(host="10.0.0.1", port=25520)
+    node_b = NodeAddress(host="10.0.0.2", port=25520)
+
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        port = system.self_node.port
+
+        async with ClusterClient(
+            contact_points=[("127.0.0.1", port)],
+            system_name="cluster",
+        ) as client:
+            # Simulate receiving a snapshot with registry entries
+            client._on_topology_update(TopologySnapshot(
+                members=frozenset({
+                    Member(address=node_a, status=MemberStatus.up, roles=frozenset(), id="a"),
+                    Member(address=node_b, status=MemberStatus.up, roles=frozenset(), id="b"),
+                }),
+                leader=node_a,
+                shard_allocations={},
+                allocation_epoch=1,
+                registry=frozenset({
+                    ServiceEntry(key="counter", node=node_a, path="/user/counter-1"),
+                    ServiceEntry(key="counter", node=node_b, path="/user/counter-2"),
+                }),
+            ))
+
+            key: ServiceKey[int] = ServiceKey("counter")
+            listing = client.lookup(key)
+            assert listing.key == key
+            assert len(listing.instances) == 2
+
+            nodes = {inst.node for inst in listing.instances}
+            assert nodes == {node_a, node_b}
+
+
+async def test_client_lookup_filters_by_key() -> None:
+    """lookup() only returns entries matching the requested key."""
+    node_a = NodeAddress(host="10.0.0.1", port=25520)
+
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        port = system.self_node.port
+
+        async with ClusterClient(
+            contact_points=[("127.0.0.1", port)],
+            system_name="cluster",
+        ) as client:
+            client._on_topology_update(TopologySnapshot(
+                members=frozenset({
+                    Member(address=node_a, status=MemberStatus.up, roles=frozenset(), id="a"),
+                }),
+                leader=node_a,
+                shard_allocations={},
+                allocation_epoch=1,
+                registry=frozenset({
+                    ServiceEntry(key="counter", node=node_a, path="/user/counter"),
+                    ServiceEntry(key="logger", node=node_a, path="/user/logger"),
+                    ServiceEntry(key="counter", node=node_a, path="/user/counter-2"),
+                }),
+            ))
+
+            counter_listing = client.lookup(ServiceKey("counter"))
+            assert len(counter_listing.instances) == 2
+
+            logger_listing = client.lookup(ServiceKey("logger"))
+            assert len(logger_listing.instances) == 1
+
+            missing_listing = client.lookup(ServiceKey("nonexistent"))
+            assert len(missing_listing.instances) == 0
+
+
+@dataclass(frozen=True)
+class Ping:
+    reply_to: ActorRef[str]
+
+
+type PingMsg = Ping
+
+
+def ping_actor() -> Behavior[PingMsg]:
+    async def receive(_ctx: Any, msg: Any) -> Any:
+        match msg:
+            case Ping(reply_to=reply_to):
+                reply_to.tell("pong")
+                return Behaviors.same()
+            case _:
+                return Behaviors.same()
+
+    return Behaviors.receive(receive)
+
+
+async def test_client_lookup_discovers_cluster_service() -> None:
+    """Integration: lookup() finds a discoverable actor in a real cluster."""
+    key: ServiceKey[PingMsg] = ServiceKey("ping-service")
+
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        port = system.self_node.port
+
+        system.spawn(
+            Behaviors.discoverable(ping_actor(), key=key),
+            "ping",
+        )
+        await asyncio.sleep(0.5)
+
+        async with ClusterClient(
+            contact_points=[("127.0.0.1", port)],
+            system_name="cluster",
+        ) as client:
+            await asyncio.sleep(1.0)
+
+            listing = client.lookup(key)
+            assert len(listing.instances) == 1
+
+            instance = next(iter(listing.instances))
+            result = await client.ask(
+                instance.ref,
+                lambda r: Ping(reply_to=r),
+                timeout=5.0,
+            )
+            assert result == "pong"

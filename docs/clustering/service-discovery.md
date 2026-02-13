@@ -153,6 +153,22 @@ for instance in listing.instances:
 
 The `ActorRef` in the `Listing` is a remote ref — `tell()` transparently serializes the message and sends it over TCP. No special handling needed by the caller.
 
+## Discovery from ClusterClient
+
+External processes that don't join the cluster can still discover services via `ClusterClient.lookup()`. The topology snapshot pushed to the client includes the service registry, so lookups are local reads with no extra round-trip:
+
+```python
+async with ClusterClient(
+    contact_points=[("10.0.1.10", 25520)],
+    system_name="my-cluster",
+) as client:
+    listing = client.lookup(ECHO_KEY)
+    for instance in listing.instances:
+        instance.ref.tell(Echo("hello from outside"))
+```
+
+See [Cluster Client](cluster-client.md) for the full API.
+
 ---
 
 **Next:** [Shard Replication](shard-replication.md)
