@@ -10,7 +10,7 @@ Cluster sharding has three components:
 - **Coordinator.** Decides which node owns which shard. Uses a least-shard-first allocation strategy: when a shard is accessed for the first time, it is assigned to the node currently hosting the fewest shards. The coordinator is replicated across the cluster with a leader/follower topology — the leader makes allocation decisions, followers cache allocations and forward unknown shards to the leader.
 - **Region.** Each node runs a region that manages local entities. When a message arrives for a shard owned by this node, the region spawns the entity actor (if it doesn't exist yet) and delivers the message. Messages for shards owned by other nodes are forwarded over the network.
 
-Underneath the sharding layer, Casty implements a **gossip protocol** for cluster state propagation, a **phi accrual failure detector** (Hayashibara et al.) for identifying unresponsive nodes, and **vector clocks** for resolving conflicting state during network partitions.
+Underneath the sharding layer, a single **topology actor** owns all cluster membership — it runs the gossip protocol for state propagation, a **phi accrual failure detector** (Hayashibara et al.) for identifying unresponsive nodes, and **vector clocks** for resolving conflicting state during network partitions. Cluster consumers (coordinator, receptionist, singleton managers) self-subscribe via `SubscribeTopology` and receive `TopologySnapshot` pushes whenever the cluster state changes.
 
 ```python
 @dataclass(frozen=True)
@@ -72,7 +72,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Every node in the cluster runs the same code — only `host`, `port`, and `node_id` differ. Each node has a human-readable `node_id` (e.g. `"node-1"`, `"worker-east"`) that is propagated through gossip and can be used with `system.lookup("/actor", node="node-1")` to address actors on specific nodes. `ShardEnvelope(entity_id, message)` wraps a message with the entity ID for routing. The proxy actor on each node caches shard-to-node mappings and forwards messages to the correct region, whether local or remote.
+Every node in the cluster runs the same code — only `host`, `port`, and `node_id` differ. Each node has a human-readable `node_id` (e.g. `"node-1"`, `"worker-east"`) that is propagated through the topology actor and can be used with `system.lookup("/actor", node="node-1")` to address actors on specific nodes. `ShardEnvelope(entity_id, message)` wraps a message with the entity ID for routing. The proxy actor on each node caches shard-to-node mappings and forwards messages to the correct region, whether local or remote.
 
 `ClusteredActorSystem` extends `ActorSystem`. Spawning a `ShardedBehavior` (produced by `Behaviors.sharded()`) returns an `ActorRef[ShardEnvelope[M]]`. All other spawns work identically to the local `ActorSystem`. This means existing actors that don't need distribution require no changes when moving to a clustered deployment.
 

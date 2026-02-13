@@ -8,7 +8,7 @@ The following sections illustrate these capabilities through the lens of buildin
 
 ## Cluster Formation
 
-`ClusteredActorSystem` establishes a cluster through seed nodes. Once started, nodes discover each other automatically via the gossip protocol. The event stream publishes membership events as nodes join and leave:
+`ClusteredActorSystem` establishes a cluster through seed nodes. Once started, nodes discover each other automatically through the topology actor — a single actor that owns cluster state, runs gossip protocol and phi accrual failure detection, and pushes `TopologySnapshot` updates to all subscribers. The event stream publishes membership events as nodes join and leave:
 
 ```python
 async with ClusteredActorSystem(
@@ -103,6 +103,22 @@ tasks = system.spawn(
 ```
 
 No Redis. No RabbitMQ. No ZooKeeper. The cluster stack is the library — membership, leader election, failure detection, sharding, replication, distributed data structures, locks, semaphores, and barriers, all in pure Python, all in a single `pip install`.
+
+## External Clients
+
+Not every process needs to be a full cluster member. `ClusterClient` connects to the cluster as an external observer — it receives topology updates (membership + shard allocations) and routes `ShardEnvelope` messages directly to the owning node with zero hops, no proxy overhead, no cluster participation:
+
+```python
+async with ClusterClient(
+    cluster_host="10.0.0.1",
+    cluster_port=25520,
+    system_name="task-queue",
+) as client:
+    ref = await client.shard_ref("tasks", num_shards=256)
+    ref.tell(ShardEnvelope("queue:emails", SubmitTask(send_welcome, reply_to)))
+```
+
+The client subscribes to `TopologySnapshot` from the cluster's topology actor, caches shard-to-node mappings locally, and includes a TCP circuit breaker that blacklists failed nodes and retries on topology changes. Ideal for web servers, API gateways, or any process that sends work to the cluster without hosting entities itself.
 
 ---
 

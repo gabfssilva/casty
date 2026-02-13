@@ -64,20 +64,20 @@ The ref returned by `spawn()` is `ActorRef[CoordinatorMsg]` — typed, no wrappe
 
 Each call to `system.spawn(Behaviors.singleton(factory), name)` creates a **singleton manager** actor on that node. The manager has three modes:
 
-- **Pending.** No role assigned yet. Buffers incoming messages until the cluster actor sends a `SetRole` message with the current leader information.
+- **Pending.** No topology received yet. Buffers incoming messages until the first `TopologySnapshot` arrives with leader information.
 - **Active.** This node is the leader. The manager spawns the actual singleton actor as a child and forwards all messages to it.
 - **Standby.** Another node is the leader. The manager forwards messages to the leader's manager over TCP.
 
-When the cluster detects a leadership change (a node goes down, a new leader is elected), every singleton manager receives a new `SetRole`. The old leader's manager stops its child. The new leader's manager spawns a fresh instance from the factory.
+On startup, the manager subscribes to the topology actor via `SubscribeTopology` and receives `TopologySnapshot` pushes whenever the cluster state changes. When a leadership change occurs (a node goes down, a new leader is elected), every singleton manager receives an updated `TopologySnapshot`. The old leader's manager stops its child. The new leader's manager spawns a fresh instance from the factory.
 
 ## Failover
 
 The singleton tracks leadership, not individual node health. When the leader node dies:
 
 1. The phi accrual failure detector marks the node as unreachable.
-2. The cluster actor sends `DownMember` to the gossip protocol, which transitions the member to `down` status.
+2. The topology actor transitions the member to `down` status via `DownMember`.
 3. Leader election (deterministic — lowest address among `up` members) produces a new leader.
-4. The new leader's singleton manager receives `SetRole(is_leader=True)` and spawns the singleton.
+4. The topology actor pushes a new `TopologySnapshot` to all subscribers, and the new leader's singleton manager spawns the singleton.
 
 Messages sent during the transition are buffered by the manager on the sending node and delivered once the new singleton is active.
 

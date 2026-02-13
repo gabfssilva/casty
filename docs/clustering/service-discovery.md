@@ -2,7 +2,7 @@
 
 In a cluster, knowing which **nodes** exist isn't enough. You need to know which **services** are running and where. A payment processor on node-2, three chat handlers spread across the cluster, a monitoring agent that just came online — without discovery, every caller needs hardcoded paths and node addresses.
 
-The **receptionist** solves this. Actors register themselves under typed `ServiceKey`s, and other actors discover them via `Find` (one-shot) or `Subscribe` (continuous). The registry propagates through the existing gossip protocol — no extra round-trips, no external service registry.
+The **receptionist** solves this. Actors register themselves under typed `ServiceKey`s, and other actors discover them via `Find` (one-shot) or `Subscribe` (continuous). The registry propagates through the cluster's topology actor — no extra round-trips, no external service registry.
 
 ```python
 PAYMENT_KEY: ServiceKey[PaymentMsg] = ServiceKey("payment")
@@ -106,7 +106,7 @@ monitor = system.spawn(presence_monitor(), "monitor")
 system.receptionist.tell(Subscribe(key=CHAT_KEY, reply_to=monitor))
 ```
 
-The monitor reacts to changes — no polling, no timers. When a user actor registers on any node in the cluster, the monitor receives an updated `Listing` within one gossip round (~1-3 seconds).
+The monitor reacts to changes — no polling, no timers. When a user actor registers on any node in the cluster, the monitor receives an updated `Listing` within one topology push cycle.
 
 ## Auto-Deregister on Stop
 
@@ -130,9 +130,9 @@ The receptionist is a regular actor spawned by `ClusteredActorSystem` at startup
 - **Local entries** — actors registered on this node via `Register`.
 - **Cluster entries** — actors on remote nodes, received via gossip.
 
-When a `Register` arrives, the receptionist adds a `ServiceEntry` to its local set and tells the gossip actor to include it in the next round. Remote nodes receive the entry through normal gossip merge and notify their own subscribers.
+When a `Register` arrives, the receptionist adds a `ServiceEntry` to its local set and forwards it to the topology actor for cluster-wide propagation. The topology actor includes registry entries in its gossip rounds, and remote nodes receive them through normal CRDT merge.
 
-The registry piggybacks on the existing gossip protocol. `ClusterState` carries a `registry: frozenset[ServiceEntry]` field that merges with the same CRDT rules as membership — union of entries, pruning of entries from `down` nodes. No additional network messages, no extra protocol.
+The registry is part of `TopologySnapshot`. `ClusterState` carries a `registry: frozenset[ServiceEntry]` field that merges with the same CRDT rules as membership — union of entries, pruning of entries from `down` nodes. The receptionist subscribes to topology updates and refreshes its remote entries whenever a new snapshot arrives. No additional network messages, no extra protocol.
 
 ## Cross-Node Discovery
 
@@ -145,7 +145,7 @@ ref = system_a.spawn(
     "echo",
 )
 
-# Node B (after gossip propagation)
+# Node B (after topology propagation)
 listing = await system_b.lookup(ECHO_KEY)
 for instance in listing.instances:
     instance.ref.tell(Echo("hello"))

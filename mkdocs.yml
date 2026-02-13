@@ -91,6 +91,7 @@ nav:
           - Service Discovery: clustering/service-discovery.md
           - Shard Replication: clustering/shard-replication.md
           - Distributed Data Structures: clustering/distributed-data-structures.md
+          - Cluster Client: clustering/cluster-client.md
           - TLS: clustering/tls.md
           - Cluster Backend: clustering/cluster-backend.md
       - Configuration: configuration/index.md
@@ -113,6 +114,7 @@ nav:
           - Failure Detector: reference/failure-detector.md
           - Sharding: reference/sharding.md
           - Receptionist: reference/receptionist.md
+          - Cluster Client: reference/client.md
           - Distributed: reference/distributed.md
       - Remoting:
           - Address: reference/address.md
