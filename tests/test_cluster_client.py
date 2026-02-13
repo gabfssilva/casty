@@ -688,3 +688,78 @@ async def test_client_lookup_discovers_cluster_service() -> None:
                 timeout=5.0,
             )
             assert result == "pong"
+
+
+async def test_client_routes_through_address_map() -> None:
+    """ClusterClient with address_map routes via mapped addresses."""
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        real_port = system.self_node.port
+
+        system.spawn(
+            Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
+            "counters",
+        )
+        await asyncio.sleep(0.3)
+
+        # Map a fake logical address to the real cluster port
+        async with ClusterClient(
+            contact_points=[("10.99.99.1", 25520)],
+            system_name="cluster",
+            address_map={
+                ("10.99.99.1", 25520): ("127.0.0.1", real_port),
+            },
+        ) as client:
+            await asyncio.sleep(1.0)
+
+            counter = client.entity_ref("counters", num_shards=10)
+            counter.tell(ShardEnvelope("bob", Increment(amount=7)))
+            await asyncio.sleep(0.5)
+
+            result = await system.ask(
+                system.lookup("counters"),  # type: ignore[arg-type]
+                lambda r: ShardEnvelope("bob", GetBalance(reply_to=r)),
+                timeout=3.0,
+            )
+            assert result == 7
+
+
+async def test_client_ask_through_address_map() -> None:
+    """ClusterClient.ask() works when routing through address_map."""
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        real_port = system.self_node.port
+
+        system.spawn(
+            Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
+            "counters",
+        )
+        await asyncio.sleep(0.3)
+
+        async with ClusterClient(
+            contact_points=[("10.99.99.1", 25520)],
+            system_name="cluster",
+            address_map={
+                ("10.99.99.1", 25520): ("127.0.0.1", real_port),
+            },
+        ) as client:
+            await asyncio.sleep(1.0)
+
+            counter = client.entity_ref("counters", num_shards=10)
+            counter.tell(ShardEnvelope("carol", Increment(amount=11)))
+            await asyncio.sleep(0.5)
+
+            result = await client.ask(
+                counter,
+                lambda r: ShardEnvelope("carol", GetBalance(reply_to=r)),
+                timeout=5.0,
+            )
+            assert result == 11

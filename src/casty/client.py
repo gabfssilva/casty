@@ -476,11 +476,17 @@ class ClusterClient:
         system_name: str,
         client_host: str = "127.0.0.1",
         client_port: int = 0,
+        advertised_host: str | None = None,
+        advertised_port: int | None = None,
+        address_map: dict[tuple[str, int], tuple[str, int]] | None = None,
     ) -> None:
         self._contact_points = contact_points
         self._system_name = system_name
         self._client_host = client_host
         self._client_port = client_port
+        self._advertised_host = advertised_host
+        self._advertised_port = advertised_port
+        self._address_map = address_map
         self._proxies: dict[str, ActorRef[ClientProxyMsg]] = {}
         self._subscriber_ref: ActorRef[TopologySubscriberMsg] | None = None
         self._last_snapshot: TopologySnapshot | None = None
@@ -490,6 +496,7 @@ class ClusterClient:
             client_host,
             client_port,
             logger=logging.getLogger(f"casty.client.tcp.{system_name}"),
+            address_map=address_map,
         )
         self._serializer = PickleSerializer()
         self._system: _RemoteActorSystem | None = None
@@ -511,6 +518,8 @@ class ClusterClient:
             local_port=self._client_port,
             system_name=client_name,
             on_send_failure=self._on_send_failure,
+            advertised_host=self._advertised_host,
+            advertised_port=self._advertised_port,
         )
         self._system.set_remote(self._remote_transport)
 
@@ -706,8 +715,8 @@ class ClusterClient:
                 address=ActorAddress(
                     system=f"{self._system_name}-client",
                     path=temp_path,
-                    host=self._client_host,
-                    port=self._client_port,
+                    host=self._advertised_host or self._client_host,
+                    port=self._advertised_port or self._client_port,
                 ),
                 _transport=remote_transport,
             )

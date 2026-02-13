@@ -77,14 +77,62 @@ The client includes a TCP circuit breaker. When a send to a node fails:
 
 The subscriber also enriches its contact list from `TopologySnapshot` — if a seed node goes down, it can still reconnect through any other cluster member it has seen.
 
+## SSH Tunnels
+
+When the cluster lives in a private network (e.g. AWS VPC), the client can reach it through SSH tunnels. `ClusterClient` supports this with two parameters: `address_map` for forward tunnels and `advertised_host`/`advertised_port` for reverse tunnels.
+
+### Setup
+
+Set up SSH tunnels to the bastion host:
+
+```bash
+# Forward tunnels — reach each cluster node
+ssh -L 12345:10.0.1.10:25520 \
+    -L 12346:10.0.1.11:25520 \
+    -R 9999:localhost:5000 \    # Reverse tunnel — cluster reaches the client
+    user@bastion.example.com
+```
+
+Then configure `ClusterClient` with the mapping:
+
+```python
+async with ClusterClient(
+    contact_points=[("10.0.1.10", 25520), ("10.0.1.11", 25520)],
+    system_name="my-cluster",
+    client_host="127.0.0.1",
+    client_port=5000,
+    advertised_host="bastion.example.com",
+    advertised_port=9999,
+    address_map={
+        ("10.0.1.10", 25520): ("localhost", 12345),
+        ("10.0.1.11", 25520): ("localhost", 12346),
+    },
+) as client:
+    counter = client.entity_ref("counter", num_shards=100)
+    count = await client.ask(
+        counter,
+        lambda r: ShardEnvelope("user-42", GetCount(reply_to=r)),
+    )
+```
+
+### How it works
+
+- **`address_map`** translates logical cluster addresses to local tunnel endpoints. When the client sends to `10.0.1.10:25520`, the TCP layer connects to `localhost:12345` instead — the SSH forward tunnel delivers it to the actual node.
+- **`advertised_host`/`advertised_port`** go into reply `ActorRef` addresses. The cluster sends responses to `bastion.example.com:9999`, which the SSH reverse tunnel delivers back to `localhost:5000`.
+- **`client_host`/`client_port`** remain the local bind address for the TCP listener.
+- If `address_map` doesn't contain an address, the client connects directly (identity fallback). This means topology-reported addresses that aren't in the map are used as-is.
+
 ## Configuration
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `contact_points` | *(required)* | List of `(host, port)` for cluster nodes |
 | `system_name` | *(required)* | Must match the cluster's actor system name |
-| `client_host` | `"127.0.0.1"` | Advertised hostname for receiving responses |
-| `client_port` | `0` | Advertised port (`0` for auto-assignment) |
+| `client_host` | `"127.0.0.1"` | Bind address for the local TCP listener |
+| `client_port` | `0` | Bind port (`0` for auto-assignment) |
+| `advertised_host` | `None` | Host in reply addresses (defaults to `client_host`) |
+| `advertised_port` | `None` | Port in reply addresses (defaults to `client_port`) |
+| `address_map` | `None` | `dict[tuple[str, int], tuple[str, int]]` — logical-to-actual address mapping |
 
 ## When to Use
 

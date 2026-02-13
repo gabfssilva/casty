@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     from casty.task_runner import TaskRunnerMsg
 
 
+type AddressMap = dict[tuple[str, int], tuple[str, int]]
+
+
 class InboundHandler(Protocol):
     async def on_message(self, data: bytes) -> None: ...
 
@@ -121,6 +124,10 @@ class TcpTransport:
         TLS context for the inbound server.
     client_ssl : ssl.SSLContext or None
         TLS context for outbound connections.
+    address_map : dict[tuple[str, int], tuple[str, int]] or None
+        Optional mapping from logical (host, port) to actual (host, port)
+        for SSH tunnels or NAT. Logical addresses passed to ``send()`` are
+        translated before connection. Default: no translation.
 
     Examples
     --------
@@ -140,6 +147,7 @@ class TcpTransport:
         client_ssl: ssl.SSLContext | None = None,
         connect_timeout: float = 2.0,
         blacklist_duration: float = 5.0,
+        address_map: AddressMap | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -150,6 +158,7 @@ class TcpTransport:
         self._client_ssl = client_ssl
         self._connect_timeout = connect_timeout
         self._blacklist_duration = blacklist_duration
+        self._address_map: AddressMap = address_map or {}
         self._blacklist: dict[tuple[str, int], float] = {}
         self._connections: dict[
             tuple[str, int], tuple[asyncio.StreamReader, asyncio.StreamWriter]
@@ -219,36 +228,46 @@ class TcpTransport:
         Parameters
         ----------
         host : str
-            Remote hostname.
+            Remote hostname (logical — may be translated by address_map).
         port : int
-            Remote port.
+            Remote port (logical — may be translated by address_map).
         data : bytes
             Raw bytes to send.
         """
-        key = (host, port)
+        actual_host, actual_port = self._address_map.get(
+            (host, port), (host, port)
+        )
+        actual_addr = (actual_host, actual_port)
 
-        blacklisted_until = self._blacklist.get(key)
+        blacklisted_until = self._blacklist.get(actual_addr)
         if blacklisted_until is not None:
             if time.monotonic() < blacklisted_until:
                 return
-            del self._blacklist[key]
+            del self._blacklist[actual_addr]
 
         try:
-            if key not in self._connections:
-                self._logger.debug("TCP connect -> %s:%d", host, port)
+            if actual_addr not in self._connections:
+                self._logger.debug("TCP connect -> %s:%d", actual_host, actual_port)
                 reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, port, ssl=self._client_ssl),
+                    asyncio.open_connection(
+                        actual_host, actual_port, ssl=self._client_ssl
+                    ),
                     timeout=self._connect_timeout,
                 )
                 self._set_nodelay(writer)
-                self._connections[key] = (reader, writer)
-            _, writer = self._connections[key]
+                self._connections[actual_addr] = (reader, writer)
+            _, writer = self._connections[actual_addr]
             writer.write(struct.pack("!I", len(data)) + data)
             await writer.drain()
         except (ConnectionError, OSError, TimeoutError):
-            self._connections.pop(key, None)
-            self._blacklist[key] = time.monotonic() + self._blacklist_duration
-            self._logger.debug("Blacklisted %s:%d for %.1fs", host, port, self._blacklist_duration)
+            self._connections.pop(actual_addr, None)
+            self._blacklist[actual_addr] = time.monotonic() + self._blacklist_duration
+            self._logger.debug(
+                "Blacklisted %s:%d for %.1fs",
+                actual_host,
+                actual_port,
+                self._blacklist_duration,
+            )
 
     async def stop(self) -> None:
         """Close all connections and shut down the server."""
@@ -332,6 +351,8 @@ class RemoteTransport:
         local_host: str,
         local_port: int,
         system_name: str,
+        advertised_host: str | None = None,
+        advertised_port: int | None = None,
         task_runner: ActorRef[TaskRunnerMsg] | None = None,
         on_send_failure: Callable[[str, int], None] | None = None,
     ) -> None:
@@ -340,6 +361,8 @@ class RemoteTransport:
         self._serializer = serializer
         self._local_host = local_host
         self._local_port = local_port
+        self._advertised_host = advertised_host
+        self._advertised_port = advertised_port
         self._system_name = system_name
         self._task_runner = task_runner
         self._logger = logging.getLogger(f"casty.remote_transport.{system_name}")
@@ -349,6 +372,16 @@ class RemoteTransport:
 
         # Wire ref_factory so deserialized ActorRefs get the right transport
         self._serializer.set_ref_factory(self._make_ref_from_address)
+
+    @property
+    def sender_host(self) -> str:
+        """Host used in outbound sender URIs (advertised or local)."""
+        return self._advertised_host or self._local_host
+
+    @property
+    def sender_port(self) -> int:
+        """Port used in outbound sender URIs (advertised or local)."""
+        return self._advertised_port or self._local_port
 
     def set_task_runner(self, task_runner: ActorRef[TaskRunnerMsg]) -> None:
         """Set the task runner ref after system bootstrap.
@@ -444,7 +477,7 @@ class RemoteTransport:
             type_name = f"{msg_cls.__module__}.{msg_cls.__qualname__}"
             envelope = MessageEnvelope(
                 target=address.to_uri(),
-                sender=f"casty://{self._system_name}@{self._local_host}:{self._local_port}/",
+                sender=f"casty://{self._system_name}@{self.sender_host}:{self.sender_port}/",
                 payload=payload,
                 type_hint=type_name,
             )

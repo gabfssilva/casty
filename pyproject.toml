@@ -51,6 +51,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "pytest-timeout>=2.4.0",
     "trustme>=1.2.1",
+    "asyncssh>=2.22.0",
 ]
 docs = [
     "mkdocs-gen-files>=0.6.0",

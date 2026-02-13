@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+import struct
 from dataclasses import dataclass
 
 import pytest
@@ -297,6 +298,83 @@ def tls_contexts() -> tuple[ssl.SSLContext, ssl.SSLContext]:
     ca.configure_trust(client_ctx)
 
     return server_ctx, client_ctx
+
+
+async def test_tcp_address_map_translates_on_send() -> None:
+    """TcpTransport with address_map connects to the mapped address, not the logical one."""
+    received: list[bytes] = []
+
+    async def handle(reader: asyncio.StreamReader, _writer: asyncio.StreamWriter) -> None:
+        length_bytes = await reader.readexactly(4)
+        msg_len = struct.unpack("!I", length_bytes)[0]
+        data = await reader.readexactly(msg_len)
+        received.append(data)
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    actual_port = server.sockets[0].getsockname()[1]
+
+    tcp = TcpTransport(
+        "127.0.0.1", 0,
+        address_map={("10.0.1.10", 25520): ("127.0.0.1", actual_port)},
+    )
+
+    try:
+        await tcp.send("10.0.1.10", 25520, b"hello-through-tunnel")
+        await asyncio.sleep(0.1)
+        assert received == [b"hello-through-tunnel"]
+    finally:
+        await tcp.stop()
+        server.close()
+        await server.wait_closed()
+
+
+async def test_remote_transport_sender_uses_advertised_address() -> None:
+    """MessageEnvelope.sender uses advertised address, not bind address."""
+    captured_data: list[bytes] = []
+
+    async def handle(reader: asyncio.StreamReader, _writer: asyncio.StreamWriter) -> None:
+        length_bytes = await reader.readexactly(4)
+        msg_len = struct.unpack("!I", length_bytes)[0]
+        data = await reader.readexactly(msg_len)
+        captured_data.append(data)
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    actual_port = server.sockets[0].getsockname()[1]
+
+    local = LocalTransport()
+    registry = TypeRegistry()
+    tcp = TcpTransport("127.0.0.1", 0)
+    serializer = JsonSerializer(registry)
+
+    remote = RemoteTransport(
+        local=local,
+        tcp=tcp,
+        serializer=serializer,
+        local_host="127.0.0.1",
+        local_port=5000,
+        system_name="test-sys",
+        advertised_host="bastion.example.com",
+        advertised_port=9999,
+    )
+
+    await remote.start()
+    try:
+        addr = ActorAddress(
+            system="remote-sys", path="/target",
+            host="127.0.0.1", port=actual_port,
+        )
+        await remote._send_remote(addr, Ping(value=42))
+        await asyncio.sleep(0.1)
+
+        assert len(captured_data) == 1
+        envelope = MessageEnvelope.from_bytes(captured_data[0])
+        assert "bastion.example.com" in envelope.sender
+        assert "9999" in envelope.sender
+        assert "5000" not in envelope.sender
+    finally:
+        await remote.stop()
+        server.close()
+        await server.wait_closed()
 
 
 async def test_tcp_transport_tls(tls_contexts: tuple[ssl.SSLContext, ssl.SSLContext]) -> None:
