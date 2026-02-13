@@ -1,0 +1,6 @@
+name: casty-loadtest
+runtime:
+  name: python
+  options:
+    toolchain: uv
+description: Casty load + resilience test infrastructure

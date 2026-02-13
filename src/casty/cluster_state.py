@@ -44,6 +44,17 @@ class MemberStatus(Enum):
     down = auto()
     removed = auto()
 
+    @property
+    def merge_priority(self) -> tuple[bool, int]:
+        """Priority key for CRDT merge on concurrent vector clocks.
+
+        Returns a ``(alive, value)`` tuple where alive statuses always win
+        over terminal ones.  This ensures a rejoining node (``joining``)
+        beats stale ``down``/``removed`` gossip.
+        """
+        alive = self in (MemberStatus.joining, MemberStatus.up, MemberStatus.leaving)
+        return (alive, self.value)
+
 
 @total_ordering
 @dataclass(frozen=True)

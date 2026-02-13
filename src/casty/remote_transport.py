@@ -13,7 +13,9 @@ import logging
 import socket
 import ssl
 import struct
+import time
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from casty.address import ActorAddress
@@ -136,6 +138,8 @@ class TcpTransport:
         logger: logging.Logger | None = None,
         server_ssl: ssl.SSLContext | None = None,
         client_ssl: ssl.SSLContext | None = None,
+        connect_timeout: float = 2.0,
+        blacklist_duration: float = 5.0,
     ) -> None:
         self._host = host
         self._port = port
@@ -144,6 +148,9 @@ class TcpTransport:
         self._logger = logger or logging.getLogger("casty.tcp")
         self._server_ssl = server_ssl
         self._client_ssl = client_ssl
+        self._connect_timeout = connect_timeout
+        self._blacklist_duration = blacklist_duration
+        self._blacklist: dict[tuple[str, int], float] = {}
         self._connections: dict[
             tuple[str, int], tuple[asyncio.StreamReader, asyncio.StreamWriter]
         ] = {}
@@ -206,7 +213,8 @@ class TcpTransport:
     async def send(self, host: str, port: int, data: bytes) -> None:
         """Send raw bytes to a remote host with length-prefix framing.
 
-        Opens a new connection if needed. Retries once on connection failure.
+        Opens a new connection if needed. Blacklists the endpoint on failure
+        to prevent connection storms to dead nodes.
 
         Parameters
         ----------
@@ -218,24 +226,29 @@ class TcpTransport:
             Raw bytes to send.
         """
         key = (host, port)
+
+        blacklisted_until = self._blacklist.get(key)
+        if blacklisted_until is not None:
+            if time.monotonic() < blacklisted_until:
+                return
+            del self._blacklist[key]
+
         try:
             if key not in self._connections:
                 self._logger.debug("TCP connect -> %s:%d", host, port)
-                reader, writer = await asyncio.open_connection(host, port, ssl=self._client_ssl)
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port, ssl=self._client_ssl),
+                    timeout=self._connect_timeout,
+                )
                 self._set_nodelay(writer)
                 self._connections[key] = (reader, writer)
             _, writer = self._connections[key]
             writer.write(struct.pack("!I", len(data)) + data)
             await writer.drain()
-        except (ConnectionError, OSError):
-            # Drop stale connection and retry once
+        except (ConnectionError, OSError, TimeoutError):
             self._connections.pop(key, None)
-            self._logger.warning("TCP reconnect -> %s:%d", host, port)
-            reader, writer = await asyncio.open_connection(host, port, ssl=self._client_ssl)
-            self._set_nodelay(writer)
-            self._connections[key] = (reader, writer)
-            writer.write(struct.pack("!I", len(data)) + data)
-            await writer.drain()
+            self._blacklist[key] = time.monotonic() + self._blacklist_duration
+            self._logger.debug("Blacklisted %s:%d for %.1fs", host, port, self._blacklist_duration)
 
     async def stop(self) -> None:
         """Close all connections and shut down the server."""
@@ -260,6 +273,21 @@ class TcpTransport:
         self._inbound_writers.clear()
         if self._server is not None:
             await self._server.wait_closed()
+
+    def clear_blacklist(self, host: str, port: int) -> None:
+        """Remove a host from the circuit breaker blacklist.
+
+        Called when a node rejoins so the system can immediately communicate
+        with it.
+
+        Parameters
+        ----------
+        host : str
+            Remote hostname.
+        port : int
+            Remote port.
+        """
+        self._blacklist.pop((host, port), None)
 
 
 class RemoteTransport:
@@ -305,6 +333,7 @@ class RemoteTransport:
         local_port: int,
         system_name: str,
         task_runner: ActorRef[TaskRunnerMsg] | None = None,
+        on_send_failure: Callable[[str, int], None] | None = None,
     ) -> None:
         self._local = local
         self._tcp = tcp
@@ -316,6 +345,7 @@ class RemoteTransport:
         self._logger = logging.getLogger(f"casty.remote_transport.{system_name}")
         self._node_index: dict[str, tuple[str, int]] = {}
         self._local_node_id: str | None = None
+        self._on_send_failure = on_send_failure
 
         # Wire ref_factory so deserialized ActorRefs get the right transport
         self._serializer.set_ref_factory(self._make_ref_from_address)
@@ -422,6 +452,8 @@ class RemoteTransport:
             await self._tcp.send(host, port, envelope.to_bytes())
         except (ConnectionError, OSError):
             self._logger.debug("Cannot reach %s:%s (connection refused or reset)", host, port)
+            if self._on_send_failure is not None:
+                self._on_send_failure(host, port)
         except Exception:
             self._logger.warning("Failed to send remote message to %s", address, exc_info=True)
 
@@ -476,6 +508,20 @@ class RemoteTransport:
             The actual port assigned by the OS.
         """
         self._local_port = port
+
+    def clear_blacklist(self, host: str, port: int) -> None:
+        """Clear the TCP circuit breaker for a specific endpoint.
+
+        Called when a node rejoins the cluster so it can be reached immediately.
+
+        Parameters
+        ----------
+        host : str
+            Remote hostname.
+        port : int
+            Remote port.
+        """
+        self._tcp.clear_blacklist(host, port)
 
     async def start(self) -> None:
         """Start the underlying TCP server and begin accepting connections."""

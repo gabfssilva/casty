@@ -12,11 +12,11 @@ from casty.receptionist import (
     Find,
     Listing,
     Register,
-    RegistryUpdated,
     ServiceKey,
     Subscribe,
     receptionist_actor,
 )
+from casty.topology import TopologySnapshot
 
 
 @dataclass(frozen=True)
@@ -146,8 +146,8 @@ async def test_deregister_removes_service() -> None:
     assert len(listing.instances) == 0
 
 
-async def test_registry_updated_from_gossip() -> None:
-    """RegistryUpdated should make remote entries available via Find."""
+async def test_registry_updated_from_topology_snapshot() -> None:
+    """TopologySnapshot with registry should make remote entries available via Find."""
     results: list[Any] = []
     remote_node = NodeAddress(host="10.0.0.2", port=2551)
     async with ActorSystem(name="test") as system:
@@ -160,7 +160,14 @@ async def test_registry_updated_from_gossip() -> None:
         remote_entry = ServiceEntry(
             key="ping", node=remote_node, path="/user/ping-service",
         )
-        rec.tell(RegistryUpdated(registry=frozenset({remote_entry})))
+        snapshot = TopologySnapshot(
+            members=frozenset(),
+            leader=None,
+            shard_allocations={},
+            allocation_epoch=0,
+            registry=frozenset({remote_entry}),
+        )
+        rec.tell(snapshot)  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
 
         key: PingKey = ServiceKey("ping")

@@ -1,0 +1,15 @@
+[project]
+name = "casty-load"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = ["casty"]
+
+[project.optional-dependencies]
+app = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+    "httpx>=0.28.0",
+]
+
+[tool.uv.sources]
+casty = { path = "../.." }

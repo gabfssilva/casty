@@ -1,0 +1,6 @@
+config:
+  aws:region: us-east-1
+  casty-loadtest:instance_type: t3.small
+  casty-loadtest:node_count: "10"
+  casty-loadtest:key_name: ""
+encryptionsalt: v1:POlTxad3vUQ=:v1:M0kCfVef4oGwV/So:/HNz98RMezi0DIqKKz47ZHN62Z141g==

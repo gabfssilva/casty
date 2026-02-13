@@ -1,0 +1,85 @@
+x-node: &node
+  build:
+    context: ../..
+    dockerfile: tests/load/Dockerfile
+  environment: &env
+    CASTY_PORT: "25520"
+    HTTP_PORT: "8000"
+    SEED_IPS: "node-0"
+    NODE_COUNT: "5"
+    CASTY_LOG_LEVEL: "INFO"
+
+services:
+  node-0:
+    <<: *node
+    hostname: node-0
+    container_name: loadtest-node-0
+    environment:
+      <<: *env
+      NODE_INDEX: "0"
+    ports:
+      - "8000:8000"
+
+  node-1:
+    <<: *node
+    hostname: node-1
+    container_name: loadtest-node-1
+    environment:
+      <<: *env
+      NODE_INDEX: "1"
+    ports:
+      - "8001:8000"
+
+  node-2:
+    <<: *node
+    hostname: node-2
+    container_name: loadtest-node-2
+    environment:
+      <<: *env
+      NODE_INDEX: "2"
+    ports:
+      - "8002:8000"
+
+  node-3:
+    <<: *node
+    hostname: node-3
+    container_name: loadtest-node-3
+    environment:
+      <<: *env
+      NODE_INDEX: "3"
+    ports:
+      - "8003:8000"
+
+  node-4:
+    <<: *node
+    hostname: node-4
+    container_name: loadtest-node-4
+    environment:
+      <<: *env
+      NODE_INDEX: "4"
+    ports:
+      - "8004:8000"
+
+  loadtest:
+    build:
+      context: ../..
+      dockerfile: tests/load/Dockerfile.loadtest
+    hostname: loadtest
+    environment:
+      CONTACT_HOST: "node-0"
+      CASTY_PORT: "25520"
+      CLIENT_HOST: "loadtest"
+      CLIENT_PORT: "25599"
+      NODE_COUNT: "5"
+      DURATION: "180"
+      WARMUP: "15"
+      NUM_WORKERS: "20"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - node-0
+      - node-1
+      - node-2
+      - node-3
+      - node-4
+    profiles: ["loadtest"]

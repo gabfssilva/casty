@@ -152,19 +152,6 @@ class Find[M]:
 
 
 @dataclass(frozen=True)
-class RegistryUpdated:
-    """Cluster-wide registry snapshot from gossip (internal message).
-
-    Parameters
-    ----------
-    registry : frozenset[ServiceEntry]
-        Complete set of service entries received via gossip.
-    """
-
-    registry: frozenset[ServiceEntry]
-
-
-@dataclass(frozen=True)
 class ActorTerminated:
     """Internal: an actor we were tracking has stopped."""
 
@@ -176,7 +163,6 @@ type ReceptionistMsg = (
     | Deregister[Any]
     | Subscribe[Any]
     | Find[Any]
-    | RegistryUpdated
     | ActorTerminated
 )
 
@@ -249,6 +235,7 @@ def receptionist_actor(
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
     event_stream: EventStream | None = None,
+    topology_ref: ActorRef[Any] | None = None,
 ) -> Behavior[ReceptionistMsg]:
     """Create a receptionist behavior for typed service discovery.
 
@@ -289,6 +276,24 @@ def receptionist_actor(
         async def receive(
             ctx: ActorContext[ReceptionistMsg], msg: ReceptionistMsg,
         ) -> Behavior[ReceptionistMsg]:
+            from casty.topology import TopologySnapshot
+
+            if isinstance(msg, TopologySnapshot):
+                remote_entries = frozenset(
+                    e for e in msg.registry if e.node != env.self_node
+                )
+                old_keys = {e.key for e in cluster_registry}
+                new_keys = {e.key for e in remote_entries}
+                changed_keys = old_keys ^ new_keys
+                for e in cluster_registry ^ remote_entries:
+                    changed_keys.add(e.key)
+                for key_name in changed_keys:
+                    _notify_subscribers(
+                        key_name, subscribers, local_entries,
+                        remote_entries, env,
+                    )
+                return active(local_entries, remote_entries, subscribers)
+
             match msg:
                 case Register(key=skey, ref=ref):
                     entry = ServiceEntry(
@@ -298,7 +303,7 @@ def receptionist_actor(
                     )
                     new_local = local_entries | {entry}
                     if gossip_ref is not None:
-                        from casty.gossip_actor import UpdateRegistry
+                        from casty.topology_actor import UpdateRegistry
                         gossip_ref.tell(UpdateRegistry(entries=new_local))
                     _notify_subscribers(
                         skey.name, subscribers, new_local, cluster_registry, env,
@@ -313,7 +318,7 @@ def receptionist_actor(
                     )
                     new_local = local_entries - {entry}
                     if gossip_ref is not None:
-                        from casty.gossip_actor import UpdateRegistry
+                        from casty.topology_actor import UpdateRegistry
                         gossip_ref.tell(UpdateRegistry(entries=new_local))
                     _notify_subscribers(
                         skey.name, subscribers, new_local, cluster_registry, env,
@@ -338,22 +343,6 @@ def receptionist_actor(
                     reply_to.tell(listing)
                     return Behaviors.same()
 
-                case RegistryUpdated(registry=registry):
-                    remote_entries = frozenset(
-                        e for e in registry if e.node != env.self_node
-                    )
-                    old_keys = {e.key for e in cluster_registry}
-                    new_keys = {e.key for e in remote_entries}
-                    changed_keys = old_keys ^ new_keys
-                    for e in cluster_registry ^ remote_entries:
-                        changed_keys.add(e.key)
-                    for key_name in changed_keys:
-                        _notify_subscribers(
-                            key_name, subscribers, local_entries,
-                            remote_entries, env,
-                        )
-                    return active(local_entries, remote_entries, subscribers)
-
                 case ActorTerminated(path=stopped_path):
                     removed = frozenset(
                         e for e in local_entries if e.path != stopped_path
@@ -361,7 +350,7 @@ def receptionist_actor(
                     if removed != local_entries:
                         changed_keys = {e.key for e in (local_entries - removed)}
                         if gossip_ref is not None:
-                            from casty.gossip_actor import UpdateRegistry
+                            from casty.topology_actor import UpdateRegistry
                             gossip_ref.tell(UpdateRegistry(entries=removed))
                         for key_name in changed_keys:
                             _notify_subscribers(
@@ -388,6 +377,10 @@ def receptionist_actor(
                     ctx.log.debug("Failed to notify receptionist: %s", e)
 
             event_stream.subscribe(ActorStopped, on_stopped)
+
+        if topology_ref is not None:
+            from casty.topology import SubscribeTopology
+            topology_ref.tell(SubscribeTopology(reply_to=ctx.self))  # type: ignore[arg-type]
 
         return active(frozenset(), frozenset(), MappingProxyType({}))
 

@@ -7,8 +7,9 @@ on the old leader and respawned on the new one.
 Internal actors:
 
 * **singleton_manager** — one per node that calls ``spawn()``.  Three modes:
-  ``pending`` (buffers until ``SetRole`` arrives), ``active`` (leader, owns the
-  child), ``standby`` (non-leader, forwards to leader's manager via remoting).
+  ``pending`` (buffers until ``TopologySnapshot`` arrives), ``active`` (leader,
+  owns the child), ``standby`` (non-leader, forwards to leader's manager via
+  remoting).
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from typing import Any, TYPE_CHECKING
 from casty.actor import Behavior, Behaviors
 from casty.address import ActorAddress
 from casty.cluster_state import NodeAddress
-from casty.shard_coordinator_actor import SetRole
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
@@ -47,11 +47,13 @@ def singleton_manager_actor(
     remote_transport: RemoteTransport | None,
     system_name: str,
     logger: logging.Logger,
+    topology_ref: ActorRef[Any] | None = None,
+    self_node: NodeAddress | None = None,
 ) -> Behavior[Any]:
     """Manager actor for a cluster singleton.
 
     Starts in ``pending`` mode, transitions to ``active`` (leader) or
-    ``standby`` (non-leader) upon receiving ``SetRole`` from the cluster actor.
+    ``standby`` (non-leader) upon receiving ``TopologySnapshot``.
     """
     cfg = SingletonConfig(
         factory=factory,
@@ -60,80 +62,101 @@ def singleton_manager_actor(
         system_name=system_name,
         logger=logger,
     )
+
+    if topology_ref is not None and self_node is not None:
+        async def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
+            from casty.topology import SubscribeTopology
+            topology_ref.tell(SubscribeTopology(reply_to=ctx.self))  # type: ignore[arg-type]
+            return pending(cfg, buffer=(), self_node=self_node)
+        return Behaviors.setup(setup)
+
     return pending(cfg, buffer=())
 
 
-def pending(cfg: SingletonConfig, buffer: tuple[Any, ...]) -> Behavior[Any]:
+def pending(
+    cfg: SingletonConfig,
+    buffer: tuple[Any, ...],
+    self_node: NodeAddress | None = None,
+) -> Behavior[Any]:
     async def receive(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
-        match msg:
-            case SetRole(is_leader=True):
+        from casty.topology import TopologySnapshot
+
+        if isinstance(msg, TopologySnapshot) and self_node is not None:
+            if msg.leader == self_node:
                 child_ref = ctx.spawn(cfg.factory(), cfg.name)
                 cfg.logger.info("Singleton [%s] activated on leader", cfg.name)
                 for buffered in buffer:
                     child_ref.tell(buffered)
-                return active(cfg, child_ref=child_ref)
-
-            case SetRole(is_leader=False, leader_node=leader) if leader is not None:
-                cfg.logger.info("Singleton [%s] standby (leader=%s:%d)", cfg.name, leader.host, leader.port)
-                if leader_ref := make_leader_ref(cfg, leader):
+                return active(cfg, child_ref=child_ref, self_node=self_node)
+            if msg.leader is not None:
+                cfg.logger.info(
+                    "Singleton [%s] standby (leader=%s:%d)",
+                    cfg.name, msg.leader.host, msg.leader.port,
+                )
+                if leader_ref := make_leader_ref(cfg, msg.leader):
                     for buffered in buffer:
                         leader_ref.tell(buffered)
-                return standby(cfg, leader_node=leader)
+                return standby(cfg, leader_node=msg.leader, self_node=self_node)
+            return Behaviors.same()
 
-            case SetRole(is_leader=False, leader_node=None):
-                return Behaviors.same()
-
-            case _:
-                return pending(cfg, buffer=(*buffer, msg))
+        return pending(cfg, buffer=(*buffer, msg), self_node=self_node)
 
     return Behaviors.receive(receive)
 
 
-def active(cfg: SingletonConfig, child_ref: ActorRef[Any]) -> Behavior[Any]:
+def active(
+    cfg: SingletonConfig,
+    child_ref: ActorRef[Any],
+    self_node: NodeAddress | None = None,
+) -> Behavior[Any]:
     async def receive(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
-        match msg:
-            case SetRole(is_leader=True):
-                return Behaviors.same()
+        from casty.topology import TopologySnapshot
 
-            case SetRole(is_leader=False, leader_node=leader) if leader is not None:
+        if isinstance(msg, TopologySnapshot) and self_node is not None:
+            if msg.leader == self_node:
+                return Behaviors.same()
+            if msg.leader is not None:
                 cfg.logger.info("Singleton [%s] demoted, stopping child", cfg.name)
                 ctx.stop(child_ref)
-                return standby(cfg, leader_node=leader)
+                return standby(cfg, leader_node=msg.leader, self_node=self_node)
+            cfg.logger.info("Singleton [%s] demoted (no leader), stopping child", cfg.name)
+            ctx.stop(child_ref)
+            return pending(cfg, buffer=(), self_node=self_node)
 
-            case SetRole(is_leader=False, leader_node=None):
-                cfg.logger.info("Singleton [%s] demoted (no leader), stopping child", cfg.name)
-                ctx.stop(child_ref)
-                return pending(cfg, buffer=())
-
-            case _:
-                child_ref.tell(msg)
-                return Behaviors.same()
+        child_ref.tell(msg)
+        return Behaviors.same()
 
     return Behaviors.receive(receive)
 
 
-def standby(cfg: SingletonConfig, leader_node: NodeAddress) -> Behavior[Any]:
+def standby(
+    cfg: SingletonConfig,
+    leader_node: NodeAddress,
+    self_node: NodeAddress | None = None,
+) -> Behavior[Any]:
     leader_ref = make_leader_ref(cfg, leader_node)
 
     async def receive(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
-        match msg:
-            case SetRole(is_leader=True):
+        from casty.topology import TopologySnapshot
+
+        if isinstance(msg, TopologySnapshot) and self_node is not None:
+            if msg.leader == self_node:
                 child_ref = ctx.spawn(cfg.factory(), cfg.name)
                 cfg.logger.info("Singleton [%s] promoted to leader", cfg.name)
-                return active(cfg, child_ref=child_ref)
+                return active(cfg, child_ref=child_ref, self_node=self_node)
+            if msg.leader is not None and msg.leader != leader_node:
+                cfg.logger.info(
+                    "Singleton [%s] leader changed to %s:%d",
+                    cfg.name, msg.leader.host, msg.leader.port,
+                )
+                return standby(cfg, leader_node=msg.leader, self_node=self_node)
+            if msg.leader is None:
+                return pending(cfg, buffer=(), self_node=self_node)
+            return Behaviors.same()
 
-            case SetRole(is_leader=False, leader_node=new_leader) if new_leader is not None:
-                if new_leader != leader_node:
-                    cfg.logger.info("Singleton [%s] leader changed to %s:%d", cfg.name, new_leader.host, new_leader.port)
-                return standby(cfg, leader_node=new_leader)
-
-            case SetRole(is_leader=False, leader_node=None):
-                return pending(cfg, buffer=())
-
-            case _:
-                if leader_ref is not None:
-                    leader_ref.tell(msg)
-                return Behaviors.same()
+        if leader_ref is not None:
+            leader_ref.tell(msg)
+        return Behaviors.same()
 
     return Behaviors.receive(receive)
 

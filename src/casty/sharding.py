@@ -28,11 +28,9 @@ from casty.ref import ActorRef, BroadcastRef
 from casty.cluster import (
     Cluster,
     ClusterConfig,
-    RegisterBroadcast,
-    RegisterCoordinator,
-    RegisterSingletonManager,
     WaitForMembers,
 )
+from casty.topology_actor import TopologyMsg
 from casty.receptionist import Find, Listing, ReceptionistMsg, ServiceKey
 from casty.remote_transport import RemoteTransport, TcpTransport
 from casty.serialization import PickleSerializer
@@ -121,6 +119,7 @@ def shard_proxy_behavior(
     remote_transport: RemoteTransport | None,
     system_name: str,
     logger: logging.Logger | None = None,
+    topology_ref: ActorRef[Any] | None = None,
 ) -> Behavior[Any]:
     """Proxy actor that routes ShardEnvelopes to the correct region.
 
@@ -135,6 +134,20 @@ def shard_proxy_behavior(
         buffer: dict[int, list[ShardEnvelope[Any]]],
     ) -> Behavior[Any]:
         async def receive(ctx: Any, msg: Any) -> Any:
+            from casty.topology import TopologySnapshot
+
+            if isinstance(msg, TopologySnapshot):
+                evicted = {
+                    sid: n for sid, n in shard_cache.items()
+                    if n not in msg.unreachable
+                }
+                if len(evicted) < len(shard_cache):
+                    log.info(
+                        "Evicted %d cached shards (unreachable nodes)",
+                        len(shard_cache) - len(evicted),
+                    )
+                return active(evicted, buffer)
+
             match msg:
                 case ShardEnvelope():
                     envelope = cast(ShardEnvelope[Any], msg)
@@ -195,6 +208,13 @@ def shard_proxy_behavior(
 
         return Behaviors.receive(receive)
 
+    if topology_ref is not None:
+        async def setup(ctx: Any) -> Any:
+            from casty.topology import SubscribeTopology
+            topology_ref.tell(SubscribeTopology(reply_to=ctx.self))
+            return active({}, {})
+        return Behaviors.setup(setup)
+
     return active({}, {})
 
 
@@ -208,18 +228,27 @@ def broadcast_proxy_behavior(
     local_ref: ActorRef[Any],
     self_node: NodeAddress,
     bcast_name: str,
-    remote_transport: RemoteTransport,
+    remote_transport: RemoteTransport | None,
     system_name: str,
+    topology_ref: ActorRef[Any] | None = None,
 ) -> Behavior[Any]:
     """Proxy that fans out every message to all cluster members.
 
-    Receives ``ClusterState`` from the cluster actor to track membership.
+    Receives ``ClusterState`` or ``TopologySnapshot`` to track membership.
     Any other message is forwarded to every ``up`` member — locally via
     ``local_ref.tell()`` and remotely via ``remote_transport.make_ref()``.
     """
 
     def active(members: frozenset[NodeAddress]) -> Behavior[Any]:
         async def receive(ctx: Any, msg: Any) -> Behavior[Any]:
+            from casty.topology import TopologySnapshot
+
+            if isinstance(msg, TopologySnapshot):
+                up = frozenset(
+                    m.address for m in msg.members if m.status == MemberStatus.up
+                )
+                return active(up)
+
             match msg:
                 case ClusterState() as state:
                     up = frozenset(
@@ -230,7 +259,7 @@ def broadcast_proxy_behavior(
                     for node in members:
                         if node == self_node:
                             local_ref.tell(msg)
-                        else:
+                        elif remote_transport is not None:
                             addr = ActorAddress(
                                 system=system_name,
                                 path=f"/_bcast-{bcast_name}",
@@ -242,6 +271,13 @@ def broadcast_proxy_behavior(
                     return Behaviors.same()
 
         return Behaviors.receive(receive)
+
+    if topology_ref is not None:
+        async def setup(ctx: Any) -> Any:
+            from casty.topology import SubscribeTopology
+            topology_ref.tell(SubscribeTopology(reply_to=ctx.self))
+            return active(frozenset({self_node}))
+        return Behaviors.setup(setup)
 
     return active(frozenset({self_node}))
 
@@ -317,6 +353,7 @@ class ClusteredActorSystem(ActorSystem):
         self._self_node = NodeAddress(host=host, port=port)
         self._coordinators: dict[str, ActorRef[CoordinatorMsg]] = {}
         self._receptionist_ref: ActorRef[ReceptionistMsg] | None = None
+        self._topology_ref: ActorRef[TopologyMsg] | None = None
         self._required_quorum = required_quorum
         self._logger = logging.getLogger(f"casty.sharding.{name}")
 
@@ -456,16 +493,20 @@ class ClusteredActorSystem(ActorSystem):
             {self._node_id: (self._host, self._port)}
         )
 
+        # Wait for cluster_actor to spawn topology + receptionist
+        while self.lookup("/_cluster/_topology") is None:
+            await asyncio.sleep(0.01)
+        self._topology_ref = self.lookup("/_cluster/_topology")  # type: ignore[assignment]
+
+        while self.lookup("/_cluster/_receptionist") is None:
+            await asyncio.sleep(0.01)
+
         from casty.distributed.barrier import BarrierMsg, barrier_entity
 
         self._barrier_proxy: ActorRef[ShardEnvelope[BarrierMsg]] = self.spawn(
             Behaviors.sharded(entity_factory=barrier_entity, num_shards=10),
             "_barrier",
         )
-
-        # Wait for cluster_actor to spawn receptionist
-        while self.lookup("/_cluster/_receptionist") is None:
-            await asyncio.sleep(0.01)
 
         self._logger.info("Started on %s:%d", self._host, self._port)
 
@@ -575,6 +616,7 @@ class ClusteredActorSystem(ActorSystem):
                 remote_transport=self._remote_transport,
                 system_name=self._name,
                 logger=logging.getLogger(f"casty.shard_proxy.{self._name}"),
+                topology_ref=self._topology_ref,  # type: ignore[arg-type]
             ),
             name,
         )
@@ -595,14 +637,11 @@ class ClusteredActorSystem(ActorSystem):
                 remote_transport=self._remote_transport,
                 system_name=self._name,
                 logger=logging.getLogger(f"casty.singleton.{self._name}"),
+                topology_ref=self._topology_ref,  # type: ignore[arg-type]
+                self_node=self._self_node,
             ),
             f"_singleton-{name}",
         )
-
-        self._cluster.ref.tell(RegisterSingletonManager(  # type: ignore[arg-type]
-            name=name,
-            manager_ref=manager_ref,
-        ))
 
         return cast(ActorRef[M], manager_ref)
 
@@ -622,15 +661,10 @@ class ClusteredActorSystem(ActorSystem):
                 bcast_name=name,
                 remote_transport=self._remote_transport,
                 system_name=self._name,
+                topology_ref=self._topology_ref,  # type: ignore[arg-type]
             ),
             name,
         )
-
-        # Register proxy with cluster actor so it receives ClusterState updates
-        self._cluster.ref.tell(RegisterBroadcast(  # type: ignore[arg-type]
-            name=name,
-            proxy_ref=proxy_ref,
-        ))
 
         return BroadcastRef[M](
             address=proxy_ref.address,
@@ -658,15 +692,12 @@ class ClusteredActorSystem(ActorSystem):
                 remote_transport=self._remote_transport,
                 system_name=self._name,
                 logger=logging.getLogger(f"casty.coordinator.{self._name}"),
+                topology_ref=self._topology_ref,  # type: ignore[arg-type]
+                self_node=self._self_node,
             ),
             f"_coord-{name}",
         )
         self._coordinators[name] = coord_ref
-
-        self._cluster.ref.tell(RegisterCoordinator(  # type: ignore[arg-type]
-            shard_name=name,
-            coord_ref=coord_ref,
-        ))
 
         return coord_ref
 

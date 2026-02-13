@@ -129,6 +129,20 @@ class PhiAccrualFailureDetector:
         """
         return frozenset(self._last_heartbeat.keys())
 
+    def remove(self, node: str) -> None:
+        """Stop tracking a node entirely.
+
+        Called when a node is marked ``down`` so it no longer accumulates
+        stale history in the failure detector.
+
+        Parameters
+        ----------
+        node : str
+            Identifier of the node to remove.
+        """
+        self._last_heartbeat.pop(node, None)
+        self._history.pop(node, None)
+
     def is_available(self, node: str) -> bool:
         """Check if a node is considered available (phi below threshold).
 

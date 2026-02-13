@@ -46,7 +46,7 @@ from casty.cluster_state import (
     VectorClock,
 )
 from casty.context import ActorContext
-from casty.gossip_actor import ResolveNode
+from casty.topology_actor import ResolveNode
 from casty.distributed import Barrier, Counter, Dict, Distributed, Lock, Queue, Semaphore, Set
 from casty.events import (
     ActorRestarted,
@@ -91,6 +91,8 @@ from casty.receptionist import (
     Subscribe,
 )
 from casty.sharding import ClusteredActorSystem, ShardEnvelope
+from casty.client import ClusterClient
+from casty.topology import SubscribeTopology, TopologySnapshot, UnsubscribeTopology
 from casty.task_runner import (
     RunTask,
     TaskCancelled,
@@ -194,7 +196,7 @@ __all__ = [
     "NodeAddress",
     "NodeId",
     "VectorClock",
-    # Gossip
+    # Topology
     "ResolveNode",
     # Replication
     "ReplicationConfig",
@@ -221,6 +223,11 @@ __all__ = [
     "ClusteredActorSystem",
     "ShardedBehavior",
     "ShardEnvelope",
+    # Client
+    "ClusterClient",
+    "TopologySnapshot",
+    "SubscribeTopology",
+    "UnsubscribeTopology",
     # Singleton
     "SingletonBehavior",
     # Task Runner

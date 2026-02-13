@@ -1,8 +1,8 @@
 """Cluster membership management and coordination.
 
 Provides ``ClusterConfig`` for cluster setup and ``Cluster`` as a thin wrapper
-around the internal cluster actor.  The cluster actor orchestrates gossip-based
-membership, heartbeat failure detection, and leader-driven member promotion.
+around the internal cluster actor.  The cluster actor spawns a ``topology_actor``
+that owns all membership state, gossip, heartbeat, and failure detection.
 """
 
 # src/casty/cluster.py
@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 from casty.actor import Behavior, Behaviors
+from casty.address import ActorAddress
 from casty.cluster_state import (
     ClusterState,
     Member,
@@ -20,40 +21,27 @@ from casty.cluster_state import (
     NodeAddress,
     NodeId,
 )
-from casty.gossip_actor import (
-    DownMember,
-    GossipMsg,
-    GossipTick,
-    GetClusterState,
-    JoinRequest,
-    PromoteMember,
-    UpdateShardAllocations,
-    gossip_actor,
-)
-from casty.heartbeat_actor import (
-    CheckAvailability,
-    HeartbeatMsg,
-    HeartbeatTick,
-    NodeUnreachable,
-    heartbeat_actor,
-)
-from casty.shard_coordinator_actor import (
-    CoordinatorMsg,
-    NodeDown,
-    PublishAllocations,
-    SetRole,
-    SyncAllocations,
-    UpdateTopology,
-)
+from casty.failure_detector import PhiAccrualFailureDetector
+from casty.ref import ActorRef
 from casty.scheduler import (
     CancelSchedule,
     ScheduleOnce,
     SchedulerMsg,
     ScheduleTick,
 )
-from casty.address import ActorAddress
-from casty.failure_detector import PhiAccrualFailureDetector
-from casty.ref import ActorRef
+from casty.shard_coordinator_actor import PublishAllocations
+from casty.topology import SubscribeTopology, TopologySnapshot
+from casty.topology_actor import (
+    CheckAvailability,
+    GetState as TopologyGetState,
+    GossipTick,
+    HeartbeatTick,
+    JoinRequest,
+    TopologyMsg,
+    UpdateShardAllocations,
+    WaitForMembers as TopologyWaitForMembers,
+    topology_actor,
+)
 
 if TYPE_CHECKING:
     from casty.config import FailureDetectorConfig
@@ -72,31 +60,9 @@ class GetState:
 
 
 @dataclass(frozen=True)
-class RegisterCoordinator:
-    """Registers a replicated coordinator with the cluster actor."""
-
-    shard_name: str
-    coord_ref: ActorRef[CoordinatorMsg]
-
-
-@dataclass(frozen=True)
 class WaitForMembers:
     n: int
     reply_to: ActorRef[ClusterState]
-
-
-@dataclass(frozen=True)
-class RegisterBroadcast:
-    name: str
-    proxy_ref: ActorRef[Any]
-
-
-@dataclass(frozen=True)
-class RegisterSingletonManager:
-    """Registers a singleton manager with the cluster actor."""
-
-    name: str
-    manager_ref: ActorRef[Any]
 
 
 @dataclass(frozen=True)
@@ -110,9 +76,8 @@ class JoinRetry:
 
 
 type ClusterCmd = (
-    GetState | WaitForMembers | NodeUnreachable | PublishAllocations
-    | RegisterCoordinator | RegisterBroadcast | RegisterSingletonManager
-    | GetReceptionist | JoinRetry | ClusterState
+    GetState | WaitForMembers | PublishAllocations
+    | GetReceptionist | JoinRetry | TopologySnapshot
 )
 
 
@@ -154,229 +119,6 @@ class ClusterConfig:
 # --- cluster_actor behavior ---
 
 
-def cluster_receive(
-    *,
-    gossip_ref: ActorRef[GossipMsg],
-    heartbeat_ref: ActorRef[HeartbeatMsg],
-    scheduler_ref: ActorRef[SchedulerMsg],
-    self_node: NodeAddress,
-    node_id: NodeId,
-    roles: frozenset[str],
-    seed_refs: tuple[ActorRef[GossipMsg], ...],
-    logger: logging.Logger,
-    coordinators: dict[str, ActorRef[CoordinatorMsg]],
-    broadcast_proxies: dict[str, ActorRef[Any]],
-    singleton_managers: dict[str, ActorRef[Any]],
-    receptionist_ref: ActorRef[Any] | None,
-    cluster_state: ClusterState | None,
-    waiters: tuple[WaitForMembers, ...] = (),
-) -> Behavior[ClusterCmd]:
-    """Pure receive behavior — all state in parameters, returns new behavior."""
-
-    def _up_count(state: ClusterState) -> int:
-        return sum(1 for m in state.members if m.status == MemberStatus.up)
-
-    def _notify_waiters(
-        state: ClusterState, pending: tuple[WaitForMembers, ...],
-    ) -> tuple[WaitForMembers, ...]:
-        up = _up_count(state)
-        remaining: list[WaitForMembers] = []
-        for w in pending:
-            if up >= w.n:
-                w.reply_to.tell(state)
-            else:
-                remaining.append(w)
-        return tuple(remaining)
-
-    def _next(
-        *,
-        new_coordinators: dict[str, ActorRef[CoordinatorMsg]] | None = None,
-        new_broadcast_proxies: dict[str, ActorRef[Any]] | None = None,
-        new_singleton_managers: dict[str, ActorRef[Any]] | None = None,
-        new_cluster_state: ClusterState | None = None,
-        new_waiters: tuple[WaitForMembers, ...] | None = None,
-    ) -> Behavior[ClusterCmd]:
-        return cluster_receive(
-            gossip_ref=gossip_ref,
-            heartbeat_ref=heartbeat_ref,
-            scheduler_ref=scheduler_ref,
-            self_node=self_node,
-            node_id=node_id,
-            roles=roles,
-            seed_refs=seed_refs,
-            logger=logger,
-            coordinators=new_coordinators
-            if new_coordinators is not None
-            else coordinators,
-            broadcast_proxies=new_broadcast_proxies
-            if new_broadcast_proxies is not None
-            else broadcast_proxies,
-            singleton_managers=new_singleton_managers
-            if new_singleton_managers is not None
-            else singleton_managers,
-            receptionist_ref=receptionist_ref,
-            cluster_state=new_cluster_state
-            if new_cluster_state is not None
-            else cluster_state,
-            waiters=new_waiters
-            if new_waiters is not None
-            else waiters,
-        )
-
-    async def receive(
-        ctx: ActorContext[ClusterCmd], msg: ClusterCmd
-    ) -> Behavior[ClusterCmd]:
-        match msg:
-            case GetState(reply_to):
-                gossip_ref.tell(GetClusterState(reply_to=reply_to))
-                return Behaviors.same()
-
-            case GetReceptionist(reply_to):
-                reply_to.tell(receptionist_ref)
-                return Behaviors.same()
-
-            case WaitForMembers(n, reply_to):
-                if cluster_state is not None and _up_count(cluster_state) >= n:
-                    reply_to.tell(cluster_state)
-                    return Behaviors.same()
-                return _next(new_waiters=(*waiters, msg))
-
-            case NodeUnreachable(node):
-                logger.warning("Node unreachable: %s:%d", node.host, node.port)
-                gossip_ref.tell(DownMember(address=node))
-                for coord_ref in coordinators.values():
-                    coord_ref.tell(NodeDown(node=node))
-                return Behaviors.same()
-
-            case PublishAllocations(shard_type, allocations, epoch):
-                gossip_ref.tell(
-                    UpdateShardAllocations(
-                        shard_type=shard_type,
-                        allocations=allocations,
-                        epoch=epoch,
-                    )
-                )
-                return Behaviors.same()
-
-            case RegisterCoordinator(shard_name=shard_name, coord_ref=coord_ref):
-                logger.info("Registered coordinator: %s", shard_name)
-                new_coords = {**coordinators, shard_name: coord_ref}
-                if cluster_state is not None:
-                    is_leader = cluster_state.leader == self_node
-                    coord_ref.tell(
-                        SetRole(
-                            is_leader=is_leader,
-                            leader_node=cluster_state.leader,
-                        )
-                    )
-                    allocs = cluster_state.shard_allocations.get(shard_name, {})
-                    coord_ref.tell(
-                        SyncAllocations(
-                            allocations=allocs,
-                            epoch=cluster_state.allocation_epoch,
-                        )
-                    )
-                return _next(new_coordinators=new_coords)
-
-            case RegisterBroadcast(name=name, proxy_ref=proxy_ref):
-                logger.info("Registered broadcast: %s", name)
-                new_proxies = {**broadcast_proxies, name: proxy_ref}
-                if cluster_state is not None:
-                    proxy_ref.tell(cluster_state)
-                return _next(new_broadcast_proxies=new_proxies)
-
-            case RegisterSingletonManager(name=sm_name, manager_ref=manager_ref):
-                logger.info("Registered singleton manager: %s", sm_name)
-                new_managers = {**singleton_managers, sm_name: manager_ref}
-                if cluster_state is not None:
-                    is_leader = cluster_state.leader == self_node
-                    manager_ref.tell(
-                        SetRole(
-                            is_leader=is_leader,
-                            leader_node=cluster_state.leader,
-                        )
-                    )
-                return _next(new_singleton_managers=new_managers)
-
-            case ClusterState() as state:
-                if state.diff(cluster_state):
-                    logger.info("Cluster topology update: %s", state)
-
-                # Leader promotes joining → up only when state is converged
-                if state.leader == self_node and state.is_converged:
-                    for m in state.members:
-                        if m.status == MemberStatus.joining:
-                            logger.info("Promoting member %s:%d", m.address.host, m.address.port)
-                            gossip_ref.tell(PromoteMember(address=m.address))
-
-                members = frozenset(
-                    m.address
-                    for m in state.members
-                    if m.status in (MemberStatus.up, MemberStatus.joining)
-                )
-                heartbeat_ref.tell(HeartbeatTick(members=members))
-
-                up_nodes = frozenset(
-                    m.address for m in state.members if m.status == MemberStatus.up
-                )
-                for shard_name, coord_ref in coordinators.items():
-                    is_leader = state.leader == self_node
-                    coord_ref.tell(
-                        SetRole(
-                            is_leader=is_leader,
-                            leader_node=state.leader,
-                        )
-                    )
-                    allocs = state.shard_allocations.get(shard_name, {})
-                    coord_ref.tell(
-                        SyncAllocations(
-                            allocations=allocs,
-                            epoch=state.allocation_epoch,
-                        )
-                    )
-                    coord_ref.tell(UpdateTopology(available_nodes=up_nodes))
-                is_leader_role = SetRole(
-                    is_leader=state.leader == self_node,
-                    leader_node=state.leader,
-                )
-                for manager_ref in singleton_managers.values():
-                    manager_ref.tell(is_leader_role)
-                for proxy_ref in broadcast_proxies.values():
-                    proxy_ref.tell(state)
-                if receptionist_ref is not None:
-                    from casty.receptionist import RegistryUpdated
-                    receptionist_ref.tell(RegistryUpdated(registry=state.registry))
-                remaining = _notify_waiters(state, waiters)
-                return _next(new_cluster_state=state, new_waiters=remaining)
-
-            case JoinRetry():
-                if cluster_state is None or len(cluster_state.members) <= 1:
-                    logger.debug("Join retry (%d seeds)", len(seed_refs))
-                    for seed_ref in seed_refs:
-                        seed_ref.tell(
-                            JoinRequest(
-                                node=self_node,
-                                roles=roles,
-                                node_id=node_id,
-                                reply_to=gossip_ref,  # type: ignore[arg-type]
-                            )
-                        )
-                    scheduler_ref.tell(
-                        ScheduleOnce(
-                            key="join-retry",
-                            target=ctx.self,
-                            message=JoinRetry(),
-                            delay=1.0,
-                        )
-                    )
-                return Behaviors.same()
-
-            case _:
-                return Behaviors.same()
-
-    return Behaviors.receive(receive)
-
-
 def cluster_actor(
     *,
     config: ClusterConfig,
@@ -398,20 +140,7 @@ def cluster_actor(
         initial_state = ClusterState().add_member(initial_member)
 
         logger = logging.getLogger(f"casty.cluster.{system_name}")
-        gossip_logger = logging.getLogger(f"casty.gossip.{system_name}")
-        heartbeat_logger = logging.getLogger(f"casty.heartbeat.{system_name}")
 
-        gossip_ref: ActorRef[GossipMsg] = ctx.spawn(
-            gossip_actor(
-                self_node=self_node,
-                initial_state=initial_state,
-                remote_transport=remote_transport,
-                system_name=system_name,
-                logger=gossip_logger,
-                fanout=gossip_fanout,
-            ),
-            "_gossip",
-        )
         from casty.config import FailureDetectorConfig as _FDConfig
 
         fd = failure_detector_config or _FDConfig()
@@ -422,65 +151,73 @@ def cluster_actor(
             acceptable_heartbeat_pause_ms=fd.acceptable_heartbeat_pause_ms,
             first_heartbeat_estimate_ms=fd.first_heartbeat_estimate_ms,
         )
-        heartbeat_ref: ActorRef[HeartbeatMsg] = ctx.spawn(
-            heartbeat_actor(
+
+        topo_ref: ActorRef[TopologyMsg] = ctx.spawn(
+            topology_actor(
                 self_node=self_node,
+                node_id=config.node_id,
+                roles=config.roles,
+                initial_state=initial_state,
                 detector=detector,
                 remote_transport=remote_transport,
                 system_name=system_name,
-                logger=heartbeat_logger,
+                fanout=gossip_fanout,
+                logger=logging.getLogger(f"casty.topology.{system_name}"),
             ),
-            "_heartbeat",
+            "_topology",
         )
 
-        # Receptionist — service discovery
         from casty.receptionist import receptionist_actor
 
         receptionist_ref: ActorRef[Any] = ctx.spawn(
             receptionist_actor(
                 self_node=self_node,
-                gossip_ref=gossip_ref,
+                gossip_ref=topo_ref,  # type: ignore[arg-type]
                 remote_transport=remote_transport,
                 system_name=system_name,
                 event_stream=event_stream,
+                topology_ref=topo_ref,  # type: ignore[arg-type]
             ),
             "_receptionist",
         )
 
-        # Build seed refs for join retry
-        seed_refs_list: list[ActorRef[GossipMsg]] = []
+        # Build seed refs pointing to remote topology actors
+        seed_refs: list[ActorRef[TopologyMsg]] = []
         if remote_transport is not None:
             for seed_host, seed_port in config.seed_nodes:
                 seed_node = NodeAddress(host=seed_host, port=seed_port)
                 if seed_node == self_node:
                     continue
-                seed_gossip_addr = ActorAddress(
+                seed_addr = ActorAddress(
                     system=system_name,
-                    path="/_cluster/_gossip",
+                    path="/_cluster/_topology",
                     host=seed_host,
                     port=seed_port,
                 )
-                seed_refs_list.append(
-                    remote_transport.make_ref(seed_gossip_addr)  # type: ignore[arg-type]
+                seed_refs.append(
+                    remote_transport.make_ref(seed_addr)  # type: ignore[arg-type]
                 )
-        seed_refs = tuple(seed_refs_list)
 
-        # Schedule periodic ticks via scheduler
+        # Schedule periodic ticks — all targeting topology_actor
         scheduler_ref.tell(ScheduleTick(
-            key="gossip", target=gossip_ref, message=GossipTick(), interval=gossip_interval,
+            key="gossip", target=topo_ref, message=GossipTick(), interval=gossip_interval,
         ))
         scheduler_ref.tell(ScheduleTick(
             key="heartbeat",
-            target=gossip_ref,
-            message=GetClusterState(reply_to=ctx.self),  # type: ignore[arg-type]
+            target=topo_ref,
+            message=HeartbeatTick(members=frozenset()),
             interval=heartbeat_interval,
         ))
         scheduler_ref.tell(ScheduleTick(
             key="availability",
-            target=heartbeat_ref,
-            message=CheckAvailability(reply_to=ctx.self),  # type: ignore[arg-type]
+            target=topo_ref,
+            message=CheckAvailability(reply_to=topo_ref),  # type: ignore[arg-type]
             interval=availability_interval,
         ))
+
+        # Subscribe to topology so we know when join succeeds
+        if seed_refs:
+            topo_ref.tell(SubscribeTopology(reply_to=ctx.self))  # type: ignore[arg-type]
 
         # Schedule join retry for multi-node clusters
         if seed_refs:
@@ -496,29 +233,105 @@ def cluster_actor(
 
         logger.info("Cluster started %s:%d (seeds=%d)", self_node.host, self_node.port, len(config.seed_nodes))
 
-        has_seeds = bool(config.seed_nodes)
-        initial_cluster_state = None if has_seeds else initial_state
-
         return Behaviors.with_lifecycle(
-            cluster_receive(
-                gossip_ref=gossip_ref,
-                heartbeat_ref=heartbeat_ref,
-                scheduler_ref=scheduler_ref,
+            ready(
+                topo_ref=topo_ref,
+                receptionist_ref=receptionist_ref,
+                seed_refs=tuple(seed_refs),
                 self_node=self_node,
                 node_id=config.node_id,
                 roles=config.roles,
-                seed_refs=seed_refs,
+                scheduler_ref=scheduler_ref,
                 logger=logger,
-                coordinators={},
-                broadcast_proxies={},
-                singleton_managers={},
-                receptionist_ref=receptionist_ref,
-                cluster_state=initial_cluster_state,
+                joined=not seed_refs,
             ),
             post_stop=cancel_schedules,
         )
 
     return Behaviors.setup(setup)
+
+
+def ready(
+    *,
+    topo_ref: ActorRef[TopologyMsg],
+    receptionist_ref: ActorRef[Any],
+    seed_refs: tuple[ActorRef[TopologyMsg], ...],
+    self_node: NodeAddress,
+    node_id: NodeId,
+    roles: frozenset[str],
+    scheduler_ref: ActorRef[SchedulerMsg],
+    logger: logging.Logger,
+    joined: bool,
+) -> Behavior[ClusterCmd]:
+    async def receive(
+        ctx: ActorContext[ClusterCmd], msg: ClusterCmd,
+    ) -> Behavior[ClusterCmd]:
+        match msg:
+            case GetState(reply_to=reply_to):
+                topo_ref.tell(TopologyGetState(reply_to=reply_to))
+                return Behaviors.same()
+
+            case WaitForMembers(n=n, reply_to=reply_to):
+                topo_ref.tell(TopologyWaitForMembers(n=n, reply_to=reply_to))
+                return Behaviors.same()
+
+            case GetReceptionist(reply_to=reply_to):
+                reply_to.tell(receptionist_ref)
+                return Behaviors.same()
+
+            case PublishAllocations(shard_type=shard_type, allocations=allocations, epoch=epoch):
+                topo_ref.tell(UpdateShardAllocations(  # type: ignore[arg-type]
+                    shard_type=shard_type,
+                    allocations=allocations,
+                    epoch=epoch,
+                ))
+                return Behaviors.same()
+
+            case TopologySnapshot(members=members) if not joined:
+                if len(members) > 1:
+                    logger.debug("Join confirmed (members=%d), stopping retries", len(members))
+                    scheduler_ref.tell(CancelSchedule(key="join-retry"))
+                    return ready(
+                        topo_ref=topo_ref,
+                        receptionist_ref=receptionist_ref,
+                        seed_refs=seed_refs,
+                        self_node=self_node,
+                        node_id=node_id,
+                        roles=roles,
+                        scheduler_ref=scheduler_ref,
+                        logger=logger,
+                        joined=True,
+                    )
+                return Behaviors.same()
+
+            case JoinRetry() if joined:
+                return Behaviors.same()
+
+            case JoinRetry():
+                logger.debug("Join retry (%d seeds)", len(seed_refs))
+                for seed_ref in seed_refs:
+                    seed_ref.tell(
+                        JoinRequest(
+                            node=self_node,
+                            roles=roles,
+                            node_id=node_id,
+                            reply_to=topo_ref,  # type: ignore[arg-type]
+                        )
+                    )
+                scheduler_ref.tell(
+                    ScheduleOnce(
+                        key="join-retry",
+                        target=ctx.self,
+                        message=JoinRetry(),
+                        delay=1.0,
+                    )
+                )
+                return Behaviors.same()
+
+            case _:
+                return Behaviors.same()
+
+    return Behaviors.receive(receive)
 
 
 # --- Cluster thin wrapper ---
@@ -628,7 +441,7 @@ class Cluster:
         )
 
     async def get_state(self, *, timeout: float = 5.0) -> ClusterState:
-        """Request the current cluster state from the gossip actor.
+        """Request the current cluster state from the topology actor.
 
         Parameters
         ----------

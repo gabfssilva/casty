@@ -3,36 +3,56 @@ from __future__ import annotations
 
 import asyncio
 
-from casty import ActorSystem
+from casty import ActorSystem, Member, MemberStatus
 from casty.cluster_state import NodeAddress
 from casty.shard_coordinator_actor import (
     GetShardLocation,
     LeastShardStrategy,
     RegisterRegion,
-    SetRole,
     ShardLocation,
-    SyncAllocations,
-    UpdateTopology,
     shard_coordinator_actor,
 )
-from casty.replication import ReplicationConfig
+from casty.replication import ReplicationConfig, ShardAllocation
+from casty.topology import TopologySnapshot
+
+
+def snap(
+    *,
+    leader: NodeAddress,
+    members: frozenset[Member],
+    allocs: dict[str, dict[int, ShardAllocation]] | None = None,
+    epoch: int = 0,
+    unreachable: frozenset[NodeAddress] | None = None,
+) -> TopologySnapshot:
+    return TopologySnapshot(
+        members=members,
+        leader=leader,
+        shard_allocations=allocs or {},
+        allocation_epoch=epoch,
+        unreachable=unreachable or frozenset(),
+    )
+
+
+def m(addr: NodeAddress, nid: str) -> Member:
+    return Member(address=addr, status=MemberStatus.up, roles=frozenset(), id=nid)
 
 
 async def test_coordinator_allocates_shard_to_node() -> None:
     """Requesting a shard location allocates it to the available node."""
     node_a = NodeAddress(host="127.0.0.1", port=25520)
+    members = frozenset({m(node_a, "a")})
 
     async with ActorSystem(name="test") as system:
         coord_ref = system.spawn(
             shard_coordinator_actor(
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({node_a}),
+                self_node=node_a,
             ),
             "coordinator",
         )
         coord_ref.tell(RegisterRegion(node=node_a))
-        coord_ref.tell(SetRole(is_leader=True, leader_node=node_a))
-        coord_ref.tell(SyncAllocations(allocations={}, epoch=0))
+        coord_ref.tell(snap(leader=node_a, members=members))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
 
         location: ShardLocation = await system.ask(
@@ -48,19 +68,20 @@ async def test_coordinator_distributes_evenly() -> None:
     """LeastShardStrategy distributes shards evenly across nodes."""
     node_a = NodeAddress(host="127.0.0.1", port=25520)
     node_b = NodeAddress(host="127.0.0.2", port=25520)
+    members = frozenset({m(node_a, "a"), m(node_b, "b")})
 
     async with ActorSystem(name="test") as system:
         coord_ref = system.spawn(
             shard_coordinator_actor(
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({node_a, node_b}),
+                self_node=node_a,
             ),
             "coordinator",
         )
         coord_ref.tell(RegisterRegion(node=node_a))
         coord_ref.tell(RegisterRegion(node=node_b))
-        coord_ref.tell(SetRole(is_leader=True, leader_node=node_a))
-        coord_ref.tell(SyncAllocations(allocations={}, epoch=0))
+        coord_ref.tell(snap(leader=node_a, members=members))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
 
         locations: list[ShardLocation] = []
@@ -82,21 +103,23 @@ async def test_coordinator_distributes_evenly() -> None:
 
 
 async def test_coordinator_topology_update() -> None:
-    """Adding a node via UpdateTopology + RegisterRegion makes it available for allocation."""
+    """Adding a node via TopologySnapshot makes it available for allocation."""
     node_a = NodeAddress(host="127.0.0.1", port=25520)
     node_b = NodeAddress(host="127.0.0.2", port=25520)
+    members_1 = frozenset({m(node_a, "a")})
+    members_2 = frozenset({m(node_a, "a"), m(node_b, "b")})
 
     async with ActorSystem(name="test") as system:
         coord_ref = system.spawn(
             shard_coordinator_actor(
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({node_a}),
+                self_node=node_a,
             ),
             "coordinator",
         )
         coord_ref.tell(RegisterRegion(node=node_a))
-        coord_ref.tell(SetRole(is_leader=True, leader_node=node_a))
-        coord_ref.tell(SyncAllocations(allocations={}, epoch=0))
+        coord_ref.tell(snap(leader=node_a, members=members_1))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
 
         # Allocate some shards to node_a
@@ -107,9 +130,9 @@ async def test_coordinator_topology_update() -> None:
                 timeout=5.0,
             )
 
-        # Add node_b (both topology update AND region registration)
-        coord_ref.tell(UpdateTopology(available_nodes=frozenset({node_a, node_b})))
+        # Add node_b via new TopologySnapshot with updated members
         coord_ref.tell(RegisterRegion(node=node_b))
+        coord_ref.tell(snap(leader=node_a, members=members_2))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
 
         # New shard should go to node_b (fewer shards)
@@ -126,6 +149,7 @@ async def test_coordinator_allocates_replicas() -> None:
     node_a = NodeAddress(host="10.0.0.1", port=25520)
     node_b = NodeAddress(host="10.0.0.2", port=25520)
     node_c = NodeAddress(host="10.0.0.3", port=25520)
+    members = frozenset({m(node_a, "a"), m(node_b, "b"), m(node_c, "c")})
 
     async with ActorSystem(name="test") as system:
         coord = system.spawn(
@@ -133,14 +157,14 @@ async def test_coordinator_allocates_replicas() -> None:
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({node_a, node_b, node_c}),
                 replication=ReplicationConfig(replicas=2),
+                self_node=node_a,
             ),
             "coord",
         )
         coord.tell(RegisterRegion(node=node_a))
         coord.tell(RegisterRegion(node=node_b))
         coord.tell(RegisterRegion(node=node_c))
-        coord.tell(SetRole(is_leader=True, leader_node=node_a))
-        coord.tell(SyncAllocations(allocations={}, epoch=0))
+        coord.tell(snap(leader=node_a, members=members))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
 
         location = await system.ask(
@@ -158,18 +182,19 @@ async def test_coordinator_allocates_replicas() -> None:
 async def test_coordinator_no_replication_has_empty_replicas() -> None:
     """Without replication config, ShardLocation.replicas is empty."""
     node_a = NodeAddress(host="10.0.0.1", port=25520)
+    members = frozenset({m(node_a, "a")})
 
     async with ActorSystem(name="test") as system:
         coord = system.spawn(
             shard_coordinator_actor(
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({node_a}),
+                self_node=node_a,
             ),
             "coord",
         )
         coord.tell(RegisterRegion(node=node_a))
-        coord.tell(SetRole(is_leader=True, leader_node=node_a))
-        coord.tell(SyncAllocations(allocations={}, epoch=0))
+        coord.tell(snap(leader=node_a, members=members))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
 
         location = await system.ask(
