@@ -32,7 +32,14 @@ from casty.cluster import (
 )
 from casty.topology_actor import TopologyMsg
 from casty.receptionist import Find, Listing, ReceptionistMsg, ServiceKey
-from casty.remote_transport import RemoteTransport, TcpTransport
+from casty.remote_transport import (
+    GetPort,
+    InboundHandler,
+    RemoteTransport,
+    TcpTransportConfig,
+    TcpTransportMsg,
+    tcp_transport,
+)
 from casty.serialization import PickleSerializer
 from casty.system import ActorSystem
 from casty.transport import MessageTransport
@@ -55,6 +62,22 @@ from casty.shard_coordinator_actor import (
     ShardLocation,
     shard_coordinator_actor,
 )
+
+
+class _PlaceholderHandler:
+    """Handler that delegates to a ``RemoteTransport`` once wired.
+
+    The TCP transport actor is spawned before the ``RemoteTransport``
+    exists — this placeholder is passed as the initial handler and
+    the real delegate is set immediately after construction.
+    """
+
+    def __init__(self) -> None:
+        self.delegate: InboundHandler | None = None
+
+    async def on_message(self, data: bytes) -> None:
+        if self.delegate is not None:
+            await self.delegate.on_message(data)
 
 
 @dataclass(frozen=True)
@@ -356,25 +379,10 @@ class ClusteredActorSystem(ActorSystem):
         self._topology_ref: ActorRef[TopologyMsg] | None = None
         self._required_quorum = required_quorum
         self._logger = logging.getLogger(f"casty.sharding.{name}")
-
-        # Serialization + transport
-        self._tcp_transport = TcpTransport(
-            self._bind_host,
-            port,
-            self_address=(host, port),
-            logger=logging.getLogger(f"casty.remote_transport.{name}"),
-            server_ssl=tls.server_context if tls else None,
-            client_ssl=tls.client_context if tls else None,
-        )
+        self._tls = tls
         self._serializer = PickleSerializer()
-        self._remote_transport = RemoteTransport(
-            local=self._local_transport,
-            tcp=self._tcp_transport,
-            serializer=self._serializer,
-            local_host=host,
-            local_port=port,
-            system_name=name,
-        )
+        self._remote_transport: RemoteTransport | None = None
+        self._tcp_ref: ActorRef[TcpTransportMsg] | None = None
 
     @property
     def receptionist(self) -> ActorRef[ReceptionistMsg]:
@@ -448,18 +456,51 @@ class ClusteredActorSystem(ActorSystem):
         )
 
     async def __aenter__(self) -> ClusteredActorSystem:
-        await self._remote_transport.start()
-        # Update actual port (handles port=0 for tests)
-        actual_port: int = self._tcp_transport.port
-        if actual_port != self._port:
-            self._port = actual_port
-            self._self_node = NodeAddress(host=self._host, port=actual_port)
-            self._remote_transport.set_local_port(actual_port)
-            self._tcp_transport.set_self_address(self._host, actual_port)
-        try:
-            await super().__aenter__()
+        # 1. Start the actor system first — we need spawn() for the transport actor
+        await super().__aenter__()
 
-            # Wire task runner into remote transport now that the system is live
+        try:
+            # 2. Spawn TCP transport actor
+            tcp_config = TcpTransportConfig(
+                host=self._bind_host,
+                port=self._port,
+                self_address=(self._host, self._port),
+                server_ssl=self._tls.server_context if self._tls else None,
+                client_ssl=self._tls.client_context if self._tls else None,
+            )
+            # RemoteTransport is the handler — create a temporary one to pass to the actor,
+            # then update it with the real tcp_ref after spawning
+            self._serializer = PickleSerializer()
+            placeholder_handler = _PlaceholderHandler()
+            self._tcp_ref = super().spawn(
+                tcp_transport(
+                    tcp_config, placeholder_handler,
+                    logger=logging.getLogger(f"casty.tcp.{self._name}"),
+                ),
+                "_tcp_transport",
+            )
+
+            # 3. Ask for the actual port (use super().ask to avoid accessing _remote)
+            actual_port: int = await super().ask(
+                self._tcp_ref, lambda r: GetPort(reply_to=r), timeout=5.0,
+            )
+            if actual_port != self._port:
+                self._port = actual_port
+                self._self_node = NodeAddress(host=self._host, port=actual_port)
+
+            # 4. Create RemoteTransport with the actor ref
+            self._remote_transport = RemoteTransport(
+                local=self._local_transport,
+                tcp=self._tcp_ref,
+                serializer=self._serializer,
+                local_host=self._host,
+                local_port=self._port,
+                system_name=self._name,
+            )
+            # Wire the real handler into the placeholder
+            placeholder_handler.delegate = self._remote_transport
+
+            # Wire task runner into remote transport
             self._remote_transport.set_task_runner(self._ensure_task_runner())
 
             # Start cluster membership (gossip, heartbeat, failure detection)
@@ -487,7 +528,7 @@ class ClusteredActorSystem(ActorSystem):
             )
             await self._cluster.start()
         except BaseException:
-            await self._remote_transport.stop()
+            await super().shutdown()
             raise
 
         self._remote_transport.set_local_node_id(self._node_id)
@@ -518,6 +559,13 @@ class ClusteredActorSystem(ActorSystem):
             self._logger.info("Cluster ready (%d nodes up)", self._required_quorum)
 
         return self
+
+    @property
+    def _remote(self) -> RemoteTransport:
+        if self._remote_transport is None:
+            msg = "ClusteredActorSystem not started"
+            raise RuntimeError(msg)
+        return self._remote_transport
 
     def _get_ref_transport(self) -> MessageTransport | None:
         return self._remote_transport
@@ -754,7 +802,7 @@ class ClusteredActorSystem(ActorSystem):
                     host=self._host,
                     port=self._port,
                 ),
-                _transport=self._remote_transport,
+                _transport=self._remote,
             )
             message = msg_factory(temp_ref)
             ref.tell(message)
@@ -792,7 +840,7 @@ class ClusteredActorSystem(ActorSystem):
                     host=self._host,
                     port=self._port,
                 ),
-                _transport=self._remote_transport,
+                _transport=self._remote,
             )
             message = msg_factory(temp_ref)
             ref.tell(message)
@@ -820,7 +868,7 @@ class ClusteredActorSystem(ActorSystem):
         return state
 
     def _update_node_index(self, state: ClusterState) -> None:
-        self._remote_transport.update_node_index(
+        self._remote.update_node_index(
             {m.id: (m.address.host, m.address.port) for m in state.members}
         )
 
@@ -937,7 +985,7 @@ class ClusteredActorSystem(ActorSystem):
                         addr = ActorAddress(
                             system=self._name, path=actor_path, node_id=node_id,
                         )
-                return self._remote_transport.make_ref(addr)
+                return self._remote.make_ref(addr)
 
     async def _lookup_service[M](
         self, key: ServiceKey[M], *, timeout: float = 5.0,
@@ -973,5 +1021,7 @@ class ClusteredActorSystem(ActorSystem):
         """Shut down the cluster node, closing transport and all actors."""
         self._logger.info("Shutting down")
         self._coordinators.clear()
+        tcp_cell = self._root_cells.pop("_tcp_transport", None)
         await super().shutdown()
-        await self._remote_transport.stop()
+        if tcp_cell is not None:
+            await tcp_cell.stop()

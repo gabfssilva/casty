@@ -9,12 +9,24 @@ import pytest
 import trustme
 
 from casty.address import ActorAddress
-from casty.ref import ActorRef
-from casty.remote_transport import FRAME_HANDSHAKE, FRAME_MESSAGE, MessageEnvelope, RemoteTransport, TcpTransport
-from casty.serialization import JsonSerializer, TypeRegistry
-from casty.transport import LocalTransport
-from casty.shard_coordinator_actor import GetShardLocation, ShardLocation
 from casty.cluster_state import NodeAddress
+from casty.ref import ActorRef
+from casty.remote_transport import (
+    FRAME_HANDSHAKE,
+    FRAME_MESSAGE,
+    GetPort,
+    InboundHandler,
+    MessageEnvelope,
+    RemoteTransport,
+    SendToNode,
+    TcpTransportConfig,
+    TcpTransportMsg,
+    tcp_transport,
+)
+from casty.shard_coordinator_actor import GetShardLocation, ShardLocation
+from casty.serialization import JsonSerializer, TypeRegistry
+from casty.system import ActorSystem
+from casty.transport import LocalTransport
 
 
 @dataclass(frozen=True)
@@ -27,46 +39,87 @@ class Pong:
     value: int
 
 
-async def _start_remote_pair() -> tuple[RemoteTransport, RemoteTransport, LocalTransport, LocalTransport, int, int]:
-    """Create and start a pair of RemoteTransports, returning actual ports."""
-    registry_a = TypeRegistry()
-    registry_b = TypeRegistry()
+class _PlaceholderHandler:
+    """Test handler that either delegates to a ``RemoteTransport`` or collects raw bytes."""
 
-    local_a = LocalTransport()
-    local_b = LocalTransport()
+    def __init__(self) -> None:
+        self.received: list[bytes] = []
+        self.delegate: InboundHandler | None = None
 
-    tcp_a = TcpTransport(host="127.0.0.1", port=0)
-    tcp_b = TcpTransport(host="127.0.0.1", port=0)
+    async def on_message(self, data: bytes) -> None:
+        if self.delegate is not None:
+            await self.delegate.on_message(data)
+        else:
+            self.received.append(data)
 
-    serializer_a = JsonSerializer(registry_a)
-    serializer_b = JsonSerializer(registry_b)
 
-    # Use port=0 placeholder; we'll update _local_port after start
+async def _spawn_tcp(
+    system: ActorSystem,
+    handler: _PlaceholderHandler,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    client_only: bool = False,
+    address_map: dict[tuple[str, int], tuple[str, int]] | None = None,
+    server_ssl: ssl.SSLContext | None = None,
+    client_ssl: ssl.SSLContext | None = None,
+) -> tuple[ActorRef[TcpTransportMsg], int]:
+    """Spawn a ``tcp_transport`` actor and return its ref + resolved port."""
+    config = TcpTransportConfig(
+        host=host,
+        port=port,
+        client_only=client_only,
+        server_ssl=server_ssl,
+        client_ssl=client_ssl,
+        address_map=address_map or {},
+    )
+    ref = system.spawn(tcp_transport(config, handler), "_tcp")
+    actual_port: int = await system.ask(ref, lambda r: GetPort(reply_to=r), timeout=5.0)
+    return ref, actual_port
+
+
+async def _start_remote_pair() -> tuple[
+    ActorSystem, ActorSystem,
+    RemoteTransport, RemoteTransport,
+    LocalTransport, LocalTransport,
+    int, int,
+]:
+    """Create two actor systems with transport actors and wired RemoteTransports."""
+    sys_a = ActorSystem(name="sys-a")
+    sys_b = ActorSystem(name="sys-b")
+    await sys_a.__aenter__()
+    await sys_b.__aenter__()
+
+    ph_a = _PlaceholderHandler()
+    ph_b = _PlaceholderHandler()
+
+    ref_a, port_a = await _spawn_tcp(sys_a, ph_a)
+    ref_b, port_b = await _spawn_tcp(sys_b, ph_b)
+
+    local_a: LocalTransport = sys_a._local_transport  # pyright: ignore[reportPrivateUsage]
+    local_b: LocalTransport = sys_b._local_transport  # pyright: ignore[reportPrivateUsage]
+
     remote_a = RemoteTransport(
-        local=local_a, tcp=tcp_a, serializer=serializer_a,
-        local_host="127.0.0.1", local_port=0, system_name="sys-a",
+        local=local_a,
+        tcp=ref_a,
+        serializer=JsonSerializer(TypeRegistry()),
+        local_host="127.0.0.1",
+        local_port=port_a,
+        system_name="sys-a",
     )
     remote_b = RemoteTransport(
-        local=local_b, tcp=tcp_b, serializer=serializer_b,
-        local_host="127.0.0.1", local_port=0, system_name="sys-b",
+        local=local_b,
+        tcp=ref_b,
+        serializer=JsonSerializer(TypeRegistry()),
+        local_host="127.0.0.1",
+        local_port=port_b,
+        system_name="sys-b",
     )
 
-    await remote_a.start()
-    await remote_b.start()
+    ph_a.delegate = remote_a
+    ph_b.delegate = remote_b
 
-    port_a = tcp_a.port
-    port_b = tcp_b.port
-
-    # Update local_port and self_address after start so routing works correctly
-    remote_a._local_port = port_a
-    remote_b._local_port = port_b
-    tcp_a.set_self_address("127.0.0.1", port_a)
-    tcp_b.set_self_address("127.0.0.1", port_b)
-
-    return remote_a, remote_b, local_a, local_b, port_a, port_b
-
-
-# --- Original tests ---
+    return sys_a, sys_b, remote_a, remote_b, local_a, local_b, port_a, port_b
 
 
 async def test_envelope_roundtrip() -> None:
@@ -82,101 +135,104 @@ async def test_envelope_roundtrip() -> None:
 
 
 async def test_tcp_transport_send_receive() -> None:
-    received: list[bytes] = []
+    handler_a = _PlaceholderHandler()
+    handler_b = _PlaceholderHandler()
 
-    class Handler:
-        async def on_message(self, data: bytes) -> None:
-            received.append(data)
+    sys_a = ActorSystem(name="test-a")
+    sys_b = ActorSystem(name="test-b")
+    await sys_a.__aenter__()
+    await sys_b.__aenter__()
 
-    transport_a = TcpTransport(host="127.0.0.1", port=0)
-    transport_b = TcpTransport(host="127.0.0.1", port=0)
-
-    await transport_a.start(Handler())
-    await transport_b.start(Handler())
+    ref_a, port_a = await _spawn_tcp(sys_a, handler_a)
+    _, port_b = await _spawn_tcp(sys_b, handler_b)
 
     try:
         envelope = MessageEnvelope(
-            target=f"casty://sys@127.0.0.1:{transport_b.port}/actor",
-            sender=f"casty://sys@127.0.0.1:{transport_a.port}/sender",
+            target=f"casty://sys@127.0.0.1:{port_b}/actor",
+            sender=f"casty://sys@127.0.0.1:{port_a}/sender",
             payload=b"hello",
             type_hint="str",
         )
-        await transport_a.send("127.0.0.1", transport_b.port, envelope.to_bytes())
+        ref_a.tell(SendToNode(host="127.0.0.1", port=port_b, data=envelope.to_bytes()))
         await asyncio.sleep(0.2)
-        assert len(received) == 1
-        restored = MessageEnvelope.from_bytes(received[0])
+        assert len(handler_b.received) == 1
+        restored = MessageEnvelope.from_bytes(handler_b.received[0])
         assert restored.payload == b"hello"
     finally:
-        await transport_a.stop()
-        await transport_b.stop()
+        await sys_a.shutdown()
+        await sys_b.shutdown()
 
 
 async def test_tcp_transport_connection_reuse() -> None:
-    received: list[bytes] = []
+    handler_a = _PlaceholderHandler()
+    handler_b = _PlaceholderHandler()
 
-    class Handler:
-        async def on_message(self, data: bytes) -> None:
-            received.append(data)
+    sys_a = ActorSystem(name="test-a")
+    sys_b = ActorSystem(name="test-b")
+    await sys_a.__aenter__()
+    await sys_b.__aenter__()
 
-    transport_a = TcpTransport(host="127.0.0.1", port=0)
-    transport_b = TcpTransport(host="127.0.0.1", port=0)
-
-    await transport_a.start(Handler())
-    await transport_b.start(Handler())
+    ref_a, port_a = await _spawn_tcp(sys_a, handler_a)
+    _, port_b = await _spawn_tcp(sys_b, handler_b)
 
     try:
         for i in range(5):
             envelope = MessageEnvelope(
-                target=f"casty://sys@127.0.0.1:{transport_b.port}/actor",
-                sender=f"casty://sys@127.0.0.1:{transport_a.port}/sender",
+                target=f"casty://sys@127.0.0.1:{port_b}/actor",
+                sender=f"casty://sys@127.0.0.1:{port_a}/sender",
                 payload=f"msg-{i}".encode(),
                 type_hint="str",
             )
-            await transport_a.send("127.0.0.1", transport_b.port, envelope.to_bytes())
+            ref_a.tell(SendToNode(host="127.0.0.1", port=port_b, data=envelope.to_bytes()))
         await asyncio.sleep(0.3)
-        assert len(received) == 5
+        assert len(handler_b.received) == 5
     finally:
-        await transport_a.stop()
-        await transport_b.stop()
-
-
-# --- Phase 2: RemoteTransport tests ---
+        await sys_a.shutdown()
+        await sys_b.shutdown()
 
 
 async def test_remote_transport_local_delivery() -> None:
     """Local delivery goes through LocalTransport."""
-    registry = TypeRegistry()
+    sys = ActorSystem(name="test")
+    await sys.__aenter__()
 
-    local = LocalTransport()
-    tcp = TcpTransport(host="127.0.0.1", port=0)
-    serializer = JsonSerializer(registry)
+    handler = _PlaceholderHandler()
+    ref, port = await _spawn_tcp(sys, handler, client_only=True)
+    local: LocalTransport = sys._local_transport  # pyright: ignore[reportPrivateUsage]
 
     remote = RemoteTransport(
-        local=local, tcp=tcp, serializer=serializer,
-        local_host="127.0.0.1", local_port=25520, system_name="test",
+        local=local,
+        tcp=ref,
+        serializer=JsonSerializer(TypeRegistry()),
+        local_host="127.0.0.1",
+        local_port=25520,
+        system_name="test",
     )
 
-    received: list[object] = []
-    local.register("/test-actor", lambda msg: received.append(msg))
+    try:
+        received: list[object] = []
+        local.register("/test-actor", lambda msg: received.append(msg))
 
-    addr = ActorAddress(system="test", path="/test-actor", host="127.0.0.1", port=25520)
-    remote.deliver(addr, Ping(value=42))
+        addr = ActorAddress(system="test", path="/test-actor", host="127.0.0.1", port=25520)
+        remote.deliver(addr, Ping(value=42))
 
-    assert len(received) == 1
-    assert isinstance(received[0], Ping)
-    assert received[0].value == 42
+        assert len(received) == 1
+        assert isinstance(received[0], Ping)
+        assert received[0].value == 42
+    finally:
+        await sys.shutdown()
 
 
 async def test_remote_transport_tcp_delivery() -> None:
     """Two RemoteTransports: message from A arrives at B's local handler."""
-    remote_a, remote_b, local_a, local_b, port_a, port_b = await _start_remote_pair()
+    sys_a, sys_b, remote_a, _, _, local_b, _, port_b = await _start_remote_pair()
 
     try:
         received: list[object] = []
         local_b.register("/target-actor", lambda msg: received.append(msg))
 
         target_addr = ActorAddress(
-            system="sys-b", path="/target-actor", host="127.0.0.1", port=port_b
+            system="sys-b", path="/target-actor", host="127.0.0.1", port=port_b,
         )
         remote_a.deliver(target_addr, Ping(value=99))
 
@@ -186,26 +242,23 @@ async def test_remote_transport_tcp_delivery() -> None:
         assert isinstance(received[0], Ping)
         assert received[0].value == 99
     finally:
-        await remote_a.stop()
-        await remote_b.stop()
+        await sys_a.shutdown()
+        await sys_b.shutdown()
 
 
 async def test_remote_transport_actor_ref_roundtrip() -> None:
     """Send message containing ActorRef, verify reply comes back via TCP."""
-    remote_a, remote_b, local_a, local_b, port_a, port_b = await _start_remote_pair()
+    sys_a, sys_b, remote_a, _, local_a, local_b, port_a, port_b = await _start_remote_pair()
 
     try:
-        # Set up reply handler on A
         received_on_a: list[object] = []
         local_a.register("/reply", lambda msg: received_on_a.append(msg))
 
-        # Create a reply ref that points to A
         reply_addr = ActorAddress(
-            system="sys-a", path="/reply", host="127.0.0.1", port=port_a
+            system="sys-a", path="/reply", host="127.0.0.1", port=port_a,
         )
         reply_ref = ActorRef[ShardLocation](address=reply_addr, _transport=remote_a)
 
-        # Set up coordinator handler on B that replies
         received_on_b: list[object] = []
 
         def handle_on_b(msg: object) -> None:
@@ -218,75 +271,64 @@ async def test_remote_transport_actor_ref_roundtrip() -> None:
                             node=NodeAddress(host="127.0.0.1", port=port_b),
                         )
                     )
+                case _:
+                    pass
 
         local_b.register("/coordinator", handle_on_b)
 
-        # Send GetShardLocation from A to B's coordinator
         coord_addr = ActorAddress(
-            system="sys-b", path="/coordinator", host="127.0.0.1", port=port_b
+            system="sys-b", path="/coordinator", host="127.0.0.1", port=port_b,
         )
         remote_a.deliver(coord_addr, GetShardLocation(shard_id=5, reply_to=reply_ref))
 
         await asyncio.sleep(0.5)
 
-        # B should have received the request
         assert len(received_on_b) == 1
         assert isinstance(received_on_b[0], GetShardLocation)
         assert received_on_b[0].shard_id == 5
 
-        # A should have received the reply
         assert len(received_on_a) == 1
         assert isinstance(received_on_a[0], ShardLocation)
         assert received_on_a[0].shard_id == 5
     finally:
-        await remote_a.stop()
-        await remote_b.stop()
+        await sys_a.shutdown()
+        await sys_b.shutdown()
 
 
-async def test_tcp_transport_connection_retry() -> None:
-    """Connection retry after drop."""
-    received: list[bytes] = []
+async def test_tcp_transport_reconnect_after_peer_shutdown() -> None:
+    """Transport connects to a new peer after the old one shuts down."""
+    handler_a = _PlaceholderHandler()
 
-    class Handler:
-        async def on_message(self, data: bytes) -> None:
-            received.append(data)
-
-    transport_b = TcpTransport(host="127.0.0.1", port=0)
-    await transport_b.start(Handler())
-    port_b = transport_b.port
-
-    transport_a = TcpTransport(host="127.0.0.1", port=0)
-    await transport_a.start(Handler())
+    sys_a = ActorSystem(name="test-a")
+    await sys_a.__aenter__()
+    ref_a, _ = await _spawn_tcp(sys_a, handler_a)
 
     try:
-        envelope = MessageEnvelope(
-            target=f"casty://sys@127.0.0.1:{port_b}/actor",
-            sender="casty://sys@127.0.0.1:0/sender",
-            payload=b"msg1",
-            type_hint="str",
-        )
-        await transport_a.send("127.0.0.1", port_b, envelope.to_bytes())
+        handler_b1 = _PlaceholderHandler()
+        sys_b1 = ActorSystem(name="test-b1")
+        await sys_b1.__aenter__()
+        _, port_b1 = await _spawn_tcp(sys_b1, handler_b1)
+
+        ref_a.tell(SendToNode(host="127.0.0.1", port=port_b1, data=b"msg1"))
         await asyncio.sleep(0.1)
-        assert len(received) == 1
+        assert len(handler_b1.received) == 1
 
-        # Manually clear peer to simulate stale connection
-        peer = transport_a._peers.pop(("127.0.0.1", port_b), None)
-        if peer is not None:
-            peer.read_task.cancel()
-            peer.writer.close()
+        await sys_b1.shutdown()
+        await asyncio.sleep(0.3)
 
-        envelope2 = MessageEnvelope(
-            target=f"casty://sys@127.0.0.1:{port_b}/actor",
-            sender="casty://sys@127.0.0.1:0/sender",
-            payload=b"msg2",
-            type_hint="str",
-        )
-        await transport_a.send("127.0.0.1", port_b, envelope2.to_bytes())
+        handler_b2 = _PlaceholderHandler()
+        sys_b2 = ActorSystem(name="test-b2")
+        await sys_b2.__aenter__()
+        _, port_b2 = await _spawn_tcp(sys_b2, handler_b2)
+
+        ref_a.tell(SendToNode(host="127.0.0.1", port=port_b2, data=b"msg2"))
         await asyncio.sleep(0.2)
-        assert len(received) == 2
+        assert len(handler_b2.received) == 1
+
+        await sys_b2.shutdown()
     finally:
-        await transport_a.stop()
-        await transport_b.stop()
+        await sys_a.shutdown()
+        await asyncio.sleep(0)
 
 
 @pytest.fixture()
@@ -322,17 +364,14 @@ def _make_server_handshake_frame(host: str, port: int) -> bytes:
 
 
 async def test_tcp_address_map_translates_on_send() -> None:
-    """TcpTransport with address_map connects to the mapped address, not the logical one."""
+    """Transport with address_map connects to the mapped address, not the logical one."""
     received: list[bytes] = []
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        # Read client handshake
         handshake = await _read_raw_frame(reader)
         assert handshake[0] == FRAME_HANDSHAKE
-        # Send server handshake back
         writer.write(_make_server_handshake_frame("127.0.0.1", actual_port))
         await writer.drain()
-        # Read message frame
         frame = await _read_raw_frame(reader)
         assert frame[0] == FRAME_MESSAGE
         received.append(frame[1:])
@@ -340,17 +379,22 @@ async def test_tcp_address_map_translates_on_send() -> None:
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     actual_port = server.sockets[0].getsockname()[1]
 
-    tcp = TcpTransport(
-        "127.0.0.1", 0,
+    sys = ActorSystem(name="test")
+    await sys.__aenter__()
+    handler = _PlaceholderHandler()
+    ref, _ = await _spawn_tcp(
+        sys,
+        handler,
+        client_only=True,
         address_map={("10.0.1.10", 25520): ("127.0.0.1", actual_port)},
     )
 
     try:
-        await tcp.send("10.0.1.10", 25520, b"hello-through-tunnel")
+        ref.tell(SendToNode(host="10.0.1.10", port=25520, data=b"hello-through-tunnel"))
         await asyncio.sleep(0.1)
         assert received == [b"hello-through-tunnel"]
     finally:
-        await tcp.stop()
+        await sys.shutdown()
         server.close()
         await server.wait_closed()
 
@@ -360,41 +404,42 @@ async def test_remote_transport_sender_uses_advertised_address() -> None:
     captured_data: list[bytes] = []
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        # Read client handshake
         await _read_raw_frame(reader)
-        # Send server handshake back
         writer.write(_make_server_handshake_frame("127.0.0.1", actual_port))
         await writer.drain()
-        # Read message frame
         frame = await _read_raw_frame(reader)
-        captured_data.append(frame[1:])  # strip frame_type byte
+        captured_data.append(frame[1:])
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     actual_port = server.sockets[0].getsockname()[1]
 
-    local = LocalTransport()
-    registry = TypeRegistry()
-    tcp = TcpTransport("127.0.0.1", 0)
-    serializer = JsonSerializer(registry)
+    sys = ActorSystem(name="test-sys")
+    await sys.__aenter__()
+
+    handler = _PlaceholderHandler()
+    ref, _ = await _spawn_tcp(sys, handler, client_only=True)
+    local: LocalTransport = sys._local_transport  # pyright: ignore[reportPrivateUsage]
 
     remote = RemoteTransport(
         local=local,
-        tcp=tcp,
-        serializer=serializer,
+        tcp=ref,
+        serializer=JsonSerializer(TypeRegistry()),
         local_host="127.0.0.1",
         local_port=5000,
         system_name="test-sys",
         advertised_host="bastion.example.com",
         advertised_port=9999,
     )
+    handler.delegate = remote
 
-    await remote.start()
     try:
         addr = ActorAddress(
-            system="remote-sys", path="/target",
-            host="127.0.0.1", port=actual_port,
+            system="remote-sys",
+            path="/target",
+            host="127.0.0.1",
+            port=actual_port,
         )
-        await remote._send_remote(addr, Ping(value=42))
+        remote.deliver(addr, Ping(value=42))
         await asyncio.sleep(0.1)
 
         assert len(captured_data) == 1
@@ -403,7 +448,7 @@ async def test_remote_transport_sender_uses_advertised_address() -> None:
         assert "9999" in envelope.sender
         assert "5000" not in envelope.sender
     finally:
-        await remote.stop()
+        await sys.shutdown()
         server.close()
         await server.wait_closed()
 
@@ -411,164 +456,112 @@ async def test_remote_transport_sender_uses_advertised_address() -> None:
 async def test_tcp_transport_tls(tls_contexts: tuple[ssl.SSLContext, ssl.SSLContext]) -> None:
     server_ctx, client_ctx = tls_contexts
 
-    received: list[bytes] = []
+    handler_a = _PlaceholderHandler()
+    handler_b = _PlaceholderHandler()
 
-    class Handler:
-        async def on_message(self, data: bytes) -> None:
-            received.append(data)
+    sys_a = ActorSystem(name="test-a")
+    sys_b = ActorSystem(name="test-b")
+    await sys_a.__aenter__()
+    await sys_b.__aenter__()
 
-    transport_a = TcpTransport(host="127.0.0.1", port=0, server_ssl=server_ctx, client_ssl=client_ctx)
-    transport_b = TcpTransport(host="127.0.0.1", port=0, server_ssl=server_ctx, client_ssl=client_ctx)
-
-    await transport_a.start(Handler())
-    await transport_b.start(Handler())
+    ref_a, port_a = await _spawn_tcp(sys_a, handler_a, server_ssl=server_ctx, client_ssl=client_ctx)
+    _, port_b = await _spawn_tcp(sys_b, handler_b, server_ssl=server_ctx, client_ssl=client_ctx)
 
     try:
         envelope = MessageEnvelope(
-            target=f"casty://sys@127.0.0.1:{transport_b.port}/actor",
-            sender=f"casty://sys@127.0.0.1:{transport_a.port}/sender",
+            target=f"casty://sys@127.0.0.1:{port_b}/actor",
+            sender=f"casty://sys@127.0.0.1:{port_a}/sender",
             payload=b"hello-tls",
             type_hint="str",
         )
-        await transport_a.send("127.0.0.1", transport_b.port, envelope.to_bytes())
+        ref_a.tell(SendToNode(host="127.0.0.1", port=port_b, data=envelope.to_bytes()))
         await asyncio.sleep(0.2)
-        assert len(received) == 1
-        restored = MessageEnvelope.from_bytes(received[0])
+        assert len(handler_b.received) == 1
+        restored = MessageEnvelope.from_bytes(handler_b.received[0])
         assert restored.payload == b"hello-tls"
     finally:
-        await transport_a.stop()
-        await transport_b.stop()
-
-
-# --- Bidirectional connection tests ---
+        await sys_a.shutdown()
+        await sys_b.shutdown()
 
 
 async def test_tcp_bidirectional_communication() -> None:
-    """A sends to B, B sends to A — verify single peer each direction."""
-    received_on_a: list[bytes] = []
-    received_on_b: list[bytes] = []
+    """A sends to B, B sends to A — verify bidirectional delivery."""
+    handler_a = _PlaceholderHandler()
+    handler_b = _PlaceholderHandler()
 
-    class HandlerA:
-        async def on_message(self, data: bytes) -> None:
-            received_on_a.append(data)
+    sys_a = ActorSystem(name="test-a")
+    sys_b = ActorSystem(name="test-b")
+    await sys_a.__aenter__()
+    await sys_b.__aenter__()
 
-    class HandlerB:
-        async def on_message(self, data: bytes) -> None:
-            received_on_b.append(data)
-
-    transport_a = TcpTransport(host="127.0.0.1", port=0)
-    transport_b = TcpTransport(host="127.0.0.1", port=0)
-
-    await transport_a.start(HandlerA())
-    await transport_b.start(HandlerB())
-
-    transport_a.set_self_address("127.0.0.1", transport_a.port)
-    transport_b.set_self_address("127.0.0.1", transport_b.port)
+    ref_a, port_a = await _spawn_tcp(sys_a, handler_a)
+    ref_b, port_b = await _spawn_tcp(sys_b, handler_b)
 
     try:
-        # A sends to B
-        await transport_a.send("127.0.0.1", transport_b.port, b"hello-from-a")
+        ref_a.tell(SendToNode(host="127.0.0.1", port=port_b, data=b"hello-from-a"))
         await asyncio.sleep(0.2)
-        assert len(received_on_b) == 1
-        assert received_on_b[0] == b"hello-from-a"
+        assert len(handler_b.received) == 1
+        assert handler_b.received[0] == b"hello-from-a"
 
-        # B sends to A — should reuse the inbound connection from A
-        await transport_b.send("127.0.0.1", transport_a.port, b"hello-from-b")
+        ref_b.tell(SendToNode(host="127.0.0.1", port=port_a, data=b"hello-from-b"))
         await asyncio.sleep(0.2)
-        assert len(received_on_a) == 1
-        assert received_on_a[0] == b"hello-from-b"
-
-        # Verify 1 peer on each side
-        assert len(transport_a._peers) == 1  # pyright: ignore[reportPrivateUsage]
-        assert len(transport_b._peers) == 1  # pyright: ignore[reportPrivateUsage]
+        assert len(handler_a.received) == 1
+        assert handler_a.received[0] == b"hello-from-b"
     finally:
-        await transport_a.stop()
-        await transport_b.stop()
+        await sys_a.shutdown()
+        await sys_b.shutdown()
 
 
 async def test_tcp_simultaneous_connect_race() -> None:
-    """Both sides send concurrently — race resolves to 1 peer each, then both directions work."""
-    received_on_a: list[bytes] = []
-    received_on_b: list[bytes] = []
+    """Both sides send concurrently — race resolves, then both directions work."""
+    handler_a = _PlaceholderHandler()
+    handler_b = _PlaceholderHandler()
 
-    class HandlerA:
-        async def on_message(self, data: bytes) -> None:
-            received_on_a.append(data)
+    sys_a = ActorSystem(name="test-a")
+    sys_b = ActorSystem(name="test-b")
+    await sys_a.__aenter__()
+    await sys_b.__aenter__()
 
-    class HandlerB:
-        async def on_message(self, data: bytes) -> None:
-            received_on_b.append(data)
-
-    transport_a = TcpTransport(host="127.0.0.1", port=0)
-    transport_b = TcpTransport(host="127.0.0.1", port=0)
-
-    await transport_a.start(HandlerA())
-    await transport_b.start(HandlerB())
-
-    transport_a.set_self_address("127.0.0.1", transport_a.port)
-    transport_b.set_self_address("127.0.0.1", transport_b.port)
+    ref_a, port_a = await _spawn_tcp(sys_a, handler_a)
+    ref_b, port_b = await _spawn_tcp(sys_b, handler_b)
 
     try:
-        # Both send simultaneously to trigger a race
-        await asyncio.gather(
-            transport_a.send("127.0.0.1", transport_b.port, b"race-a"),
-            transport_b.send("127.0.0.1", transport_a.port, b"race-b"),
-        )
+        ref_a.tell(SendToNode(host="127.0.0.1", port=port_b, data=b"race-a"))
+        ref_b.tell(SendToNode(host="127.0.0.1", port=port_a, data=b"race-b"))
         await asyncio.sleep(0.3)
 
-        # Race dedup: exactly 1 peer on each side
-        assert len(transport_a._peers) == 1  # pyright: ignore[reportPrivateUsage]
-        assert len(transport_b._peers) == 1  # pyright: ignore[reportPrivateUsage]
-
-        # After race resolution, bidirectional communication works
-        await transport_a.send("127.0.0.1", transport_b.port, b"from-a")
-        await transport_b.send("127.0.0.1", transport_a.port, b"from-b")
+        ref_a.tell(SendToNode(host="127.0.0.1", port=port_b, data=b"from-a"))
+        ref_b.tell(SendToNode(host="127.0.0.1", port=port_a, data=b"from-b"))
         await asyncio.sleep(0.2)
 
-        assert b"from-a" in received_on_b
-        assert b"from-b" in received_on_a
-
-        # Still exactly 1 peer each
-        assert len(transport_a._peers) == 1  # pyright: ignore[reportPrivateUsage]
-        assert len(transport_b._peers) == 1  # pyright: ignore[reportPrivateUsage]
+        assert b"from-a" in handler_b.received
+        assert b"from-b" in handler_a.received
     finally:
-        await transport_a.stop()
-        await transport_b.stop()
+        await sys_a.shutdown()
+        await sys_b.shutdown()
 
 
 async def test_tcp_hostname_ip_alias_reuses_peer() -> None:
-    """Sending via hostname then via IP reuses the same connection (alias)."""
-    received: list[bytes] = []
+    """Sending via hostname then via IP both deliver successfully."""
+    handler_a = _PlaceholderHandler()
+    handler_b = _PlaceholderHandler()
 
-    class Handler:
-        async def on_message(self, data: bytes) -> None:
-            received.append(data)
+    sys_a = ActorSystem(name="test-a")
+    sys_b = ActorSystem(name="test-b")
+    await sys_a.__aenter__()
+    await sys_b.__aenter__()
 
-    transport_a = TcpTransport(host="127.0.0.1", port=0)
-    transport_b = TcpTransport(host="127.0.0.1", port=0)
-
-    await transport_a.start(Handler())
-    await transport_b.start(Handler())
-
-    transport_a.set_self_address("127.0.0.1", transport_a.port)
-    transport_b.set_self_address("127.0.0.1", transport_b.port)
+    ref_a, _ = await _spawn_tcp(sys_a, handler_a)
+    _, port_b = await _spawn_tcp(sys_b, handler_b)
 
     try:
-        # First send via "localhost" — connects and learns canonical (127.0.0.1, port_b)
-        await transport_a.send("localhost", transport_b.port, b"via-hostname")
+        ref_a.tell(SendToNode(host="localhost", port=port_b, data=b"via-hostname"))
         await asyncio.sleep(0.2)
-        assert len(received) == 1
+        assert len(handler_b.received) == 1
 
-        # Second send via "127.0.0.1" — should reuse via alias, no new connection
-        await transport_a.send("127.0.0.1", transport_b.port, b"via-ip")
+        ref_a.tell(SendToNode(host="127.0.0.1", port=port_b, data=b"via-ip"))
         await asyncio.sleep(0.2)
-        assert len(received) == 2
-
-        # Only 1 peer on A (canonical address), with an alias for the hostname
-        assert len(transport_a._peers) == 1  # pyright: ignore[reportPrivateUsage]
-        alias = transport_a._peer_aliases  # pyright: ignore[reportPrivateUsage]
-        assert ("localhost", transport_b.port) in alias
-        assert alias[("localhost", transport_b.port)] == ("127.0.0.1", transport_b.port)
+        assert len(handler_b.received) == 2
     finally:
-        await transport_a.stop()
-        await transport_b.stop()
+        await sys_a.shutdown()
+        await sys_b.shutdown()

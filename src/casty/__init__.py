@@ -79,7 +79,16 @@ from casty.replication import (
 )
 from casty.messages import Terminated
 from casty.ref import ActorRef, BroadcastRef
-from casty.remote_transport import MessageEnvelope, RemoteTransport, TcpTransport
+from casty.remote_transport import (
+    ClearNodeBlacklist,
+    GetPort,
+    MessageEnvelope,
+    RemoteTransport,
+    SendToNode,
+    TcpTransportConfig,
+    TcpTransportMsg,
+    tcp_transport,
+)
 from casty.serialization import JsonSerializer, PickleSerializer, Serializer, TypeRegistry
 from casty.receptionist import (
     Deregister,
@@ -159,7 +168,12 @@ __all__ = [
     # Remoting
     "MessageEnvelope",
     "RemoteTransport",
-    "TcpTransport",
+    "TcpTransportConfig",
+    "TcpTransportMsg",
+    "tcp_transport",
+    "SendToNode",
+    "ClearNodeBlacklist",
+    "GetPort",
     # Serialization
     "TypeRegistry",
     "JsonSerializer",
