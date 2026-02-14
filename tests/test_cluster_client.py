@@ -763,3 +763,41 @@ async def test_client_ask_through_address_map() -> None:
                 timeout=5.0,
             )
             assert result == 11
+
+
+async def test_client_ask_with_advertised_host_port() -> None:
+    """ClusterClient.ask() works with advertised_host/port (SSH tunnel scenario)."""
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        real_port = system.self_node.port
+
+        system.spawn(
+            Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
+            "counters",
+        )
+        await asyncio.sleep(0.3)
+
+        async with ClusterClient(
+            contact_points=[("127.0.0.1", real_port)],
+            system_name="cluster",
+            client_host="127.0.0.1",
+            client_port=0,
+            advertised_host="127.0.0.1",
+            advertised_port=9999,
+        ) as client:
+            await asyncio.sleep(1.0)
+
+            counter = client.entity_ref("counters", num_shards=10)
+            counter.tell(ShardEnvelope("dave", Increment(amount=42)))
+            await asyncio.sleep(0.5)
+
+            result = await client.ask(
+                counter,
+                lambda r: ShardEnvelope("dave", GetBalance(reply_to=r)),
+                timeout=5.0,
+            )
+            assert result == 42

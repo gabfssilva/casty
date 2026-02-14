@@ -449,6 +449,9 @@ class _RemoteActorSystem(ActorSystem):
     def set_port(self, port: int) -> None:
         self._port = port
 
+    def set_host(self, host: str) -> None:
+        self._host = host
+
 
 class ClusterClient:
     """External client that routes messages to a Casty cluster.
@@ -543,13 +546,15 @@ class ClusterClient:
             "_tcp_transport",
         )
 
-        # 3. Ask for actual port
+        # 3. Ask for actual port and update system address
         actual_port: int = await self._system.ask(
             tcp_ref, lambda r: GetPort(reply_to=r), timeout=5.0,
         )
         if actual_port != self._client_port:
             self._client_port = actual_port
             self._system.set_port(actual_port)
+        if self._advertised_host is not None:
+            self._system.set_host(self._advertised_host)
 
         # 4. Create RemoteTransport with the actor ref
         self._remote_transport = RemoteTransport(

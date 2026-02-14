@@ -21,7 +21,7 @@ from app.entities import (
 
 logger = logging.getLogger("casty.aws_client")
 
-CLIENT_PORT = 5000
+CLIENT_PORT = 5100
 NUM_SHARDS = 20
 
 
@@ -95,8 +95,8 @@ app.command(counter_app)
 app.command(kv_app)
 
 
-def parse_seeds(seeds: str) -> list[str]:
-    return [s for part in seeds.split(",") if (s := part.strip())]
+def generate_seeds(node_count: int) -> list[str]:
+    return [f"10.0.1.{10 + i}" for i in range(node_count)]
 
 
 @counter_app.command(name="increment")
@@ -105,7 +105,7 @@ async def counter_increment(
     *,
     ssh_host: str,
     amount: int = 1,
-    seeds: str = "10.0.1.10",
+    node_count: int = 3,
     ssh_user: str = "ec2-user",
     ssh_key: Path | None = None,
     casty_port: int = 25520,
@@ -116,7 +116,7 @@ async def counter_increment(
         ssh_host=ssh_host,
         ssh_user=ssh_user,
         ssh_key=ssh_key,
-        seeds=parse_seeds(seeds),
+        seeds=generate_seeds(node_count),
         casty_port=casty_port,
         system_name=system_name,
     ) as client:
@@ -133,7 +133,7 @@ async def counter_get(
     entity_id: str,
     *,
     ssh_host: str,
-    seeds: str = "10.0.1.10",
+    node_count: int = 3,
     ssh_user: str = "ec2-user",
     ssh_key: Path | None = None,
     casty_port: int = 25520,
@@ -144,7 +144,7 @@ async def counter_get(
         ssh_host=ssh_host,
         ssh_user=ssh_user,
         ssh_key=ssh_key,
-        seeds=parse_seeds(seeds),
+        seeds=generate_seeds(node_count),
         casty_port=casty_port,
         system_name=system_name,
     ) as client:
@@ -164,7 +164,7 @@ async def kv_put(
     value: str,
     *,
     ssh_host: str,
-    seeds: str = "10.0.1.10",
+    node_count: int = 3,
     ssh_user: str = "ec2-user",
     ssh_key: Path | None = None,
     casty_port: int = 25520,
@@ -175,7 +175,7 @@ async def kv_put(
         ssh_host=ssh_host,
         ssh_user=ssh_user,
         ssh_key=ssh_key,
-        seeds=parse_seeds(seeds),
+        seeds=generate_seeds(node_count),
         casty_port=casty_port,
         system_name=system_name,
     ) as client:
@@ -192,7 +192,7 @@ async def kv_get(
     key: str,
     *,
     ssh_host: str,
-    seeds: str = "10.0.1.10",
+    node_count: int = 3,
     ssh_user: str = "ec2-user",
     ssh_key: Path | None = None,
     casty_port: int = 25520,
@@ -203,7 +203,7 @@ async def kv_get(
         ssh_host=ssh_host,
         ssh_user=ssh_user,
         ssh_key=ssh_key,
-        seeds=parse_seeds(seeds),
+        seeds=generate_seeds(node_count),
         casty_port=casty_port,
         system_name=system_name,
     ) as client:

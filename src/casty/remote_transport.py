@@ -608,7 +608,16 @@ class RemoteTransport:
             return address.node_id == self._local_node_id
         if address.host is None:
             return True
-        return address.host == self._local_host and address.port == self._local_port
+        if address.host == self._local_host and address.port == self._local_port:
+            return True
+        if (
+            self._advertised_host is not None
+            and self._advertised_port is not None
+            and address.host == self._advertised_host
+            and address.port == self._advertised_port
+        ):
+            return True
+        return False
 
     def _resolve_address(self, address: ActorAddress) -> ActorAddress | None:
         if address.host is not None and address.port is not None:
