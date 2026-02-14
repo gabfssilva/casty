@@ -7,7 +7,7 @@ In this guide you'll implement a **custom serializer using cloudpickle** that ca
 Casty uses a `Protocol`, not an ABC. Any object with these two methods satisfies it:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:30:34"
+--8<-- "examples/guides/08_custom_serialization.py:31:33"
 ```
 
 `serialize` converts to bytes. `deserialize` converts back. The optional `ref_factory` keyword argument lets the transport layer pass a factory for reconstructing `ActorRef` objects during deserialization.
@@ -17,7 +17,7 @@ Casty uses a `Protocol`, not an ABC. Any object with these two methods satisfies
 The implementation is minimal — cloudpickle does the heavy lifting:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:40:52"
+--8<-- "examples/guides/08_custom_serialization.py:39:51"
 ```
 
 No inheritance, no registration. If it quacks like a `Serializer`, it *is* a `Serializer`.
@@ -27,7 +27,7 @@ No inheritance, no registration. If it quacks like a `Serializer`, it *is* a `Se
 Standard pickle can't serialize lambdas defined inside functions. Cloudpickle can:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:93:102"
+--8<-- "examples/guides/08_custom_serialization.py:92:101"
 ```
 
 Output:
@@ -42,7 +42,7 @@ cloudpickle: OK
 Cloudpickle captures local variables along with the lambda. `multiplier = 3` survives the serialize-deserialize roundtrip:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:105:112"
+--8<-- "examples/guides/08_custom_serialization.py:104:111"
 ```
 
 ## Messages with Lambdas
@@ -54,7 +54,7 @@ A frozen dataclass carrying a callable roundtrips cleanly:
 ```
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:115:120"
+--8<-- "examples/guides/08_custom_serialization.py:114:119"
 ```
 
 ## Actor Applying Serialized Functions
@@ -62,11 +62,11 @@ A frozen dataclass carrying a callable roundtrips cleanly:
 The full loop: serialize a message carrying a lambda, deserialize it, and `tell()` it to an actor that applies the function to its state:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:74:87"
+--8<-- "examples/guides/08_custom_serialization.py:73:86"
 ```
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:123:142"
+--8<-- "examples/guides/08_custom_serialization.py:122:141"
 ```
 
 Output:
