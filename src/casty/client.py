@@ -355,14 +355,6 @@ def topology_subscriber(
                         on_snapshot(snapshot)
                     for proxy in registered_proxies:
                         proxy.tell(snapshot)
-                    scheduler_ref.tell(
-                        ScheduleOnce(
-                            key="liveness",
-                            target=ctx.self,
-                            message=SubscriptionTimeout(),
-                            delay=SUBSCRIPTION_TIMEOUT,
-                        )
-                    )
                     return connected(
                         registered_proxies, snapshot, contact_index, scheduler_ref
                     )
@@ -377,7 +369,7 @@ def topology_subscriber(
                         scheduler_ref,
                     )
 
-                case SubscriptionTimeout():
+                case SubscriptionTimeout() if last_snapshot is None:
                     known = _build_contacts(last_snapshot)
                     next_idx = (contact_index + 1) % len(known)
                     host, port = known[next_idx]
@@ -393,6 +385,9 @@ def topology_subscriber(
                     return connected(
                         registered_proxies, last_snapshot, next_idx, scheduler_ref
                     )
+
+                case SubscriptionTimeout():
+                    return Behaviors.same()
 
                 case _:
                     return Behaviors.same()
