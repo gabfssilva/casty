@@ -100,6 +100,13 @@ nav:
       - Acknowledgments: acknowledgments.md
   - Guides:
       - Your First Actor: guides/your-first-actor.md
+      - Shopping Cart: guides/shopping-cart.md
+      - Supervision: guides/supervision.md
+      - Pipe to Self: guides/pipe-to-self.md
+      - Event Sourcing: guides/event-sourcing.md
+      - Clustered: guides/clustered.md
+      - Client + Cluster: guides/cluster-client.md
+      - Custom Serialization: guides/custom-serialization.md
   - API Reference:
       - Core:
           - Behaviors: reference/behaviors.md
