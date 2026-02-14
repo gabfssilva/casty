@@ -23,9 +23,6 @@ from casty import (
     ActorSystem,
     Behavior,
     Behaviors,
-    JsonSerializer,
-    PickleSerializer,
-    TypeRegistry,
 )
 
 
@@ -62,115 +59,92 @@ class CloudpickleSerializer:
 
 
 @dataclass(frozen=True)
-class Greet:
-    name: str
-    reply_to: ActorRef[str]
-
-
-@dataclass(frozen=True)
 class ApplyFn:
     fn: Callable[[int], int]
 
 
-type DemoMsg = Greet | ApplyFn
+@dataclass(frozen=True)
+class GetValue:
+    reply_to: ActorRef[int]
+
+
+type ComputeMsg = ApplyFn | GetValue
+
+
+# ── Behavior ─────────────────────────────────────────────────────────
+
+
+def accumulator(value: int = 0) -> Behavior[ComputeMsg]:
+    async def receive(
+        ctx: ActorContext[ComputeMsg], msg: ComputeMsg
+    ) -> Behavior[ComputeMsg]:
+        match msg:
+            case ApplyFn(fn):
+                new_value = fn(value)
+                print(f"  {value} → {new_value}")
+                return accumulator(new_value)
+            case GetValue(reply_to):
+                reply_to.tell(value)
+                return Behaviors.same()
+
+    return Behaviors.receive(receive)
 
 
 # ── Main ─────────────────────────────────────────────────────────────
 
 
-def make_ref_factory(addr: ActorAddress) -> ActorRef[Any]:
-    """Stub ref factory for demonstration — real clusters use RemoteTransport."""
-    return ActorRef(address=addr, _transport=None)  # type: ignore[arg-type]
-
-
 async def main() -> None:
-    # 1. Roundtrip with JsonSerializer
-    print("── JsonSerializer ──")
-    registry = TypeRegistry()
-    registry.register(Greet)
-    json_ser = JsonSerializer(registry, ref_factory=make_ref_factory)
+    serializer = CloudpickleSerializer()
 
-    original = Greet(
-        name="Alice",
-        reply_to=ActorRef(
-            address=ActorAddress.from_uri("casty://demo/greeter"),
-            _transport=None,  # type: ignore[arg-type]
-        ),
-    )
-    data = json_ser.serialize(original)
-    print(f"  JSON bytes: {data.decode()}")
-    restored = json_ser.deserialize(data)
-    print(f"  Restored:   {restored}")
-    print(f"  Match:      {original.name == restored.name}")
-
-    # 2. Roundtrip with PickleSerializer
-    print("\n── PickleSerializer ──")
-    pickle_ser = PickleSerializer()
-    pickle_ser.set_ref_factory(make_ref_factory)
-
-    data = pickle_ser.serialize(original)
-    print(f"  Pickle bytes: {len(data)} bytes")
-    restored = pickle_ser.deserialize(data)
-    print(f"  Restored:     {restored}")
-    print(f"  Match:        {original.name == restored.name}")
-
-    # 3. CloudpickleSerializer — handles lambdas!
-    print("\n── CloudpickleSerializer ──")
-    cloud_ser = CloudpickleSerializer()
-
-    multiplier = 3
-    fn = lambda x: x * multiplier  # noqa: E731
-
-    data = cloud_ser.serialize(fn)
-    print(f"  Serialized lambda: {len(data)} bytes")
-    restored_fn = cloud_ser.deserialize(data)
-    print(f"  restored_fn(10) = {restored_fn(10)}")
-    print(f"  Captures closure variable multiplier={multiplier}")
-
-    # 4. Lambdas in messages
-    print("\n── Lambda messages with cloudpickle ──")
-    msg = ApplyFn(fn=lambda x: x + 42)
-    data = cloud_ser.serialize(msg)
-    restored_msg = cloud_ser.deserialize(data)
-    print(f"  Original:  ApplyFn(fn=<lambda>)")
-    print(f"  Roundtrip: fn(0) = {restored_msg.fn(0)}")
-
-    # 5. Standard pickle CANNOT do this
-    print("\n── Standard pickle vs cloudpickle ──")
+    # Prove standard pickle can't do this
+    print("── Standard pickle vs cloudpickle ──")
     import pickle
 
     try:
         pickle.dumps(lambda x: x + 1)
-        print("  pickle: OK (unexpected)")
+        print("  pickle:      OK (unexpected)")
     except Exception as e:
-        print(f"  pickle: {type(e).__name__} — {e}")
+        print(f"  pickle:      {type(e).__name__}")
 
     cloudpickle.dumps(lambda x: x + 1)
     print("  cloudpickle: OK")
 
-    # 6. Prove it works in a real actor
-    print("\n── Actor using cloudpickle-serialized functions ──")
+    # Roundtrip a lambda that captures a local variable
+    print("\n── Roundtrip a closure ──")
+    multiplier = 3
+    fn: Callable[[int], int] = lambda x: x * multiplier  # noqa: E731
 
-    def accumulator(value: int = 0) -> Behavior[ApplyFn]:
-        async def receive(
-            ctx: ActorContext[ApplyFn], msg: ApplyFn
-        ) -> Behavior[ApplyFn]:
-            new_value = msg.fn(value)
-            print(f"  {value} → {new_value}")
-            return accumulator(new_value)
+    data = serializer.serialize(fn)
+    restored_fn = serializer.deserialize(data)
+    print(f"  restored_fn(10) = {restored_fn(10)}")
 
-        return Behaviors.receive(receive)
+    # Roundtrip a message carrying a lambda
+    print("\n── Roundtrip a message ──")
+    msg = ApplyFn(fn=lambda x: x + 42)
+    data = serializer.serialize(msg)
+    restored_msg = serializer.deserialize(data)
+    print(f"  fn(0) = {restored_msg.fn(0)}")
 
+    # Use it in a real actor
+    print("\n── Actor applying serialized functions ──")
     async with ActorSystem() as system:
-        ref: ActorRef[ApplyFn] = system.spawn(accumulator(), "calc")
+        ref: ActorRef[ComputeMsg] = system.spawn(accumulator(), "calc")
 
-        # Functions survive serialization roundtrip, then get applied
-        for fn in [lambda x: x + 10, lambda x: x * 3, lambda x: x - 5]:
-            data = cloud_ser.serialize(ApplyFn(fn=fn))
-            restored_msg = cloud_ser.deserialize(data)
-            ref.tell(restored_msg)
+        fns: list[Callable[[int], int]] = [
+            lambda x: x + 10,
+            lambda x: x * 3,
+            lambda x: x - 5,
+        ]
+        for fn in fns:
+            data = serializer.serialize(ApplyFn(fn=fn))
+            ref.tell(serializer.deserialize(data))
 
         await asyncio.sleep(0.1)
+
+        value: int = await system.ask(
+            ref, lambda r: GetValue(reply_to=r), timeout=5.0
+        )
+        print(f"  Final value: {value}")
 
 
 asyncio.run(main())

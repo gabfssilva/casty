@@ -1,17 +1,13 @@
 # Custom Serialization
 
-In this guide you'll implement a **custom serializer using cloudpickle** to handle lambdas and closures that standard pickle cannot. Along the way you'll learn the `Serializer` protocol, compare all three serializer implementations, and prove the roundtrip works inside a real actor.
-
-## Why Custom Serialization?
-
-Casty ships with two serializers: `JsonSerializer` (human-readable, cross-language) and `PickleSerializer` (fast, Python-only). But standard pickle can't serialize lambdas or closures defined inside functions. If your actors need to receive functions as messages — think distributed compute, map-reduce, or rule engines — you need something like cloudpickle.
+In this guide you'll implement a **custom serializer using cloudpickle** that can handle lambdas and closures. Along the way you'll learn the `Serializer` protocol, build a working implementation, and prove it roundtrips functions through a real actor.
 
 ## The Serializer Protocol
 
 Casty uses a `Protocol`, not an ABC. Any object with these three methods satisfies it:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:32:37"
+--8<-- "examples/guides/08_custom_serialization.py:30:35"
 ```
 
 `serialize` converts to bytes. `deserialize` converts back. `set_ref_factory` is called by the transport layer so your serializer can reconstruct `ActorRef` objects during deserialization.
@@ -21,68 +17,56 @@ Casty uses a `Protocol`, not an ABC. Any object with these three methods satisfi
 The implementation is minimal — cloudpickle does the heavy lifting:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:43:58"
+--8<-- "examples/guides/08_custom_serialization.py:40:55"
 ```
 
 No inheritance, no registration. If it quacks like a `Serializer`, it *is* a `Serializer`.
 
-## Comparing All Three
+## Why Cloudpickle?
 
-The example walks through each serializer with the same message:
-
-### JsonSerializer
-
-Requires a `TypeRegistry` to map type names to classes. Produces human-readable JSON:
+Standard pickle can't serialize lambdas defined inside functions. Cloudpickle can:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:88:104"
-```
-
-### PickleSerializer
-
-No registry needed — pickle handles Python types natively:
-
-```python
---8<-- "examples/guides/08_custom_serialization.py:107:115"
-```
-
-### CloudpickleSerializer — Lambdas!
-
-Standard pickle chokes on lambdas defined inside functions. Cloudpickle handles them, including captured closure variables:
-
-```python
---8<-- "examples/guides/08_custom_serialization.py:118:128"
-```
-
-`multiplier = 3` is captured in the closure. Cloudpickle serializes *both* the lambda and its captured state.
-
-## Lambdas in Messages
-
-Frozen dataclasses can carry callables. Cloudpickle roundtrips the whole message:
-
-```python
---8<-- "examples/guides/08_custom_serialization.py:64:75"
-```
-
-## Proof: Standard Pickle Fails
-
-```python
---8<-- "examples/guides/08_custom_serialization.py:138:149"
+--8<-- "examples/guides/08_custom_serialization.py:99:110"
 ```
 
 Output:
 
 ```
-pickle: AttributeError — Can't get local object 'main.<locals>.<lambda>'
+pickle:      AttributeError
 cloudpickle: OK
 ```
 
-## Real Actor with Serialized Functions
+## Roundtripping Closures
 
-Functions survive the serialize-deserialize roundtrip and get applied by a real actor:
+Cloudpickle captures local variables along with the lambda. `multiplier = 3` survives the serialize-deserialize roundtrip:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:154:173"
+--8<-- "examples/guides/08_custom_serialization.py:112:119"
+```
+
+## Messages with Lambdas
+
+A frozen dataclass carrying a callable roundtrips cleanly:
+
+```python
+--8<-- "examples/guides/08_custom_serialization.py:61:71"
+```
+
+```python
+--8<-- "examples/guides/08_custom_serialization.py:122:126"
+```
+
+## Actor Applying Serialized Functions
+
+The full loop: serialize a message carrying a lambda, deserialize it, and `tell()` it to an actor that applies the function to its state:
+
+```python
+--8<-- "examples/guides/08_custom_serialization.py:77:90"
+```
+
+```python
+--8<-- "examples/guides/08_custom_serialization.py:129:147"
 ```
 
 Output:
@@ -91,6 +75,7 @@ Output:
 0 → 10
 10 → 30
 30 → 25
+Final value: 25
 ```
 
 ## Run the Full Example
@@ -107,7 +92,6 @@ uv run python examples/guides/08_custom_serialization.py
 **What you learned:**
 
 - **`Serializer`** is a Protocol — implement three methods and you're done. No inheritance required.
-- **`JsonSerializer`** needs a `TypeRegistry` and produces human-readable output.
-- **`PickleSerializer`** is fast and requires no setup, but can't handle lambdas inside functions.
 - **Cloudpickle** handles lambdas, closures, and captured variables that standard pickle cannot.
-- **Custom serializers** satisfy the protocol by structural subtyping — no base class needed.
+- **Messages carrying callables** roundtrip cleanly through cloudpickle serialization.
+- **Structural subtyping** means your serializer satisfies the protocol without any base class.
