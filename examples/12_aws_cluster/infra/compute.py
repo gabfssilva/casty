@@ -74,8 +74,8 @@ def create_compute(
         private_ip = f"10.0.1.{10 + i}"
 
         user_data = pulumi.Output.all(image_url, image_id).apply(
-            lambda args, idx=i, pip=private_ip, sip=seed_ip: _build_user_data(
-                args[0], args[1], idx, pip, sip
+            lambda args, idx=i, pip=private_ip, sip=seed_ip, nc=node_count: _build_user_data(
+                args[0], args[1], idx, pip, sip, nc
             )
         )
 
@@ -104,7 +104,7 @@ def create_compute(
 
 
 def _build_user_data(
-    image_url: str, image_id: str, node_index: int, private_ip: str, seed_ip: str
+    image_url: str, image_id: str, node_index: int, private_ip: str, seed_ip: str, node_count: int
 ) -> str:
     """Generate cloud-init user data script."""
     # Extract ECR registry URL (everything before the image name)
@@ -138,6 +138,7 @@ docker run -d --restart=always \\
     -e SEED_IPS={seed_ip} \\
     -e CASTY_PORT=25520 \\
     -e HTTP_PORT=8000 \\
+    -e NODE_COUNT={node_count} \\
     --name casty-node \\
     {image_url}
 """
