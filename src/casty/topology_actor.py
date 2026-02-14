@@ -27,11 +27,9 @@ from casty.ref import ActorRef
 from casty.topology import SubscribeTopology, TopologySnapshot, UnsubscribeTopology
 
 if TYPE_CHECKING:
+    from casty.context import ActorContext
     from casty.remote_transport import RemoteTransport
     from casty.replication import ShardAllocation
-
-
-# --- Messages (formerly in gossip_actor.py / heartbeat_actor.py) ---
 
 
 @dataclass(frozen=True)
@@ -272,9 +270,10 @@ def topology_actor(
         waiters: tuple[WaitForMembers, ...],
         handled_unreachable: frozenset[NodeAddress],
     ) -> Behavior[TopologyMsg]:
-        async def receive(ctx: Any, msg: TopologyMsg) -> Any:
+        async def receive(
+            ctx: ActorContext[TopologyMsg], msg: TopologyMsg,
+        ) -> Behavior[TopologyMsg]:
             match msg:
-                # --- Subscribe/Unsubscribe ---
                 case SubscribeTopology(reply_to=reply_to):
                     reply_to.tell(build_snapshot(state))
                     return active(
@@ -292,7 +291,6 @@ def topology_actor(
                         handled_unreachable,
                     )
 
-                # --- Gossip merge ---
                 case GossipMessage(remote_state, from_node, is_reply):
                     log.debug(
                         "Gossip from %s:%d (members=%d, reply=%s)",
@@ -321,7 +319,6 @@ def topology_actor(
                             ),
                         )
 
-                    # Leader promotes joining members when converged
                     if new_state.leader == self_node and new_state.is_converged:
                         for m in new_state.members:
                             if m.status == MemberStatus.joining:
@@ -335,7 +332,6 @@ def topology_actor(
                     push_to_subscribers(snapshot, subscribers)
                     remaining = notify_waiters(new_state, waiters)
 
-                    # Clear unreachable for rejoining nodes
                     rejoined = frozenset(
                         m.address for m in new_state.members
                         if m.address in handled_unreachable
@@ -386,7 +382,6 @@ def topology_actor(
                                 )
                     return Behaviors.same()
 
-                # --- Join ---
                 case JoinRequest(
                     node=node, roles=join_roles,
                     node_id=nid, reply_to=reply_to,
@@ -459,7 +454,6 @@ def topology_actor(
                         new_state, subscribers, remaining, handled_unreachable,
                     )
 
-                # --- Heartbeat ---
                 case HeartbeatRequest(from_node=from_node, reply_to=reply_to):
                     reply_to.tell(
                         HeartbeatResponse(from_node=self_node),
@@ -473,7 +467,6 @@ def topology_actor(
                     return Behaviors.same()
 
                 case HeartbeatTick(members=tick_members):
-                    # Remove departed nodes from detector
                     current = frozenset(
                         m.address for m in state.members
                         if m.status
@@ -522,7 +515,6 @@ def topology_actor(
                     for node in new_unreachable:
                         new_state = new_state.mark_unreachable(node)
 
-                    # Auto-down unreachable nodes
                     for node in new_unreachable:
                         ctx.self.tell(DownMember(address=node))
 
@@ -535,7 +527,6 @@ def topology_actor(
                         handled_unreachable | frozenset(new_unreachable),
                     )
 
-                # --- Leader duties ---
                 case PromoteMember(address=address):
                     promoted = frozenset(
                         Member(
@@ -618,7 +609,6 @@ def topology_actor(
                         )
                     return Behaviors.same()
 
-                # --- Shard allocations & registry ---
                 case UpdateShardAllocations(
                     shard_type=shard_type,
                     allocations=allocations,
@@ -658,7 +648,6 @@ def topology_actor(
                         handled_unreachable,
                     )
 
-                # --- Queries ---
                 case GetState(reply_to=reply_to):
                     reply_to.tell(state)
                     return Behaviors.same()

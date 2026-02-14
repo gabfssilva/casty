@@ -22,7 +22,7 @@ from casty.receptionist import Listing, ServiceInstance, ServiceKey
 from casty.ref import ActorRef
 from casty.remote_transport import (
     GetPort,
-    InboundHandler,
+    PlaceholderHandler,
     RemoteTransport,
     TcpTransportConfig,
     TcpTransportMsg,
@@ -40,21 +40,6 @@ if TYPE_CHECKING:
     from casty.context import ActorContext
 
 SUBSCRIPTION_TIMEOUT = 10.0
-
-
-class _ClientPlaceholderHandler:
-    """Handler that delegates to a ``RemoteTransport`` once wired.
-
-    Same pattern as ``_PlaceholderHandler`` in ``sharding.py`` — the TCP
-    transport actor is spawned before the ``RemoteTransport`` exists.
-    """
-
-    def __init__(self) -> None:
-        self.delegate: InboundHandler | None = None
-
-    async def on_message(self, data: bytes) -> None:
-        if self.delegate is not None:
-            await self.delegate.on_message(data)
 
 
 @dataclass(frozen=True)
@@ -135,7 +120,7 @@ def client_proxy_behavior(
         def active(
             allocations: dict[int, NodeAddress],
             leader: NodeAddress | None,
-            buffer: dict[int, list[ShardEnvelope[Any]]],
+            buffer: dict[int, tuple[ShardEnvelope[Any], ...]],
             failed_nodes: frozenset[NodeAddress],
         ) -> Behavior[ClientProxyMsg]:
             async def receive(
@@ -150,8 +135,8 @@ def client_proxy_behavior(
                             _route(envelope, allocations[shard_id])
                             return Behaviors.same()
 
-                        existing = buffer.get(shard_id, [])
-                        new_buf = {**buffer, shard_id: [*existing, envelope]}
+                        existing = buffer.get(shard_id, ())
+                        new_buf = {**buffer, shard_id: (*existing, envelope)}
                         if not existing and leader is not None:
                             _query_coordinator(shard_id, leader, ctx.self)
                         return active(allocations, leader, new_buf, failed_nodes)
@@ -175,7 +160,7 @@ def client_proxy_behavior(
                             return Behaviors.same()
 
                         new_allocs = {**allocations, sid: node}
-                        buffered = buffer.get(sid, [])
+                        buffered = buffer.get(sid, ())
                         log.debug(
                             "Shard %d -> %s:%d (flushed %d)",
                             sid,
@@ -207,7 +192,7 @@ def client_proxy_behavior(
                                 evicted,
                             )
                         new_leader = snapshot.leader
-                        still_buffered: dict[int, list[ShardEnvelope[Any]]] = {}
+                        still_buffered: dict[int, tuple[ShardEnvelope[Any], ...]] = {}
                         for sid, envelopes in buffer.items():
                             if sid in new_allocations:
                                 for envelope in envelopes:
@@ -545,7 +530,7 @@ class ClusterClient:
             client_only=True,
             address_map=self._address_map or {},
         )
-        placeholder: _ClientPlaceholderHandler = _ClientPlaceholderHandler()
+        placeholder: PlaceholderHandler = PlaceholderHandler()
         tcp_ref: ActorRef[TcpTransportMsg] = self._system.spawn(
             tcp_transport(
                 tcp_config, placeholder,

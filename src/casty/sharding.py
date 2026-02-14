@@ -34,7 +34,7 @@ from casty.topology_actor import TopologyMsg
 from casty.receptionist import Find, Listing, ReceptionistMsg, ServiceKey
 from casty.remote_transport import (
     GetPort,
-    InboundHandler,
+    PlaceholderHandler,
     RemoteTransport,
     TcpTransportConfig,
     TcpTransportMsg,
@@ -42,6 +42,7 @@ from casty.remote_transport import (
 )
 from casty.serialization import PickleSerializer
 from casty.system import ActorSystem
+from casty.topology import SubscribeTopology, TopologySnapshot
 from casty.transport import MessageTransport
 
 if TYPE_CHECKING:
@@ -64,20 +65,6 @@ from casty.shard_coordinator_actor import (
 )
 
 
-class _PlaceholderHandler:
-    """Handler that delegates to a ``RemoteTransport`` once wired.
-
-    The TCP transport actor is spawned before the ``RemoteTransport``
-    exists — this placeholder is passed as the initial handler and
-    the real delegate is set immediately after construction.
-    """
-
-    def __init__(self) -> None:
-        self.delegate: InboundHandler | None = None
-
-    async def on_message(self, data: bytes) -> None:
-        if self.delegate is not None:
-            await self.delegate.on_message(data)
 
 
 @dataclass(frozen=True)
@@ -127,11 +114,6 @@ def entity_shard(entity_id: str, num_shards: int) -> int:
     return int.from_bytes(digest[:4], "big") % num_shards
 
 
-# ---------------------------------------------------------------------------
-# Shard proxy behavior — routes ShardEnvelope to the right region
-# ---------------------------------------------------------------------------
-
-
 def shard_proxy_behavior(
     *,
     coordinator: ActorRef[CoordinatorMsg],
@@ -154,24 +136,22 @@ def shard_proxy_behavior(
 
     def active(
         shard_cache: dict[int, NodeAddress],
-        buffer: dict[int, list[ShardEnvelope[Any]]],
+        buffer: dict[int, tuple[ShardEnvelope[Any], ...]],
     ) -> Behavior[Any]:
         async def receive(ctx: Any, msg: Any) -> Any:
-            from casty.topology import TopologySnapshot
-
-            if isinstance(msg, TopologySnapshot):
-                evicted = {
-                    sid: n for sid, n in shard_cache.items()
-                    if n not in msg.unreachable
-                }
-                if len(evicted) < len(shard_cache):
-                    log.info(
-                        "Evicted %d cached shards (unreachable nodes)",
-                        len(shard_cache) - len(evicted),
-                    )
-                return active(evicted, buffer)
-
             match msg:
+                case TopologySnapshot() as snapshot:
+                    evicted = {
+                        sid: n for sid, n in shard_cache.items()
+                        if n not in snapshot.unreachable
+                    }
+                    if len(evicted) < len(shard_cache):
+                        log.info(
+                            "Evicted %d cached shards (unreachable nodes)",
+                            len(shard_cache) - len(evicted),
+                        )
+                    return active(evicted, buffer)
+
                 case ShardEnvelope():
                     envelope = cast(ShardEnvelope[Any], msg)
                     shard_id = entity_shard(envelope.entity_id, num_shards)
@@ -193,8 +173,8 @@ def shard_proxy_behavior(
                             remote_ref.tell(envelope)
                         return Behaviors.same()
 
-                    existing_buf = buffer.get(shard_id, [])
-                    new_buf = [*existing_buf, envelope]
+                    existing_buf = buffer.get(shard_id, ())
+                    new_buf = (*existing_buf, envelope)
                     new_buffer = {**buffer, shard_id: new_buf}
                     if not existing_buf:
                         log.debug("Shard %d: requesting location (entity=%s)", shard_id, envelope.entity_id)
@@ -207,7 +187,7 @@ def shard_proxy_behavior(
 
                 case ShardLocation(shard_id=sid, node=node):
                     new_cache = {**shard_cache, sid: node}
-                    buffered = buffer.get(sid, [])
+                    buffered = buffer.get(sid, ())
                     log.debug("Shard %d -> %s:%d (flushed %d)", sid, node.host, node.port, len(buffered))
                     new_buffer = {k: v for k, v in buffer.items() if k != sid}
                     for envelope in buffered:
@@ -233,17 +213,11 @@ def shard_proxy_behavior(
 
     if topology_ref is not None:
         async def setup(ctx: Any) -> Any:
-            from casty.topology import SubscribeTopology
             topology_ref.tell(SubscribeTopology(reply_to=ctx.self))
             return active({}, {})
         return Behaviors.setup(setup)
 
     return active({}, {})
-
-
-# ---------------------------------------------------------------------------
-# Broadcast proxy behavior — fans out messages to all cluster members
-# ---------------------------------------------------------------------------
 
 
 def broadcast_proxy_behavior(
@@ -264,15 +238,14 @@ def broadcast_proxy_behavior(
 
     def active(members: frozenset[NodeAddress]) -> Behavior[Any]:
         async def receive(ctx: Any, msg: Any) -> Behavior[Any]:
-            from casty.topology import TopologySnapshot
-
-            if isinstance(msg, TopologySnapshot):
-                up = frozenset(
-                    m.address for m in msg.members if m.status == MemberStatus.up
-                )
-                return active(up)
-
             match msg:
+                case TopologySnapshot() as snapshot:
+                    up = frozenset(
+                        m.address for m in snapshot.members
+                        if m.status == MemberStatus.up
+                    )
+                    return active(up)
+
                 case ClusterState() as state:
                     up = frozenset(
                         m.address for m in state.members if m.status == MemberStatus.up
@@ -297,17 +270,11 @@ def broadcast_proxy_behavior(
 
     if topology_ref is not None:
         async def setup(ctx: Any) -> Any:
-            from casty.topology import SubscribeTopology
             topology_ref.tell(SubscribeTopology(reply_to=ctx.self))
             return active(frozenset({self_node}))
         return Behaviors.setup(setup)
 
     return active(frozenset({self_node}))
-
-
-# ---------------------------------------------------------------------------
-# ClusteredActorSystem
-# ---------------------------------------------------------------------------
 
 
 class ClusteredActorSystem(ActorSystem):
@@ -471,7 +438,7 @@ class ClusteredActorSystem(ActorSystem):
             # RemoteTransport is the handler — create a temporary one to pass to the actor,
             # then update it with the real tcp_ref after spawning
             self._serializer = PickleSerializer()
-            placeholder_handler = _PlaceholderHandler()
+            placeholder_handler = PlaceholderHandler()
             self._tcp_ref = super().spawn(
                 tcp_transport(
                     tcp_config, placeholder_handler,
@@ -653,7 +620,6 @@ class ClusteredActorSystem(ActorSystem):
             ),
             f"_region-{name}",
         )
-
 
         # Proxy — the ref users interact with
         proxy_ref: ActorRef[Any] = super().spawn(

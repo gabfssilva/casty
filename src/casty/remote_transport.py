@@ -53,6 +53,22 @@ class InboundHandler(Protocol):
     async def on_message(self, data: bytes) -> None: ...
 
 
+class PlaceholderHandler:
+    """Handler that delegates to an ``InboundHandler`` once wired.
+
+    The TCP transport actor is spawned before the real handler exists —
+    this placeholder is passed as the initial handler and the real
+    delegate is set immediately after construction.
+    """
+
+    def __init__(self) -> None:
+        self.delegate: InboundHandler | None = None
+
+    async def on_message(self, data: bytes) -> None:
+        if self.delegate is not None:
+            await self.delegate.on_message(data)
+
+
 def set_nodelay(writer: asyncio.StreamWriter) -> None:
     sock = writer.transport.get_extra_info("socket")
     if sock is not None:
@@ -76,11 +92,6 @@ def resolve_race(self_addr: NodeAddr, peer_addr: NodeAddr, new_initiator: NodeAd
     The connection initiated by ``min(self_addr, peer_addr)`` wins.
     """
     return new_initiator == min(self_addr, peer_addr)
-
-
-# ---------------------------------------------------------------------------
-# Peer connection actor — one per TCP connection
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -217,7 +228,6 @@ class MessageEnvelope:
             "sender": self.sender,
             "type_hint": self.type_hint,
         }).encode("utf-8")
-        # Format: [header_len:4][header][payload]
         return struct.pack("!I", len(header)) + header + self.payload
 
     @staticmethod
@@ -243,11 +253,6 @@ class MessageEnvelope:
             payload=payload,
             type_hint=header["type_hint"],
         )
-
-
-# ---------------------------------------------------------------------------
-# TCP transport actor — manages all peer connections
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -421,20 +426,53 @@ def tcp_transport(
                         peer_addr: NodeAddr = (host, port)
                         canonical = aliases.get(peer_addr, peer_addr)
 
+                        effective_bl = blacklist
                         bl_until = blacklist.get(canonical)
                         if bl_until is not None:
                             if time.monotonic() < bl_until:
                                 return Behaviors.same()
-                            new_bl = {k: v for k, v in blacklist.items() if k != canonical}
-                            return await _handle_send(
-                                ctx, peer_addr, canonical, data, srv, self_addr,
-                                peers, aliases, new_bl,
-                            )
+                            effective_bl = {k: v for k, v in blacklist.items() if k != canonical}
 
-                        return await _handle_send(
-                            ctx, peer_addr, canonical, data, srv, self_addr,
-                            peers, aliases, blacklist,
+                        peer_ref = peers.get(canonical)
+                        if peer_ref is not None:
+                            peer_ref.tell(SendFrame(data=data))
+                            return active(srv, self_addr, peers, aliases, effective_bl, next_id)
+
+                        result = await connect_and_handshake(peer_addr, self_addr, config)
+                        if result is None:
+                            new_bl = {
+                                **effective_bl,
+                                canonical: time.monotonic() + config.blacklist_duration,
+                            }
+                            log.debug(
+                                "Blacklisted %s:%d for %.1fs",
+                                peer_addr[0], peer_addr[1], config.blacklist_duration,
+                            )
+                            return active(srv, self_addr, peers, aliases, new_bl, next_id)
+
+                        conn_reader, conn_writer, server_canonical = result
+                        new_aliases = aliases
+                        if peer_addr != server_canonical:
+                            new_aliases = {**aliases, peer_addr: server_canonical}
+
+                        existing = peers.get(server_canonical)
+                        if existing is not None:
+                            if not resolve_race(self_addr, server_canonical, self_addr):
+                                conn_writer.close()
+                                existing.tell(SendFrame(data=data))
+                                return active(srv, self_addr, peers, new_aliases, effective_bl, next_id)
+                            ctx.stop(existing)
+
+                        new_peer_ref = ctx.spawn(
+                            peer_connection(
+                                addr=server_canonical, writer=conn_writer, reader=conn_reader,
+                                handler=handler, parent=ctx.self, logger=log,
+                            ),
+                            f"peer-{server_canonical[0]}-{server_canonical[1]}-{next_id}",
                         )
+                        new_peer_ref.tell(SendFrame(data=data))
+                        new_peers = {**peers, server_canonical: new_peer_ref}
+                        return active(srv, self_addr, new_peers, new_aliases, effective_bl, next_id + 1)
 
                     case InboundAccepted(
                         peer_addr=pa, initiator=initiator,
@@ -484,58 +522,6 @@ def tcp_transport(
                         else:
                             reply_to.tell(self_addr[1])
                         return Behaviors.same()
-
-            async def _handle_send(
-                ctx: ActorContext[TcpTransportMsg],
-                peer_addr: NodeAddr,
-                canonical: NodeAddr,
-                data: bytes,
-                srv: asyncio.Server | None,
-                self_addr: NodeAddr,
-                peers: dict[NodeAddr, ActorRef[PeerMsg]],
-                aliases: dict[NodeAddr, NodeAddr],
-                blacklist: dict[NodeAddr, float],
-            ) -> Behavior[TcpTransportMsg]:
-                peer_ref = peers.get(canonical)
-                if peer_ref is not None:
-                    peer_ref.tell(SendFrame(data=data))
-                    return active(srv, self_addr, peers, aliases, blacklist, next_id)
-
-                result = await connect_and_handshake(peer_addr, self_addr, config)
-                if result is None:
-                    new_bl = {
-                        **blacklist,
-                        canonical: time.monotonic() + config.blacklist_duration,
-                    }
-                    log.debug(
-                        "Blacklisted %s:%d for %.1fs",
-                        peer_addr[0], peer_addr[1], config.blacklist_duration,
-                    )
-                    return active(srv, self_addr, peers, aliases, new_bl, next_id)
-
-                reader, writer, server_canonical = result
-                new_aliases = aliases
-                if peer_addr != server_canonical:
-                    new_aliases = {**aliases, peer_addr: server_canonical}
-
-                existing = peers.get(server_canonical)
-                if existing is not None:
-                    if not resolve_race(self_addr, server_canonical, self_addr):
-                        writer.close()
-                        existing.tell(SendFrame(data=data))
-                        return active(srv, self_addr, peers, new_aliases, blacklist, next_id)
-                    ctx.stop(existing)
-
-                new_peer_ref = ctx.spawn(
-                    peer_connection(
-                        addr=server_canonical, writer=writer, reader=reader,
-                        handler=handler, parent=ctx.self, logger=log,
-                    ),
-                    f"peer-{server_canonical[0]}-{server_canonical[1]}-{next_id}",
-                )
-                new_peer_ref.tell(SendFrame(data=data))
-                new_peers = {**peers, server_canonical: new_peer_ref}
-                return active(srv, self_addr, new_peers, new_aliases, blacklist, next_id + 1)
 
             return Behaviors.receive(receive)
 

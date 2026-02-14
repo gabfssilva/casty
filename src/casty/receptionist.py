@@ -16,6 +16,7 @@ from typing import Any, TYPE_CHECKING
 from casty import ActorContext
 from casty.actor import Behavior, Behaviors
 from casty.cluster_state import NodeAddress, ServiceEntry
+from casty.topology import TopologySnapshot
 
 if TYPE_CHECKING:
     from casty.events import EventStream
@@ -164,6 +165,7 @@ type ReceptionistMsg = (
     | Subscribe[Any]
     | Find[Any]
     | ActorTerminated
+    | TopologySnapshot
 )
 
 
@@ -276,25 +278,23 @@ def receptionist_actor(
         async def receive(
             ctx: ActorContext[ReceptionistMsg], msg: ReceptionistMsg,
         ) -> Behavior[ReceptionistMsg]:
-            from casty.topology import TopologySnapshot
-
-            if isinstance(msg, TopologySnapshot):
-                remote_entries = frozenset(
-                    e for e in msg.registry if e.node != env.self_node
-                )
-                old_keys = {e.key for e in cluster_registry}
-                new_keys = {e.key for e in remote_entries}
-                changed_keys = old_keys ^ new_keys
-                for e in cluster_registry ^ remote_entries:
-                    changed_keys.add(e.key)
-                for key_name in changed_keys:
-                    _notify_subscribers(
-                        key_name, subscribers, local_entries,
-                        remote_entries, env,
-                    )
-                return active(local_entries, remote_entries, subscribers)
-
             match msg:
+                case TopologySnapshot() as snapshot:
+                    remote_entries = frozenset(
+                        e for e in snapshot.registry if e.node != env.self_node
+                    )
+                    old_keys = {e.key for e in cluster_registry}
+                    new_keys = {e.key for e in remote_entries}
+                    changed_keys = old_keys ^ new_keys
+                    for e in cluster_registry ^ remote_entries:
+                        changed_keys.add(e.key)
+                    for key_name in changed_keys:
+                        _notify_subscribers(
+                            key_name, subscribers, local_entries,
+                            remote_entries, env,
+                        )
+                    return active(local_entries, remote_entries, subscribers)
+
                 case Register(key=skey, ref=ref):
                     entry = ServiceEntry(
                         key=skey.name,
