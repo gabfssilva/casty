@@ -82,6 +82,7 @@ from casty.ref import ActorRef, BroadcastRef
 from casty.remote_transport import (
     ClearNodeBlacklist,
     GetPort,
+    InboundMessageHandler,
     MessageEnvelope,
     RemoteTransport,
     SendToNode,
@@ -174,6 +175,7 @@ __all__ = [
     "SendToNode",
     "ClearNodeBlacklist",
     "GetPort",
+    "InboundMessageHandler",
     # Serialization
     "TypeRegistry",
     "JsonSerializer",

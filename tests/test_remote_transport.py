@@ -16,6 +16,7 @@ from casty.remote_transport import (
     FRAME_MESSAGE,
     GetPort,
     InboundHandler,
+    InboundMessageHandler,
     MessageEnvelope,
     RemoteTransport,
     SendToNode,
@@ -55,7 +56,7 @@ class _PlaceholderHandler:
 
 async def _spawn_tcp(
     system: ActorSystem,
-    handler: _PlaceholderHandler,
+    handler: InboundHandler,
     *,
     host: str = "127.0.0.1",
     port: int = 0,
@@ -90,19 +91,22 @@ async def _start_remote_pair() -> tuple[
     await sys_a.__aenter__()
     await sys_b.__aenter__()
 
-    ph_a = _PlaceholderHandler()
-    ph_b = _PlaceholderHandler()
-
-    ref_a, port_a = await _spawn_tcp(sys_a, ph_a)
-    ref_b, port_b = await _spawn_tcp(sys_b, ph_b)
-
     local_a: LocalTransport = sys_a._local_transport  # pyright: ignore[reportPrivateUsage]
     local_b: LocalTransport = sys_b._local_transport  # pyright: ignore[reportPrivateUsage]
+
+    serializer_a = JsonSerializer(TypeRegistry())
+    serializer_b = JsonSerializer(TypeRegistry())
+
+    inbound_a = InboundMessageHandler(local=local_a, serializer=serializer_a, system_name="sys-a")
+    inbound_b = InboundMessageHandler(local=local_b, serializer=serializer_b, system_name="sys-b")
+
+    ref_a, port_a = await _spawn_tcp(sys_a, inbound_a)
+    ref_b, port_b = await _spawn_tcp(sys_b, inbound_b)
 
     remote_a = RemoteTransport(
         local=local_a,
         tcp=ref_a,
-        serializer=JsonSerializer(TypeRegistry()),
+        serializer=serializer_a,
         local_host="127.0.0.1",
         local_port=port_a,
         system_name="sys-a",
@@ -110,14 +114,11 @@ async def _start_remote_pair() -> tuple[
     remote_b = RemoteTransport(
         local=local_b,
         tcp=ref_b,
-        serializer=JsonSerializer(TypeRegistry()),
+        serializer=serializer_b,
         local_host="127.0.0.1",
         local_port=port_b,
         system_name="sys-b",
     )
-
-    ph_a.delegate = remote_a
-    ph_b.delegate = remote_b
 
     return sys_a, sys_b, remote_a, remote_b, local_a, local_b, port_a, port_b
 
@@ -416,21 +417,21 @@ async def test_remote_transport_sender_uses_advertised_address() -> None:
     sys = ActorSystem(name="test-sys")
     await sys.__aenter__()
 
-    handler = _PlaceholderHandler()
-    ref, _ = await _spawn_tcp(sys, handler, client_only=True)
     local: LocalTransport = sys._local_transport  # pyright: ignore[reportPrivateUsage]
+    serializer = JsonSerializer(TypeRegistry())
+    inbound = InboundMessageHandler(local=local, serializer=serializer, system_name="test-sys")
+    ref, _ = await _spawn_tcp(sys, inbound, client_only=True)
 
     remote = RemoteTransport(
         local=local,
         tcp=ref,
-        serializer=JsonSerializer(TypeRegistry()),
+        serializer=serializer,
         local_host="127.0.0.1",
         local_port=5000,
         system_name="test-sys",
         advertised_host="bastion.example.com",
         advertised_port=9999,
     )
-    handler.delegate = remote
 
     try:
         addr = ActorAddress(

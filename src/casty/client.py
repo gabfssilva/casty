@@ -22,7 +22,7 @@ from casty.receptionist import Listing, ServiceInstance, ServiceKey
 from casty.ref import ActorRef
 from casty.remote_transport import (
     GetPort,
-    PlaceholderHandler,
+    InboundMessageHandler,
     RemoteTransport,
     TcpTransportConfig,
     TcpTransportMsg,
@@ -530,10 +530,14 @@ class ClusterClient:
             client_only=True,
             address_map=self._address_map or {},
         )
-        placeholder: PlaceholderHandler = PlaceholderHandler()
+        inbound = InboundMessageHandler(
+            local=self._system.local_transport,
+            serializer=self._serializer,
+            system_name=client_name,
+        )
         tcp_ref: ActorRef[TcpTransportMsg] = self._system.spawn(
             tcp_transport(
-                tcp_config, placeholder,
+                tcp_config, inbound,
                 logger=logging.getLogger(f"casty.client.tcp.{self._system_name}"),
             ),
             "_tcp_transport",
@@ -558,10 +562,9 @@ class ClusterClient:
             on_send_failure=self._on_send_failure,
             advertised_host=self._advertised_host,
             advertised_port=self._advertised_port,
+            task_runner=self._system._ensure_task_runner(),  # pyright: ignore[reportPrivateUsage]
         )
-        placeholder.delegate = self._remote_transport
         self._system.set_remote(self._remote_transport)
-        self._remote_transport.set_task_runner(self._system._ensure_task_runner())  # pyright: ignore[reportPrivateUsage]
 
         self._subscriber_ref = self._system.spawn(
             topology_subscriber(

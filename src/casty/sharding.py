@@ -34,7 +34,7 @@ from casty.topology_actor import TopologyMsg
 from casty.receptionist import Find, Listing, ReceptionistMsg, ServiceKey
 from casty.remote_transport import (
     GetPort,
-    PlaceholderHandler,
+    InboundMessageHandler,
     RemoteTransport,
     TcpTransportConfig,
     TcpTransportMsg,
@@ -435,13 +435,15 @@ class ClusteredActorSystem(ActorSystem):
                 server_ssl=self._tls.server_context if self._tls else None,
                 client_ssl=self._tls.client_context if self._tls else None,
             )
-            # RemoteTransport is the handler — create a temporary one to pass to the actor,
-            # then update it with the real tcp_ref after spawning
             self._serializer = PickleSerializer()
-            placeholder_handler = PlaceholderHandler()
+            inbound = InboundMessageHandler(
+                local=self._local_transport,
+                serializer=self._serializer,
+                system_name=self._name,
+            )
             self._tcp_ref = super().spawn(
                 tcp_transport(
-                    tcp_config, placeholder_handler,
+                    tcp_config, inbound,
                     logger=logging.getLogger(f"casty.tcp.{self._name}"),
                 ),
                 "_tcp_transport",
@@ -463,12 +465,9 @@ class ClusteredActorSystem(ActorSystem):
                 local_host=self._host,
                 local_port=self._port,
                 system_name=self._name,
+                task_runner=self._ensure_task_runner(),
+                local_node_id=self._node_id,
             )
-            # Wire the real handler into the placeholder
-            placeholder_handler.delegate = self._remote_transport
-
-            # Wire task runner into remote transport
-            self._remote_transport.set_task_runner(self._ensure_task_runner())
 
             # Start cluster membership (gossip, heartbeat, failure detection)
             cluster_config = ClusterConfig(
@@ -498,7 +497,6 @@ class ClusteredActorSystem(ActorSystem):
             await super().shutdown()
             raise
 
-        self._remote_transport.set_local_node_id(self._node_id)
         self._remote_transport.update_node_index(
             {self._node_id: (self._host, self._port)}
         )

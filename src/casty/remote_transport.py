@@ -53,20 +53,34 @@ class InboundHandler(Protocol):
     async def on_message(self, data: bytes) -> None: ...
 
 
-class PlaceholderHandler:
-    """Handler that delegates to an ``InboundHandler`` once wired.
+class InboundMessageHandler:
+    """Deserializes inbound TCP frames and delivers them locally.
 
-    The TCP transport actor is spawned before the real handler exists —
-    this placeholder is passed as the initial handler and the real
-    delegate is set immediately after construction.
+    Satisfies ``InboundHandler`` structurally.  Passed directly to
+    ``tcp_transport`` at spawn time — no placeholder or delegate wiring
+    needed.
     """
 
-    def __init__(self) -> None:
-        self.delegate: InboundHandler | None = None
+    def __init__(
+        self,
+        *,
+        local: LocalTransport,
+        serializer: Serializer,
+        system_name: str,
+    ) -> None:
+        self._local = local
+        self._serializer = serializer
+        self._logger = logging.getLogger(f"casty.remote_transport.{system_name}")
 
     async def on_message(self, data: bytes) -> None:
-        if self.delegate is not None:
-            await self.delegate.on_message(data)
+        try:
+            envelope = MessageEnvelope.from_bytes(data)
+            msg = self._serializer.deserialize(envelope.payload)
+            target_addr = ActorAddress.from_uri(envelope.target)
+            self._logger.debug("Received %s -> %s", envelope.type_hint, target_addr.path)
+            self._local.deliver(target_addr, msg)
+        except Exception:
+            self._logger.warning("Failed to handle inbound message", exc_info=True)
 
 
 def set_nodelay(writer: asyncio.StreamWriter) -> None:
@@ -541,8 +555,7 @@ class RemoteTransport:
     """Bridge between ``MessageTransport`` and the TCP transport actor.
 
     Routes local messages through ``LocalTransport`` and remote messages
-    through TCP serialization via ``tell(SendToNode(...))``.  Also acts as
-    an ``InboundHandler`` to receive and deserialize inbound TCP frames.
+    through TCP serialization via ``tell(SendToNode(...))``.
     """
 
     def __init__(
@@ -558,6 +571,7 @@ class RemoteTransport:
         advertised_port: int | None = None,
         task_runner: ActorRef[TaskRunnerMsg] | None = None,
         on_send_failure: Callable[[str, int], None] | None = None,
+        local_node_id: str | None = None,
     ) -> None:
         self._local = local
         self._tcp = tcp
@@ -570,7 +584,7 @@ class RemoteTransport:
         self._task_runner = task_runner
         self._logger = logging.getLogger(f"casty.remote_transport.{system_name}")
         self._node_index: dict[str, NodeAddr] = {}
-        self._local_node_id: str | None = None
+        self._local_node_id = local_node_id
         self._on_send_failure = on_send_failure
 
         self._serializer.set_ref_factory(self._make_ref_from_address)
@@ -584,14 +598,6 @@ class RemoteTransport:
     def sender_port(self) -> int:
         """Port used in outbound sender URIs (advertised or local)."""
         return self._advertised_port or self._local_port
-
-    def set_task_runner(self, task_runner: ActorRef[TaskRunnerMsg]) -> None:
-        """Set the task runner ref after system bootstrap."""
-        self._task_runner = task_runner
-
-    def set_local_node_id(self, node_id: str) -> None:
-        """Set the local node ID for ``node_id``-based locality checks."""
-        self._local_node_id = node_id
 
     def update_node_index(self, index: dict[str, NodeAddr]) -> None:
         """Replace the node index used for ``node_id`` resolution."""
@@ -655,17 +661,6 @@ class RemoteTransport:
             if self._on_send_failure is not None:
                 self._on_send_failure(host, port)
 
-    async def on_message(self, data: bytes) -> None:
-        """Handle an inbound TCP frame by deserializing and delivering locally."""
-        try:
-            envelope = MessageEnvelope.from_bytes(data)
-            msg = self._serializer.deserialize(envelope.payload)
-            target_addr = ActorAddress.from_uri(envelope.target)
-            self._logger.debug("Received %s -> %s", envelope.type_hint, target_addr.path)
-            self._local.deliver(target_addr, msg)
-        except Exception:
-            self._logger.warning("Failed to handle inbound message", exc_info=True)
-
     def make_ref(self, address: ActorAddress) -> ActorRef[Any]:
         """Create an ``ActorRef`` with the appropriate transport for the address."""
         from casty.ref import ActorRef as _ActorRef
@@ -675,10 +670,6 @@ class RemoteTransport:
 
     def _make_ref_from_address(self, address: ActorAddress) -> Any:
         return self.make_ref(address)
-
-    def set_local_port(self, port: int) -> None:
-        """Update local port after binding to an OS-assigned port."""
-        self._local_port = port
 
     def clear_blacklist(self, host: str, port: int) -> None:
         """Clear the TCP circuit breaker for a specific endpoint."""
