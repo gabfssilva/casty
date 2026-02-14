@@ -17,7 +17,7 @@ The factory receives the `entity_id` and returns a `Behavior`. Casty calls it la
 Two `ClusteredActorSystem` instances. Node 1 starts independently; node 2 joins via `seed_nodes`:
 
 ```python
---8<-- "examples/guides/06_clustered.py:59:78"
+--8<-- "examples/guides/06_clustered.py:59:73"
 ```
 
 `wait_for(2)` blocks until both nodes reach `MemberStatus.up`. In production, each node runs in its own process — here we run both in one process for simplicity.
@@ -27,7 +27,7 @@ Two `ClusteredActorSystem` instances. Node 1 starts independently; node 2 joins 
 Both nodes spawn the same shard type. The coordinator distributes shards across the cluster:
 
 ```python
---8<-- "examples/guides/06_clustered.py:81:88"
+--8<-- "examples/guides/06_clustered.py:76:85"
 ```
 
 `num_shards=10` means entity IDs are hashed into 10 buckets. Each bucket is assigned to one node. You send messages through the local proxy — routing to the correct node is transparent.
@@ -37,7 +37,7 @@ Both nodes spawn the same shard type. The coordinator distributes shards across 
 Messages are wrapped in `ShardEnvelope(entity_id, message)`. The proxy routes based on entity ID:
 
 ```python
---8<-- "examples/guides/06_clustered.py:90:106"
+--8<-- "examples/guides/06_clustered.py:88:107"
 ```
 
 Notice: all queries go through `proxy1` on node 1, but entities may live on node 2. The proxy handles the cross-node routing transparently — you never need to know which node owns which shard.
@@ -45,7 +45,7 @@ Notice: all queries go through `proxy1` on node 1, but entities may live on node
 ## Running It
 
 ```python
---8<-- "examples/guides/06_clustered.py:59:109"
+--8<-- "examples/guides/06_clustered.py:113:127"
 ```
 
 Output:

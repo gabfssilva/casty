@@ -70,3 +70,4 @@ markers = ["benchmark: performance benchmarks (deselect with '-m not benchmark')
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
+reportInvalidTypeVarUse = false

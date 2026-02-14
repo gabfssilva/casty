@@ -4,20 +4,20 @@ In this guide you'll implement a **custom serializer using cloudpickle** that ca
 
 ## The Serializer Protocol
 
-Casty uses a `Protocol`, not an ABC. Any object with these three methods satisfies it:
+Casty uses a `Protocol`, not an ABC. Any object with these two methods satisfies it:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:30:35"
+--8<-- "examples/guides/08_custom_serialization.py:30:34"
 ```
 
-`serialize` converts to bytes. `deserialize` converts back. `set_ref_factory` is called by the transport layer so your serializer can reconstruct `ActorRef` objects during deserialization.
+`serialize` converts to bytes. `deserialize` converts back. The optional `ref_factory` keyword argument lets the transport layer pass a factory for reconstructing `ActorRef` objects during deserialization.
 
 ## CloudpickleSerializer
 
 The implementation is minimal — cloudpickle does the heavy lifting:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:40:55"
+--8<-- "examples/guides/08_custom_serialization.py:40:52"
 ```
 
 No inheritance, no registration. If it quacks like a `Serializer`, it *is* a `Serializer`.
@@ -27,7 +27,7 @@ No inheritance, no registration. If it quacks like a `Serializer`, it *is* a `Se
 Standard pickle can't serialize lambdas defined inside functions. Cloudpickle can:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:99:110"
+--8<-- "examples/guides/08_custom_serialization.py:93:102"
 ```
 
 Output:
@@ -42,7 +42,7 @@ cloudpickle: OK
 Cloudpickle captures local variables along with the lambda. `multiplier = 3` survives the serialize-deserialize roundtrip:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:112:119"
+--8<-- "examples/guides/08_custom_serialization.py:105:112"
 ```
 
 ## Messages with Lambdas
@@ -50,11 +50,11 @@ Cloudpickle captures local variables along with the lambda. `multiplier = 3` sur
 A frozen dataclass carrying a callable roundtrips cleanly:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:61:71"
+--8<-- "examples/guides/08_custom_serialization.py:57:67"
 ```
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:122:126"
+--8<-- "examples/guides/08_custom_serialization.py:115:120"
 ```
 
 ## Actor Applying Serialized Functions
@@ -62,11 +62,11 @@ A frozen dataclass carrying a callable roundtrips cleanly:
 The full loop: serialize a message carrying a lambda, deserialize it, and `tell()` it to an actor that applies the function to its state:
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:77:90"
+--8<-- "examples/guides/08_custom_serialization.py:74:87"
 ```
 
 ```python
---8<-- "examples/guides/08_custom_serialization.py:129:147"
+--8<-- "examples/guides/08_custom_serialization.py:123:142"
 ```
 
 Output:
@@ -91,7 +91,7 @@ uv run python examples/guides/08_custom_serialization.py
 
 **What you learned:**
 
-- **`Serializer`** is a Protocol — implement three methods and you're done. No inheritance required.
+- **`Serializer`** is a Protocol — implement two methods and you're done. No inheritance required.
 - **Cloudpickle** handles lambdas, closures, and captured variables that standard pickle cannot.
 - **Messages carrying callables** roundtrip cleanly through cloudpickle serialization.
 - **Structural subtyping** means your serializer satisfies the protocol without any base class.

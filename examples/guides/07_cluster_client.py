@@ -35,6 +35,9 @@ class GetPoints:
 type LoyaltyMsg = AddPoints | GetPoints
 
 
+NUM_SHARDS = 10
+
+
 # ── Entity factory ───────────────────────────────────────────────────
 
 
@@ -54,10 +57,31 @@ def loyalty_entity(entity_id: str) -> Behavior[LoyaltyMsg]:
     return active()
 
 
+# ── Client operations ────────────────────────────────────────────────
+
+
+async def send_points(loyalty: ActorRef[ShardEnvelope[LoyaltyMsg]]) -> None:
+    print("── Sending points ──")
+    loyalty.tell(ShardEnvelope("user-1", AddPoints(100)))
+    loyalty.tell(ShardEnvelope("user-1", AddPoints(50)))
+    loyalty.tell(ShardEnvelope("user-2", AddPoints(200)))
+    await asyncio.sleep(0.5)
+
+
+async def query_points(
+    client: ClusterClient, loyalty: ActorRef[ShardEnvelope[LoyaltyMsg]]
+) -> None:
+    print("\n── Querying points ──")
+    for user in ("user-1", "user-2"):
+        points: int = await client.ask(
+            loyalty,
+            lambda r, uid=user: ShardEnvelope(uid, GetPoints(reply_to=r)),
+            timeout=5.0,
+        )
+        print(f"  {user}: {points} points")
+
+
 # ── Main ─────────────────────────────────────────────────────────────
-
-
-NUM_SHARDS = 10
 
 
 async def main() -> None:
@@ -84,27 +108,10 @@ async def main() -> None:
         ) as client:
             await asyncio.sleep(1.0)
 
-            # Get a ref that routes to the cluster's "loyalty" shard type
             loyalty = client.entity_ref("loyalty", num_shards=NUM_SHARDS)
 
-            # tell() — fire and forget
-            print("── Sending points ──")
-            loyalty.tell(ShardEnvelope("user-1", AddPoints(100)))
-            loyalty.tell(ShardEnvelope("user-1", AddPoints(50)))
-            loyalty.tell(ShardEnvelope("user-2", AddPoints(200)))
-            await asyncio.sleep(0.5)
-
-            # ask() — request-reply from outside the cluster
-            print("\n── Querying points ──")
-            for user in ("user-1", "user-2"):
-                points: int = await client.ask(
-                    loyalty,
-                    lambda r, uid=user: ShardEnvelope(
-                        uid, GetPoints(reply_to=r)
-                    ),
-                    timeout=5.0,
-                )
-                print(f"  {user}: {points} points")
+            await send_points(loyalty)
+            await query_points(client, loyalty)
 
 
 asyncio.run(main())

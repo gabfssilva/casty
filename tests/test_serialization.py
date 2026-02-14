@@ -102,13 +102,13 @@ def test_json_serializer_address_roundtrip() -> None:
 
 def test_nested_dataclass_roundtrip() -> None:
     registry = _make_registry()
-    serializer = JsonSerializer(registry, ref_factory=_ref_factory)
+    serializer = JsonSerializer(registry)
 
     inner = UserGreet(name="Alice", count=42)
     envelope = ShardEnvelope(entity_id="user-1", message=inner)
 
     data = serializer.serialize(envelope)
-    restored = serializer.deserialize(data)
+    restored = serializer.deserialize(data, ref_factory=_ref_factory)
 
     assert isinstance(restored, ShardEnvelope)
     assert isinstance(restored.message, UserGreet)
@@ -119,7 +119,7 @@ def test_nested_dataclass_roundtrip() -> None:
 
 def test_actor_ref_serialization() -> None:
     registry = _make_registry()
-    serializer = JsonSerializer(registry, ref_factory=_ref_factory)
+    serializer = JsonSerializer(registry)
 
     reply_ref: ActorRef[ShardLocation] = ActorRef(
         address=ActorAddress(
@@ -130,7 +130,7 @@ def test_actor_ref_serialization() -> None:
     msg = GetShardLocation(shard_id=7, reply_to=reply_ref)
 
     data = serializer.serialize(msg)
-    restored = serializer.deserialize(data)
+    restored = serializer.deserialize(data, ref_factory=_ref_factory)
 
     assert isinstance(restored, GetShardLocation)
     assert restored.shard_id == 7
@@ -142,7 +142,7 @@ def test_actor_ref_serialization() -> None:
 
 def test_frozenset_roundtrip() -> None:
     registry = _make_registry()
-    serializer = JsonSerializer(registry, ref_factory=_ref_factory)
+    serializer = JsonSerializer(registry)
 
     node1 = NodeAddress(host="127.0.0.1", port=25520)
     node2 = NodeAddress(host="127.0.0.1", port=25521)
@@ -153,7 +153,7 @@ def test_frozenset_roundtrip() -> None:
     state = ClusterState(members=frozenset({member1, member2}))
 
     data = serializer.serialize(state)
-    restored = serializer.deserialize(data)
+    restored = serializer.deserialize(data, ref_factory=_ref_factory)
 
     assert isinstance(restored, ClusterState)
     assert len(restored.members) == 2
@@ -164,13 +164,13 @@ def test_frozenset_roundtrip() -> None:
 
 def test_enum_roundtrip() -> None:
     registry = _make_registry()
-    serializer = JsonSerializer(registry, ref_factory=_ref_factory)
+    serializer = JsonSerializer(registry)
 
     node = NodeAddress(host="127.0.0.1", port=25520)
     member = Member(id="node-1", address=node, status=MemberStatus.leaving, roles=frozenset())
 
     data = serializer.serialize(member)
-    restored = serializer.deserialize(data)
+    restored = serializer.deserialize(data, ref_factory=_ref_factory)
 
     assert isinstance(restored, Member)
     assert restored.status == MemberStatus.leaving
@@ -180,14 +180,14 @@ def test_enum_roundtrip() -> None:
 
 def test_vector_clock_roundtrip() -> None:
     registry = _make_registry()
-    serializer = JsonSerializer(registry, ref_factory=_ref_factory)
+    serializer = JsonSerializer(registry)
 
     node1 = NodeAddress(host="127.0.0.1", port=25520)
     node2 = NodeAddress(host="127.0.0.1", port=25521)
     clock = VectorClock().increment(node1).increment(node1).increment(node2)
 
     data = serializer.serialize(clock)
-    restored = serializer.deserialize(data)
+    restored = serializer.deserialize(data, ref_factory=_ref_factory)
 
     assert isinstance(restored, VectorClock)
     assert restored.version_of(node1) == 2
@@ -196,7 +196,7 @@ def test_vector_clock_roundtrip() -> None:
 
 def test_full_cluster_state_roundtrip() -> None:
     registry = _make_registry()
-    serializer = JsonSerializer(registry, ref_factory=_ref_factory)
+    serializer = JsonSerializer(registry)
 
     node1 = NodeAddress(host="10.0.0.1", port=25520)
     node2 = NodeAddress(host="10.0.0.2", port=25521)
@@ -214,7 +214,7 @@ def test_full_cluster_state_roundtrip() -> None:
     )
 
     data = serializer.serialize(state)
-    restored = serializer.deserialize(data)
+    restored = serializer.deserialize(data, ref_factory=_ref_factory)
 
     assert isinstance(restored, ClusterState)
     assert len(restored.members) == 2
@@ -240,14 +240,14 @@ def test_auto_register_on_serialize() -> None:
 
 def test_shard_location_with_replicas_roundtrip() -> None:
     registry = _make_registry()
-    serializer = JsonSerializer(registry, ref_factory=_ref_factory)
+    serializer = JsonSerializer(registry)
 
     node1 = NodeAddress(host="127.0.0.1", port=25520)
     node2 = NodeAddress(host="127.0.0.1", port=25521)
     location = ShardLocation(shard_id=3, node=node1, replicas=[node2])
 
     data = serializer.serialize(location)
-    restored = serializer.deserialize(data)
+    restored = serializer.deserialize(data, ref_factory=_ref_factory)
 
     assert isinstance(restored, ShardLocation)
     assert restored.shard_id == 3
@@ -259,24 +259,13 @@ def test_shard_location_with_replicas_roundtrip() -> None:
 # --- PickleSerializer tests ---
 
 
-def _pickle_ref_factory(addr: ActorAddress) -> ActorRef[object]:
-    transport = LocalTransport()
-    return ActorRef(address=addr, _transport=transport)
-
-
-def _make_pickle_serializer() -> PickleSerializer:
-    s = PickleSerializer()
-    s.set_ref_factory(_pickle_ref_factory)
-    return s
-
-
 def test_pickle_serializer_implements_protocol() -> None:
     serializer = PickleSerializer()
     assert isinstance(serializer, Serializer)
 
 
 def test_pickle_roundtrip_simple() -> None:
-    serializer = _make_pickle_serializer()
+    serializer = PickleSerializer()
     original = Greet(name="Alice")
     data = serializer.serialize(original)
     restored = serializer.deserialize(data)
@@ -284,7 +273,7 @@ def test_pickle_roundtrip_simple() -> None:
 
 
 def test_pickle_roundtrip_int_field() -> None:
-    serializer = _make_pickle_serializer()
+    serializer = PickleSerializer()
     original = Count(value=42)
     data = serializer.serialize(original)
     restored = serializer.deserialize(data)
@@ -292,7 +281,7 @@ def test_pickle_roundtrip_int_field() -> None:
 
 
 def test_pickle_nested_dataclass_roundtrip() -> None:
-    serializer = _make_pickle_serializer()
+    serializer = PickleSerializer()
     inner = UserGreet(name="Alice", count=42)
     envelope = ShardEnvelope(entity_id="user-1", message=inner)
     data = serializer.serialize(envelope)
@@ -306,7 +295,7 @@ def test_pickle_nested_dataclass_roundtrip() -> None:
 
 
 def test_pickle_actor_ref_serialization() -> None:
-    serializer = _make_pickle_serializer()
+    serializer = PickleSerializer()
     reply_ref: ActorRef[ShardLocation] = ActorRef(
         address=ActorAddress(
             system="test", path="/reply", host="127.0.0.1", port=25521
@@ -316,7 +305,7 @@ def test_pickle_actor_ref_serialization() -> None:
     msg = GetShardLocation(shard_id=7, reply_to=reply_ref)
 
     data = serializer.serialize(msg)
-    restored = serializer.deserialize(data)
+    restored = serializer.deserialize(data, ref_factory=_ref_factory)
 
     assert isinstance(restored, GetShardLocation)
     assert restored.shard_id == 7
@@ -327,7 +316,7 @@ def test_pickle_actor_ref_serialization() -> None:
 
 
 def test_pickle_frozenset_roundtrip() -> None:
-    serializer = _make_pickle_serializer()
+    serializer = PickleSerializer()
     node1 = NodeAddress(host="127.0.0.1", port=25520)
     node2 = NodeAddress(host="127.0.0.1", port=25521)
     member1 = Member(id="node-1", address=node1, status=MemberStatus.up, roles=frozenset({"web"}))
@@ -345,7 +334,7 @@ def test_pickle_frozenset_roundtrip() -> None:
 
 
 def test_pickle_enum_roundtrip() -> None:
-    serializer = _make_pickle_serializer()
+    serializer = PickleSerializer()
     node = NodeAddress(host="127.0.0.1", port=25520)
     member = Member(id="node-1", address=node, status=MemberStatus.leaving, roles=frozenset())
 
@@ -359,7 +348,7 @@ def test_pickle_enum_roundtrip() -> None:
 
 
 def test_pickle_vector_clock_roundtrip() -> None:
-    serializer = _make_pickle_serializer()
+    serializer = PickleSerializer()
     node1 = NodeAddress(host="127.0.0.1", port=25520)
     node2 = NodeAddress(host="127.0.0.1", port=25521)
     clock = VectorClock().increment(node1).increment(node1).increment(node2)
@@ -373,7 +362,7 @@ def test_pickle_vector_clock_roundtrip() -> None:
 
 
 def test_pickle_full_cluster_state_roundtrip() -> None:
-    serializer = _make_pickle_serializer()
+    serializer = PickleSerializer()
     node1 = NodeAddress(host="10.0.0.1", port=25520)
     node2 = NodeAddress(host="10.0.0.2", port=25521)
     member1 = Member(id="node-1", address=node1, status=MemberStatus.up, roles=frozenset({"seed", "web"}))

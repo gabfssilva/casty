@@ -438,7 +438,7 @@ class ClusteredActorSystem(ActorSystem):
             self._serializer = PickleSerializer()
             inbound = InboundMessageHandler(
                 local=self._local_transport,
-                serializer=self._serializer,
+                serializer=self._serializer,  # pyright: ignore[reportArgumentType]
                 system_name=self._name,
             )
             self._tcp_ref = super().spawn(
@@ -461,13 +461,14 @@ class ClusteredActorSystem(ActorSystem):
             self._remote_transport = RemoteTransport(
                 local=self._local_transport,
                 tcp=self._tcp_ref,
-                serializer=self._serializer,
+                serializer=self._serializer,  # pyright: ignore[reportArgumentType]
                 local_host=self._host,
                 local_port=self._port,
                 system_name=self._name,
                 task_runner=self._ensure_task_runner(),
                 local_node_id=self._node_id,
             )
+            inbound.ref_factory = self._remote_transport.make_ref
 
             # Start cluster membership (gossip, heartbeat, failure detection)
             cluster_config = ClusterConfig(

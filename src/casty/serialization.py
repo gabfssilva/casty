@@ -14,9 +14,12 @@ import json
 import logging
 import pickle
 from collections.abc import Callable
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from casty.address import ActorAddress
+
+if TYPE_CHECKING:
+    from casty.ref import ActorRef
 
 logger = logging.getLogger("casty.serialization")
 
@@ -162,8 +165,8 @@ class TypeRegistry:
 class Serializer(Protocol):
     """Protocol for message serialization and deserialization.
 
-    Implementations must handle ``ActorRef`` round-tripping via a
-    ref factory set with ``set_ref_factory``.
+    Implementations must handle ``ActorRef`` round-tripping via the
+    ``ref_factory`` keyword argument passed to ``deserialize()``.
 
     Examples
     --------
@@ -171,20 +174,20 @@ class Serializer(Protocol):
 
     >>> class MySerializer:
     ...     def serialize(self, obj: object) -> bytes: ...
-    ...     def deserialize(self, data: bytes) -> object: ...
-    ...     def set_ref_factory(self, factory) -> None: ...
+    ...     def deserialize(self, data: bytes, *, ref_factory=None) -> object: ...
     """
 
-    def serialize(self, obj: Any) -> bytes:
+    def serialize[M](self, obj: M) -> bytes:
         """Serialize an object to bytes."""
         ...
 
-    def deserialize(self, data: bytes) -> Any:
+    def deserialize[M, R](
+        self,
+        data: bytes,
+        *,
+        ref_factory: Callable[[ActorAddress], ActorRef[R]] | None = None,
+    ) -> M:
         """Deserialize bytes back to an object."""
-        ...
-
-    def set_ref_factory(self, factory: Callable[[ActorAddress], Any]) -> None:
-        """Set the factory used to reconstruct ``ActorRef`` during deserialization."""
         ...
 
 
@@ -198,8 +201,6 @@ class JsonSerializer:
     ----------
     registry : TypeRegistry
         Registry for resolving type names.
-    ref_factory : Callable or None
-        Optional factory for reconstructing ``ActorRef`` instances.
 
     Examples
     --------
@@ -209,36 +210,20 @@ class JsonSerializer:
     {'key': 'value'}
     """
 
-    def __init__(
-        self,
-        registry: TypeRegistry,
-        *,
-        ref_factory: Callable[[ActorAddress], Any] | None = None,
-    ) -> None:
+    def __init__(self, registry: TypeRegistry) -> None:
         self._registry = registry
-        self._ref_factory = ref_factory
 
     @property
     def registry(self) -> TypeRegistry:
         """Return the underlying type registry."""
         return self._registry
 
-    def set_ref_factory(self, factory: Callable[[ActorAddress], Any]) -> None:
-        """Set the factory used to reconstruct ``ActorRef`` during deserialization.
-
-        Parameters
-        ----------
-        factory : Callable[[ActorAddress], Any]
-            A callable that creates an ``ActorRef`` from an ``ActorAddress``.
-        """
-        self._ref_factory = factory
-
-    def serialize(self, obj: Any) -> bytes:
+    def serialize[M](self, obj: M) -> bytes:
         """Serialize an object to JSON bytes.
 
         Parameters
         ----------
-        obj : Any
+        obj : M
             Object to serialize.
 
         Returns
@@ -249,20 +234,27 @@ class JsonSerializer:
         payload = self._to_dict(obj)
         return json.dumps(payload).encode("utf-8")
 
-    def deserialize(self, data: bytes) -> Any:
+    def deserialize[M, R](
+        self,
+        data: bytes,
+        *,
+        ref_factory: Callable[[ActorAddress], ActorRef[R]] | None = None,
+    ) -> M:
         """Deserialize JSON bytes back to a Python object.
 
         Parameters
         ----------
         data : bytes
             UTF-8 encoded JSON from ``serialize``.
+        ref_factory : Callable or None
+            Factory for reconstructing ``ActorRef`` instances from addresses.
 
         Returns
         -------
         Any
         """
         payload: object = json.loads(data.decode("utf-8"))
-        return self._from_dict(payload)
+        return self._from_dict(payload, ref_factory=ref_factory)
 
     def _to_dict(self, value: Any) -> object:
         from casty.ref import ActorRef
@@ -299,12 +291,17 @@ class JsonSerializer:
             case _:
                 return value
 
-    def _from_dict(self, value: object) -> Any:
+    def _from_dict[R](
+        self,
+        value: object,
+        *,
+        ref_factory: Callable[[ActorAddress], ActorRef[R]] | None = None,
+    ) -> Any:
         match value:
             case {"__ref__": str() as uri}:
                 addr = ActorAddress.from_uri(uri)
-                if self._ref_factory is not None:
-                    return self._ref_factory(addr)
+                if ref_factory is not None:
+                    return ref_factory(addr)
                 msg = "Cannot deserialize ActorRef without ref_factory"
                 raise ValueError(msg)
             case {"__enum__": str() as enum_type_name, "value": str() as member_name}:
@@ -312,16 +309,16 @@ class JsonSerializer:
                 return enum_cls[member_name]  # type: ignore[index]
             case {"__frozenset__": list() as _fs}:  # pyright: ignore[reportUnknownVariableType]
                 items = cast(list[object], _fs)
-                return frozenset(self._from_dict(item) for item in items)
+                return frozenset(self._from_dict(item, ref_factory=ref_factory) for item in items)
             case {"__dict__": list() as _pairs}:  # pyright: ignore[reportUnknownVariableType]
                 pairs = cast(list[list[object]], _pairs)
                 return {
-                    self._from_dict(pair[0]): self._from_dict(pair[1])
+                    self._from_dict(pair[0], ref_factory=ref_factory): self._from_dict(pair[1], ref_factory=ref_factory)
                     for pair in pairs
                 }
             case {"__tuple__": list() as _tup}:  # pyright: ignore[reportUnknownVariableType]
                 items = cast(list[object], _tup)
-                return tuple(self._from_dict(item) for item in items)
+                return tuple(self._from_dict(item, ref_factory=ref_factory) for item in items)
             case {"_type": str() as type_name}:
                 cls = self._registry.resolve(type_name)
                 fields = dataclasses.fields(cls)
@@ -329,12 +326,12 @@ class JsonSerializer:
                 kwargs: dict[str, Any] = {}
                 for f in fields:
                     if f.name in str_dict:
-                        kwargs[f.name] = self._from_dict(str_dict[f.name])
+                        kwargs[f.name] = self._from_dict(str_dict[f.name], ref_factory=ref_factory)
                 return cls(**kwargs)
             case dict():
                 return cast(dict[str, object], value)
             case list():
-                return [self._from_dict(item) for item in cast(list[object], value)]
+                return [self._from_dict(item, ref_factory=ref_factory) for item in cast(list[object], value)]
             case _:
                 return value
 
@@ -345,11 +342,6 @@ class PickleSerializer:
     Faster than JSON but not human-readable. Suitable for trusted
     environments where all nodes run the same code.
 
-    Parameters
-    ----------
-    ref_factory : Callable or None
-        Optional factory for reconstructing ``ActorRef`` instances.
-
     Examples
     --------
     >>> ser = PickleSerializer()
@@ -357,28 +349,12 @@ class PickleSerializer:
     {'key': 'value'}
     """
 
-    def __init__(self, *, ref_factory: Callable[[ActorAddress], Any] | None = None) -> None:
-        self._ref_factory = ref_factory
-
-    def set_ref_factory(self, factory: Callable[[ActorAddress], Any]) -> None:
-        """Set the factory used to reconstruct ``ActorRef`` during deserialization.
-
-        Parameters
-        ----------
-        factory : Callable[[ActorAddress], Any]
-            A callable that creates an ``ActorRef`` from an ``ActorAddress``.
-        """
-        from casty import ref as _ref_module
-
-        self._ref_factory = factory
-        _ref_module.ref_restore_hook = lambda uri: factory(ActorAddress.from_uri(uri))
-
-    def serialize(self, obj: Any) -> bytes:
+    def serialize[M](self, obj: M) -> bytes:
         """Serialize an object to pickle bytes (protocol 5).
 
         Parameters
         ----------
-        obj : Any
+        obj : M
             Object to serialize.
 
         Returns
@@ -387,16 +363,36 @@ class PickleSerializer:
         """
         return pickle.dumps(obj, protocol=5)
 
-    def deserialize(self, data: bytes) -> Any:
+    def deserialize[M, R](
+        self,
+        data: bytes,
+        *,
+        ref_factory: Callable[[ActorAddress], ActorRef[R]] | None = None,
+    ) -> M:
         """Deserialize pickle bytes back to a Python object.
+
+        Temporarily installs ``ref_factory`` as the module-level restore
+        hook for the duration of ``pickle.loads()``, then restores the
+        previous value.
 
         Parameters
         ----------
         data : bytes
             Bytes produced by ``serialize``.
+        ref_factory : Callable or None
+            Factory for reconstructing ``ActorRef`` instances from addresses.
 
         Returns
         -------
         Any
         """
+        from casty import ref as _ref_module
+
+        if ref_factory is not None:
+            previous = _ref_module.ref_restore_hook
+            _ref_module.ref_restore_hook = lambda uri: ref_factory(ActorAddress.from_uri(uri))
+            try:
+                return pickle.loads(data)  # noqa: S301
+            finally:
+                _ref_module.ref_restore_hook = previous
         return pickle.loads(data)  # noqa: S301

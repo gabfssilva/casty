@@ -67,15 +67,19 @@ class InboundMessageHandler:
         local: LocalTransport,
         serializer: Serializer,
         system_name: str,
+        ref_factory: Callable[[ActorAddress], ActorRef[Any]] | None = None,
     ) -> None:
         self._local = local
         self._serializer = serializer
+        self.ref_factory = ref_factory
         self._logger = logging.getLogger(f"casty.remote_transport.{system_name}")
 
     async def on_message(self, data: bytes) -> None:
         try:
             envelope = MessageEnvelope.from_bytes(data)
-            msg = self._serializer.deserialize(envelope.payload)
+            msg: object = self._serializer.deserialize(
+                envelope.payload, ref_factory=self.ref_factory,
+            )
             target_addr = ActorAddress.from_uri(envelope.target)
             self._logger.debug("Received %s -> %s", envelope.type_hint, target_addr.path)
             self._local.deliver(target_addr, msg)
@@ -586,8 +590,6 @@ class RemoteTransport:
         self._node_index: dict[str, NodeAddr] = {}
         self._local_node_id = local_node_id
         self._on_send_failure = on_send_failure
-
-        self._serializer.set_ref_factory(self._make_ref_from_address)
 
     @property
     def sender_host(self) -> str:

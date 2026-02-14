@@ -1,7 +1,7 @@
 """Custom Serialization — implement the Serializer protocol with cloudpickle.
 
 Casty's ``Serializer`` is a Protocol, not an ABC. Any object with
-``serialize``, ``deserialize``, and ``set_ref_factory`` methods satisfies it.
+``serialize`` and ``deserialize`` methods satisfies it.
 
 This example uses cloudpickle to serialize lambdas and closures that
 standard pickle cannot handle.
@@ -10,9 +10,9 @@ standard pickle cannot handle.
 """
 
 import asyncio
+import pickle
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
 import cloudpickle
 
@@ -30,8 +30,7 @@ from casty import (
 #
 #   class Serializer(Protocol):
 #       def serialize(self, obj: Any) -> bytes: ...
-#       def deserialize(self, data: bytes) -> Any: ...
-#       def set_ref_factory(self, factory: Callable[[ActorAddress], Any]) -> None: ...
+#       def deserialize(self, data: bytes, *, ref_factory=None) -> Any: ...
 
 
 # ── CloudpickleSerializer ────────────────────────────────────────────
@@ -40,19 +39,16 @@ from casty import (
 class CloudpickleSerializer:
     """Serializer that uses cloudpickle for lambdas and closures."""
 
-    def __init__(self) -> None:
-        self._ref_factory: Callable[[ActorAddress], Any] | None = None
-
-    def serialize(self, obj: Any) -> bytes:
+    def serialize[M](self, obj: M) -> bytes:
         return cloudpickle.dumps(obj)
 
-    def deserialize(self, data: bytes) -> Any:
+    def deserialize[M, R](
+        self,
+        data: bytes,
+        *,
+        ref_factory: Callable[[ActorAddress], ActorRef[R]] | None = None,
+    ) -> M:
         return cloudpickle.loads(data)  # noqa: S301
-
-    def set_ref_factory(
-        self, factory: Callable[[ActorAddress], Any]
-    ) -> None:
-        self._ref_factory = factory
 
 
 # ── Messages ─────────────────────────────────────────────────────────
@@ -90,16 +86,11 @@ def accumulator(value: int = 0) -> Behavior[ComputeMsg]:
     return Behaviors.receive(receive)
 
 
-# ── Main ─────────────────────────────────────────────────────────────
+# ── Demonstrations ───────────────────────────────────────────────────
 
 
-async def main() -> None:
-    serializer = CloudpickleSerializer()
-
-    # Prove standard pickle can't do this
+def pickle_vs_cloudpickle() -> None:
     print("── Standard pickle vs cloudpickle ──")
-    import pickle
-
     try:
         pickle.dumps(lambda x: x + 1)
         print("  pickle:      OK (unexpected)")
@@ -109,7 +100,8 @@ async def main() -> None:
     cloudpickle.dumps(lambda x: x + 1)
     print("  cloudpickle: OK")
 
-    # Roundtrip a lambda that captures a local variable
+
+def roundtrip_closure(serializer: CloudpickleSerializer) -> None:
     print("\n── Roundtrip a closure ──")
     multiplier = 3
     fn: Callable[[int], int] = lambda x: x * multiplier  # noqa: E731
@@ -118,14 +110,16 @@ async def main() -> None:
     restored_fn = serializer.deserialize(data)
     print(f"  restored_fn(10) = {restored_fn(10)}")
 
-    # Roundtrip a message carrying a lambda
+
+def roundtrip_message(serializer: CloudpickleSerializer) -> None:
     print("\n── Roundtrip a message ──")
     msg = ApplyFn(fn=lambda x: x + 42)
     data = serializer.serialize(msg)
     restored_msg = serializer.deserialize(data)
     print(f"  fn(0) = {restored_msg.fn(0)}")
 
-    # Use it in a real actor
+
+async def actor_with_serialized_fns(serializer: CloudpickleSerializer) -> None:
     print("\n── Actor applying serialized functions ──")
     async with ActorSystem() as system:
         ref: ActorRef[ComputeMsg] = system.spawn(accumulator(), "calc")
@@ -145,6 +139,17 @@ async def main() -> None:
             ref, lambda r: GetValue(reply_to=r), timeout=5.0
         )
         print(f"  Final value: {value}")
+
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+
+async def main() -> None:
+    serializer = CloudpickleSerializer()
+    pickle_vs_cloudpickle()
+    roundtrip_closure(serializer)
+    roundtrip_message(serializer)
+    await actor_with_serialized_fns(serializer)
 
 
 asyncio.run(main())

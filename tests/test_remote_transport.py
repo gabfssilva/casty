@@ -120,6 +120,9 @@ async def _start_remote_pair() -> tuple[
         system_name="sys-b",
     )
 
+    inbound_a.ref_factory = remote_a.make_ref
+    inbound_b.ref_factory = remote_b.make_ref
+
     return sys_a, sys_b, remote_a, remote_b, local_a, local_b, port_a, port_b
 
 

@@ -530,7 +530,7 @@ class ClusterClient:
         )
         inbound = InboundMessageHandler(
             local=self._system.local_transport,
-            serializer=self._serializer,
+            serializer=self._serializer,  # pyright: ignore[reportArgumentType]
             system_name=client_name,
         )
         tcp_ref: ActorRef[TcpTransportMsg] = self._system.spawn(
@@ -555,7 +555,7 @@ class ClusterClient:
         self._remote_transport = RemoteTransport(
             local=self._system.local_transport,
             tcp=tcp_ref,
-            serializer=self._serializer,
+            serializer=self._serializer,  # pyright: ignore[reportArgumentType]
             local_host=self._client_host,
             local_port=self._client_port,
             system_name=client_name,
@@ -564,6 +564,7 @@ class ClusterClient:
             advertised_port=self._advertised_port,
             task_runner=self._system._ensure_task_runner(),  # pyright: ignore[reportPrivateUsage]
         )
+        inbound.ref_factory = self._remote_transport.make_ref
         self._system.set_remote(self._remote_transport)
 
         self._subscriber_ref = self._system.spawn(

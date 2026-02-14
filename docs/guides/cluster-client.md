@@ -11,7 +11,7 @@ In this guide you'll connect to a running cluster **from outside** using `Cluste
 A loyalty points system. Each user is a sharded entity:
 
 ```python
---8<-- "examples/guides/07_cluster_client.py:25:54"
+--8<-- "examples/guides/07_cluster_client.py:25:57"
 ```
 
 ## Starting the Cluster
@@ -19,7 +19,7 @@ A loyalty points system. Each user is a sharded entity:
 A single-node cluster with a sharded "loyalty" entity type:
 
 ```python
---8<-- "examples/guides/07_cluster_client.py:63:78"
+--8<-- "examples/guides/07_cluster_client.py:87:102"
 ```
 
 ## Connecting from Outside
@@ -27,7 +27,7 @@ A single-node cluster with a sharded "loyalty" entity type:
 `ClusterClient` takes a list of contact points and the cluster's system name:
 
 ```python
---8<-- "examples/guides/07_cluster_client.py:81:88"
+--8<-- "examples/guides/07_cluster_client.py:104:110"
 ```
 
 The client connects to the contact point, subscribes to `TopologySnapshot` updates, and caches shard allocations locally. `entity_ref("loyalty", num_shards=NUM_SHARDS)` creates a local proxy actor that routes `ShardEnvelope` messages to the cluster.
@@ -37,7 +37,7 @@ The client connects to the contact point, subscribes to `TopologySnapshot` updat
 `tell()` works the same as inside the cluster — wrap the message in `ShardEnvelope`:
 
 ```python
---8<-- "examples/guides/07_cluster_client.py:90:95"
+--8<-- "examples/guides/07_cluster_client.py:63:68"
 ```
 
 ## Request-Reply
@@ -45,7 +45,7 @@ The client connects to the contact point, subscribes to `TopologySnapshot` updat
 `client.ask()` creates a temporary ref, sends the message, and waits for the response:
 
 ```python
---8<-- "examples/guides/07_cluster_client.py:97:107"
+--8<-- "examples/guides/07_cluster_client.py:71:81"
 ```
 
 The reply travels back through the existing TCP connection — no extra server socket or reverse tunnel needed.
@@ -53,7 +53,7 @@ The reply travels back through the existing TCP connection — no extra server s
 ## Running It
 
 ```python
---8<-- "examples/guides/07_cluster_client.py:63:110"
+--8<-- "examples/guides/07_cluster_client.py:87:117"
 ```
 
 Output:

@@ -53,11 +53,10 @@ def counter_entity(entity_id: str) -> Behavior[CounterMsg]:
     return active()
 
 
-# ── Main ─────────────────────────────────────────────────────────────
+# ── Cluster setup ────────────────────────────────────────────────────
 
 
-async def main() -> None:
-    # Start two cluster nodes
+def make_cluster() -> tuple[ClusteredActorSystem, ClusteredActorSystem]:
     node1 = ClusteredActorSystem(
         name="my-cluster",
         host="127.0.0.1",
@@ -71,39 +70,58 @@ async def main() -> None:
         node_id="node-2",
         seed_nodes=[("127.0.0.1", 25520)],
     )
+    return node1, node2
+
+
+def spawn_sharded(
+    node1: ClusteredActorSystem, node2: ClusteredActorSystem
+) -> tuple[ActorRef[ShardEnvelope[CounterMsg]], ActorRef[ShardEnvelope[CounterMsg]]]:
+    proxy1 = node1.spawn(
+        Behaviors.sharded(counter_entity, num_shards=10), "counters"
+    )
+    proxy2 = node2.spawn(
+        Behaviors.sharded(counter_entity, num_shards=10), "counters"
+    )
+    return proxy1, proxy2
+
+
+async def send_and_query(
+    node: ClusteredActorSystem, proxy: ActorRef[ShardEnvelope[CounterMsg]]
+) -> None:
+    # Route messages by entity_id — shards are distributed across nodes
+    print("── Sending increments ──")
+    proxy.tell(ShardEnvelope("alice", Increment(10)))
+    proxy.tell(ShardEnvelope("alice", Increment(5)))
+    proxy.tell(ShardEnvelope("bob", Increment(100)))
+    proxy.tell(ShardEnvelope("carol", Increment(42)))
+    await asyncio.sleep(0.5)
+
+    # Query from either node — routing is transparent
+    print("\n── Querying balances ──")
+    for name in ("alice", "bob", "carol"):
+        value: int = await node.ask(
+            proxy,
+            lambda r, eid=name: ShardEnvelope(eid, GetValue(reply_to=r)),
+            timeout=5.0,
+        )
+        print(f"  {name}: {value}")
+
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+
+async def main() -> None:
+    node1, node2 = make_cluster()
 
     async with node1, node2:
-        # Wait for both nodes to be UP
         await node1.wait_for(2)
         await node2.wait_for(2)
         print("── Cluster formed (2 nodes) ──\n")
 
-        # Spawn sharded entities on both nodes
-        proxy1: ActorRef[ShardEnvelope[CounterMsg]] = node1.spawn(
-            Behaviors.sharded(counter_entity, num_shards=10), "counters"
-        )
-        proxy2: ActorRef[ShardEnvelope[CounterMsg]] = node2.spawn(
-            Behaviors.sharded(counter_entity, num_shards=10), "counters"
-        )
+        proxy1, proxy2 = spawn_sharded(node1, node2)
         await asyncio.sleep(1.0)
 
-        # Route messages by entity_id — shards are distributed across nodes
-        print("── Sending increments ──")
-        proxy1.tell(ShardEnvelope("alice", Increment(10)))
-        proxy1.tell(ShardEnvelope("alice", Increment(5)))
-        proxy1.tell(ShardEnvelope("bob", Increment(100)))
-        proxy2.tell(ShardEnvelope("carol", Increment(42)))
-        await asyncio.sleep(0.5)
-
-        # Query from either node — routing is transparent
-        print("\n── Querying balances ──")
-        for name in ("alice", "bob", "carol"):
-            value: int = await node1.ask(
-                proxy1,
-                lambda r, eid=name: ShardEnvelope(eid, GetValue(reply_to=r)),
-                timeout=5.0,
-            )
-            print(f"  {name}: {value}")
+        await send_and_query(node1, proxy1)
 
 
 asyncio.run(main())
