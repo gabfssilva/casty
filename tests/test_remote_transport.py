@@ -380,6 +380,7 @@ async def test_tcp_address_map_translates_on_send() -> None:
         frame = await _read_raw_frame(reader)
         assert frame[0] == FRAME_MESSAGE
         received.append(frame[1:])
+        writer.close()
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     actual_port = server.sockets[0].getsockname()[1]
@@ -414,6 +415,7 @@ async def test_remote_transport_sender_uses_advertised_address() -> None:
         await writer.drain()
         frame = await _read_raw_frame(reader)
         captured_data.append(frame[1:])
+        writer.close()
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     actual_port = server.sockets[0].getsockname()[1]
