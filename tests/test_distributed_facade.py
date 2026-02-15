@@ -4,7 +4,7 @@ import asyncio
 
 from casty.distributed import Distributed
 from casty.distributed.lock import Lock
-from casty.sharding import ClusteredActorSystem
+from casty.cluster.system import ClusteredActorSystem
 
 
 async def test_distributed_counter() -> None:

@@ -28,12 +28,30 @@ Available hooks: `pre_start` (before first message), `post_stop` (after final me
 
 ## Event Stream
 
-The `EventStream` is a system-wide publish/subscribe bus for observability. Every significant actor lifecycle event is published automatically:
+The event stream is a system-wide publish/subscribe bus for observability, implemented as an actor. `system.event_stream` returns an `ActorRef[EventStreamMsg]` — you subscribe by spawning a handler actor and sending `EventStreamSubscribe`:
 
 ```python
-system.event_stream.subscribe(ActorStarted, lambda e: print(f"Started: {e.ref}"))
-system.event_stream.subscribe(ActorStopped, lambda e: print(f"Stopped: {e.ref}"))
-system.event_stream.subscribe(DeadLetter, lambda e: print(f"Dead letter: {e.message}"))
+from casty import (
+    ActorStarted, ActorStopped, DeadLetter,
+    EventStreamSubscribe, Behaviors,
+)
+
+def lifecycle_logger() -> Behavior[ActorStarted | ActorStopped | DeadLetter]:
+    async def receive(ctx, msg):
+        match msg:
+            case ActorStarted(ref=ref):
+                print(f"Started: {ref}")
+            case ActorStopped(ref=ref):
+                print(f"Stopped: {ref}")
+            case DeadLetter(message=message):
+                print(f"Dead letter: {message}")
+        return Behaviors.same()
+    return Behaviors.receive(receive)
+
+logger = system.spawn(lifecycle_logger(), "lifecycle-logger")
+system.event_stream.tell(EventStreamSubscribe(event_type=ActorStarted, handler=logger))
+system.event_stream.tell(EventStreamSubscribe(event_type=ActorStopped, handler=logger))
+system.event_stream.tell(EventStreamSubscribe(event_type=DeadLetter, handler=logger))
 ```
 
 A `DeadLetter` is published when a message is sent to an actor that has already stopped. This is valuable for debugging message routing issues.

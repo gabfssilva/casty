@@ -1,7 +1,8 @@
-"""Replication data types for primary-replica shard failover.
+"""Replication protocol types used by event sourcing and shard replication.
 
-Defines configuration and internal messages used by the shard coordinator
-and replica region actors to replicate events across cluster nodes.
+Defines ``ReplicationConfig``, ``ReplicateEvents``, and ``ReplicateEventsAck``
+— the protocol primitives needed by ``core/event_sourcing.py`` (L1) and
+consumed by sharding actors at higher layers.
 """
 from __future__ import annotations
 
@@ -9,9 +10,8 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from casty.cluster_state import NodeAddress
-    from casty.journal import PersistedEvent
-    from casty.ref import ActorRef
+    from casty.core.journal import PersistedEvent
+    from casty.core.ref import ActorRef
 
 
 @dataclass(frozen=True)
@@ -38,27 +38,6 @@ class ReplicationConfig:
     replicas: int = 0
     min_acks: int = 0
     ack_timeout: float = 5.0
-
-
-@dataclass(frozen=True)
-class ShardAllocation:
-    """Tracks which node owns a shard and where its replicas live.
-
-    Parameters
-    ----------
-    primary : NodeAddress
-        Node that owns the shard and handles writes.
-    replicas : tuple[NodeAddress, ...]
-        Nodes holding passive replica copies.
-
-    Examples
-    --------
-    >>> alloc = ShardAllocation(primary=NodeAddress("10.0.0.1", 25520))
-    >>> alloc.replicas
-    ()
-    """
-    primary: NodeAddress
-    replicas: tuple[NodeAddress, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -108,27 +87,3 @@ class ReplicateEventsAck:
     """
     entity_id: str
     sequence_nr: int
-
-
-@dataclass(frozen=True)
-class ReplicaPromoted:
-    """Internal message: notifies a replica that it has been promoted to primary.
-
-    Sent by the shard coordinator when the previous primary is detected as
-    down.  The replica transitions from passive event persistence to active
-    command handling.
-
-    Parameters
-    ----------
-    entity_id : str
-        Entity being promoted.
-    shard_id : int
-        Shard that owns the entity.
-
-    Examples
-    --------
-    >>> ReplicaPromoted("user-1", shard_id=7)
-    ReplicaPromoted(entity_id='user-1', shard_id=7)
-    """
-    entity_id: str
-    shard_id: int

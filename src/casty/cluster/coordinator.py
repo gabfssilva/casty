@@ -6,15 +6,16 @@ from dataclasses import dataclass
 from typing import Any, Protocol, TYPE_CHECKING
 
 from casty.actor import Behavior, Behaviors
-from casty.address import ActorAddress
-from casty.cluster_state import MemberStatus, NodeAddress
+from casty.core.address import ActorAddress
+from casty.cluster.state import MemberStatus, NodeAddress
 from casty.ref import ActorRef
-from casty.replication import ReplicationConfig, ShardAllocation
-from casty.topology import TopologySnapshot
+from casty.cluster.state import ShardAllocation
+from casty.core.replication import ReplicationConfig
+from casty.cluster.topology import TopologySnapshot
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
-    from casty.remote_transport import RemoteTransport
+    from casty.remote.tcp_transport import RemoteTransport
 
 
 @dataclass(frozen=True)
@@ -31,20 +32,12 @@ class ShardLocation:
 
 
 @dataclass(frozen=True)
-class PublishAllocations:
-    shard_type: str
-    allocations: dict[int, ShardAllocation]
-    epoch: int
-
-
-@dataclass(frozen=True)
 class RegisterRegion:
     node: NodeAddress
 
 
 type CoordinatorMsg = (
     GetShardLocation
-    | PublishAllocations
     | RegisterRegion
     | TopologySnapshot
 )
@@ -80,7 +73,7 @@ class CoordinatorConfig:
     strategy: ShardAllocationStrategy
     num_replicas: int
     shard_type: str
-    publish_ref: ActorRef[PublishAllocations] | None
+    topology_ref: ActorRef[Any] | None
     remote_transport: RemoteTransport | None
     system_name: str
     logger: logging.Logger
@@ -150,7 +143,6 @@ def shard_coordinator_actor(
     available_nodes: frozenset[NodeAddress],
     replication: ReplicationConfig | None = None,
     shard_type: str = "",
-    publish_ref: ActorRef[PublishAllocations] | None = None,
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
     logger: logging.Logger | None = None,
@@ -163,7 +155,7 @@ def shard_coordinator_actor(
         strategy=strategy,
         num_replicas=replication.replicas if replication is not None else 0,
         shard_type=shard_type,
-        publish_ref=publish_ref,
+        topology_ref=topology_ref,
         remote_transport=remote_transport,
         system_name=system_name,
         logger=log,
@@ -178,7 +170,7 @@ def shard_coordinator_actor(
 
     if topology_ref is not None and self_node is not None:
         async def setup(ctx: ActorContext[CoordinatorMsg]) -> Behavior[CoordinatorMsg]:
-            from casty.topology import SubscribeTopology
+            from casty.cluster.topology import SubscribeTopology
             topology_ref.tell(SubscribeTopology(reply_to=ctx.self))  # type: ignore[arg-type]
             return initial
         return Behaviors.setup(setup)
@@ -268,12 +260,15 @@ def leader_behavior(
     nodes: frozenset[NodeAddress],
     region_nodes: frozenset[NodeAddress],
     epoch: int,
+    buffer: tuple[GetShardLocation, ...] = (),
 ) -> Behavior[CoordinatorMsg]:
-    """Leader mode: allocates new shards, publishes via publish_ref."""
+    """Leader mode: allocates new shards, publishes to topology actor."""
 
     def publish(allocs: dict[int, ShardAllocation], new_epoch: int) -> None:
-        if cfg.publish_ref is not None:
-            cfg.publish_ref.tell(PublishAllocations(
+        if cfg.topology_ref is not None:
+            from casty.cluster.topology_actor import UpdateShardAllocations
+
+            cfg.topology_ref.tell(UpdateShardAllocations(
                 shard_type=cfg.shard_type,
                 allocations=allocs,
                 epoch=new_epoch,
@@ -333,6 +328,7 @@ def leader_behavior(
                         nodes=up_nodes,
                         region_nodes=region_nodes,
                         epoch=snapshot.allocation_epoch,
+                        buffer=buffer,
                     )
                 effective_up = up_nodes - snapshot.unreachable
                 if effective_up != nodes or current_allocs != allocations:
@@ -342,17 +338,21 @@ def leader_behavior(
                         nodes=effective_up,
                         region_nodes=region_nodes,
                         epoch=current_epoch,
+                        buffer=buffer,
                     )
                 return Behaviors.same()
 
             case RegisterRegion(node):
-                return leader_behavior(
+                new_behavior = leader_behavior(
                     cfg=cfg,
                     allocations=allocations,
                     nodes=nodes,
                     region_nodes=region_nodes | {node},
                     epoch=epoch,
                 )
+                for buffered in buffer:
+                    ctx.self.tell(buffered)
+                return new_behavior
 
             case GetShardLocation(shard_id, reply_to):
                 if shard_id in allocations:
@@ -363,6 +363,16 @@ def leader_behavior(
                         replicas=alloc.replicas,
                     ))
                     return Behaviors.same()
+
+                if not effective_nodes:
+                    return leader_behavior(
+                        cfg=cfg,
+                        allocations=allocations,
+                        nodes=nodes,
+                        region_nodes=region_nodes,
+                        epoch=epoch,
+                        buffer=(*buffer, msg),
+                    )
 
                 new_alloc = allocate_shard(
                     shard_id, cfg.strategy, allocations, effective_nodes, cfg.num_replicas,

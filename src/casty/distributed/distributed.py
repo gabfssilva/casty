@@ -19,9 +19,9 @@ from casty.distributed.semaphore import Semaphore, semaphore_entity_factory
 from casty.distributed.set import Set, set_entity, persistent_set_entity
 
 if TYPE_CHECKING:
-    from casty.journal import EventJournal
+    from casty.core.journal import EventJournal
     from casty.ref import ActorRef
-    from casty.sharding import ClusteredActorSystem
+    from casty.cluster.system import ClusteredActorSystem
 
 
 def get_or_spawn_region(

@@ -43,17 +43,17 @@ Walking through each arm:
 Once a cart is checked out or expired, it ignores all messages:
 
 ```python
---8<-- "examples/guides/02_shopping_cart.py:139:154"
+--8<-- "examples/guides/02_shopping_cart.py:139:145"
 ```
 
-Both behaviors do the same thing: return `Behaviors.same()` for every message. There is no flag to accidentally forget to check. A checked-out cart can't accept items because the behavior simply doesn't handle them. The behavior *is* the state.
+`Behaviors.ignore()` accepts any message and does nothing. A checked-out cart can't accept items because the behavior simply doesn't handle them. The behavior *is* the state.
 
 ## Wiring It Up
 
 The `shopping_cart` function ties everything together with `Behaviors.setup()`:
 
 ```python
---8<-- "examples/guides/02_shopping_cart.py:160:165"
+--8<-- "examples/guides/02_shopping_cart.py:150:155"
 ```
 
 `Behaviors.setup()` gives us an `ActorContext` before the first message arrives. We use it to spawn a scheduler as a **child actor** and pass its ref to `empty_cart`. Because the scheduler is a child, it shares the cart's lifecycle — when the cart stops, the scheduler stops with it.
@@ -63,7 +63,7 @@ The `shopping_cart` function ties everything together with `Behaviors.setup()`:
 The `main()` function spawns two carts: one that checks out successfully, and one that gets abandoned:
 
 ```python
---8<-- "examples/guides/02_shopping_cart.py:171:196"
+--8<-- "examples/guides/02_shopping_cart.py:161:186"
 ```
 
 Output:

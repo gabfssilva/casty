@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 
-from casty.mailbox import Mailbox, MailboxOverflowStrategy
+from casty.core.mailbox import Mailbox, MailboxOverflowStrategy
 
 
 async def test_unbounded_mailbox_put_and_get() -> None:

@@ -14,26 +14,22 @@ from casty import (
     NodeAddress,
     ServiceEntry,
 )
-from casty.receptionist import (
+from casty.cluster.receptionist import (
     Find,
     Listing,
     ServiceKey,
     receptionist_actor,
 )
-from casty.shard_coordinator_actor import (
+from casty.cluster.coordinator import (
     CoordinatorMsg,
     RegisterRegion,
     shard_coordinator_actor,
     LeastShardStrategy,
-    PublishAllocations,
 )
-from casty.sharding import (
-    ShardEnvelope,
-    broadcast_proxy_behavior,
-    shard_proxy_behavior,
-)
-from casty.topology import SubscribeTopology, TopologySnapshot
-from casty.topology_actor import TopologyMsg
+from casty.cluster.envelope import ShardEnvelope
+from casty.cluster.proxy import broadcast_proxy_behavior, shard_proxy_behavior
+from casty.cluster.topology import SubscribeTopology, TopologySnapshot
+from casty.cluster.topology_actor import TopologyMsg
 
 
 SELF_NODE = NodeAddress(host="127.0.0.1", port=2551)
@@ -89,15 +85,6 @@ async def test_shard_proxy_evicts_on_unreachable_snapshot() -> None:
                 return Behaviors.same()
             return Behaviors.receive(receive)
 
-        pub_msgs: list[PublishAllocations] = []
-
-        def capture_publish() -> Behavior[PublishAllocations]:
-            async def receive(ctx: ActorContext[PublishAllocations], msg: PublishAllocations) -> Behavior[PublishAllocations]:
-                pub_msgs.append(msg)
-                return Behaviors.same()
-            return Behaviors.receive(receive)
-
-        publish_ref = system.spawn(capture_publish(), "_publish")
         topo_ref = system.spawn(fake_topology_actor(), "_topology")
         region_ref = system.spawn(region_behavior(), "_region")
 
@@ -106,7 +93,6 @@ async def test_shard_proxy_evicts_on_unreachable_snapshot() -> None:
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({SELF_NODE, OTHER_NODE}),
                 shard_type="test",
-                publish_ref=publish_ref,
                 topology_ref=topo_ref,  # type: ignore[arg-type]
                 self_node=SELF_NODE,
             ),

@@ -13,23 +13,23 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from casty.actor import Behavior, Behaviors
-from casty.address import ActorAddress
-from casty.cluster_state import (
+from casty.core.address import ActorAddress
+from casty.cluster.state import (
     ClusterState,
     Member,
     MemberStatus,
     NodeAddress,
     NodeId,
     ServiceEntry,
+    ShardAllocation,
 )
-from casty.failure_detector import PhiAccrualFailureDetector
+from casty.cluster.failure_detector import PhiAccrualFailureDetector
 from casty.ref import ActorRef
-from casty.topology import SubscribeTopology, TopologySnapshot, UnsubscribeTopology
+from casty.cluster.topology import SubscribeTopology, TopologySnapshot, UnsubscribeTopology
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
-    from casty.remote_transport import RemoteTransport
-    from casty.replication import ShardAllocation
+    from casty.remote.tcp_transport import RemoteTransport
 
 
 @dataclass(frozen=True)

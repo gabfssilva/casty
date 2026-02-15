@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 
 from casty import ActorSystem, PhiAccrualFailureDetector
-from casty.cluster_state import (
+from casty.cluster.state import (
     ClusterState,
     Member,
     MemberStatus,
     NodeAddress,
     VectorClock,
 )
-from casty.topology_actor import (
+from casty.cluster.topology_actor import (
     DownMember,
     GetState,
     GossipMessage,

@@ -25,7 +25,7 @@ def configure_logging() -> None:
         "casty.transport",
         "casty.system",
         "casty.actor",
-        "casty.sharding",
+        "casty.cluster",
         "casty.singleton",
     ]
     for name in casty_loggers:

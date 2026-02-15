@@ -23,8 +23,8 @@ from casty import (
     Behaviors,
     CancelSchedule,
     ScheduleOnce,
+    scheduler,
 )
-from casty.scheduler import scheduler
 
 
 # ── Messages ─────────────────────────────────────────────────────────
@@ -137,21 +137,11 @@ def active_cart(
 
 
 def checked_out() -> Behavior[CartMsg]:
-    async def receive(
-        ctx: ActorContext[CartMsg], msg: CartMsg
-    ) -> Behavior[CartMsg]:
-        return Behaviors.same()
-
-    return Behaviors.receive(receive)
+    return Behaviors.ignore()
 
 
 def expired() -> Behavior[CartMsg]:
-    async def receive(
-        ctx: ActorContext[CartMsg], msg: CartMsg
-    ) -> Behavior[CartMsg]:
-        return Behaviors.same()
-
-    return Behaviors.receive(receive)
+    return Behaviors.ignore()
 
 
 # ── Setup wrapper ────────────────────────────────────────────────────

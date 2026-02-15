@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from casty import ActorRef, ActorSystem, Behavior, Behaviors, OneForOneStrategy
-from casty.sharding import ClusteredActorSystem
-from casty.cluster_state import NodeAddress, ServiceEntry
-from casty.receptionist import (
+from casty.cluster.system import ClusteredActorSystem
+from casty.cluster.state import NodeAddress, ServiceEntry
+from casty.cluster.receptionist import (
     Deregister,
     Find,
     Listing,
@@ -16,7 +16,7 @@ from casty.receptionist import (
     Subscribe,
     receptionist_actor,
 )
-from casty.topology import TopologySnapshot
+from casty.cluster.topology import TopologySnapshot
 
 
 @dataclass(frozen=True)

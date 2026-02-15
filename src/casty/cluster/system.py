@@ -4,13 +4,10 @@ Extends the core ``ActorSystem`` with transparent sharding, broadcast actors,
 and remote ``ask()`` support over TCP.  ``ClusteredActorSystem`` is the main
 entry point for multi-node deployments.
 """
-# src/casty/sharding.py
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING, cast, overload
 from uuid import uuid4
 
@@ -21,18 +18,21 @@ from casty.actor import (
     ShardedBehavior,
     SingletonBehavior,
 )
-from casty.address import ActorAddress
-from casty.cluster_state import ClusterState, MemberStatus, NodeAddress, NodeId
-from casty.mailbox import Mailbox
-from casty.ref import ActorRef, BroadcastRef
-from casty.cluster import (
+from casty.cluster.cluster import (
     Cluster,
     ClusterConfig,
     WaitForMembers,
 )
-from casty.topology_actor import TopologyMsg
-from casty.receptionist import Find, Listing, ReceptionistMsg, ServiceKey
-from casty.remote_transport import (
+from casty.cluster.receptionist import Find, Listing, ReceptionistMsg, ServiceKey
+from casty.cluster.state import ClusterState, MemberStatus, NodeAddress, NodeId
+from casty.cluster.topology_actor import TopologyMsg
+from casty.core.mailbox import Mailbox
+from casty.core.system import ActorSystem
+from casty.ref import ActorRef, BroadcastRef
+from casty.remote.ref import RemoteActorRef
+from casty.core.address import ActorAddress
+from casty.remote.serialization import PickleSerializer
+from casty.remote.tcp_transport import (
     GetPort,
     InboundMessageHandler,
     RemoteTransport,
@@ -40,241 +40,23 @@ from casty.remote_transport import (
     TcpTransportMsg,
     tcp_transport,
 )
-from casty.serialization import PickleSerializer
-from casty.system import ActorSystem
-from casty.topology import SubscribeTopology, TopologySnapshot
-from casty.transport import MessageTransport
+from casty.core.transport import LocalTransport
+from casty.remote.tls import Config as TlsConfig
+from casty.cluster.coordinator import (
+    CoordinatorMsg,
+    LeastShardStrategy,
+    RegisterRegion,
+    shard_coordinator_actor,
+)
+from casty.cluster.envelope import ShardEnvelope
+from casty.cluster.proxy import broadcast_proxy_behavior, shard_proxy_behavior
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
     from casty.config import CastyConfig
     from casty.distributed import Distributed
-    from casty.journal import EventJournal
-
-from casty.tls import Config as TlsConfig
-
-from casty.shard_coordinator_actor import (
-    CoordinatorMsg,
-    GetShardLocation,
-    LeastShardStrategy,
-    PublishAllocations,
-    RegisterRegion,
-    ShardLocation,
-    shard_coordinator_actor,
-)
-
-
-
-
-@dataclass(frozen=True)
-class ShardEnvelope[M]:
-    """Envelope that routes a message to a specific entity within a shard region.
-
-    Wraps a message ``M`` together with an ``entity_id`` used for deterministic
-    shard assignment.  The shard proxy computes the target shard from the
-    ``entity_id`` and forwards the envelope to the owning node.
-
-    Parameters
-    ----------
-    entity_id : str
-        Logical identifier of the target entity.
-    message : M
-        The payload message delivered to the entity actor.
-
-    Examples
-    --------
-    >>> ref.tell(ShardEnvelope("user-42", Deposit(amount=100)))
-    """
-    entity_id: str
-    message: M
-
-
-def entity_shard(entity_id: str, num_shards: int) -> int:
-    """Deterministic shard assignment -- consistent across processes.
-
-    Parameters
-    ----------
-    entity_id : str
-        The entity identifier to hash.
-    num_shards : int
-        Total number of shards.
-
-    Returns
-    -------
-    int
-        Shard index in ``[0, num_shards)``.
-
-    Examples
-    --------
-    >>> entity_shard("user-42", 100)
-    72
-    """
-    digest = hashlib.md5(entity_id.encode(), usedforsecurity=False).digest()
-    return int.from_bytes(digest[:4], "big") % num_shards
-
-
-def shard_proxy_behavior(
-    *,
-    coordinator: ActorRef[CoordinatorMsg],
-    local_region: ActorRef[Any],
-    self_node: NodeAddress,
-    shard_name: str,
-    num_shards: int,
-    remote_transport: RemoteTransport | None,
-    system_name: str,
-    logger: logging.Logger | None = None,
-    topology_ref: ActorRef[Any] | None = None,
-) -> Behavior[Any]:
-    """Proxy actor that routes ShardEnvelopes to the correct region.
-
-    - Computes shard_id from entity_id
-    - Caches shard->node mappings
-    - Buffers messages while waiting for coordinator response
-    """
-    log = logger or logging.getLogger(f"casty.shard_proxy.{system_name}")
-
-    def active(
-        shard_cache: dict[int, NodeAddress],
-        buffer: dict[int, tuple[ShardEnvelope[Any], ...]],
-    ) -> Behavior[Any]:
-        async def receive(ctx: Any, msg: Any) -> Any:
-            match msg:
-                case TopologySnapshot() as snapshot:
-                    evicted = {
-                        sid: n for sid, n in shard_cache.items()
-                        if n not in snapshot.unreachable
-                    }
-                    if len(evicted) < len(shard_cache):
-                        log.info(
-                            "Evicted %d cached shards (unreachable nodes)",
-                            len(shard_cache) - len(evicted),
-                        )
-                    return active(evicted, buffer)
-
-                case ShardEnvelope():
-                    envelope = cast(ShardEnvelope[Any], msg)
-                    shard_id = entity_shard(envelope.entity_id, num_shards)
-
-                    if shard_id in shard_cache:
-                        node = shard_cache[shard_id]
-                        if node == self_node:
-                            local_region.tell(envelope)
-                        elif remote_transport is not None:
-                            remote_addr = ActorAddress(
-                                system=system_name,
-                                path=f"/_region-{shard_name}",
-                                host=node.host,
-                                port=node.port,
-                            )
-                            remote_ref: ActorRef[Any] = (
-                                remote_transport.make_ref(remote_addr)
-                            )
-                            remote_ref.tell(envelope)
-                        return Behaviors.same()
-
-                    existing_buf = buffer.get(shard_id, ())
-                    new_buf = (*existing_buf, envelope)
-                    new_buffer = {**buffer, shard_id: new_buf}
-                    if not existing_buf:
-                        log.debug("Shard %d: requesting location (entity=%s)", shard_id, envelope.entity_id)
-                        coordinator.tell(
-                            GetShardLocation(
-                                shard_id=shard_id, reply_to=ctx.self
-                            )
-                        )
-                    return active(shard_cache, new_buffer)
-
-                case ShardLocation(shard_id=sid, node=node):
-                    new_cache = {**shard_cache, sid: node}
-                    buffered = buffer.get(sid, ())
-                    log.debug("Shard %d -> %s:%d (flushed %d)", sid, node.host, node.port, len(buffered))
-                    new_buffer = {k: v for k, v in buffer.items() if k != sid}
-                    for envelope in buffered:
-                        if node == self_node:
-                            local_region.tell(envelope)
-                        elif remote_transport is not None:
-                            remote_addr = ActorAddress(
-                                system=system_name,
-                                path=f"/_region-{shard_name}",
-                                host=node.host,
-                                port=node.port,
-                            )
-                            remote_ref: ActorRef[Any] = (
-                                remote_transport.make_ref(remote_addr)
-                            )
-                            remote_ref.tell(envelope)
-                    return active(new_cache, new_buffer)
-
-                case _:
-                    return Behaviors.same()
-
-        return Behaviors.receive(receive)
-
-    if topology_ref is not None:
-        async def setup(ctx: Any) -> Any:
-            topology_ref.tell(SubscribeTopology(reply_to=ctx.self))
-            return active({}, {})
-        return Behaviors.setup(setup)
-
-    return active({}, {})
-
-
-def broadcast_proxy_behavior(
-    *,
-    local_ref: ActorRef[Any],
-    self_node: NodeAddress,
-    bcast_name: str,
-    remote_transport: RemoteTransport | None,
-    system_name: str,
-    topology_ref: ActorRef[Any] | None = None,
-) -> Behavior[Any]:
-    """Proxy that fans out every message to all cluster members.
-
-    Receives ``ClusterState`` or ``TopologySnapshot`` to track membership.
-    Any other message is forwarded to every ``up`` member — locally via
-    ``local_ref.tell()`` and remotely via ``remote_transport.make_ref()``.
-    """
-
-    def active(members: frozenset[NodeAddress]) -> Behavior[Any]:
-        async def receive(ctx: Any, msg: Any) -> Behavior[Any]:
-            match msg:
-                case TopologySnapshot() as snapshot:
-                    up = frozenset(
-                        m.address for m in snapshot.members
-                        if m.status == MemberStatus.up
-                    )
-                    return active(up)
-
-                case ClusterState() as state:
-                    up = frozenset(
-                        m.address for m in state.members if m.status == MemberStatus.up
-                    )
-                    return active(up)
-                case _:
-                    for node in members:
-                        if node == self_node:
-                            local_ref.tell(msg)
-                        elif remote_transport is not None:
-                            addr = ActorAddress(
-                                system=system_name,
-                                path=f"/_bcast-{bcast_name}",
-                                host=node.host,
-                                port=node.port,
-                            )
-                            remote_ref: ActorRef[Any] = remote_transport.make_ref(addr)
-                            remote_ref.tell(msg)
-                    return Behaviors.same()
-
-        return Behaviors.receive(receive)
-
-    if topology_ref is not None:
-        async def setup(ctx: Any) -> Any:
-            topology_ref.tell(SubscribeTopology(reply_to=ctx.self))
-            return active(frozenset({self_node}))
-        return Behaviors.setup(setup)
-
-    return active(frozenset({self_node}))
+    from casty.core.journal import EventJournal
 
 
 class ClusteredActorSystem(ActorSystem):
@@ -294,7 +76,7 @@ class ClusteredActorSystem(ActorSystem):
         Advertised hostname for this node.
     port : int
         Advertised port for this node (use ``0`` for auto-assignment).
-    seed_nodes : list[tuple[str, int]] | None
+    seed_nodes : tuple[tuple[str, int], ...] | None
         Initial contact points for cluster join.
     roles : frozenset[str]
         Roles assigned to this node (for role-aware shard placement).
@@ -326,7 +108,7 @@ class ClusteredActorSystem(ActorSystem):
         host: str,
         port: int,
         node_id: NodeId,
-        seed_nodes: list[tuple[str, int]] | None = None,
+        seed_nodes: tuple[tuple[str, int], ...] | None = None,
         roles: frozenset[str] = frozenset(),
         bind_host: str | None = None,
         config: CastyConfig | None = None,
@@ -334,22 +116,34 @@ class ClusteredActorSystem(ActorSystem):
         required_quorum: int | None = None,
     ) -> None:
         super().__init__(name=name, config=config)
+        self._local_transport = LocalTransport()
         self._host = host
         self._port: int = port
         self._node_id = node_id
         self._bind_host = bind_host or host
-        self._seed_nodes = seed_nodes or []
+        self._seed_nodes = seed_nodes or ()
         self._roles = roles
         self._self_node = NodeAddress(host=host, port=port)
         self._coordinators: dict[str, ActorRef[CoordinatorMsg]] = {}
         self._receptionist_ref: ActorRef[ReceptionistMsg] | None = None
         self._topology_ref: ActorRef[TopologyMsg] | None = None
         self._required_quorum = required_quorum
-        self._logger = logging.getLogger(f"casty.sharding.{name}")
+        self._logger = logging.getLogger(f"casty.cluster.{name}")
         self._tls = tls
         self._serializer = PickleSerializer()
         self._remote_transport: RemoteTransport | None = None
         self._tcp_ref: ActorRef[TcpTransportMsg] | None = None
+
+    def __make_ref__[M](self, id: str, deliver: Callable[[Any], None]) -> ActorRef[M]:
+        path = f"/{id}" if not id.startswith("/") else id
+        self._local_transport.register(path, deliver)
+        if self._remote_transport is not None:
+            addr = ActorAddress(
+                system=self._name, path=path,
+                host=self._host, port=self._port,
+            )
+            return self._remote_transport.make_ref(addr)
+        return super().__make_ref__(id, deliver)
 
     @property
     def receptionist(self) -> ActorRef[ReceptionistMsg]:
@@ -375,7 +169,7 @@ class ClusteredActorSystem(ActorSystem):
         host: str | None = None,
         port: int | None = None,
         node_id: NodeId | None = None,
-        seed_nodes: list[tuple[str, int]] | None = None,
+        seed_nodes: tuple[tuple[str, int], ...] | None = None,
         bind_host: str | None = None,
         tls: TlsConfig | None = None,
         required_quorum: int | None = None,
@@ -485,6 +279,7 @@ class ClusteredActorSystem(ActorSystem):
                 self,
                 cluster_config,
                 remote_transport=self._remote_transport,
+                local_transport=self._local_transport,
                 system_name=self._name,
                 gossip_interval=cfg.gossip.interval,
                 gossip_fanout=cfg.gossip.fanout,
@@ -502,13 +297,12 @@ class ClusteredActorSystem(ActorSystem):
             {self._node_id: (self._host, self._port)}
         )
 
-        # Wait for cluster_actor to spawn topology + receptionist
-        while self.lookup("/_cluster/_topology") is None:
-            await asyncio.sleep(0.01)
+        await self._local_transport.wait_for_path("/_cluster/_topology")
         self._topology_ref = self.lookup("/_cluster/_topology")  # type: ignore[assignment]
 
-        while self.lookup("/_cluster/_receptionist") is None:
-            await asyncio.sleep(0.01)
+        self._local_transport.register_path_factory(
+            "/_coord-", self._lazy_spawn_coordinator,
+        )
 
         from casty.distributed.barrier import BarrierMsg, barrier_entity
 
@@ -532,24 +326,6 @@ class ClusteredActorSystem(ActorSystem):
             msg = "ClusteredActorSystem not started"
             raise RuntimeError(msg)
         return self._remote_transport
-
-    def _get_ref_transport(self) -> MessageTransport | None:
-        return self._remote_transport
-
-    def _get_ref_host(self) -> str | None:
-        return self._host
-
-    def _get_ref_port(self) -> int | None:
-        return self._port
-
-    def _get_ref_node_id(self) -> str | None:
-        return self._node_id
-
-    def _get_receptionist_ref(self) -> ActorRef[Any] | None:
-        try:
-            return self.receptionist
-        except RuntimeError:
-            return None
 
     @overload
     def spawn[M](
@@ -595,7 +371,7 @@ class ClusteredActorSystem(ActorSystem):
     def _spawn_sharded[M](
         self, sharded: ShardedBehavior[M], name: str
     ) -> ActorRef[ShardEnvelope[M]]:
-        from casty.shard_region_actor import shard_region_actor
+        from casty.cluster.region import shard_region_actor
 
         self._logger.info("Sharded entity: %s (shards=%d)", name, sharded.num_shards)
 
@@ -641,7 +417,7 @@ class ClusteredActorSystem(ActorSystem):
     def _spawn_singleton[M](
         self, singleton: SingletonBehavior[M], name: str
     ) -> ActorRef[M]:
-        from casty.singleton import singleton_manager_actor
+        from casty.cluster.singleton import singleton_manager_actor
 
         self._logger.info("Singleton: %s", name)
 
@@ -681,10 +457,48 @@ class ClusteredActorSystem(ActorSystem):
             name,
         )
 
+        if not isinstance(proxy_ref, RemoteActorRef):
+            msg = "BroadcastRef requires a RemoteActorRef"
+            raise TypeError(msg)
         return BroadcastRef[M](
             address=proxy_ref.address,
             _transport=proxy_ref._transport,  # pyright: ignore[reportPrivateUsage]
         )
+
+    def _lazy_spawn_coordinator(self, path: str) -> None:
+        """Lazily spawn a coordinator when a remote message arrives for an unknown shard type.
+
+        Called by ``LocalTransport`` path factory when a message arrives at
+        ``/_coord-{name}`` and no handler exists yet. This happens when a follower
+        coordinator on another node forwards ``GetShardLocation`` or ``RegisterRegion``
+        to the leader node, which hasn't spawned that shard type locally.
+        """
+        prefix = "/_coord-"
+        name = path[len(prefix):]
+        if name in self._coordinators:
+            return
+
+        self._logger.info("Lazy-spawning coordinator for shard type: %s", name)
+
+        available_nodes = frozenset(
+            {self._self_node}
+            | {NodeAddress(host=h, port=p) for h, p in self._seed_nodes}
+        )
+
+        coord_ref = super().spawn(
+            shard_coordinator_actor(
+                strategy=LeastShardStrategy(),
+                available_nodes=available_nodes,
+                shard_type=name,
+                remote_transport=self._remote_transport,
+                system_name=self._name,
+                logger=logging.getLogger(f"casty.coordinator.{self._name}"),
+                topology_ref=self._topology_ref,  # type: ignore[arg-type]
+                self_node=self._self_node,
+            ),
+            f"_coord-{name}",
+        )
+        self._coordinators[name] = coord_ref
 
     def _get_or_create_coordinator(
         self,
@@ -695,15 +509,12 @@ class ClusteredActorSystem(ActorSystem):
         if name in self._coordinators:
             return self._coordinators[name]
 
-        publish_ref = cast(ActorRef[PublishAllocations], self._cluster.ref)
-
         coord_ref = super().spawn(
             shard_coordinator_actor(
                 strategy=LeastShardStrategy(),
                 available_nodes=available_nodes,
                 replication=sharded.replication,
                 shard_type=name,
-                publish_ref=publish_ref,
                 remote_transport=self._remote_transport,
                 system_name=self._name,
                 logger=logging.getLogger(f"casty.coordinator.{self._name}"),
@@ -758,19 +569,9 @@ class ClusteredActorSystem(ActorSystem):
             if not future.done():
                 future.set_result(msg)
 
-        self._local_transport.register(temp_path, on_reply)
+        temp_ref: ActorRef[R] = self.__make_ref__(temp_path, on_reply)
         try:
-            temp_ref: ActorRef[R] = ActorRef(
-                address=ActorAddress(
-                    system=self._name,
-                    path=temp_path,
-                    host=self._host,
-                    port=self._port,
-                ),
-                _transport=self._remote,
-            )
-            message = msg_factory(temp_ref)
-            ref.tell(message)
+            ref.tell(msg_factory(temp_ref))
             return await asyncio.wait_for(future, timeout=timeout)
         finally:
             self._local_transport.unregister(temp_path)
@@ -796,19 +597,9 @@ class ClusteredActorSystem(ActorSystem):
             if len(responses) >= expected:
                 done_event.set()
 
-        self._local_transport.register(temp_path, on_reply)
+        temp_ref: ActorRef[R] = self.__make_ref__(temp_path, on_reply)
         try:
-            temp_ref: ActorRef[R] = ActorRef(
-                address=ActorAddress(
-                    system=self._name,
-                    path=temp_path,
-                    host=self._host,
-                    port=self._port,
-                ),
-                _transport=self._remote,
-            )
-            message = msg_factory(temp_ref)
-            ref.tell(message)
+            ref.tell(msg_factory(temp_ref))
             await asyncio.wait_for(done_event.wait(), timeout=timeout)
             return tuple(responses)
         finally:
@@ -938,17 +729,25 @@ class ClusteredActorSystem(ActorSystem):
             case ServiceKey() as key:
                 return self._lookup_service(key, timeout=timeout)
             case str() as actor_path:
+                normalized = f"/{actor_path}" if not actor_path.startswith("/") else actor_path
                 match node:
                     case None:
-                        return super().lookup(actor_path)
+                        local_ref = super().lookup(actor_path)
+                        if local_ref is None:
+                            return None
+                        addr = ActorAddress(
+                            system=self._name, path=normalized,
+                            host=self._host, port=self._port,
+                        )
+                        return self._remote.make_ref(addr)
                     case NodeAddress(host=host, port=port):
                         addr = ActorAddress(
-                            system=self._name, path=actor_path,
+                            system=self._name, path=normalized,
                             host=host, port=port,
                         )
                     case str() as node_id:
                         addr = ActorAddress(
-                            system=self._name, path=actor_path, node_id=node_id,
+                            system=self._name, path=normalized, node_id=node_id,
                         )
                 return self._remote.make_ref(addr)
 

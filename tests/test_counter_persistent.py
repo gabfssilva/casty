@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 
 from casty import ActorSystem, InMemoryJournal
-from casty.shard_coordinator_actor import LeastShardStrategy, shard_coordinator_actor
-from casty.shard_region_actor import shard_region_actor
-from casty.cluster_state import NodeAddress
+from casty.cluster.coordinator import LeastShardStrategy, shard_coordinator_actor
+from casty.cluster.region import shard_region_actor
+from casty.cluster.state import NodeAddress
 from casty.distributed import Counter
 from casty.distributed.counter import persistent_counter_entity
 

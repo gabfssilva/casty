@@ -33,7 +33,8 @@ from casty import ActorRef, Behaviors
 from casty.actor import Behavior
 from casty.journal import InMemoryJournal
 from casty.replication import ReplicationConfig
-from casty.sharding import ClusteredActorSystem, ShardEnvelope
+from casty.cluster.system import ClusteredActorSystem
+from casty.cluster.envelope import ShardEnvelope
 
 NUM_SHARDS = 10
 

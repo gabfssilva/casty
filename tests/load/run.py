@@ -22,8 +22,8 @@ import time
 import urllib.request
 from dataclasses import dataclass, field
 
-from casty.client import ClusterClient
-from casty.sharding import ShardEnvelope
+from casty.client.client import ClusterClient
+from casty.cluster import ShardEnvelope
 
 from app.entities import Get, GetCounter, Increment, Put
 

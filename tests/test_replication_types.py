@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-from casty.replication import (
-    ReplicationConfig,
-    ShardAllocation,
-    ReplicateEvents,
-    ReplicateEventsAck,
-    ReplicaPromoted,
-)
-from casty.cluster_state import NodeAddress
-from casty.journal import PersistedEvent
+from casty.cluster.state import NodeAddress, ShardAllocation
+from casty.core.replication import ReplicateEvents, ReplicateEventsAck, ReplicationConfig
+from casty.cluster.replication import ReplicaPromoted
+from casty.core.journal import PersistedEvent
 
 
 def test_replication_config_defaults() -> None:

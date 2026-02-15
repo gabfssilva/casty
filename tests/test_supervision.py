@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 
-from casty.supervision import Directive, OneForOneStrategy, SupervisionStrategy
+from casty.core.supervision import Directive, OneForOneStrategy, SupervisionStrategy
 
 
 async def test_directive_values() -> None:

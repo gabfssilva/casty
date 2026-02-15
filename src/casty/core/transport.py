@@ -6,11 +6,12 @@ an in-process implementation that routes messages by actor path.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any, Protocol, runtime_checkable
 
-from casty.address import ActorAddress
+from casty.core.address import ActorAddress
 
 logger = logging.getLogger("casty.transport")
 
@@ -70,6 +71,25 @@ class LocalTransport:
         self._pending: dict[str, list[Any]] = {}
         self._dead: set[str] = set()
         self._max_pending_per_path = max_pending_per_path
+        self._waiters: dict[str, asyncio.Event] = {}
+        self._path_factories: list[tuple[str, Callable[[str], None]]] = []
+
+    def register_path_factory(
+        self, prefix: str, factory: Callable[[str], None],
+    ) -> None:
+        """Register a factory that lazily spawns handlers for paths with a given prefix.
+
+        When ``deliver()`` encounters an unregistered path starting with *prefix*,
+        it calls ``factory(path)`` which should register a handler for that path.
+
+        Parameters
+        ----------
+        prefix : str
+            Path prefix to match (e.g. ``"/_coord-"``).
+        factory : Callable[[str], None]
+            Called with the full path; must call ``register()`` for that path.
+        """
+        self._path_factories.append((prefix, factory))
 
     def register(self, path: str, handler: Callable[[Any], None]) -> None:
         """Register a message handler for the given path.
@@ -88,6 +108,9 @@ class LocalTransport:
         self._dead.discard(path)
         for msg in self._pending.pop(path, []):
             handler(msg)
+        waiter = self._waiters.pop(path, None)
+        if waiter is not None:
+            waiter.set()
 
     def unregister(self, path: str) -> None:
         """Remove the handler for the given path and mark it dead.
@@ -102,6 +125,16 @@ class LocalTransport:
         self._handlers.pop(path, None)
         self._pending.pop(path, None)
         self._dead.add(path)
+
+    async def wait_for_path(self, path: str) -> None:
+        """Wait until a handler is registered for the given path."""
+        if path in self._handlers:
+            return
+        event = self._waiters.get(path)
+        if event is None:
+            event = asyncio.Event()
+            self._waiters[path] = event
+        await event.wait()
 
     def deliver(self, address: ActorAddress, msg: Any) -> None:
         """Deliver a message to the handler registered for the address path.
@@ -122,6 +155,14 @@ class LocalTransport:
             return
         if address.path in self._dead:
             logger.warning("No handler for path %s, dropping %s", address.path, type(msg).__name__)
+            return
+        for prefix, factory in self._path_factories:
+            if address.path.startswith(prefix) and address.path not in self._handlers:
+                factory(address.path)
+                break
+        handler = self._handlers.get(address.path)
+        if handler is not None:
+            handler(msg)
             return
         buf = self._pending.get(address.path)
         if buf is not None and len(buf) >= self._max_pending_per_path:

@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from casty.address import ActorAddress
-from casty.cluster_state import (
+from casty.core.address import ActorAddress
+from casty.cluster.state import (
     ClusterState,
     Member,
     MemberStatus,
@@ -13,10 +13,11 @@ from casty.cluster_state import (
     VectorClock,
 )
 from casty.ref import ActorRef
-from casty.serialization import JsonSerializer, PickleSerializer, Serializer, TypeRegistry
-from casty.sharding import ShardEnvelope
-from casty.transport import LocalTransport
-from casty.shard_coordinator_actor import GetShardLocation, ShardLocation
+from casty.remote.ref import RemoteActorRef
+from casty.remote.serialization import JsonSerializer, PickleSerializer, Serializer, TypeRegistry
+from casty.cluster import ShardEnvelope
+from casty.core.transport import LocalTransport
+from casty.cluster.coordinator import GetShardLocation, ShardLocation
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,7 @@ def _make_registry() -> TypeRegistry:
 
 def _ref_factory(addr: ActorAddress) -> ActorRef[object]:
     transport = LocalTransport()
-    return ActorRef(address=addr, _transport=transport)
+    return RemoteActorRef(address=addr, _transport=transport)
 
 
 # --- Original tests ---
@@ -121,7 +122,7 @@ def test_actor_ref_serialization() -> None:
     registry = _make_registry()
     serializer = JsonSerializer(registry)
 
-    reply_ref: ActorRef[ShardLocation] = ActorRef(
+    reply_ref: ActorRef[ShardLocation] = RemoteActorRef(
         address=ActorAddress(
             system="test", path="/reply", host="127.0.0.1", port=25521
         ),
@@ -134,7 +135,7 @@ def test_actor_ref_serialization() -> None:
 
     assert isinstance(restored, GetShardLocation)
     assert restored.shard_id == 7
-    assert isinstance(restored.reply_to, ActorRef)
+    assert isinstance(restored.reply_to, RemoteActorRef)
     assert restored.reply_to.address.host == "127.0.0.1"
     assert restored.reply_to.address.port == 25521
     assert restored.reply_to.address.path == "/reply"
@@ -296,7 +297,7 @@ def test_pickle_nested_dataclass_roundtrip() -> None:
 
 def test_pickle_actor_ref_serialization() -> None:
     serializer = PickleSerializer()
-    reply_ref: ActorRef[ShardLocation] = ActorRef(
+    reply_ref: ActorRef[ShardLocation] = RemoteActorRef(
         address=ActorAddress(
             system="test", path="/reply", host="127.0.0.1", port=25521
         ),
@@ -309,7 +310,7 @@ def test_pickle_actor_ref_serialization() -> None:
 
     assert isinstance(restored, GetShardLocation)
     assert restored.shard_id == 7
-    assert isinstance(restored.reply_to, ActorRef)
+    assert isinstance(restored.reply_to, RemoteActorRef)
     assert restored.reply_to.address.host == "127.0.0.1"
     assert restored.reply_to.address.port == 25521
     assert restored.reply_to.address.path == "/reply"

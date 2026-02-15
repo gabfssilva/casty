@@ -16,11 +16,11 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from casty.actor import Behavior, Behaviors
-from casty.address import ActorAddress
-from casty.cluster_state import NodeAddress, ServiceEntry
-from casty.receptionist import Listing, ServiceInstance, ServiceKey
+from casty.core.address import ActorAddress
+from casty.cluster.state import NodeAddress, ServiceEntry
+from casty.cluster.receptionist import Listing, ServiceInstance, ServiceKey
 from casty.ref import ActorRef
-from casty.remote_transport import (
+from casty.remote.tcp_transport import (
     GetPort,
     InboundMessageHandler,
     RemoteTransport,
@@ -28,13 +28,13 @@ from casty.remote_transport import (
     TcpTransportMsg,
     tcp_transport,
 )
-from casty.scheduler import ScheduleOnce, scheduler
-from casty.serialization import PickleSerializer
-from casty.shard_coordinator_actor import GetShardLocation, ShardLocation
-from casty.sharding import ShardEnvelope, entity_shard
-from casty.system import ActorSystem
-from casty.topology import SubscribeTopology, TopologySnapshot
-from casty.transport import LocalTransport, MessageTransport
+from casty.core.scheduler import ScheduleOnce, scheduler
+from casty.remote.serialization import PickleSerializer
+from casty.cluster.coordinator import GetShardLocation, ShardLocation
+from casty.cluster.envelope import ShardEnvelope, entity_shard
+from casty.core.system import ActorSystem
+from casty.cluster.topology import SubscribeTopology, TopologySnapshot
+from casty.core.transport import LocalTransport
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
@@ -415,6 +415,7 @@ class _RemoteActorSystem(ActorSystem):
         port: int,
     ) -> None:
         super().__init__(name=name)
+        self._local_transport = LocalTransport()
         self._remote = remote_transport
         self._host = host
         self._port = port
@@ -423,14 +424,16 @@ class _RemoteActorSystem(ActorSystem):
     def local_transport(self) -> LocalTransport:
         return self._local_transport
 
-    def _get_ref_transport(self) -> MessageTransport | None:
-        return self._remote
-
-    def _get_ref_host(self) -> str | None:
-        return self._host
-
-    def _get_ref_port(self) -> int | None:
-        return self._port
+    def __make_ref__[M](self, id: str, deliver: Callable[[Any], None]) -> ActorRef[M]:
+        path = f"/{id}" if not id.startswith("/") else id
+        self._local_transport.register(path, deliver)
+        if self._remote is not None:
+            addr = ActorAddress(
+                system=self._name, path=path,
+                host=self._host, port=self._port,
+            )
+            return self._remote.make_ref(addr)
+        return super().__make_ref__(id, deliver)
 
     def set_remote(self, transport: RemoteTransport) -> None:
         self._remote = transport
@@ -730,7 +733,7 @@ class ClusterClient:
         ...     lambda r: ShardEnvelope("user-42", GetCount(reply_to=r)),
         ... )
         """
-        system, remote_transport = self._require_started()
+        system, _ = self._require_started()
 
         future: asyncio.Future[R] = asyncio.get_running_loop().create_future()
         ask_id = uuid4().hex
@@ -740,19 +743,9 @@ class ClusterClient:
             if not future.done():
                 future.set_result(msg)
 
-        system.local_transport.register(temp_path, on_reply)
+        temp_ref: ActorRef[R] = system.__make_ref__(temp_path, on_reply)
         try:
-            temp_ref: ActorRef[R] = ActorRef(
-                address=ActorAddress(
-                    system=f"{self._system_name}-client",
-                    path=temp_path,
-                    host=self._advertised_host or self._client_host,
-                    port=self._advertised_port or self._client_port,
-                ),
-                _transport=remote_transport,
-            )
-            message = msg_factory(temp_ref)
-            ref.tell(message)
+            ref.tell(msg_factory(temp_ref))
             return await asyncio.wait_for(future, timeout=timeout)
         finally:
             system.local_transport.unregister(temp_path)

@@ -10,11 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from casty.cluster_state import Member, NodeAddress, ServiceEntry
+from casty.cluster.state import Member, NodeAddress, ServiceEntry, ShardAllocation
 
 if TYPE_CHECKING:
     from casty.ref import ActorRef
-    from casty.replication import ShardAllocation
 
 
 @dataclass(frozen=True)

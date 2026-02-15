@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from casty import ActorSystem, Behaviors, ActorRef, Behavior
-from casty.sharding import ShardEnvelope
-from casty.shard_region_actor import shard_region_actor
-from casty.shard_coordinator_actor import (
+from casty.cluster import ShardEnvelope
+from casty.cluster.region import shard_region_actor
+from casty.cluster.coordinator import (
     shard_coordinator_actor,
     LeastShardStrategy,
 )
-from casty.cluster_state import NodeAddress
+from casty.cluster.state import NodeAddress
 
 
 @dataclass(frozen=True)

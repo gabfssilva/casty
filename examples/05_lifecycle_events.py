@@ -1,6 +1,7 @@
 """Lifecycle + EventStream — hooks e observabilidade do sistema."""
 
 import asyncio
+from typing import Any
 
 from casty import (
     ActorContext,
@@ -10,6 +11,7 @@ from casty import (
     Behavior,
     Behaviors,
     DeadLetter,
+    EventStreamSubscribe,
 )
 
 
@@ -34,17 +36,27 @@ def my_actor() -> Behavior[str]:
     )
 
 
+def event_logger() -> Behavior[Any]:
+    async def receive(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+        match msg:
+            case ActorStarted(ref=ref):
+                print(f"  [event] ator iniciou: {ref}")
+            case ActorStopped(ref=ref):
+                print(f"  [event] ator parou: {ref}")
+            case DeadLetter(message=message):
+                print(f"  [dead letter] msg={message}")
+            case _:
+                pass
+        return Behaviors.same()
+    return Behaviors.receive(receive)
+
+
 async def main() -> None:
     async with ActorSystem(name="lifecycle-demo") as system:
-        system.event_stream.subscribe(
-            ActorStarted, lambda e: print(f"  [event] ator iniciou: {e.ref}")
-        )
-        system.event_stream.subscribe(
-            ActorStopped, lambda e: print(f"  [event] ator parou: {e.ref}")
-        )
-        system.event_stream.subscribe(
-            DeadLetter, lambda e: print(f"  [dead letter] msg={e.message}")
-        )
+        logger = system.spawn(event_logger(), "_event_logger")
+        system.event_stream.tell(EventStreamSubscribe(event_type=ActorStarted, handler=logger))
+        system.event_stream.tell(EventStreamSubscribe(event_type=ActorStopped, handler=logger))
+        system.event_stream.tell(EventStreamSubscribe(event_type=DeadLetter, handler=logger))
 
         ref = system.spawn(my_actor(), "meu-ator")
         await asyncio.sleep(0.1)

@@ -4,16 +4,17 @@ from __future__ import annotations
 import asyncio
 
 from casty import ActorSystem, Member, MemberStatus
-from casty.cluster_state import NodeAddress
-from casty.shard_coordinator_actor import (
+from casty.cluster.state import NodeAddress
+from casty.cluster.coordinator import (
     GetShardLocation,
     LeastShardStrategy,
     RegisterRegion,
     ShardLocation,
     shard_coordinator_actor,
 )
-from casty.replication import ReplicationConfig, ShardAllocation
-from casty.topology import TopologySnapshot
+from casty.cluster.state import ShardAllocation
+from casty.core.replication import ReplicationConfig
+from casty.cluster.topology import TopologySnapshot
 
 
 def snap(

@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 
 from casty import ActorSystem
-from casty.shard_coordinator_actor import (
+from casty.cluster.coordinator import (
     shard_coordinator_actor,
     LeastShardStrategy,
 )
-from casty.shard_region_actor import shard_region_actor
-from casty.cluster_state import NodeAddress
+from casty.cluster.region import shard_region_actor
+from casty.cluster.state import NodeAddress
 from casty.distributed import Dict
 from casty.distributed.dict import map_entity
 

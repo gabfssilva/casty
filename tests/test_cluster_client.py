@@ -8,17 +8,18 @@ from typing import Any
 
 from casty import Behaviors, ActorRef, Behavior, ActorSystem, MemberStatus, Member
 from casty import ServiceKey, ServiceEntry
-from casty.client import (
+from casty.client.client import (
     ClusterClient,
     NodeFailed,
     SubscriptionTimeout,
     client_proxy_behavior,
     topology_subscriber,
 )
-from casty.cluster_state import NodeAddress
-from casty.shard_coordinator_actor import ShardLocation
-from casty.sharding import ClusteredActorSystem, ShardEnvelope
-from casty.topology import SubscribeTopology, TopologySnapshot
+from casty.cluster.state import NodeAddress
+from casty.cluster.coordinator import ShardLocation
+from casty.cluster.system import ClusteredActorSystem
+from casty.cluster.envelope import ShardEnvelope
+from casty.cluster.topology import SubscribeTopology, TopologySnapshot
 
 
 @dataclass(frozen=True)
@@ -250,7 +251,7 @@ async def test_client_entity_ref_is_cached() -> None:
         ) as client:
             ref1 = client.entity_ref("counters", num_shards=10)
             ref2 = client.entity_ref("counters", num_shards=10)
-            assert ref1.address == ref2.address
+            assert ref1.id == ref2.id
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +325,7 @@ async def test_proxy_rejects_stale_allocation_after_node_failure() -> None:
         assert routed_to_a == [], f"Should not route to failed node-A: {routed_to_a}"
 
         # Send an envelope that maps to shard 3, then resolve it to node-B
-        from casty.sharding import entity_shard
+        from casty.cluster import entity_shard
 
         target_id = next(
             eid for i in range(1000) if entity_shard(eid := f"e-{i}", 10) == 3
@@ -395,7 +396,7 @@ async def test_proxy_clears_failed_nodes_on_healthy_topology() -> None:
 
         # The allocation should be cached — send an envelope for shard 5 to verify routing
         # We need to find which entity_id maps to shard 5 with num_shards=10
-        from casty.sharding import entity_shard
+        from casty.cluster import entity_shard
 
         target_id = next(
             eid
@@ -479,7 +480,7 @@ async def test_subscriber_resets_liveness_on_snapshot() -> None:
 
             return _Ref(addr.path, addr.host, addr.port)
 
-    import casty.client as client_mod
+    import casty.client.client as client_mod
 
     original_timeout = client_mod.SUBSCRIPTION_TIMEOUT
     client_mod.SUBSCRIPTION_TIMEOUT = 0.5  # Short timeout for testing

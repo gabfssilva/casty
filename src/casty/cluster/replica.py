@@ -6,8 +6,8 @@ from collections.abc import Callable
 from typing import Any
 
 from casty.actor import Behavior, Behaviors
-from casty.journal import EventJournal, JournalKind
-from casty.replication import ReplicateEvents, ReplicateEventsAck
+from casty.core.journal import EventJournal, JournalKind
+from casty.core.replication import ReplicateEvents, ReplicateEventsAck
 
 
 def replica_region_actor[S, E](

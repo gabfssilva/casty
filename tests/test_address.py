@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from casty.address import ActorAddress
+from casty.core.address import ActorAddress
 
 
 async def test_local_address_creation() -> None:

@@ -16,7 +16,8 @@ from typing import Any
 
 from casty import ActorRef, Behavior, Behaviors
 from casty.internal.retry import Backoff, retry
-from casty.sharding import ClusteredActorSystem, ShardEnvelope
+from casty.cluster.system import ClusteredActorSystem
+from casty.cluster.envelope import ShardEnvelope
 
 
 @dataclass(frozen=True)

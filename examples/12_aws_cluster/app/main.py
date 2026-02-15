@@ -11,7 +11,8 @@ from pydantic import BaseModel
 
 from casty import Behaviors, BroadcastRef
 from casty.ref import ActorRef
-from casty.sharding import ClusteredActorSystem, ShardEnvelope
+from casty.cluster.system import ClusteredActorSystem
+from casty.cluster.envelope import ShardEnvelope
 
 from .config import AppConfig
 from .entities import (

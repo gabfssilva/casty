@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from casty.journal import EventJournal, InMemoryJournal, PersistedEvent, Snapshot, SqliteJournal
+from casty.core.journal import EventJournal, InMemoryJournal, PersistedEvent, Snapshot, SqliteJournal
 
 
 @dataclass(frozen=True)

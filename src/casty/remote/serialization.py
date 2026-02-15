@@ -16,10 +16,10 @@ import pickle
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
-from casty.address import ActorAddress
+from casty.core.address import ActorAddress
 
 if TYPE_CHECKING:
-    from casty.ref import ActorRef
+    from casty.remote.ref import RemoteActorRef
 
 logger = logging.getLogger("casty.serialization")
 
@@ -185,7 +185,7 @@ class Serializer(Protocol):
         self,
         data: bytes,
         *,
-        ref_factory: Callable[[ActorAddress], ActorRef[R]] | None = None,
+        ref_factory: Callable[[ActorAddress], RemoteActorRef[R]] | None = None,
     ) -> M:
         """Deserialize bytes back to an object."""
         ...
@@ -238,7 +238,7 @@ class JsonSerializer:
         self,
         data: bytes,
         *,
-        ref_factory: Callable[[ActorAddress], ActorRef[R]] | None = None,
+        ref_factory: Callable[[ActorAddress], RemoteActorRef[R]] | None = None,
     ) -> M:
         """Deserialize JSON bytes back to a Python object.
 
@@ -257,10 +257,10 @@ class JsonSerializer:
         return self._from_dict(payload, ref_factory=ref_factory)
 
     def _to_dict(self, value: Any) -> object:
-        from casty.ref import ActorRef
+        from casty.remote.ref import RemoteActorRef
 
         match value:
-            case ActorRef():
+            case RemoteActorRef():
                 return {"__ref__": value.address.to_uri()}
             case enum.Enum():
                 enum_cls = type(value)
@@ -295,7 +295,7 @@ class JsonSerializer:
         self,
         value: object,
         *,
-        ref_factory: Callable[[ActorAddress], ActorRef[R]] | None = None,
+        ref_factory: Callable[[ActorAddress], RemoteActorRef[R]] | None = None,
     ) -> Any:
         match value:
             case {"__ref__": str() as uri}:
@@ -367,7 +367,7 @@ class PickleSerializer:
         self,
         data: bytes,
         *,
-        ref_factory: Callable[[ActorAddress], ActorRef[R]] | None = None,
+        ref_factory: Callable[[ActorAddress], RemoteActorRef[R]] | None = None,
     ) -> M:
         """Deserialize pickle bytes back to a Python object.
 
@@ -386,7 +386,7 @@ class PickleSerializer:
         -------
         Any
         """
-        from casty import ref as _ref_module
+        from casty.remote import ref as _ref_module
 
         if ref_factory is not None:
             previous = _ref_module.ref_restore_hook

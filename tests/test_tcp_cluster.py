@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from casty import Behaviors, ActorRef, Behavior
-from casty.receptionist import Find, Listing, Register, ServiceKey
-from casty.sharding import ClusteredActorSystem, ShardEnvelope
+from casty.cluster.receptionist import Find, Listing, Register, ServiceKey
+from casty.cluster.system import ClusteredActorSystem
+from casty.cluster.envelope import ShardEnvelope
 
 
 # --- Simple counter entity for testing ---
@@ -124,7 +125,7 @@ async def test_cross_system_tell_via_tcp() -> None:
             await asyncio.sleep(0.1)
 
             # Send to it from system B via remote transport
-            from casty.address import ActorAddress
+            from casty.core.address import ActorAddress
             from casty.ref import ActorRef as _ActorRef
 
             remote_addr = ActorAddress(

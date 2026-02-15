@@ -171,21 +171,34 @@ async def test_lifecycle_hooks_called() -> None:
     """Lifecycle hooks fire in correct order."""
     hooks: list[str] = []
 
+    @dataclass(frozen=True)
+    class Stop:
+        pass
+
     async def pre_start(ctx: Any) -> None:
         hooks.append("pre_start")
 
     async def post_stop(ctx: Any) -> None:
         hooks.append("post_stop")
 
+    async def handler(ctx: Any, msg: Any) -> Behavior[Any]:
+        match msg:
+            case Stop():
+                return Behaviors.stopped()
+            case _:
+                return Behaviors.same()
+
     behavior = Behaviors.with_lifecycle(
-        Behaviors.receive(lambda ctx, msg: Behaviors.same()),
+        Behaviors.receive(handler),
         pre_start=pre_start,
         post_stop=post_stop,
     )
 
     async with ActorSystem() as system:
-        system.spawn(behavior, "hooked")
-        await asyncio.sleep(0.1)
+        ref = system.spawn(behavior, "hooked")
+        await asyncio.sleep(0.05)
+        ref.tell(Stop())
+        await asyncio.sleep(0.05)
 
     assert hooks == ["pre_start", "post_stop"]
 
@@ -193,9 +206,15 @@ async def test_lifecycle_hooks_called() -> None:
 async def test_dead_letters() -> None:
     """Messages to stopped actors go to dead letters."""
     dead: list[DeadLetter] = []
+    from casty.core.event_stream import Subscribe as ESSubscribe
 
     async with ActorSystem() as system:
-        system.event_stream.subscribe(DeadLetter, lambda e: dead.append(e))  # type: ignore[arg-type,return-value]
+        observer = system.spawn(
+            Behaviors.receive(lambda ctx, msg: (dead.append(msg), Behaviors.same())[1]),
+            "dead-observer",
+        )
+        system.event_stream.tell(ESSubscribe(event_type=DeadLetter, handler=observer))
+        await asyncio.sleep(0.05)
 
         behavior = Behaviors.receive(lambda ctx, msg: Behaviors.stopped())
         ref = system.spawn(behavior, "short-lived")
@@ -213,9 +232,16 @@ async def test_suppress_dead_letters_on_shutdown() -> None:
     """Config flag suppresses dead letter logs and events during shutdown."""
     dead: list[DeadLetter] = []
     config = CastyConfig(suppress_dead_letters_on_shutdown=True)
+    from casty.core.event_stream import Subscribe as ESSubscribe
 
     system = ActorSystem(config=config)
-    system.event_stream.subscribe(DeadLetter, lambda e: dead.append(e))  # type: ignore[arg-type,return-value]
+
+    observer = system.spawn(
+        Behaviors.receive(lambda ctx, msg: (dead.append(msg), Behaviors.same())[1]),
+        "dead-observer",
+    )
+    system.event_stream.tell(ESSubscribe(event_type=DeadLetter, handler=observer))
+    await asyncio.sleep(0.05)
 
     ref = system.spawn(
         Behaviors.receive(lambda ctx, msg: Behaviors.same()), "sticky"

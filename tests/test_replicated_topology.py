@@ -6,28 +6,26 @@ import asyncio
 from typing import Any
 
 from casty import ActorSystem, Behaviors, ClusterState, NodeAddress
-from casty.topology_actor import (
+from casty.cluster.topology_actor import (
     GetState as TopologyGetState,
     GossipMessage,
     TopologyMsg,
     UpdateShardAllocations,
     topology_actor,
 )
-from casty.topology import TopologySnapshot
-from casty.shard_coordinator_actor import (
+from casty.cluster.topology import TopologySnapshot
+from casty.cluster.coordinator import (
     GetShardLocation,
     LeastShardStrategy,
-    PublishAllocations,
     RegisterRegion,
     ShardLocation,
     shard_coordinator_actor,
 )
-from casty.cluster import ClusterCmd, cluster_actor, ClusterConfig, GetState
-from casty.cluster_state import Member, MemberStatus
-from casty.failure_detector import PhiAccrualFailureDetector
+from casty.cluster.state import Member, MemberStatus
+from casty.cluster.failure_detector import PhiAccrualFailureDetector
 from casty.ref import ActorRef
-from casty.replication import ShardAllocation
-from casty.serialization import JsonSerializer, TypeRegistry
+from casty.cluster.state import ShardAllocation
+from casty.remote.serialization import JsonSerializer, TypeRegistry
 
 
 # --- Helpers ---
@@ -450,14 +448,14 @@ async def test_follower_buffers_unknown_shards_drains_on_sync() -> None:
 
 
 async def test_leader_publishes_allocations() -> None:
-    """Leader publishes allocations via publish_ref on new shard allocation."""
+    """Leader publishes allocations to topology on new shard allocation."""
     node = NodeAddress(host="10.0.0.1", port=25520)
     member = make_member(node, node_id="node-1")
-    published: list[PublishAllocations] = []
+    published: list[UpdateShardAllocations] = []
 
     async with ActorSystem(name="test") as system:
         async def _capture_publish(_ctx: Any, msg: Any) -> Any:
-            if isinstance(msg, PublishAllocations):
+            if isinstance(msg, UpdateShardAllocations):
                 published.append(msg)
             return Behaviors.same()
 
@@ -470,7 +468,7 @@ async def test_leader_publishes_allocations() -> None:
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({node}),
                 shard_type="counters",
-                publish_ref=publish_sink,
+                topology_ref=publish_sink,
                 self_node=node,
             ),
             "coord",
@@ -612,40 +610,6 @@ async def test_pending_waits_for_topology_snapshot() -> None:
 # ===========================================================================
 
 
-async def test_cluster_actor_forwards_publish_allocations_to_gossip() -> None:
-    """PublishAllocations from coordinator is forwarded to topology as UpdateShardAllocations."""
-    node = NodeAddress(host="127.0.0.1", port=25520)
-    alloc = ShardAllocation(primary=node)
-
-    async with ActorSystem(name="test") as system:
-        cluster_ref: ActorRef[ClusterCmd] = system.spawn(
-            cluster_actor(
-                config=ClusterConfig(host="127.0.0.1", port=25520, seed_nodes=[], node_id="node-1"),
-                scheduler_ref=system.scheduler,
-            ),
-            "_cluster",
-        )
-        await asyncio.sleep(0.5)
-
-        # Send PublishAllocations to cluster_actor
-        cluster_ref.tell(PublishAllocations(  # type: ignore[arg-type]
-            shard_type="counters",
-            allocations={0: alloc},
-            epoch=1,
-        ))
-        await asyncio.sleep(0.5)
-
-        # Verify by reading cluster state
-        state: ClusterState = await system.ask(
-            cluster_ref,
-            lambda r: GetState(reply_to=r),
-            timeout=5.0,
-        )
-        # The topology should have received the allocation via UpdateShardAllocations
-        assert state.allocation_epoch == 1
-        assert state.shard_allocations["counters"][0] == alloc
-
-
 async def test_topology_updates_state_via_update_shard_allocations() -> None:
     """UpdateShardAllocations updates topology state and propagates."""
     node = NodeAddress(host="10.0.0.1", port=25520)
@@ -767,16 +731,16 @@ async def test_follower_promoted_to_leader_responds_immediately() -> None:
 
 
 async def test_follower_promotion_publishes_new_allocations() -> None:
-    """Promoted follower publishes new allocations via publish_ref."""
+    """Promoted follower publishes new allocations to topology."""
     node_a = NodeAddress(host="10.0.0.1", port=25520)
     node_b = NodeAddress(host="10.0.0.2", port=25520)
     member_a = make_member(node_a, node_id="node-a")
     member_b = make_member(node_b, node_id="node-b")
-    published: list[PublishAllocations] = []
+    published: list[UpdateShardAllocations] = []
 
     async with ActorSystem(name="test") as system:
         async def capture_publish(_ctx: Any, msg: Any) -> Any:
-            if isinstance(msg, PublishAllocations):
+            if isinstance(msg, UpdateShardAllocations):
                 published.append(msg)
             return Behaviors.same()
 
@@ -789,7 +753,7 @@ async def test_follower_promotion_publishes_new_allocations() -> None:
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({node_a, node_b}),
                 shard_type="counters",
-                publish_ref=publish_sink,
+                topology_ref=publish_sink,
                 self_node=node_b,
             ),
             "coord",
@@ -841,11 +805,11 @@ async def test_promoted_leader_handles_node_down() -> None:
 
     # Shard 0 is on node_a with replica on node_b
     alloc = ShardAllocation(primary=node_a, replicas=(node_b,))
-    published: list[PublishAllocations] = []
+    published: list[UpdateShardAllocations] = []
 
     async with ActorSystem(name="test") as system:
         async def capture_publish(_ctx: Any, msg: Any) -> Any:
-            if isinstance(msg, PublishAllocations):
+            if isinstance(msg, UpdateShardAllocations):
                 published.append(msg)
             return Behaviors.same()
 
@@ -858,7 +822,7 @@ async def test_promoted_leader_handles_node_down() -> None:
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({node_a, node_b, node_c}),
                 shard_type="counters",
-                publish_ref=publish_sink,
+                topology_ref=publish_sink,
                 self_node=node_c,
             ),
             "coord",

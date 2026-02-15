@@ -7,9 +7,10 @@ monitored actor stops.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from casty.ref import ActorRef
+if TYPE_CHECKING:
+    from casty.core.ref import ActorRef
 
 
 @dataclass(frozen=True)
@@ -18,16 +19,6 @@ class Terminated:
 
     Delivered to actors that called ``ctx.watch()`` on the terminated
     actor's reference.
-
-    Parameters
-    ----------
-    ref : ActorRef[Any]
-        Reference to the actor that terminated.
-
-    Examples
-    --------
-    >>> from casty import Terminated
-    >>> event = Terminated(ref=watched_ref)
     """
 
     ref: ActorRef[Any]

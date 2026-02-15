@@ -12,9 +12,9 @@ from casty import (
     Behaviors,
     NodeAddress,
 )
-from casty.topology import SubscribeTopology, TopologySnapshot
-from casty.topology_actor import TopologyMsg
-from casty.singleton import singleton_manager_actor
+from casty.cluster.topology import SubscribeTopology, TopologySnapshot
+from casty.cluster.topology_actor import TopologyMsg
+from casty.cluster.singleton import singleton_manager_actor
 
 from casty import Member, MemberStatus
 

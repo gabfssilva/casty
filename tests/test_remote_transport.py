@@ -8,10 +8,11 @@ from dataclasses import dataclass
 import pytest
 import trustme
 
-from casty.address import ActorAddress
-from casty.cluster_state import NodeAddress
+from casty.core.address import ActorAddress
+from casty.cluster.state import NodeAddress
 from casty.ref import ActorRef
-from casty.remote_transport import (
+from casty.remote.ref import RemoteActorRef
+from casty.remote.tcp_transport import (
     FRAME_HANDSHAKE,
     FRAME_MESSAGE,
     GetPort,
@@ -24,10 +25,10 @@ from casty.remote_transport import (
     TcpTransportMsg,
     tcp_transport,
 )
-from casty.shard_coordinator_actor import GetShardLocation, ShardLocation
-from casty.serialization import JsonSerializer, TypeRegistry
-from casty.system import ActorSystem
-from casty.transport import LocalTransport
+from casty.cluster.coordinator import GetShardLocation, ShardLocation
+from casty.remote.serialization import JsonSerializer, TypeRegistry
+from casty.core.system import ActorSystem
+from casty.core.transport import LocalTransport
 
 
 @dataclass(frozen=True)
@@ -91,8 +92,8 @@ async def _start_remote_pair() -> tuple[
     await sys_a.__aenter__()
     await sys_b.__aenter__()
 
-    local_a: LocalTransport = sys_a._local_transport  # pyright: ignore[reportPrivateUsage]
-    local_b: LocalTransport = sys_b._local_transport  # pyright: ignore[reportPrivateUsage]
+    local_a = LocalTransport()
+    local_b = LocalTransport()
 
     serializer_a = JsonSerializer(TypeRegistry())
     serializer_b = JsonSerializer(TypeRegistry())
@@ -202,7 +203,7 @@ async def test_remote_transport_local_delivery() -> None:
 
     handler = _PlaceholderHandler()
     ref, port = await _spawn_tcp(sys, handler, client_only=True)
-    local: LocalTransport = sys._local_transport  # pyright: ignore[reportPrivateUsage]
+    local = LocalTransport()
 
     remote = RemoteTransport(
         local=local,
@@ -261,7 +262,7 @@ async def test_remote_transport_actor_ref_roundtrip() -> None:
         reply_addr = ActorAddress(
             system="sys-a", path="/reply", host="127.0.0.1", port=port_a,
         )
-        reply_ref = ActorRef[ShardLocation](address=reply_addr, _transport=remote_a)
+        reply_ref = RemoteActorRef[ShardLocation](address=reply_addr, _transport=remote_a)
 
         received_on_b: list[object] = []
 
@@ -420,7 +421,7 @@ async def test_remote_transport_sender_uses_advertised_address() -> None:
     sys = ActorSystem(name="test-sys")
     await sys.__aenter__()
 
-    local: LocalTransport = sys._local_transport  # pyright: ignore[reportPrivateUsage]
+    local = LocalTransport()
     serializer = JsonSerializer(TypeRegistry())
     inbound = InboundMessageHandler(local=local, serializer=serializer, system_name="test-sys")
     ref, _ = await _spawn_tcp(sys, inbound, client_only=True)

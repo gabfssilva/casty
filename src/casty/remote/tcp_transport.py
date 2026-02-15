@@ -28,14 +28,15 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from casty.actor import Behavior, Behaviors
-from casty.address import ActorAddress
-from casty.serialization import Serializer
-from casty.transport import LocalTransport
+from casty.core.address import ActorAddress
+from casty.remote.serialization import Serializer
+from casty.core.transport import LocalTransport
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
-    from casty.ref import ActorRef
-    from casty.task_runner import TaskRunnerMsg
+    from casty.core.ref import ActorRef
+    from casty.core.task_runner import TaskRunnerMsg
+    from casty.remote.ref import RemoteActorRef
 
 type NodeAddr = tuple[str, int]
 type AddressMap = dict[NodeAddr, NodeAddr]
@@ -67,7 +68,7 @@ class InboundMessageHandler:
         local: LocalTransport,
         serializer: Serializer,
         system_name: str,
-        ref_factory: Callable[[ActorAddress], ActorRef[Any]] | None = None,
+        ref_factory: Callable[[ActorAddress], RemoteActorRef[Any]] | None = None,
     ) -> None:
         self._local = local
         self._serializer = serializer
@@ -672,12 +673,12 @@ class RemoteTransport:
             if self._on_send_failure is not None:
                 self._on_send_failure(host, port)
 
-    def make_ref(self, address: ActorAddress) -> ActorRef[Any]:
+    def make_ref(self, address: ActorAddress) -> RemoteActorRef[Any]:
         """Create an ``ActorRef`` with the appropriate transport for the address."""
-        from casty.ref import ActorRef as _ActorRef
+        from casty.remote.ref import RemoteActorRef
         if self._is_local(address):
-            return _ActorRef[Any](address=address, _transport=self._local)
-        return _ActorRef[Any](address=address, _transport=self)
+            return RemoteActorRef[Any](address=address, _transport=self._local)
+        return RemoteActorRef[Any](address=address, _transport=self)
 
     def _make_ref_from_address(self, address: ActorAddress) -> Any:
         return self.make_ref(address)

@@ -15,8 +15,8 @@ from casty.config import (
     GossipConfig,
     HeartbeatConfig,
 )
-from casty.journal import InMemoryJournal
-from casty.sharding import ClusteredActorSystem
+from casty.core.journal import InMemoryJournal
+from casty.cluster.system import ClusteredActorSystem
 
 
 

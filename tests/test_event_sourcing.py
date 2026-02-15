@@ -7,7 +7,7 @@ from typing import Any
 
 from casty import ActorRef, ActorSystem, Behaviors
 from casty.actor import Behavior, SnapshotEvery
-from casty.journal import InMemoryJournal, JournalKind, PersistedEvent, Snapshot
+from casty.core.journal import InMemoryJournal, JournalKind, PersistedEvent, Snapshot
 
 
 @dataclass(frozen=True)
@@ -156,7 +156,7 @@ async def test_recovery_from_snapshot_plus_events() -> None:
 
 async def test_event_sourced_pushes_to_replicas() -> None:
     """Primary entity pushes persisted events to replica refs."""
-    from casty.replication import ReplicateEvents
+    from casty.core.replication import ReplicateEvents
 
     journal = InMemoryJournal()
     received_replications: list[Any] = []
@@ -194,7 +194,7 @@ async def test_event_sourced_pushes_to_replicas() -> None:
 
 async def test_event_sourced_waits_for_acks() -> None:
     """When min_acks > 0, primary waits for replica acks."""
-    from casty.replication import ReplicateEvents, ReplicateEventsAck, ReplicationConfig
+    from casty.core.replication import ReplicateEvents, ReplicateEventsAck, ReplicationConfig
 
     journal = InMemoryJournal()
     replica_journal = InMemoryJournal()
@@ -241,7 +241,7 @@ async def test_event_sourced_waits_for_acks() -> None:
 
 async def test_event_sourced_fire_and_forget_replication() -> None:
     """When min_acks=0, primary doesn't wait for acks."""
-    from casty.replication import ReplicateEvents, ReplicationConfig
+    from casty.core.replication import ReplicateEvents, ReplicationConfig
 
     journal = InMemoryJournal()
     replications: list[Any] = []
@@ -281,8 +281,8 @@ async def test_event_sourced_fire_and_forget_replication() -> None:
 
 async def test_centralized_journal_replica_skips_persist() -> None:
     """With a centralized journal, replicas apply events but skip persist."""
-    from casty.replica_region_actor import replica_region_actor
-    from casty.replication import ReplicateEvents, ReplicateEventsAck
+    from casty.cluster.replica import replica_region_actor
+    from casty.core.replication import ReplicateEvents, ReplicateEventsAck
 
     class CentralizedJournal(InMemoryJournal):
         @property

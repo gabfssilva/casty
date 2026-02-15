@@ -41,13 +41,14 @@ from casty import (
     Behavior,
     Behaviors,
     DeadLetter,
+    EventStreamSubscribe,
     Find,
     Listing,
     ServiceKey,
     Subscribe,
 )
 from casty.config import load_config
-from casty.sharding import ClusteredActorSystem
+from casty.cluster.system import ClusteredActorSystem
 
 log = logging.getLogger(__name__)
 
@@ -317,18 +318,22 @@ async def run_node(
             RESET,
         )
 
-        async def on_dead_letter(event: DeadLetter) -> None:
-            match event.message:
-                case ChatMessage():
-                    recipient = event.intended_ref.address.path.rsplit("/", maxsplit=1)[-1]
-                    log.info(
-                        "💨 %s%s%s already left the chat",
-                        DIM,
-                        recipient,
-                        RESET,
-                    )
+        def dead_letter_logger() -> Behavior[DeadLetter]:
+            async def receive(ctx: Any, msg: DeadLetter) -> Behavior[DeadLetter]:
+                match msg.message:
+                    case ChatMessage():
+                        recipient = msg.intended_ref.id.rsplit("/", maxsplit=1)[-1]
+                        log.info(
+                            "💨 %s%s%s already left the chat",
+                            DIM,
+                            recipient,
+                            RESET,
+                        )
+                return Behaviors.same()
+            return Behaviors.receive(receive)
 
-        system.event_stream.subscribe(DeadLetter, on_dead_letter)
+        dl_ref = system.spawn(dead_letter_logger(), "_dead_letter_logger")
+        system.event_stream.tell(EventStreamSubscribe(event_type=DeadLetter, handler=dl_ref))
 
         monitor = system.spawn(presence_monitor(), "presence-monitor")
         system.receptionist.tell(Subscribe(key=CHAT_USER_KEY, reply_to=monitor))

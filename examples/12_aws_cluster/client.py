@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import cyclopts
 
 from casty.client import ClusterClient
-from casty.sharding import ShardEnvelope
+from casty.cluster import ShardEnvelope
 
 from app.entities import (
     Get,

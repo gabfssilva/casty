@@ -105,7 +105,7 @@ async def test_spy_observes_messages() -> None:
         assert isinstance(events[0].event, Ping)
         assert isinstance(events[1].event, Ping)
         assert events[0].timestamp <= events[1].timestamp
-        assert "/echo" in events[0].actor_path
+        assert "echo" in events[0].actor_path
 
 
 async def test_spy_reports_stop_message() -> None:
@@ -375,8 +375,8 @@ async def test_spy_children_observes_child_messages() -> None:
             observer, lambda r: GetAnyCollected(reply_to=r), timeout=2.0
         )
 
-        parent_events = [e for e in events if "/parent" == e.actor_path.rstrip("/")]
-        child_events = [e for e in events if "/parent/child" in e.actor_path]
+        parent_events = [e for e in events if "parent" == e.actor_path.split("/")[0]]
+        child_events = [e for e in events if "parent/child" in e.actor_path]
 
         assert len(parent_events) >= 1
         assert len(child_events) >= 1
@@ -408,7 +408,7 @@ async def test_spy_children_false_does_not_spy_children() -> None:
             observer, lambda r: GetAnyCollected(reply_to=r), timeout=2.0
         )
 
-        child_events = [e for e in events if "/parent/child" in e.actor_path]
+        child_events = [e for e in events if "parent/child" in e.actor_path]
         assert len(child_events) == 0
 
 
@@ -465,7 +465,7 @@ async def test_spy_captures_terminated_from_watched_child() -> None:
             observer, lambda r: GetAnyCollected(reply_to=r), timeout=2.0
         )
 
-        watcher_events = [e for e in events if e.actor_path == "/watcher"]
+        watcher_events = [e for e in events if e.actor_path == "watcher"]
         terminated_events = [e for e in watcher_events if isinstance(e.event, Terminated)]
 
         assert len(terminated_events) == 1

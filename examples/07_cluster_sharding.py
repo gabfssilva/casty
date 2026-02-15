@@ -25,7 +25,7 @@ from casty import (
     Behaviors,
     ShardEnvelope,
 )
-from casty.sharding import ClusteredActorSystem
+from casty.cluster.system import ClusteredActorSystem
 
 NUM_SHARDS = 10
 
@@ -75,12 +75,11 @@ async def main() -> None:
         ClusteredActorSystem(
             name="bank", host="127.0.0.1", port=25520,
             node_id="node-1",
-            seed_nodes=[("127.0.0.1", 25521)],
         ) as s1,
         ClusteredActorSystem(
             name="bank", host="127.0.0.1", port=25521,
             node_id="node-2",
-            seed_nodes=[("127.0.0.1", 25520)],
+            seed_nodes=(("127.0.0.1", 25520),),
         ) as s2,
     ):
         # spawn returns ActorRef[ShardEnvelope[AccountMsg]]

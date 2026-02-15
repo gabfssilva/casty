@@ -6,9 +6,9 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from casty.actor import Behavior, Behaviors
-from casty.messages import Terminated
+from casty.core.messages import Terminated
 from casty.ref import ActorRef
-from casty.sharding import ShardEnvelope
+from casty.cluster.envelope import ShardEnvelope
 
 
 def shard_region_actor(

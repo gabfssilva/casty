@@ -13,32 +13,30 @@ from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 from casty.actor import Behavior, Behaviors
-from casty.address import ActorAddress
-from casty.cluster_state import (
+from casty.core.address import ActorAddress
+from casty.cluster.state import (
     ClusterState,
     Member,
     MemberStatus,
     NodeAddress,
     NodeId,
 )
-from casty.failure_detector import PhiAccrualFailureDetector
+from casty.cluster.failure_detector import PhiAccrualFailureDetector
 from casty.ref import ActorRef
-from casty.scheduler import (
+from casty.core.scheduler import (
     CancelSchedule,
     ScheduleOnce,
     SchedulerMsg,
     ScheduleTick,
 )
-from casty.shard_coordinator_actor import PublishAllocations
-from casty.topology import SubscribeTopology, TopologySnapshot
-from casty.topology_actor import (
+from casty.cluster.topology import SubscribeTopology, TopologySnapshot
+from casty.cluster.topology_actor import (
     CheckAvailability,
     GetState as TopologyGetState,
     GossipTick,
     HeartbeatTick,
     JoinRequest,
     TopologyMsg,
-    UpdateShardAllocations,
     WaitForMembers as TopologyWaitForMembers,
     topology_actor,
 )
@@ -46,9 +44,10 @@ from casty.topology_actor import (
 if TYPE_CHECKING:
     from casty.config import FailureDetectorConfig
     from casty.context import ActorContext
-    from casty.events import EventStream
-    from casty.remote_transport import RemoteTransport
-    from casty.system import ActorSystem
+    from casty.core.event_stream import EventStreamMsg
+    from casty.core.transport import LocalTransport
+    from casty.remote.tcp_transport import RemoteTransport
+    from casty.core.system import ActorSystem
 
 
 # --- ClusterCmd messages ---
@@ -76,7 +75,7 @@ class JoinRetry:
 
 
 type ClusterCmd = (
-    GetState | WaitForMembers | PublishAllocations
+    GetState | WaitForMembers
     | GetReceptionist | JoinRetry | TopologySnapshot
 )
 
@@ -94,8 +93,8 @@ class ClusterConfig:
         Bind address for this node.
     port : int
         TCP port for this node.
-    seed_nodes : list[tuple[str, int]]
-        Initial contact points for cluster formation.  An empty list means
+    seed_nodes : tuple[tuple[str, int], ...]
+        Initial contact points for cluster formation.  An empty tuple means
         this node forms a new single-node cluster.
     node_id : NodeId
         Human-readable identifier for this node (e.g. ``"worker-1"``).
@@ -104,15 +103,15 @@ class ClusterConfig:
 
     Examples
     --------
-    >>> cfg = ClusterConfig("127.0.0.1", 2551, [("127.0.0.1", 2552)], node_id="node-1")
+    >>> cfg = ClusterConfig("127.0.0.1", 2551, node_id="node-1", seed_nodes=(("127.0.0.1", 2552),))
     >>> cfg.host, cfg.port
     ('127.0.0.1', 2551)
     """
 
     host: str
     port: int
-    seed_nodes: list[tuple[str, int]]
     node_id: NodeId
+    seed_nodes: tuple[tuple[str, int], ...] = ()
     roles: frozenset[str] = field(default_factory=lambda: frozenset[str]())
 
 
@@ -124,13 +123,14 @@ def cluster_actor(
     config: ClusterConfig,
     scheduler_ref: ActorRef[SchedulerMsg],
     remote_transport: RemoteTransport | None = None,
+    local_transport: LocalTransport | None = None,
     system_name: str = "",
     gossip_interval: float = 1.0,
     gossip_fanout: int = 3,
     heartbeat_interval: float = 0.5,
     availability_interval: float = 2.0,
     failure_detector_config: FailureDetectorConfig | None = None,
-    event_stream: EventStream | None = None,
+    event_stream: ActorRef[EventStreamMsg] | None = None,
 ) -> Behavior[ClusterCmd]:
     async def setup(ctx: ActorContext[ClusterCmd]) -> Behavior[ClusterCmd]:
         self_node = NodeAddress(host=config.host, port=config.port)
@@ -152,34 +152,30 @@ def cluster_actor(
             first_heartbeat_estimate_ms=fd.first_heartbeat_estimate_ms,
         )
 
-        topo_ref: ActorRef[TopologyMsg] = ctx.spawn(
-            topology_actor(
-                self_node=self_node,
-                node_id=config.node_id,
-                roles=config.roles,
-                initial_state=initial_state,
-                detector=detector,
-                remote_transport=remote_transport,
-                system_name=system_name,
-                fanout=gossip_fanout,
-                logger=logging.getLogger(f"casty.topology.{system_name}"),
-            ),
-            "_topology",
+        topo_behavior = topology_actor(
+            self_node=self_node,
+            node_id=config.node_id,
+            roles=config.roles,
+            initial_state=initial_state,
+            detector=detector,
+            remote_transport=remote_transport,
+            system_name=system_name,
+            fanout=gossip_fanout,
+            logger=logging.getLogger(f"casty.topology.{system_name}"),
         )
+        topo_ref: ActorRef[TopologyMsg] = ctx.spawn(topo_behavior, "_topology")
 
-        from casty.receptionist import receptionist_actor
+        from casty.cluster.receptionist import receptionist_actor
 
-        receptionist_ref: ActorRef[Any] = ctx.spawn(
-            receptionist_actor(
-                self_node=self_node,
-                gossip_ref=topo_ref,  # type: ignore[arg-type]
-                remote_transport=remote_transport,
-                system_name=system_name,
-                event_stream=event_stream,
-                topology_ref=topo_ref,  # type: ignore[arg-type]
-            ),
-            "_receptionist",
+        recep_behavior: Behavior[Any] = receptionist_actor(
+            self_node=self_node,
+            gossip_ref=topo_ref,  # type: ignore[arg-type]
+            remote_transport=remote_transport,
+            system_name=system_name,
+            event_stream=event_stream,
+            topology_ref=topo_ref,  # type: ignore[arg-type]
         )
+        receptionist_ref: ActorRef[Any] = ctx.spawn(recep_behavior, "_receptionist")
 
         # Build seed refs pointing to remote topology actors
         seed_refs: list[ActorRef[TopologyMsg]] = []
@@ -279,14 +275,6 @@ def ready(
                 reply_to.tell(receptionist_ref)
                 return Behaviors.same()
 
-            case PublishAllocations(shard_type=shard_type, allocations=allocations, epoch=epoch):
-                topo_ref.tell(UpdateShardAllocations(  # type: ignore[arg-type]
-                    shard_type=shard_type,
-                    allocations=allocations,
-                    epoch=epoch,
-                ))
-                return Behaviors.same()
-
             case TopologySnapshot(members=members) if not joined:
                 if len(members) > 1:
                     logger.debug("Join confirmed (members=%d), stopping retries", len(members))
@@ -366,7 +354,7 @@ class Cluster:
 
     Examples
     --------
-    >>> cluster = Cluster(system, ClusterConfig("127.0.0.1", 2551, []))
+    >>> cluster = Cluster(system, ClusterConfig("127.0.0.1", 2551, node_id="node-1"))
     >>> await cluster.start()
     >>> state = await cluster.get_state()
     >>> len(state.members)
@@ -379,17 +367,19 @@ class Cluster:
         config: ClusterConfig,
         *,
         remote_transport: RemoteTransport | None = None,
+        local_transport: LocalTransport | None = None,
         system_name: str = "",
         gossip_interval: float = 1.0,
         gossip_fanout: int = 3,
         heartbeat_interval: float = 0.5,
         availability_interval: float = 2.0,
         failure_detector_config: FailureDetectorConfig | None = None,
-        event_stream: EventStream | None = None,
+        event_stream: ActorRef[EventStreamMsg] | None = None,
     ) -> None:
         self._system = system
         self._config = config
         self._remote_transport = remote_transport
+        self._local_transport = local_transport
         self._system_name = system_name
         self._gossip_interval = gossip_interval
         self._gossip_fanout = gossip_fanout
@@ -424,21 +414,20 @@ class Cluster:
         After this method returns the cluster is actively gossiping and
         monitoring heartbeats.
         """
-        self._ref = self._system.spawn(
-            cluster_actor(
-                config=self._config,
-                scheduler_ref=self._system.scheduler,
-                remote_transport=self._remote_transport,
-                system_name=self._system_name,
-                gossip_interval=self._gossip_interval,
-                gossip_fanout=self._gossip_fanout,
-                heartbeat_interval=self._heartbeat_interval,
-                availability_interval=self._availability_interval,
-                failure_detector_config=self._failure_detector_config,
-                event_stream=self._event_stream,
-            ),
-            "_cluster",
+        behavior = cluster_actor(
+            config=self._config,
+            scheduler_ref=self._system.scheduler,
+            remote_transport=self._remote_transport,
+            local_transport=self._local_transport,
+            system_name=self._system_name,
+            gossip_interval=self._gossip_interval,
+            gossip_fanout=self._gossip_fanout,
+            heartbeat_interval=self._heartbeat_interval,
+            availability_interval=self._availability_interval,
+            failure_detector_config=self._failure_detector_config,
+            event_stream=self._event_stream,
         )
+        self._ref = self._system.spawn(behavior, "_cluster")
 
     async def get_state(self, *, timeout: float = 5.0) -> ClusterState:
         """Request the current cluster state from the topology actor.

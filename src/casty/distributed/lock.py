@@ -10,11 +10,11 @@ from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
 from casty.actor import Behavior, Behaviors
-from casty.sharding import ShardEnvelope
+from casty.cluster.envelope import ShardEnvelope
 
 if TYPE_CHECKING:
     from casty.ref import ActorRef
-    from casty.system import ActorSystem
+    from casty.core.system import ActorSystem
 
 
 # ---------------------------------------------------------------------------

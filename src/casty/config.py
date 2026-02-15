@@ -12,9 +12,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from casty.cluster import ClusterConfig
-from casty.replication import ReplicationConfig
-from casty.tls import Config as TlsConfig
+from casty.cluster.cluster import ClusterConfig
+from casty.core.replication import ReplicationConfig
+from casty.remote.tls import Config as TlsConfig
 
 
 __all__ = [
@@ -468,7 +468,7 @@ def load_config(path: Path | None = None) -> CastyConfig:
 
     if "host" in cluster_raw:
         seed_nodes_raw: list[str] = cluster_raw.get("seed_nodes", [])
-        seed_nodes = [parse_seed_node(s) for s in seed_nodes_raw]
+        seed_nodes = tuple(parse_seed_node(s) for s in seed_nodes_raw)
         roles_raw: list[str] = cluster_raw.get("roles", [])
         node_id: str = cluster_raw.get("node_id", f"{cluster_raw['host']}:{cluster_raw['port']}")
         cluster = ClusterConfig(

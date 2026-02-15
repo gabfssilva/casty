@@ -13,15 +13,15 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, TYPE_CHECKING
 
-from casty import ActorContext
+from casty.context import ActorContext
 from casty.actor import Behavior, Behaviors
-from casty.cluster_state import NodeAddress, ServiceEntry
-from casty.topology import TopologySnapshot
+from casty.cluster.state import NodeAddress, ServiceEntry
+from casty.cluster.topology import TopologySnapshot
 
 if TYPE_CHECKING:
-    from casty.events import EventStream
+    from casty.core.event_stream import EventStreamMsg
     from casty.ref import ActorRef
-    from casty.remote_transport import RemoteTransport
+    from casty.remote.tcp_transport import RemoteTransport
 
 
 @dataclass(frozen=True)
@@ -183,9 +183,9 @@ type Subscribers = MappingProxyType[str, frozenset[ActorRef[Listing[Any]]]]
 
 def _make_ref(entry: ServiceEntry, env: ReceptionistEnv) -> ActorRef[Any]:
     """Construct an ``ActorRef`` from a ``ServiceEntry``."""
-    from casty.address import ActorAddress
-    from casty.ref import ActorRef as ActorRefCls
-    from casty.transport import LocalTransport
+    from casty.core.address import ActorAddress
+    from casty.remote.ref import RemoteActorRef
+    from casty.core.transport import LocalTransport
 
     addr = ActorAddress(
         system=env.system_name,
@@ -195,7 +195,7 @@ def _make_ref(entry: ServiceEntry, env: ReceptionistEnv) -> ActorRef[Any]:
     )
     if env.remote_transport is not None:
         return env.remote_transport.make_ref(addr)
-    return ActorRefCls(address=addr, _transport=LocalTransport())
+    return RemoteActorRef(address=addr, _transport=LocalTransport())
 
 
 def _build_listing(
@@ -236,7 +236,7 @@ def receptionist_actor(
     gossip_ref: ActorRef[Any] | None = None,
     remote_transport: RemoteTransport | None = None,
     system_name: str = "",
-    event_stream: EventStream | None = None,
+    event_stream: ActorRef[EventStreamMsg] | None = None,
     topology_ref: ActorRef[Any] | None = None,
 ) -> Behavior[ReceptionistMsg]:
     """Create a receptionist behavior for typed service discovery.
@@ -251,8 +251,8 @@ def receptionist_actor(
         Remote transport for constructing refs to remote actors.
     system_name : str
         Name of the actor system.
-    event_stream : EventStream or None
-        Event stream for subscribing to actor lifecycle events.
+    event_stream : ActorRef[EventStreamMsg] or None
+        Event stream actor ref for subscribing to actor lifecycle events.
 
     Returns
     -------
@@ -299,11 +299,11 @@ def receptionist_actor(
                     entry = ServiceEntry(
                         key=skey.name,
                         node=env.self_node,
-                        path=ref.address.path,
+                        path=ref.id,
                     )
                     new_local = local_entries | {entry}
                     if gossip_ref is not None:
-                        from casty.topology_actor import UpdateRegistry
+                        from casty.cluster.topology_actor import UpdateRegistry
                         gossip_ref.tell(UpdateRegistry(entries=new_local))
                     _notify_subscribers(
                         skey.name, subscribers, new_local, cluster_registry, env,
@@ -314,11 +314,11 @@ def receptionist_actor(
                     entry = ServiceEntry(
                         key=skey.name,
                         node=env.self_node,
-                        path=ref.address.path,
+                        path=ref.id,
                     )
                     new_local = local_entries - {entry}
                     if gossip_ref is not None:
-                        from casty.topology_actor import UpdateRegistry
+                        from casty.cluster.topology_actor import UpdateRegistry
                         gossip_ref.tell(UpdateRegistry(entries=new_local))
                     _notify_subscribers(
                         skey.name, subscribers, new_local, cluster_registry, env,
@@ -350,7 +350,7 @@ def receptionist_actor(
                     if removed != local_entries:
                         changed_keys = {e.key for e in (local_entries - removed)}
                         if gossip_ref is not None:
-                            from casty.topology_actor import UpdateRegistry
+                            from casty.cluster.topology_actor import UpdateRegistry
                             gossip_ref.tell(UpdateRegistry(entries=removed))
                         for key_name in changed_keys:
                             _notify_subscribers(
@@ -367,19 +367,22 @@ def receptionist_actor(
 
     async def setup(ctx: ActorContext[ReceptionistMsg]) -> Behavior[ReceptionistMsg]:
         if event_stream is not None:
-            from casty.events import ActorStopped
+            from casty.core.events import ActorStopped
+            from casty.core.event_stream import Subscribe
 
-            async def on_stopped(event: ActorStopped) -> None:
-                try:
-                    ctx.self.tell(ActorTerminated(path=event.ref.address.path))
-                except Exception as e:
-                    ctx.log.warning("Failed to notify receptionist: %s", e)
-                    ctx.log.debug("Failed to notify receptionist: %s", e)
+            def stopped_forwarder() -> Behavior[ActorStopped]:
+                async def receive(
+                    _ctx: ActorContext[ActorStopped], msg: ActorStopped,
+                ) -> Behavior[ActorStopped]:
+                    ctx.self.tell(ActorTerminated(path=msg.ref.id))
+                    return Behaviors.same()
+                return Behaviors.receive(receive)
 
-            event_stream.subscribe(ActorStopped, on_stopped)
+            forwarder = ctx.spawn(stopped_forwarder(), "_stopped_forwarder")
+            event_stream.tell(Subscribe(event_type=ActorStopped, handler=forwarder))
 
         if topology_ref is not None:
-            from casty.topology import SubscribeTopology
+            from casty.cluster.topology import SubscribeTopology
             topology_ref.tell(SubscribeTopology(reply_to=ctx.self))  # type: ignore[arg-type]
 
         return active(frozenset(), frozenset(), MappingProxyType({}))

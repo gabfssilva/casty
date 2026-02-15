@@ -43,7 +43,7 @@ NODE_SCRIPT = textwrap.dedent("""\
         GossipConfig,
         HeartbeatConfig,
     )
-    from casty.sharding import ClusteredActorSystem
+    from casty.cluster.system import ClusteredActorSystem
 
     logging.basicConfig(
         level=logging.WARNING,

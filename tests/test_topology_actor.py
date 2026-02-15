@@ -15,7 +15,7 @@ from casty import (
     NodeAddress,
     PhiAccrualFailureDetector,
 )
-from casty.topology_actor import (
+from casty.cluster.topology_actor import (
     CheckAvailability,
     DownMember,
     GossipMessage,
@@ -24,8 +24,8 @@ from casty.topology_actor import (
     JoinRequest,
     PromoteMember,
 )
-from casty.topology import SubscribeTopology, TopologySnapshot, UnsubscribeTopology
-from casty.topology_actor import TopologyMsg, WaitForMembers, topology_actor
+from casty.cluster.topology import SubscribeTopology, TopologySnapshot, UnsubscribeTopology
+from casty.cluster.topology_actor import TopologyMsg, WaitForMembers, topology_actor
 
 
 SELF_NODE = NodeAddress(host="127.0.0.1", port=2551)

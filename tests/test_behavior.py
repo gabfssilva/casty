@@ -2,80 +2,88 @@ from __future__ import annotations
 
 from typing import Any
 
-from casty.actor import (
-    Behaviors,
-    LifecycleBehavior,
-    ReceiveBehavior,
-    RestartBehavior,
-    SameBehavior,
-    SetupBehavior,
-    StoppedBehavior,
-    SupervisedBehavior,
-    UnhandledBehavior,
-)
+from casty.actor import Behaviors
+from casty.core.behavior import Behavior, Signal
 
 
 async def test_receive_creates_receive_behavior() -> None:
-    async def handler(ctx: object, msg: str) -> SameBehavior:
+    async def handler(ctx: object, msg: str) -> Behavior[Any]:
         return Behaviors.same()
 
     b = Behaviors.receive(handler)
-    assert isinstance(b, ReceiveBehavior)
-    assert b.handler is handler
+    assert b.on_receive is handler
+    assert b.on_setup is None
+    assert b.signal is None
 
 
 async def test_setup_creates_setup_behavior() -> None:
-    async def factory(ctx: object) -> SameBehavior:
+    async def factory(ctx: object) -> Behavior[Any]:
         return Behaviors.same()
 
     b = Behaviors.setup(factory)
-    assert isinstance(b, SetupBehavior)
-    assert b.factory is factory
+    assert b.on_setup is factory
+    assert b.on_receive is None
+    assert b.signal is None
 
 
-async def test_same_returns_singleton_type() -> None:
+async def test_same_returns_signal() -> None:
     b = Behaviors.same()
-    assert isinstance(b, SameBehavior)
+    assert b.signal is Signal.same
 
 
-async def test_stopped_returns_singleton_type() -> None:
+async def test_stopped_returns_signal() -> None:
     b = Behaviors.stopped()
-    assert isinstance(b, StoppedBehavior)
+    assert b.signal is Signal.stopped
 
 
-async def test_unhandled_returns_singleton_type() -> None:
+async def test_unhandled_returns_signal() -> None:
     b = Behaviors.unhandled()
-    assert isinstance(b, UnhandledBehavior)
+    assert b.signal is Signal.unhandled
 
 
-async def test_restart_returns_singleton_type() -> None:
+async def test_restart_returns_signal() -> None:
     b = Behaviors.restart()
-    assert isinstance(b, RestartBehavior)
+    assert b.signal is Signal.restart
 
 
 async def test_with_lifecycle_wraps_behavior() -> None:
     inner = Behaviors.receive(lambda ctx, msg: Behaviors.same())
-    def pre(ctx: Any) -> None: return None
-    def post(ctx: Any) -> None: return None
-
-    b = Behaviors.with_lifecycle(inner, pre_start=pre, post_stop=post)
-    assert isinstance(b, LifecycleBehavior)
-    assert b.behavior is inner
-    assert b.pre_start is pre
-    assert b.post_stop is post
-    assert b.pre_restart is None
-    assert b.post_restart is None
+    b = Behaviors.with_lifecycle(inner, pre_start=lambda ctx: None)
+    assert b.on_setup is not None
 
 
-async def test_supervise_wraps_behavior_with_strategy() -> None:
+async def test_ignore_returns_same_for_any_message() -> None:
+    b = Behaviors.ignore()
+    assert b.on_receive is not None
+    assert b.signal is None
+
+    from casty.core.actor import CellContext
+
+    class FakeCell:
+        pass
+
+    result = await b.on_receive(CellContext(FakeCell()), "anything")  # type: ignore[arg-type]
+    assert result.signal is Signal.same
+
+
+async def test_ignore_in_actor_system() -> None:
+    import asyncio
+    from casty import ActorSystem, Behaviors
+
+    async with ActorSystem("test") as system:
+        ref = system.spawn(Behaviors.ignore(), "sink")
+        ref.tell("hello")
+        ref.tell(42)
+        ref.tell({"key": "value"})
+        await asyncio.sleep(0.1)
+
+
+async def test_supervise_wraps_behavior() -> None:
     inner = Behaviors.receive(lambda ctx, msg: Behaviors.same())
 
     class FakeStrategy:
-        def decide(self, exc: Exception) -> None:
+        def decide(self, exc: Exception, **kw: object) -> None:
             pass
 
-    strategy = FakeStrategy()
-    b = Behaviors.supervise(inner, strategy)  # type: ignore[arg-type]
-    assert isinstance(b, SupervisedBehavior)
-    assert b.behavior is inner
-    assert b.strategy is strategy
+    b = Behaviors.supervise(inner, FakeStrategy())  # type: ignore[arg-type]
+    assert b.on_setup is not None

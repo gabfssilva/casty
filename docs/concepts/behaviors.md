@@ -8,6 +8,7 @@ A behavior is a frozen dataclass that describes how an actor processes messages.
 |---------|---------|
 | `Behaviors.receive(handler)` | Create a behavior from an async message handler `(ctx, msg) -> Behavior` |
 | `Behaviors.setup(factory)` | Run initialization logic with access to `ActorContext`, then return the real behavior |
+| `Behaviors.ignore()` | Accept any message and keep the current behavior — useful for terminal states |
 | `Behaviors.same()` | Keep the current behavior unchanged (returned from a message handler) |
 | `Behaviors.stopped()` | Stop the actor gracefully |
 | `Behaviors.unhandled()` | Signal that the message was not handled |

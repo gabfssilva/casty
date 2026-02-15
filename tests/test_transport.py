@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from casty.address import ActorAddress
-from casty.transport import LocalTransport, MessageTransport
+from casty.core.address import ActorAddress
+from casty.core.transport import LocalTransport, MessageTransport
 
 
 async def test_local_transport_implements_protocol() -> None:

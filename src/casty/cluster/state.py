@@ -11,11 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import total_ordering
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from casty.replication import ShardAllocation
-
 
 type NodeId = str
 
@@ -261,6 +256,27 @@ class ServiceEntry:
     key: str
     node: NodeAddress
     path: str
+
+
+@dataclass(frozen=True)
+class ShardAllocation:
+    """Tracks which node owns a shard and where its replicas live.
+
+    Parameters
+    ----------
+    primary : NodeAddress
+        Node that owns the shard and handles writes.
+    replicas : tuple[NodeAddress, ...]
+        Nodes holding passive replica copies.
+
+    Examples
+    --------
+    >>> alloc = ShardAllocation(primary=NodeAddress("10.0.0.1", 25520))
+    >>> alloc.replicas
+    ()
+    """
+    primary: NodeAddress
+    replicas: tuple[NodeAddress, ...] = ()
 
 
 @dataclass(frozen=True)

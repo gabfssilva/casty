@@ -16,8 +16,9 @@ import asyncssh
 import pytest
 
 from casty import ActorRef, Behavior, Behaviors
-from casty.client import ClusterClient
-from casty.sharding import ClusteredActorSystem, ShardEnvelope
+from casty.client.client import ClusterClient
+from casty.cluster.system import ClusteredActorSystem
+from casty.cluster.envelope import ShardEnvelope
 
 
 @dataclass(frozen=True)

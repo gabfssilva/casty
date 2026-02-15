@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from casty.address import ActorAddress
-from casty.messages import Terminated
+from casty.core.address import ActorAddress
+from casty.core.messages import Terminated
 from casty.ref import ActorRef
-from casty.transport import LocalTransport
+from casty.remote.ref import RemoteActorRef
+from casty.core.transport import LocalTransport
 
 
 def _dummy_ref() -> ActorRef[str]:
     transport = LocalTransport()
     addr = ActorAddress(system="test", path="/dummy")
-    return ActorRef(address=addr, _transport=transport)
+    return RemoteActorRef(address=addr, _transport=transport)
 
 
 async def test_terminated_holds_ref() -> None:

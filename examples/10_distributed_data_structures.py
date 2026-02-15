@@ -15,7 +15,7 @@ Each structure is backed by sharded actors spread across all nodes.
 import asyncio
 from dataclasses import dataclass
 
-from casty.sharding import ClusteredActorSystem
+from casty.cluster.system import ClusteredActorSystem
 
 BASE_PORT = 25530
 NUM_NODES = 5
@@ -53,14 +53,11 @@ async def main() -> None:
         await s.__aenter__()
         systems.append(s)
 
-    await asyncio.sleep(0.3)  # let cluster form
+    await systems[0].wait_for(NUM_NODES, timeout=30.0)
 
-    # Create Distributed facades — each node gets its own
     d1 = systems[0].distributed()
     d3 = systems[2].distributed()
     d5 = systems[4].distributed()
-
-    await asyncio.sleep(0.3)  # let coordinators allocate shards
 
     # ── Counter ───────────────────────────────────────────────────────
     print("--- Counter ---")

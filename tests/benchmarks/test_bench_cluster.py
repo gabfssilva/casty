@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from casty import ActorRef, Behavior, Behaviors
-from casty.sharding import ClusteredActorSystem, ShardEnvelope
+from casty.cluster.system import ClusteredActorSystem
+from casty.cluster.envelope import ShardEnvelope
 
 if TYPE_CHECKING:
     from tests.benchmarks.conftest import BenchmarkResult

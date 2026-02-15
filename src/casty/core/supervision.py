@@ -1,17 +1,21 @@
 """Supervision strategies for actor failure handling.
 
-Provides the ``SupervisionStrategy`` protocol and a default
-``OneForOneStrategy`` that decides per-child restart/stop/escalate
-directives based on failure frequency.
+Provides the ``SupervisionStrategy`` protocol, a default
+``OneForOneStrategy``, and the ``supervise`` behavior wrapper that
+catches handler exceptions and applies a strategy.
 """
 
 from __future__ import annotations
 
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from enum import Enum, auto
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from casty.core.context import ActorContext
+    from casty.core.behavior import Behavior
 
 
 class Directive(Enum):
@@ -120,3 +124,45 @@ class OneForOneStrategy(SupervisionStrategy):
 
         timestamps.append(now)
         return Directive.restart
+
+
+def supervise[M](
+    behavior: Behavior[M],
+    strategy: SupervisionStrategy,
+) -> Behavior[M]:
+    """Wrap a behavior with a supervision strategy for failure recovery."""
+    from casty.core.behavior import Behavior as B
+
+    async def setup(ctx: ActorContext[M]) -> Behavior[M]:
+        inner = behavior
+        if inner.on_setup is not None:
+            inner = await inner.on_setup(ctx)
+
+        original = inner.on_receive
+        if original is None:
+            return inner
+
+        def supervised(handler: Callable[[ActorContext[M], M], Awaitable[Behavior[M]]]) -> Behavior[M]:
+            async def receive(ctx: ActorContext[M], msg: M) -> Behavior[M]:
+                try:
+                    result = await handler(ctx, msg)
+                except Exception as exc:
+                    directive = strategy.decide(exc, child_id="")
+                    match directive:
+                        case Directive.restart:
+                            return B.restart()
+                        case Directive.stop:
+                            return B.stopped()
+                        case Directive.escalate:
+                            raise
+
+                if result.on_receive is not None:
+                    return supervised(result.on_receive)
+
+                return result
+
+            return B.receive(receive)
+
+        return supervised(original)
+
+    return B.setup(setup)

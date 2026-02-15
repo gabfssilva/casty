@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from casty import Behaviors, ActorRef, Behavior
-from casty.journal import InMemoryJournal
-from casty.sharding import ClusteredActorSystem, ShardEnvelope
+from casty.core.journal import InMemoryJournal
+from casty.cluster.system import ClusteredActorSystem
+from casty.cluster.envelope import ShardEnvelope
 
 
 @dataclass(frozen=True)
@@ -102,7 +103,7 @@ async def test_event_sourced_sharding_workflow() -> None:
 
 async def test_sharded_with_replication_config() -> None:
     """Verify that sharded entities accept ReplicationConfig."""
-    from casty.replication import ReplicationConfig
+    from casty.core.replication import ReplicationConfig
 
     _local_journal = InMemoryJournal()
 

@@ -33,7 +33,7 @@ from typing import Any
 
 from casty import ActorRef, Behavior, Behaviors, BroadcastRef
 from casty.config import load_config
-from casty.sharding import ClusteredActorSystem
+from casty.cluster.system import ClusteredActorSystem
 
 log = logging.getLogger(__name__)
 

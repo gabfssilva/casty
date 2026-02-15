@@ -10,13 +10,13 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from casty.actor import Behavior, Behaviors, ShardedBehavior
-from casty.sharding import ShardEnvelope
+from casty.cluster.envelope import ShardEnvelope
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
-    from casty.journal import EventJournal
+    from casty.core.journal import EventJournal
     from casty.ref import ActorRef
-    from casty.system import ActorSystem
+    from casty.core.system import ActorSystem
 
 
 # ---------------------------------------------------------------------------

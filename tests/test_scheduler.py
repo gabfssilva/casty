@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from casty import ActorRef, Behaviors, ActorSystem, Behavior
-from casty.scheduler import (
+from casty.core.scheduler import (
     CancelSchedule,
     ScheduleOnce,
     SchedulerMsg,

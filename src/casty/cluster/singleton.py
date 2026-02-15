@@ -20,14 +20,14 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from casty.actor import Behavior, Behaviors
-from casty.address import ActorAddress
-from casty.cluster_state import NodeAddress
-from casty.topology import TopologySnapshot
+from casty.core.address import ActorAddress
+from casty.cluster.state import NodeAddress
+from casty.cluster.topology import TopologySnapshot
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
     from casty.ref import ActorRef
-    from casty.remote_transport import RemoteTransport
+    from casty.remote.tcp_transport import RemoteTransport
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,7 @@ def singleton_manager_actor(
 
     if topology_ref is not None and self_node is not None:
         async def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
-            from casty.topology import SubscribeTopology
+            from casty.cluster.topology import SubscribeTopology
             topology_ref.tell(SubscribeTopology(reply_to=ctx.self))  # type: ignore[arg-type]
             return pending(cfg, buffer=(), self_node=self_node)
         return Behaviors.setup(setup)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from casty.cluster_state import (
+from casty.cluster.state import (
     VectorClock,
     NodeAddress,
     Member,

@@ -11,16 +11,16 @@ import asyncio
 from typing import Any
 
 from casty import ActorSystem, Behaviors
-from casty.cluster_state import (
+from casty.cluster.state import (
     ClusterState,
     Member,
     MemberStatus,
     NodeAddress,
     VectorClock,
 )
-from casty.failure_detector import PhiAccrualFailureDetector
-from casty.topology import SubscribeTopology, TopologySnapshot
-from casty.topology_actor import (
+from casty.cluster.failure_detector import PhiAccrualFailureDetector
+from casty.cluster.topology import SubscribeTopology, TopologySnapshot
+from casty.cluster.topology_actor import (
     DownMember,
     GetState,
     GossipMessage,

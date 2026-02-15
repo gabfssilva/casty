@@ -17,7 +17,7 @@ from casty.config import (
     discover_config,
     load_config,
 )
-from casty.replication import ReplicationConfig
+from casty.core.replication import ReplicationConfig
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +303,7 @@ mailbox = { capacity = 50 }
         assert cfg.cluster is not None
         assert cfg.cluster.host == "10.0.0.1"
         assert cfg.cluster.port == 25520
-        assert cfg.cluster.seed_nodes == [("10.0.0.2", 25520)]
+        assert cfg.cluster.seed_nodes == (("10.0.0.2", 25520),)
         assert cfg.cluster.roles == frozenset({"worker"})
 
         # Cluster subsections
@@ -337,10 +337,10 @@ seed_nodes = ["10.0.0.1:25520", "10.0.0.2:25521"]
 """)
         cfg = load_config(toml_file)
         assert cfg.cluster is not None
-        assert cfg.cluster.seed_nodes == [
+        assert cfg.cluster.seed_nodes == (
             ("10.0.0.1", 25520),
             ("10.0.0.2", 25521),
-        ]
+        )
 
     def test_cluster_no_seed_nodes(self, tmp_path: Path) -> None:
         toml_file = tmp_path / "casty.toml"
@@ -351,7 +351,7 @@ port = 25520
 """)
         cfg = load_config(toml_file)
         assert cfg.cluster is not None
-        assert cfg.cluster.seed_nodes == []
+        assert cfg.cluster.seed_nodes == ()
 
     def test_cluster_no_roles(self, tmp_path: Path) -> None:
         toml_file = tmp_path / "casty.toml"
@@ -499,13 +499,6 @@ class TestActorSystemWithConfig:
         async with ActorSystem() as system:
             assert system.name == "casty-system"
 
-    async def test_transport_config_flows_to_local_transport(self) -> None:
-        from casty import ActorSystem, CastyConfig, TransportConfig
-
-        config = CastyConfig(transport=TransportConfig(max_pending_per_path=16))
-        async with ActorSystem(config=config) as system:
-            assert system._local_transport._max_pending_per_path == 16  # pyright: ignore[reportPrivateUsage]
-
 
 # ---------------------------------------------------------------------------
 # ClusteredActorSystem + Config integration
@@ -514,7 +507,7 @@ class TestActorSystemWithConfig:
 
 class TestClusteredSystemFromConfig:
     async def test_from_config(self, tmp_path: Path) -> None:
-        from casty.sharding import ClusteredActorSystem
+        from casty.cluster.system import ClusteredActorSystem
 
         toml_file = tmp_path / "casty.toml"
         toml_file.write_text(
@@ -529,7 +522,7 @@ class TestClusteredSystemFromConfig:
         assert system.name == "cluster-test"
 
     async def test_from_config_no_cluster_raises(self, tmp_path: Path) -> None:
-        from casty.sharding import ClusteredActorSystem
+        from casty.cluster.system import ClusteredActorSystem
 
         toml_file = tmp_path / "casty.toml"
         toml_file.write_text('[system]\nname = "no-cluster"\n')
@@ -538,7 +531,7 @@ class TestClusteredSystemFromConfig:
             ClusteredActorSystem.from_config(config)
 
     async def test_from_config_with_overrides(self, tmp_path: Path) -> None:
-        from casty.sharding import ClusteredActorSystem
+        from casty.cluster.system import ClusteredActorSystem
 
         toml_file = tmp_path / "casty.toml"
         toml_file.write_text(

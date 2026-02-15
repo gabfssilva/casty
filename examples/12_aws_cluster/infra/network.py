@@ -1,7 +1,6 @@
 """VPC, subnets, internet gateway, route tables, and security groups."""
 from __future__ import annotations
 
-import pulumi
 import pulumi_aws as aws
 
 

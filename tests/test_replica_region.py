@@ -5,9 +5,9 @@ import asyncio
 from dataclasses import dataclass
 
 from casty import ActorSystem
-from casty.journal import InMemoryJournal, PersistedEvent
-from casty.replication import ReplicateEvents
-from casty.replica_region_actor import replica_region_actor
+from casty.core.journal import InMemoryJournal, PersistedEvent
+from casty.core.replication import ReplicateEvents
+from casty.cluster.replica import replica_region_actor
 
 
 @dataclass(frozen=True)

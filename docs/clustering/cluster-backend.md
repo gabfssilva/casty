@@ -19,12 +19,19 @@ async with ClusteredActorSystem(
     seed_nodes=[("10.0.0.2", 25520), ("10.0.0.3", 25520)],
     required_quorum=3,  # startup blocks until 3 nodes are UP
 ) as system:
-    system.event_stream.subscribe(
-        MemberUp, lambda e: log.info(f"Worker joined: {e.member.address}")
-    )
-    system.event_stream.subscribe(
-        MemberLeft, lambda e: log.info(f"Worker left: {e.member.address}")
-    )
+    def membership_logger() -> Behavior[MemberUp | MemberLeft]:
+        async def receive(ctx, msg):
+            match msg:
+                case MemberUp(member=m):
+                    log.info(f"Worker joined: {m.address}")
+                case MemberLeft(member=m):
+                    log.info(f"Worker left: {m.address}")
+            return Behaviors.same()
+        return Behaviors.receive(receive)
+
+    monitor = system.spawn(membership_logger(), "membership-monitor")
+    system.event_stream.tell(EventStreamSubscribe(event_type=MemberUp, handler=monitor))
+    system.event_stream.tell(EventStreamSubscribe(event_type=MemberLeft, handler=monitor))
 ```
 
 Every node in the cluster runs the same code. There is no distinction between "broker" and "worker" — every node is both. The cluster forms automatically as nodes start and discover each other through the seed list. The `required_quorum` parameter blocks startup inside `__aenter__` until the specified number of nodes have status `up` — no more guessing with `asyncio.sleep()`. When omitted, startup completes immediately after the local node initializes.
@@ -59,10 +66,16 @@ The entity ID determines which node processes the task. Tasks with the same queu
 When a node becomes unreachable, the phi accrual failure detector identifies it and the coordinator reallocates its shards to surviving nodes. No manual intervention, no external health check service:
 
 ```python
-system.event_stream.subscribe(
-    UnreachableMember,
-    lambda e: log.warning(f"Node unreachable: {e.member.address}, shards will be reallocated"),
-)
+def unreachable_logger() -> Behavior[UnreachableMember]:
+    async def receive(ctx, msg):
+        match msg:
+            case UnreachableMember(member=m):
+                log.warning(f"Node unreachable: {m.address}, shards will be reallocated")
+        return Behaviors.same()
+    return Behaviors.receive(receive)
+
+alert = system.spawn(unreachable_logger(), "unreachable-alert")
+system.event_stream.tell(EventStreamSubscribe(event_type=UnreachableMember, handler=alert))
 ```
 
 If the task worker uses event sourcing, reallocated entities replay their journal on the new node and resume exactly where they left off. Tasks in progress at the time of failure are recovered automatically — the new primary replays persisted events and the worker continues from its last known state.

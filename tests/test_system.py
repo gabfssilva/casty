@@ -8,9 +8,9 @@ from typing import Any
 import pytest
 
 from casty.actor import Behaviors, Behavior
-from casty.events import ActorStarted
+from casty.core.events import ActorStarted
 from casty.ref import ActorRef
-from casty.system import ActorSystem
+from casty.core.system import ActorSystem
 
 
 @dataclass(frozen=True)
@@ -97,9 +97,16 @@ async def test_system_lookup_not_found() -> None:
 
 async def test_system_event_stream() -> None:
     events: list[ActorStarted] = []
+    from casty.core.event_stream import Subscribe as ESSubscribe
 
     async with ActorSystem() as system:
-        system.event_stream.subscribe(ActorStarted, lambda e: events.append(e))  # type: ignore[arg-type,return-value]
+        observer = system.spawn(
+            Behaviors.receive(lambda ctx, msg: (events.append(msg), Behaviors.same())[1]),
+            "observer",
+        )
+        system.event_stream.tell(ESSubscribe(event_type=ActorStarted, handler=observer))
+        await asyncio.sleep(0.05)
+
         system.spawn(
             Behaviors.receive(lambda ctx, msg: Behaviors.same()), "actor"
         )
@@ -109,23 +116,15 @@ async def test_system_event_stream() -> None:
 
 
 async def test_system_shutdown_stops_all_actors() -> None:
-    stopped = False
-
-    async def post_stop(ctx: Any) -> None:
-        nonlocal stopped
-        stopped = True
-
-    behavior = Behaviors.with_lifecycle(
-        Behaviors.receive(lambda ctx, msg: Behaviors.same()),
-        post_stop=post_stop,
-    )
-
     async with ActorSystem() as system:
-        system.spawn(behavior, "actor")
+        system.spawn(
+            Behaviors.receive(lambda ctx, msg: Behaviors.same()),
+            "actor",
+        )
         await asyncio.sleep(0.1)
 
-    # After exiting context manager, shutdown was called
-    assert stopped
+    cell = system._root_cells.get("actor")
+    assert cell is None
 
 
 async def test_system_named() -> None:

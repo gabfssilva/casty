@@ -13,18 +13,18 @@ from casty import (
     MemberStatus,
     NodeAddress,
 )
-from casty.replication import ReplicationConfig, ShardAllocation
-from casty.shard_coordinator_actor import (
+from casty.cluster.state import ShardAllocation
+from casty.core.replication import ReplicationConfig
+from casty.cluster.coordinator import (
     CoordinatorMsg,
     GetShardLocation,
     LeastShardStrategy,
-    PublishAllocations,
     RegisterRegion,
     ShardLocation,
     shard_coordinator_actor,
 )
-from casty.topology import SubscribeTopology, TopologySnapshot
-from casty.topology_actor import TopologyMsg
+from casty.cluster.topology import SubscribeTopology, TopologySnapshot
+from casty.cluster.topology_actor import TopologyMsg, UpdateShardAllocations
 
 
 SELF_NODE = NodeAddress(host="127.0.0.1", port=2551)
@@ -54,7 +54,9 @@ def make_snapshot(
     )
 
 
-def fake_topology_actor() -> Behavior[TopologyMsg]:
+def fake_topology_actor(
+    updates: list[UpdateShardAllocations] | None = None,
+) -> Behavior[TopologyMsg]:
     """Fake topology actor that captures subscriptions and allows manual snapshot pushes."""
     def active(
         subscriber: ActorRef[TopologySnapshot] | None,
@@ -67,6 +69,10 @@ def fake_topology_actor() -> Behavior[TopologyMsg]:
                     if subscriber is not None:
                         subscriber.tell(snap)
                     return Behaviors.same()
+                case UpdateShardAllocations() as update:
+                    if updates is not None:
+                        updates.append(update)
+                    return Behaviors.same()
                 case _:
                     return Behaviors.same()
         return Behaviors.receive(receive)
@@ -77,21 +83,6 @@ def fake_topology_actor() -> Behavior[TopologyMsg]:
 async def test_coordinator_transitions_to_leader_on_snapshot() -> None:
     """Receives TopologySnapshot where leader == self_node, transitions to leader."""
     async with ActorSystem(name="test") as system:
-        publish_msgs: list[PublishAllocations] = []
-
-        def capture_publish() -> Behavior[PublishAllocations]:
-            async def receive(
-                ctx: ActorContext[PublishAllocations], msg: PublishAllocations,
-            ) -> Behavior[PublishAllocations]:
-                publish_msgs.append(msg)
-                return Behaviors.same()
-            return Behaviors.receive(receive)
-
-        publish_ref: ActorRef[PublishAllocations] = system.spawn(
-            capture_publish(), "_publish",
-        )
-
-        # Spawn fake topology actor
         topo_ref = system.spawn(fake_topology_actor(), "_topology")
 
         coord_ref: ActorRef[CoordinatorMsg] = system.spawn(
@@ -99,7 +90,6 @@ async def test_coordinator_transitions_to_leader_on_snapshot() -> None:
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({SELF_NODE, OTHER_NODE}),
                 shard_type="test",
-                publish_ref=publish_ref,
                 topology_ref=topo_ref,  # type: ignore[arg-type]
                 self_node=SELF_NODE,
             ),
@@ -187,27 +177,14 @@ async def test_coordinator_transitions_to_follower_on_snapshot() -> None:
 async def test_coordinator_evicts_on_unreachable() -> None:
     """Leader receives snapshot with new unreachable node, promotes replicas."""
     async with ActorSystem(name="test") as system:
-        publish_msgs: list[PublishAllocations] = []
-
-        def capture_publish() -> Behavior[PublishAllocations]:
-            async def receive(
-                ctx: ActorContext[PublishAllocations], msg: PublishAllocations,
-            ) -> Behavior[PublishAllocations]:
-                publish_msgs.append(msg)
-                return Behaviors.same()
-            return Behaviors.receive(receive)
-
-        publish_ref: ActorRef[PublishAllocations] = system.spawn(
-            capture_publish(), "_publish",
-        )
-        topo_ref = system.spawn(fake_topology_actor(), "_topology")
+        updates: list[UpdateShardAllocations] = []
+        topo_ref = system.spawn(fake_topology_actor(updates=updates), "_topology")
 
         coord_ref: ActorRef[CoordinatorMsg] = system.spawn(
             shard_coordinator_actor(
                 strategy=LeastShardStrategy(),
                 available_nodes=frozenset({SELF_NODE, OTHER_NODE}),
                 shard_type="test",
-                publish_ref=publish_ref,
                 topology_ref=topo_ref,  # type: ignore[arg-type]
                 self_node=SELF_NODE,
                 replication=ReplicationConfig(replicas=1),
@@ -249,7 +226,7 @@ async def test_coordinator_evicts_on_unreachable() -> None:
         await asyncio.sleep(0.1)
 
         # Should have published new allocations (eviction)
-        assert len(publish_msgs) >= 2
+        assert len(updates) >= 2
 
 
 async def test_coordinator_syncs_allocations_from_snapshot() -> None:
