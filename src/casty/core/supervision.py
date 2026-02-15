@@ -46,7 +46,9 @@ class SupervisionStrategy(Protocol):
     ...         return Directive.restart
     """
 
-    def decide(self, exception: Exception, *, child_id: str = ..., **kwargs: object) -> Directive: ...
+    def decide(
+        self, exception: Exception, *, child_id: str = ..., **kwargs: object
+    ) -> Directive: ...
 
 
 class OneForOneStrategy(SupervisionStrategy):
@@ -142,7 +144,9 @@ def supervise[M](
         if original is None:
             return inner
 
-        def supervised(handler: Callable[[ActorContext[M], M], Awaitable[Behavior[M]]]) -> Behavior[M]:
+        def supervised(
+            handler: Callable[[ActorContext[M], M], Awaitable[Behavior[M]]],
+        ) -> Behavior[M]:
             async def receive(ctx: ActorContext[M], msg: M) -> Behavior[M]:
                 try:
                     result = await handler(ctx, msg)

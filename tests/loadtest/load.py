@@ -118,9 +118,7 @@ async def run_load(
     limits = httpx.Limits(max_connections=200, max_keepalive_connections=100)
     async with httpx.AsyncClient(limits=limits) as client:
         tasks = [
-            asyncio.create_task(
-                run_worker(client, node_urls, collector, stop_event)
-            )
+            asyncio.create_task(run_worker(client, node_urls, collector, stop_event))
             for _ in range(num_workers)
         ]
         await stop_event.wait()

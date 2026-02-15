@@ -43,7 +43,12 @@ def replica_region_actor[S, E](
                         state = on_event(state, persisted.event)
                         highest_seq = persisted.sequence_nr
 
-                    log.debug("Replicated %d events for %s (seq_nr=%d)", len(events), entity_id, highest_seq)
+                    log.debug(
+                        "Replicated %d events for %s (seq_nr=%d)",
+                        len(events),
+                        entity_id,
+                        highest_seq,
+                    )
                     new_entity_states = {**entity_states, entity_id: state}
                     new_sequence_nrs = {**entity_sequence_nrs, entity_id: highest_seq}
 

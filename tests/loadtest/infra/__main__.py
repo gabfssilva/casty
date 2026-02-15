@@ -1,4 +1,5 @@
 """Casty Load Test — Pulumi program."""
+
 from __future__ import annotations
 
 from pathlib import Path

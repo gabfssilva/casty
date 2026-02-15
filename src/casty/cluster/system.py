@@ -4,6 +4,7 @@ Extends the core ``ActorSystem`` with transparent sharding, broadcast actors,
 and remote ``ask()`` support over TCP.  ``ClusteredActorSystem`` is the main
 entry point for multi-node deployments.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -101,6 +102,7 @@ class ClusteredActorSystem(ActorSystem):
     ...     ref = system.spawn(Behaviors.sharded(my_entity, num_shards=50), "things")
     ...     ref.tell(ShardEnvelope("abc", DoSomething()))
     """
+
     def __init__(
         self,
         *,
@@ -139,8 +141,10 @@ class ClusteredActorSystem(ActorSystem):
         self._local_transport.register(path, deliver)
         if self._remote_transport is not None:
             addr = ActorAddress(
-                system=self._name, path=path,
-                host=self._host, port=self._port,
+                system=self._name,
+                path=path,
+                host=self._host,
+                port=self._port,
             )
             return self._remote_transport.make_ref(addr)
         return super().__make_ref__(id, deliver)
@@ -237,7 +241,8 @@ class ClusteredActorSystem(ActorSystem):
             )
             self._tcp_ref = super().spawn(
                 tcp_transport(
-                    tcp_config, inbound,
+                    tcp_config,
+                    inbound,
                     logger=logging.getLogger(f"casty.tcp.{self._name}"),
                 ),
                 "_tcp_transport",
@@ -245,7 +250,9 @@ class ClusteredActorSystem(ActorSystem):
 
             # 3. Ask for the actual port (use super().ask to avoid accessing _remote)
             actual_port: int = await super().ask(
-                self._tcp_ref, lambda r: GetPort(reply_to=r), timeout=5.0,
+                self._tcp_ref,
+                lambda r: GetPort(reply_to=r),
+                timeout=5.0,
             )
             if actual_port != self._port:
                 self._port = actual_port
@@ -301,7 +308,8 @@ class ClusteredActorSystem(ActorSystem):
         self._topology_ref = self.lookup("/_cluster/_topology")  # type: ignore[assignment]
 
         self._local_transport.register_path_factory(
-            "/_coord-", self._lazy_spawn_coordinator,
+            "/_coord-",
+            self._lazy_spawn_coordinator,
         )
 
         from casty.distributed.barrier import BarrierMsg, barrier_entity
@@ -338,9 +346,7 @@ class ClusteredActorSystem(ActorSystem):
     ) -> ActorRef[ShardEnvelope[M]]: ...
 
     @overload
-    def spawn[M](
-        self, behavior: SingletonBehavior[M], name: str
-    ) -> ActorRef[M]: ...
+    def spawn[M](self, behavior: SingletonBehavior[M], name: str) -> ActorRef[M]: ...
 
     @overload
     def spawn[M](
@@ -353,7 +359,10 @@ class ClusteredActorSystem(ActorSystem):
 
     def spawn[M](
         self,
-        behavior: BroadcastedBehavior[M] | ShardedBehavior[M] | SingletonBehavior[M] | Behavior[M],
+        behavior: BroadcastedBehavior[M]
+        | ShardedBehavior[M]
+        | SingletonBehavior[M]
+        | Behavior[M],
         name: str,
         *,
         mailbox: Mailbox[M] | None = None,
@@ -382,9 +391,7 @@ class ClusteredActorSystem(ActorSystem):
         )
 
         # Coordinator: deterministic — lives on first seed node
-        coordinator = self._get_or_create_coordinator(
-            name, sharded, available_nodes
-        )
+        coordinator = self._get_or_create_coordinator(name, sharded, available_nodes)
         coordinator.tell(RegisterRegion(node=self._self_node))
 
         # Local shard region
@@ -474,7 +481,7 @@ class ClusteredActorSystem(ActorSystem):
         to the leader node, which hasn't spawned that shard type locally.
         """
         prefix = "/_coord-"
-        name = path[len(prefix):]
+        name = path[len(prefix) :]
         if name in self._coordinators:
             return
 
@@ -558,7 +565,9 @@ class ClusteredActorSystem(ActorSystem):
         cluster members and responses are collected into a ``tuple[R, ...]``.
         """
         if isinstance(ref, BroadcastRef):
-            bcast_result: tuple[R, ...] = await self._ask_broadcast(ref, msg_factory, timeout=timeout)  # type: ignore[assignment]
+            bcast_result: tuple[R, ...] = await self._ask_broadcast(
+                ref, msg_factory, timeout=timeout
+            )  # type: ignore[assignment]
             return bcast_result
 
         future: asyncio.Future[R] = asyncio.get_running_loop().create_future()
@@ -676,18 +685,26 @@ class ClusteredActorSystem(ActorSystem):
         node_id = f"{self._host}:{self._port}"
         await self.ask(
             self._barrier_proxy,
-            lambda r: ShardEnvelope(name, BarrierArrive(node=node_id, expected=n, reply_to=r)),
+            lambda r: ShardEnvelope(
+                name, BarrierArrive(node=node_id, expected=n, reply_to=r)
+            ),
             timeout=timeout,
         )
 
     @overload
     def lookup[M](
-        self, path: ServiceKey[M], *, timeout: float = 5.0,
+        self,
+        path: ServiceKey[M],
+        *,
+        timeout: float = 5.0,
     ) -> Coroutine[Any, Any, Listing[M]]: ...
 
     @overload
     def lookup(
-        self, path: str, *, node: NodeId | NodeAddress | None = None,
+        self,
+        path: str,
+        *,
+        node: NodeId | NodeAddress | None = None,
     ) -> ActorRef[Any] | None: ...
 
     def lookup[M](  # type: ignore[reportIncompatibleMethodOverride]
@@ -729,30 +746,41 @@ class ClusteredActorSystem(ActorSystem):
             case ServiceKey() as key:
                 return self._lookup_service(key, timeout=timeout)
             case str() as actor_path:
-                normalized = f"/{actor_path}" if not actor_path.startswith("/") else actor_path
+                normalized = (
+                    f"/{actor_path}" if not actor_path.startswith("/") else actor_path
+                )
                 match node:
                     case None:
                         local_ref = super().lookup(actor_path)
                         if local_ref is None:
                             return None
                         addr = ActorAddress(
-                            system=self._name, path=normalized,
-                            host=self._host, port=self._port,
+                            system=self._name,
+                            path=normalized,
+                            host=self._host,
+                            port=self._port,
                         )
                         return self._remote.make_ref(addr)
                     case NodeAddress(host=host, port=port):
                         addr = ActorAddress(
-                            system=self._name, path=normalized,
-                            host=host, port=port,
+                            system=self._name,
+                            path=normalized,
+                            host=host,
+                            port=port,
                         )
                     case str() as node_id:
                         addr = ActorAddress(
-                            system=self._name, path=normalized, node_id=node_id,
+                            system=self._name,
+                            path=normalized,
+                            node_id=node_id,
                         )
                 return self._remote.make_ref(addr)
 
     async def _lookup_service[M](
-        self, key: ServiceKey[M], *, timeout: float = 5.0,
+        self,
+        key: ServiceKey[M],
+        *,
+        timeout: float = 5.0,
     ) -> Listing[M]:
         return await self.ask(
             self.receptionist,

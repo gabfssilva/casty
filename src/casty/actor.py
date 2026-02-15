@@ -69,7 +69,6 @@ __all__ = [
     "Behavior",
     "Behaviors",
     "BroadcastedBehavior",
-
     "EventSourcedBehavior",
     "PersistedBehavior",
     "ShardedBehavior",

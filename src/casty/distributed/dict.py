@@ -2,6 +2,7 @@
 
 Supports optional event sourcing via ``persistent_map_entity``.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -126,9 +127,7 @@ def persistent_map_entity(
                     return Behaviors.same()
                 case Delete(reply_to):
                     reply_to.tell(state is not None)
-                    return Behaviors.persisted(
-                        [ValueDeleted()], then=Behaviors.same()
-                    )
+                    return Behaviors.persisted([ValueDeleted()], then=Behaviors.same())
                 case Contains(reply_to):
                     reply_to.tell(state is not None)
                     return Behaviors.same()

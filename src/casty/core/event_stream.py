@@ -38,7 +38,8 @@ def event_stream_actor() -> Behavior[EventStreamMsg]:
         subscribers: dict[type, tuple[ActorRef[Any], ...]] = {},
     ) -> Behavior[EventStreamMsg]:
         async def receive(
-            ctx: ActorContext[EventStreamMsg], msg: EventStreamMsg,
+            ctx: ActorContext[EventStreamMsg],
+            msg: EventStreamMsg,
         ) -> Behavior[EventStreamMsg]:
             match msg:
                 case Subscribe(event_type=et, handler=h):
@@ -47,7 +48,9 @@ def event_stream_actor() -> Behavior[EventStreamMsg]:
 
                 case Unsubscribe(event_type=et, handler=h):
                     current = subscribers.get(et, ())
-                    return active({**subscribers, et: tuple(r for r in current if r != h)})
+                    return active(
+                        {**subscribers, et: tuple(r for r in current if r != h)}
+                    )
 
                 case Publish(event=event):
                     for handler in subscribers.get(type(event), ()):

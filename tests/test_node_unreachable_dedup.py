@@ -35,16 +35,22 @@ NODE_DEAD = NodeAddress(host="10.0.0.2", port=25520)
 
 def make_initial_state() -> ClusterState:
     return ClusterState(
-        members=frozenset({
-            Member(
-                address=NODE_SELF, status=MemberStatus.up,
-                roles=frozenset(), id="self",
-            ),
-            Member(
-                address=NODE_DEAD, status=MemberStatus.up,
-                roles=frozenset(), id="dead",
-            ),
-        }),
+        members=frozenset(
+            {
+                Member(
+                    address=NODE_SELF,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="self",
+                ),
+                Member(
+                    address=NODE_DEAD,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="dead",
+                ),
+            }
+        ),
         version=VectorClock().increment(NODE_SELF).increment(NODE_DEAD),
     )
 
@@ -58,6 +64,7 @@ async def test_dedup_survives_stale_gossip() -> None:
     snapshots: list[TopologySnapshot] = []
 
     async with ActorSystem(name="test") as system:
+
         async def capture(_ctx: Any, msg: Any) -> Any:
             if isinstance(msg, TopologySnapshot):
                 snapshots.append(msg)
@@ -86,16 +93,22 @@ async def test_dedup_survives_stale_gossip() -> None:
 
         # Stale gossip arrives: NODE_DEAD still 'up', older vector clock
         stale_state = ClusterState(
-            members=frozenset({
-                Member(
-                    address=NODE_SELF, status=MemberStatus.up,
-                    roles=frozenset(), id="self",
-                ),
-                Member(
-                    address=NODE_DEAD, status=MemberStatus.up,
-                    roles=frozenset(), id="dead",
-                ),
-            }),
+            members=frozenset(
+                {
+                    Member(
+                        address=NODE_SELF,
+                        status=MemberStatus.up,
+                        roles=frozenset(),
+                        id="self",
+                    ),
+                    Member(
+                        address=NODE_DEAD,
+                        status=MemberStatus.up,
+                        roles=frozenset(),
+                        id="dead",
+                    ),
+                }
+            ),
             version=VectorClock().increment(NODE_SELF),
         )
         topo.tell(GossipMessage(state=stale_state, from_node=NODE_DEAD))
@@ -106,7 +119,9 @@ async def test_dedup_survives_stale_gossip() -> None:
         await asyncio.sleep(0.1)
 
         state: ClusterState = await system.ask(
-            topo, lambda r: GetState(reply_to=r), timeout=5.0,
+            topo,
+            lambda r: GetState(reply_to=r),
+            timeout=5.0,
         )
         node_dead = next(m for m in state.members if m.address == NODE_DEAD)
         assert node_dead.status == MemberStatus.down
@@ -131,19 +146,27 @@ async def test_dedup_clears_on_rejoin() -> None:
         await asyncio.sleep(0.1)
 
         state: ClusterState = await system.ask(
-            topo, lambda r: GetState(reply_to=r), timeout=5.0,
+            topo,
+            lambda r: GetState(reply_to=r),
+            timeout=5.0,
         )
         node_dead = next(m for m in state.members if m.address == NODE_DEAD)
         assert node_dead.status == MemberStatus.down
 
         # Node rejoins
-        topo.tell(JoinRequest(
-            node=NODE_DEAD, roles=frozenset(), node_id="dead-v2",
-        ))
+        topo.tell(
+            JoinRequest(
+                node=NODE_DEAD,
+                roles=frozenset(),
+                node_id="dead-v2",
+            )
+        )
         await asyncio.sleep(0.1)
 
         state = await system.ask(
-            topo, lambda r: GetState(reply_to=r), timeout=5.0,
+            topo,
+            lambda r: GetState(reply_to=r),
+            timeout=5.0,
         )
         node_dead = next(m for m in state.members if m.address == NODE_DEAD)
         assert node_dead.status == MemberStatus.joining
@@ -153,7 +176,9 @@ async def test_dedup_clears_on_rejoin() -> None:
         await asyncio.sleep(0.1)
 
         state = await system.ask(
-            topo, lambda r: GetState(reply_to=r), timeout=5.0,
+            topo,
+            lambda r: GetState(reply_to=r),
+            timeout=5.0,
         )
         node_dead = next(m for m in state.members if m.address == NODE_DEAD)
         assert node_dead.status == MemberStatus.down

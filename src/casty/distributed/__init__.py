@@ -4,6 +4,7 @@ Re-exports the public client classes (``Counter``, ``Dict``, ``Set``,
 ``Queue``, ``Lock``, ``Semaphore``, ``Barrier``) and the ``Distributed``
 facade that creates them.
 """
+
 from __future__ import annotations
 
 from casty.distributed.barrier import Barrier

@@ -81,10 +81,14 @@ async def _spawn_tcp(
 
 
 async def _start_remote_pair() -> tuple[
-    ActorSystem, ActorSystem,
-    RemoteTransport, RemoteTransport,
-    LocalTransport, LocalTransport,
-    int, int,
+    ActorSystem,
+    ActorSystem,
+    RemoteTransport,
+    RemoteTransport,
+    LocalTransport,
+    LocalTransport,
+    int,
+    int,
 ]:
     """Create two actor systems with transport actors and wired RemoteTransports."""
     sys_a = ActorSystem(name="sys-a")
@@ -98,8 +102,12 @@ async def _start_remote_pair() -> tuple[
     serializer_a = JsonSerializer(TypeRegistry())
     serializer_b = JsonSerializer(TypeRegistry())
 
-    inbound_a = InboundMessageHandler(local=local_a, serializer=serializer_a, system_name="sys-a")
-    inbound_b = InboundMessageHandler(local=local_b, serializer=serializer_b, system_name="sys-b")
+    inbound_a = InboundMessageHandler(
+        local=local_a, serializer=serializer_a, system_name="sys-a"
+    )
+    inbound_b = InboundMessageHandler(
+        local=local_b, serializer=serializer_b, system_name="sys-b"
+    )
 
     ref_a, port_a = await _spawn_tcp(sys_a, inbound_a)
     ref_b, port_b = await _spawn_tcp(sys_b, inbound_b)
@@ -188,7 +196,9 @@ async def test_tcp_transport_connection_reuse() -> None:
                 payload=f"msg-{i}".encode(),
                 type_hint="str",
             )
-            ref_a.tell(SendToNode(host="127.0.0.1", port=port_b, data=envelope.to_bytes()))
+            ref_a.tell(
+                SendToNode(host="127.0.0.1", port=port_b, data=envelope.to_bytes())
+            )
         await asyncio.sleep(0.3)
         assert len(handler_b.received) == 5
     finally:
@@ -218,7 +228,9 @@ async def test_remote_transport_local_delivery() -> None:
         received: list[object] = []
         local.register("/test-actor", lambda msg: received.append(msg))
 
-        addr = ActorAddress(system="test", path="/test-actor", host="127.0.0.1", port=25520)
+        addr = ActorAddress(
+            system="test", path="/test-actor", host="127.0.0.1", port=25520
+        )
         remote.deliver(addr, Ping(value=42))
 
         assert len(received) == 1
@@ -237,7 +249,10 @@ async def test_remote_transport_tcp_delivery() -> None:
         local_b.register("/target-actor", lambda msg: received.append(msg))
 
         target_addr = ActorAddress(
-            system="sys-b", path="/target-actor", host="127.0.0.1", port=port_b,
+            system="sys-b",
+            path="/target-actor",
+            host="127.0.0.1",
+            port=port_b,
         )
         remote_a.deliver(target_addr, Ping(value=99))
 
@@ -253,16 +268,30 @@ async def test_remote_transport_tcp_delivery() -> None:
 
 async def test_remote_transport_actor_ref_roundtrip() -> None:
     """Send message containing ActorRef, verify reply comes back via TCP."""
-    sys_a, sys_b, remote_a, _, local_a, local_b, port_a, port_b = await _start_remote_pair()
+    (
+        sys_a,
+        sys_b,
+        remote_a,
+        _,
+        local_a,
+        local_b,
+        port_a,
+        port_b,
+    ) = await _start_remote_pair()
 
     try:
         received_on_a: list[object] = []
         local_a.register("/reply", lambda msg: received_on_a.append(msg))
 
         reply_addr = ActorAddress(
-            system="sys-a", path="/reply", host="127.0.0.1", port=port_a,
+            system="sys-a",
+            path="/reply",
+            host="127.0.0.1",
+            port=port_a,
         )
-        reply_ref = RemoteActorRef[ShardLocation](address=reply_addr, _transport=remote_a)
+        reply_ref = RemoteActorRef[ShardLocation](
+            address=reply_addr, _transport=remote_a
+        )
 
         received_on_b: list[object] = []
 
@@ -282,7 +311,10 @@ async def test_remote_transport_actor_ref_roundtrip() -> None:
         local_b.register("/coordinator", handle_on_b)
 
         coord_addr = ActorAddress(
-            system="sys-b", path="/coordinator", host="127.0.0.1", port=port_b,
+            system="sys-b",
+            path="/coordinator",
+            host="127.0.0.1",
+            port=port_b,
         )
         remote_a.deliver(coord_addr, GetShardLocation(shard_id=5, reply_to=reply_ref))
 
@@ -372,7 +404,9 @@ async def test_tcp_address_map_translates_on_send() -> None:
     """Transport with address_map connects to the mapped address, not the logical one."""
     received: list[bytes] = []
 
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def handle(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
         handshake = await _read_raw_frame(reader)
         assert handshake[0] == FRAME_HANDSHAKE
         writer.write(_make_server_handshake_frame("127.0.0.1", actual_port))
@@ -409,7 +443,9 @@ async def test_remote_transport_sender_uses_advertised_address() -> None:
     """MessageEnvelope.sender uses advertised address, not bind address."""
     captured_data: list[bytes] = []
 
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def handle(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
         await _read_raw_frame(reader)
         writer.write(_make_server_handshake_frame("127.0.0.1", actual_port))
         await writer.drain()
@@ -425,7 +461,9 @@ async def test_remote_transport_sender_uses_advertised_address() -> None:
 
     local = LocalTransport()
     serializer = JsonSerializer(TypeRegistry())
-    inbound = InboundMessageHandler(local=local, serializer=serializer, system_name="test-sys")
+    inbound = InboundMessageHandler(
+        local=local, serializer=serializer, system_name="test-sys"
+    )
     ref, _ = await _spawn_tcp(sys, inbound, client_only=True)
 
     remote = RemoteTransport(
@@ -460,7 +498,9 @@ async def test_remote_transport_sender_uses_advertised_address() -> None:
         await server.wait_closed()
 
 
-async def test_tcp_transport_tls(tls_contexts: tuple[ssl.SSLContext, ssl.SSLContext]) -> None:
+async def test_tcp_transport_tls(
+    tls_contexts: tuple[ssl.SSLContext, ssl.SSLContext],
+) -> None:
     server_ctx, client_ctx = tls_contexts
 
     handler_a = _PlaceholderHandler()
@@ -471,8 +511,12 @@ async def test_tcp_transport_tls(tls_contexts: tuple[ssl.SSLContext, ssl.SSLCont
     await sys_a.__aenter__()
     await sys_b.__aenter__()
 
-    ref_a, port_a = await _spawn_tcp(sys_a, handler_a, server_ssl=server_ctx, client_ssl=client_ctx)
-    _, port_b = await _spawn_tcp(sys_b, handler_b, server_ssl=server_ctx, client_ssl=client_ctx)
+    ref_a, port_a = await _spawn_tcp(
+        sys_a, handler_a, server_ssl=server_ctx, client_ssl=client_ctx
+    )
+    _, port_b = await _spawn_tcp(
+        sys_b, handler_b, server_ssl=server_ctx, client_ssl=client_ctx
+    )
 
     try:
         envelope = MessageEnvelope(

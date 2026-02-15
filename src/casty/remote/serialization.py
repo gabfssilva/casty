@@ -269,7 +269,11 @@ class JsonSerializer:
                     "value": value.name,
                 }
             case frozenset():
-                return {"__frozenset__": [self._to_dict(item) for item in cast(frozenset[object], value)]}
+                return {
+                    "__frozenset__": [
+                        self._to_dict(item) for item in cast(frozenset[object], value)
+                    ]
+                }
             case _ if dataclasses.is_dataclass(value) and not isinstance(value, type):
                 type_name = self._registry.type_name(type(value))
                 result: dict[str, object] = {"_type": type_name}
@@ -287,7 +291,11 @@ class JsonSerializer:
             case list():
                 return [self._to_dict(item) for item in cast(list[object], value)]
             case tuple():
-                return {"__tuple__": [self._to_dict(item) for item in cast(tuple[object, ...], value)]}
+                return {
+                    "__tuple__": [
+                        self._to_dict(item) for item in cast(tuple[object, ...], value)
+                    ]
+                }
             case _:
                 return value
 
@@ -309,16 +317,22 @@ class JsonSerializer:
                 return enum_cls[member_name]  # type: ignore[index]
             case {"__frozenset__": list() as _fs}:  # pyright: ignore[reportUnknownVariableType]
                 items = cast(list[object], _fs)
-                return frozenset(self._from_dict(item, ref_factory=ref_factory) for item in items)
+                return frozenset(
+                    self._from_dict(item, ref_factory=ref_factory) for item in items
+                )
             case {"__dict__": list() as _pairs}:  # pyright: ignore[reportUnknownVariableType]
                 pairs = cast(list[list[object]], _pairs)
                 return {
-                    self._from_dict(pair[0], ref_factory=ref_factory): self._from_dict(pair[1], ref_factory=ref_factory)
+                    self._from_dict(pair[0], ref_factory=ref_factory): self._from_dict(
+                        pair[1], ref_factory=ref_factory
+                    )
                     for pair in pairs
                 }
             case {"__tuple__": list() as _tup}:  # pyright: ignore[reportUnknownVariableType]
                 items = cast(list[object], _tup)
-                return tuple(self._from_dict(item, ref_factory=ref_factory) for item in items)
+                return tuple(
+                    self._from_dict(item, ref_factory=ref_factory) for item in items
+                )
             case {"_type": str() as type_name}:
                 cls = self._registry.resolve(type_name)
                 fields = dataclasses.fields(cls)
@@ -326,12 +340,17 @@ class JsonSerializer:
                 kwargs: dict[str, Any] = {}
                 for f in fields:
                     if f.name in str_dict:
-                        kwargs[f.name] = self._from_dict(str_dict[f.name], ref_factory=ref_factory)
+                        kwargs[f.name] = self._from_dict(
+                            str_dict[f.name], ref_factory=ref_factory
+                        )
                 return cls(**kwargs)
             case dict():
                 return cast(dict[str, object], value)
             case list():
-                return [self._from_dict(item, ref_factory=ref_factory) for item in cast(list[object], value)]
+                return [
+                    self._from_dict(item, ref_factory=ref_factory)
+                    for item in cast(list[object], value)
+                ]
             case _:
                 return value
 
@@ -390,7 +409,9 @@ class PickleSerializer:
 
         if ref_factory is not None:
             previous = _ref_module.ref_restore_hook
-            _ref_module.ref_restore_hook = lambda uri: ref_factory(ActorAddress.from_uri(uri))
+            _ref_module.ref_restore_hook = lambda uri: ref_factory(
+                ActorAddress.from_uri(uri)
+            )
             try:
                 return pickle.loads(data)  # noqa: S301
             finally:

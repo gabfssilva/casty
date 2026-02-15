@@ -32,7 +32,9 @@ async def test_tick_delivers_periodically() -> None:
     async with ActorSystem() as system:
         target = system.spawn(collector(results), "target")
         sched = system.spawn(scheduler(), "scheduler")
-        sched.tell(ScheduleTick(key="ping", target=target, message=Ping(1), interval=0.05))
+        sched.tell(
+            ScheduleTick(key="ping", target=target, message=Ping(1), interval=0.05)
+        )
         await asyncio.sleep(0.3)
 
     assert len(results) >= 3
@@ -57,7 +59,9 @@ async def test_cancel_stops_delivery() -> None:
     async with ActorSystem() as system:
         target = system.spawn(collector(results), "target")
         sched = system.spawn(scheduler(), "scheduler")
-        sched.tell(ScheduleTick(key="ping", target=target, message=Ping(1), interval=0.05))
+        sched.tell(
+            ScheduleTick(key="ping", target=target, message=Ping(1), interval=0.05)
+        )
         await asyncio.sleep(0.15)
         count_before = len(results)
         assert count_before >= 1
@@ -123,7 +127,9 @@ async def test_reschedule_pattern() -> None:
     async with ActorSystem() as system:
         sched = system.spawn(scheduler(), "scheduler")
         retrier = system.spawn(retry_actor(sched), "retrier")
-        sched.tell(ScheduleOnce(key="retry", target=retrier, message=Ping(1), delay=0.05))
+        sched.tell(
+            ScheduleOnce(key="retry", target=retrier, message=Ping(1), delay=0.05)
+        )
         await asyncio.sleep(0.5)
 
     assert attempts == [1, 2, 3]

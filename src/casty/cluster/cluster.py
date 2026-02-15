@@ -75,8 +75,7 @@ class JoinRetry:
 
 
 type ClusterCmd = (
-    GetState | WaitForMembers
-    | GetReceptionist | JoinRetry | TopologySnapshot
+    GetState | WaitForMembers | GetReceptionist | JoinRetry | TopologySnapshot
 )
 
 
@@ -135,7 +134,10 @@ def cluster_actor(
     async def setup(ctx: ActorContext[ClusterCmd]) -> Behavior[ClusterCmd]:
         self_node = NodeAddress(host=config.host, port=config.port)
         initial_member = Member(
-            address=self_node, status=MemberStatus.up, roles=config.roles, id=config.node_id
+            address=self_node,
+            status=MemberStatus.up,
+            roles=config.roles,
+            id=config.node_id,
         )
         initial_state = ClusterState().add_member(initial_member)
 
@@ -195,21 +197,30 @@ def cluster_actor(
                 )
 
         # Schedule periodic ticks — all targeting topology_actor
-        scheduler_ref.tell(ScheduleTick(
-            key="gossip", target=topo_ref, message=GossipTick(), interval=gossip_interval,
-        ))
-        scheduler_ref.tell(ScheduleTick(
-            key="heartbeat",
-            target=topo_ref,
-            message=HeartbeatTick(members=frozenset()),
-            interval=heartbeat_interval,
-        ))
-        scheduler_ref.tell(ScheduleTick(
-            key="availability",
-            target=topo_ref,
-            message=CheckAvailability(reply_to=topo_ref),  # type: ignore[arg-type]
-            interval=availability_interval,
-        ))
+        scheduler_ref.tell(
+            ScheduleTick(
+                key="gossip",
+                target=topo_ref,
+                message=GossipTick(),
+                interval=gossip_interval,
+            )
+        )
+        scheduler_ref.tell(
+            ScheduleTick(
+                key="heartbeat",
+                target=topo_ref,
+                message=HeartbeatTick(members=frozenset()),
+                interval=heartbeat_interval,
+            )
+        )
+        scheduler_ref.tell(
+            ScheduleTick(
+                key="availability",
+                target=topo_ref,
+                message=CheckAvailability(reply_to=topo_ref),  # type: ignore[arg-type]
+                interval=availability_interval,
+            )
+        )
 
         # Subscribe to topology so we know when join succeeds
         if seed_refs:
@@ -217,9 +228,14 @@ def cluster_actor(
 
         # Schedule join retry for multi-node clusters
         if seed_refs:
-            scheduler_ref.tell(ScheduleOnce(
-                key="join-retry", target=ctx.self, message=JoinRetry(), delay=0.0,
-            ))
+            scheduler_ref.tell(
+                ScheduleOnce(
+                    key="join-retry",
+                    target=ctx.self,
+                    message=JoinRetry(),
+                    delay=0.0,
+                )
+            )
 
         async def cancel_schedules(ctx: ActorContext[ClusterCmd]) -> None:
             scheduler_ref.tell(CancelSchedule(key="gossip"))
@@ -227,7 +243,12 @@ def cluster_actor(
             scheduler_ref.tell(CancelSchedule(key="availability"))
             scheduler_ref.tell(CancelSchedule(key="join-retry"))
 
-        logger.info("Cluster started %s:%d (seeds=%d)", self_node.host, self_node.port, len(config.seed_nodes))
+        logger.info(
+            "Cluster started %s:%d (seeds=%d)",
+            self_node.host,
+            self_node.port,
+            len(config.seed_nodes),
+        )
 
         return Behaviors.with_lifecycle(
             ready(
@@ -260,7 +281,8 @@ def ready(
     joined: bool,
 ) -> Behavior[ClusterCmd]:
     async def receive(
-        ctx: ActorContext[ClusterCmd], msg: ClusterCmd,
+        ctx: ActorContext[ClusterCmd],
+        msg: ClusterCmd,
     ) -> Behavior[ClusterCmd]:
         match msg:
             case GetState(reply_to=reply_to):
@@ -277,7 +299,9 @@ def ready(
 
             case TopologySnapshot(members=members) if not joined:
                 if len(members) > 1:
-                    logger.debug("Join confirmed (members=%d), stopping retries", len(members))
+                    logger.debug(
+                        "Join confirmed (members=%d), stopping retries", len(members)
+                    )
                     scheduler_ref.tell(CancelSchedule(key="join-retry"))
                     return ready(
                         topo_ref=topo_ref,

@@ -13,9 +13,7 @@ from dataclasses import dataclass
 _REMOTE_PATTERN = re.compile(
     r"^casty://(?P<system>[^@/]+)@(?P<host>[^:]+):(?P<port>\d+)/(?P<path>.+)$"
 )
-_LOCAL_PATTERN = re.compile(
-    r"^casty://(?P<system>[^@/]+)/(?P<path>.+)$"
-)
+_LOCAL_PATTERN = re.compile(r"^casty://(?P<system>[^@/]+)/(?P<path>.+)$")
 
 
 @dataclass(frozen=True)

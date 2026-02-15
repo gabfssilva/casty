@@ -4,6 +4,7 @@ Provides ``load_config`` / ``discover_config`` for loading ``casty.toml`` and
 a hierarchy of frozen dataclasses for mailbox, supervision, sharding, gossip,
 heartbeat, failure-detector, and per-actor override settings.
 """
+
 from __future__ import annotations
 
 import re
@@ -52,6 +53,7 @@ class TransportConfig:
     >>> TransportConfig(max_pending_per_path=128)
     TransportConfig(max_pending_per_path=128)
     """
+
     max_pending_per_path: int = 64
 
 
@@ -72,6 +74,7 @@ class MailboxConfig:
     >>> MailboxConfig(capacity=500, strategy="drop_oldest")
     MailboxConfig(capacity=500, strategy='drop_oldest')
     """
+
     capacity: int = 1000
     strategy: MailboxStrategy = "drop_new"
 
@@ -94,6 +97,7 @@ class SupervisionConfig:
     >>> SupervisionConfig(strategy="stop")
     SupervisionConfig(strategy='stop', max_restarts=3, within_seconds=60.0)
     """
+
     strategy: str = "restart"
     max_restarts: int = 3
     within_seconds: float = 60.0
@@ -113,6 +117,7 @@ class ShardingConfig:
     >>> ShardingConfig(num_shards=512)
     ShardingConfig(num_shards=512)
     """
+
     num_shards: int = 256
 
 
@@ -138,6 +143,7 @@ class FailureDetectorConfig:
     >>> FailureDetectorConfig(threshold=12.0, max_sample_size=500)
     FailureDetectorConfig(threshold=12.0, max_sample_size=500, ...)
     """
+
     threshold: float = 8.0
     max_sample_size: int = 200
     min_std_deviation_ms: float = 100.0
@@ -161,6 +167,7 @@ class GossipConfig:
     >>> GossipConfig(interval=0.5, fanout=5)
     GossipConfig(interval=0.5, fanout=5)
     """
+
     interval: float = 1.0
     fanout: int = 3
 
@@ -181,6 +188,7 @@ class HeartbeatConfig:
     >>> HeartbeatConfig(interval=1.0, availability_check_interval=5.0)
     HeartbeatConfig(interval=1.0, availability_check_interval=5.0)
     """
+
     interval: float = 0.5
     availability_check_interval: float = 2.0
 
@@ -217,6 +225,7 @@ class ActorConfig:
     ... )
     ActorConfig(pattern=..., ...)
     """
+
     pattern: re.Pattern[str]
     mailbox_overrides: dict[str, Any]
     supervision_overrides: dict[str, Any]
@@ -249,6 +258,7 @@ class ResolvedActorConfig:
     >>> resolved.mailbox.capacity
     1000
     """
+
     mailbox: MailboxConfig
     supervision: SupervisionConfig
     sharding: ShardingConfig
@@ -295,6 +305,7 @@ class CastyConfig:
 
     >>> config = load_config(Path("casty.toml"))
     """
+
     system_name: str = "casty"
     cluster: ClusterConfig | None = None
     tls: TlsConfig | None = None
@@ -439,7 +450,9 @@ def load_config(path: Path | None = None) -> CastyConfig:
 
     system_raw = raw.get("system", {})
     system_name = system_raw.get("name", "casty")
-    suppress_dead_letters_on_shutdown = system_raw.get("suppress_dead_letters_on_shutdown", False)
+    suppress_dead_letters_on_shutdown = system_raw.get(
+        "suppress_dead_letters_on_shutdown", False
+    )
 
     transport = TransportConfig(**raw.get("transport", {}))
 
@@ -470,7 +483,9 @@ def load_config(path: Path | None = None) -> CastyConfig:
         seed_nodes_raw: list[str] = cluster_raw.get("seed_nodes", [])
         seed_nodes = tuple(parse_seed_node(s) for s in seed_nodes_raw)
         roles_raw: list[str] = cluster_raw.get("roles", [])
-        node_id: str = cluster_raw.get("node_id", f"{cluster_raw['host']}:{cluster_raw['port']}")
+        node_id: str = cluster_raw.get(
+            "node_id", f"{cluster_raw['host']}:{cluster_raw['port']}"
+        )
         cluster = ClusterConfig(
             host=cluster_raw["host"],
             port=cluster_raw["port"],

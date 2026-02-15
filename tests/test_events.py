@@ -6,7 +6,12 @@ import pytest
 
 from casty.core.address import ActorAddress
 from casty.cluster.state import Member, MemberStatus, NodeAddress
-from casty.cluster.events import MemberLeft, MemberUp, ReachableMember, UnreachableMember
+from casty.cluster.events import (
+    MemberLeft,
+    MemberUp,
+    ReachableMember,
+    UnreachableMember,
+)
 from casty.core.events import (
     ActorRestarted,
     DeadLetter,

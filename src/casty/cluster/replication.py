@@ -3,6 +3,7 @@
 ``ReplicaPromoted`` is sent by the shard coordinator to a replica region
 when the previous primary is detected as down.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,5 +29,6 @@ class ReplicaPromoted:
     >>> ReplicaPromoted("user-1", shard_id=7)
     ReplicaPromoted(entity_id='user-1', shard_id=7)
     """
+
     entity_id: str
     shard_id: int

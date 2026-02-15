@@ -36,11 +36,7 @@ class RegisterRegion:
     node: NodeAddress
 
 
-type CoordinatorMsg = (
-    GetShardLocation
-    | RegisterRegion
-    | TopologySnapshot
-)
+type CoordinatorMsg = GetShardLocation | RegisterRegion | TopologySnapshot
 
 
 class ShardAllocationStrategy(Protocol):
@@ -96,9 +92,7 @@ def allocate_shard(
     for _ in range(min(num_replicas, len(remaining))):
         replica = min(
             remaining,
-            key=lambda n: sum(
-                1 for a in allocations.values() if n in a.replicas
-            ),
+            key=lambda n: sum(1 for a in allocations.values() if n in a.replicas),
         )
         replica_nodes_list.append(replica)
         remaining = remaining - {replica}
@@ -117,18 +111,14 @@ def handle_node_down(
         if alloc.primary == failed_node:
             if alloc.replicas:
                 new_primary = alloc.replicas[0]
-                new_replicas = tuple(
-                    r for r in alloc.replicas[1:] if r != failed_node
-                )
+                new_replicas = tuple(r for r in alloc.replicas[1:] if r != failed_node)
                 new_allocations[shard_id] = ShardAllocation(
                     primary=new_primary, replicas=new_replicas
                 )
             else:
                 del new_allocations[shard_id]
         else:
-            new_replicas = tuple(
-                r for r in alloc.replicas if r != failed_node
-            )
+            new_replicas = tuple(r for r in alloc.replicas if r != failed_node)
             if new_replicas != alloc.replicas:
                 new_allocations[shard_id] = ShardAllocation(
                     primary=alloc.primary, replicas=new_replicas
@@ -169,10 +159,13 @@ def shard_coordinator_actor(
     )
 
     if topology_ref is not None and self_node is not None:
+
         async def setup(ctx: ActorContext[CoordinatorMsg]) -> Behavior[CoordinatorMsg]:
             from casty.cluster.topology import SubscribeTopology
+
             topology_ref.tell(SubscribeTopology(reply_to=ctx.self))  # type: ignore[arg-type]
             return initial
+
         return Behaviors.setup(setup)
 
     return initial
@@ -188,7 +181,8 @@ def pending_behavior(
     """Buffers requests until first TopologySnapshot arrives."""
 
     async def receive(
-        ctx: ActorContext[CoordinatorMsg], msg: CoordinatorMsg,
+        ctx: ActorContext[CoordinatorMsg],
+        msg: CoordinatorMsg,
     ) -> Behavior[CoordinatorMsg]:
         match msg:
             case TopologySnapshot() as snapshot:
@@ -196,14 +190,14 @@ def pending_behavior(
                     return Behaviors.same()
                 is_leader = snapshot.leader == cfg.self_node
                 up_nodes = frozenset(
-                    m.address for m in snapshot.members
-                    if m.status == MemberStatus.up
+                    m.address for m in snapshot.members if m.status == MemberStatus.up
                 )
                 allocs = snapshot.shard_allocations.get(cfg.shard_type, {})
                 if is_leader:
                     cfg.logger.info(
                         "Coordinator [%s] activated as leader (buffered=%d)",
-                        cfg.shard_type, len(buffer),
+                        cfg.shard_type,
+                        len(buffer),
                     )
                     behavior: Behavior[CoordinatorMsg] = leader_behavior(
                         cfg=cfg,
@@ -215,7 +209,8 @@ def pending_behavior(
                 else:
                     cfg.logger.info(
                         "Coordinator [%s] activated as follower (buffered=%d)",
-                        cfg.shard_type, len(buffer),
+                        cfg.shard_type,
+                        len(buffer),
                     )
                     behavior = follower_behavior(
                         cfg=cfg,
@@ -268,16 +263,19 @@ def leader_behavior(
         if cfg.topology_ref is not None:
             from casty.cluster.topology_actor import UpdateShardAllocations
 
-            cfg.topology_ref.tell(UpdateShardAllocations(
-                shard_type=cfg.shard_type,
-                allocations=allocs,
-                epoch=new_epoch,
-            ))
+            cfg.topology_ref.tell(
+                UpdateShardAllocations(
+                    shard_type=cfg.shard_type,
+                    allocations=allocs,
+                    epoch=new_epoch,
+                )
+            )
 
     effective_nodes = nodes & region_nodes
 
     async def receive(
-        ctx: ActorContext[CoordinatorMsg], msg: CoordinatorMsg,
+        ctx: ActorContext[CoordinatorMsg],
+        msg: CoordinatorMsg,
     ) -> Behavior[CoordinatorMsg]:
         match msg:
             case TopologySnapshot() as snapshot:
@@ -285,15 +283,18 @@ def leader_behavior(
                     return Behaviors.same()
                 is_leader = snapshot.leader == cfg.self_node
                 up_nodes = frozenset(
-                    m.address for m in snapshot.members
-                    if m.status == MemberStatus.up
+                    m.address for m in snapshot.members if m.status == MemberStatus.up
                 )
                 if not is_leader:
-                    cfg.logger.info("Coordinator [%s] demoted to follower", cfg.shard_type)
+                    cfg.logger.info(
+                        "Coordinator [%s] demoted to follower", cfg.shard_type
+                    )
                     allocs = snapshot.shard_allocations.get(cfg.shard_type, {})
                     behavior: Behavior[CoordinatorMsg] = follower_behavior(
                         cfg=cfg,
-                        allocations=allocs if snapshot.allocation_epoch >= epoch else allocations,
+                        allocations=allocs
+                        if snapshot.allocation_epoch >= epoch
+                        else allocations,
                         nodes=up_nodes,
                         region_nodes=region_nodes,
                         epoch=max(snapshot.allocation_epoch, epoch),
@@ -313,10 +314,13 @@ def leader_behavior(
                     ):
                         cfg.logger.warning(
                             "NodeDown %s:%d (shards affected)",
-                            unreachable_node.host, unreachable_node.port,
+                            unreachable_node.host,
+                            unreachable_node.port,
                         )
                         current_allocs, current_nodes = handle_node_down(
-                            unreachable_node, current_allocs, current_nodes,
+                            unreachable_node,
+                            current_allocs,
+                            current_nodes,
                         )
                         current_epoch += 1
                         publish(current_allocs, current_epoch)
@@ -357,11 +361,13 @@ def leader_behavior(
             case GetShardLocation(shard_id, reply_to):
                 if shard_id in allocations:
                     alloc = allocations[shard_id]
-                    reply_to.tell(ShardLocation(
-                        shard_id=shard_id,
-                        node=alloc.primary,
-                        replicas=alloc.replicas,
-                    ))
+                    reply_to.tell(
+                        ShardLocation(
+                            shard_id=shard_id,
+                            node=alloc.primary,
+                            replicas=alloc.replicas,
+                        )
+                    )
                     return Behaviors.same()
 
                 if not effective_nodes:
@@ -375,18 +381,27 @@ def leader_behavior(
                     )
 
                 new_alloc = allocate_shard(
-                    shard_id, cfg.strategy, allocations, effective_nodes, cfg.num_replicas,
+                    shard_id,
+                    cfg.strategy,
+                    allocations,
+                    effective_nodes,
+                    cfg.num_replicas,
                 )
                 new_allocations = {**allocations, shard_id: new_alloc}
-                reply_to.tell(ShardLocation(
-                    shard_id=shard_id,
-                    node=new_alloc.primary,
-                    replicas=new_alloc.replicas,
-                ))
+                reply_to.tell(
+                    ShardLocation(
+                        shard_id=shard_id,
+                        node=new_alloc.primary,
+                        replicas=new_alloc.replicas,
+                    )
+                )
                 new_epoch = epoch + 1
                 cfg.logger.info(
                     "Shard %d -> %s:%d (epoch=%d)",
-                    shard_id, new_alloc.primary.host, new_alloc.primary.port, new_epoch,
+                    shard_id,
+                    new_alloc.primary.host,
+                    new_alloc.primary.port,
+                    new_epoch,
                 )
                 publish(new_allocations, new_epoch)
                 return leader_behavior(
@@ -416,7 +431,8 @@ def follower_behavior(
     """Follower mode: serves cached allocations, forwards unknown to leader."""
 
     async def receive(
-        ctx: ActorContext[CoordinatorMsg], msg: CoordinatorMsg,
+        ctx: ActorContext[CoordinatorMsg],
+        msg: CoordinatorMsg,
     ) -> Behavior[CoordinatorMsg]:
         match msg:
             case TopologySnapshot() as snapshot:
@@ -424,15 +440,18 @@ def follower_behavior(
                     return Behaviors.same()
                 is_leader = snapshot.leader == cfg.self_node
                 up_nodes = frozenset(
-                    m.address for m in snapshot.members
-                    if m.status == MemberStatus.up
+                    m.address for m in snapshot.members if m.status == MemberStatus.up
                 )
                 allocs = snapshot.shard_allocations.get(cfg.shard_type, {})
                 if is_leader:
-                    cfg.logger.info("Coordinator [%s] promoted to leader", cfg.shard_type)
+                    cfg.logger.info(
+                        "Coordinator [%s] promoted to leader", cfg.shard_type
+                    )
                     return leader_behavior(
                         cfg=cfg,
-                        allocations=allocs if snapshot.allocation_epoch >= epoch else allocations,
+                        allocations=allocs
+                        if snapshot.allocation_epoch >= epoch
+                        else allocations,
                         nodes=up_nodes,
                         region_nodes=region_nodes,
                         epoch=max(snapshot.allocation_epoch, epoch),
@@ -471,8 +490,8 @@ def follower_behavior(
                         host=leader_node.host,
                         port=leader_node.port,
                     )
-                    leader_ref: ActorRef[CoordinatorMsg] = cfg.remote_transport.make_ref(
-                        leader_coord_addr
+                    leader_ref: ActorRef[CoordinatorMsg] = (
+                        cfg.remote_transport.make_ref(leader_coord_addr)
                     )
                     leader_ref.tell(msg)
                 return follower_behavior(
@@ -488,11 +507,13 @@ def follower_behavior(
             case GetShardLocation(shard_id, reply_to):
                 if shard_id in allocations:
                     alloc = allocations[shard_id]
-                    reply_to.tell(ShardLocation(
-                        shard_id=shard_id,
-                        node=alloc.primary,
-                        replicas=alloc.replicas,
-                    ))
+                    reply_to.tell(
+                        ShardLocation(
+                            shard_id=shard_id,
+                            node=alloc.primary,
+                            replicas=alloc.replicas,
+                        )
+                    )
                     return Behaviors.same()
                 if leader_node is not None and cfg.remote_transport is not None:
                     cfg.logger.debug("Forwarding shard %d to leader", shard_id)
@@ -502,8 +523,8 @@ def follower_behavior(
                         host=leader_node.host,
                         port=leader_node.port,
                     )
-                    leader_ref: ActorRef[CoordinatorMsg] = cfg.remote_transport.make_ref(
-                        leader_coord_addr
+                    leader_ref: ActorRef[CoordinatorMsg] = (
+                        cfg.remote_transport.make_ref(leader_coord_addr)
                     )
                     leader_ref.tell(msg)
                     return Behaviors.same()

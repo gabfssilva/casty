@@ -54,13 +54,19 @@ def scheduler() -> Behavior[SchedulerMsg]:
     async def setup(ctx: ActorContext[SchedulerMsg]) -> Behavior[SchedulerMsg]:
         running: dict[str, asyncio.Task[None]] = {}
 
-        async def receive(ctx: ActorContext[SchedulerMsg], msg: SchedulerMsg) -> Behavior[SchedulerMsg]:
+        async def receive(
+            ctx: ActorContext[SchedulerMsg], msg: SchedulerMsg
+        ) -> Behavior[SchedulerMsg]:
             match msg:
-                case ScheduleTick(key=key, target=target, message=message, interval=interval):
+                case ScheduleTick(
+                    key=key, target=target, message=message, interval=interval
+                ):
                     if key in running:
                         running[key].cancel()
 
-                    async def tick(t: ActorRef[Any] = target, m: Any = message, i: float = interval) -> None:
+                    async def tick(
+                        t: ActorRef[Any] = target, m: Any = message, i: float = interval
+                    ) -> None:
                         try:
                             while True:
                                 await asyncio.sleep(i)
@@ -75,7 +81,9 @@ def scheduler() -> Behavior[SchedulerMsg]:
                     if key in running:
                         running[key].cancel()
 
-                    async def once(t: ActorRef[Any] = target, m: Any = message, d: float = delay) -> None:
+                    async def once(
+                        t: ActorRef[Any] = target, m: Any = message, d: float = delay
+                    ) -> None:
                         try:
                             await asyncio.sleep(d)
                             t.tell(m)

@@ -47,6 +47,7 @@ class Behaviors:
     def ignore[M]() -> Behavior[M]:
         async def receive(ctx: ActorContext[M], msg: M) -> Behavior[M]:
             return Behavior.same()
+
         return Behavior.receive(receive)
 
     @staticmethod
@@ -67,7 +68,8 @@ class Behaviors:
         *,
         pre_start: Callable[[ActorContext[M]], Awaitable[None]] | None = None,
         post_stop: Callable[[ActorContext[M]], Awaitable[None]] | None = None,
-        pre_restart: Callable[[ActorContext[M], Exception], Awaitable[None]] | None = None,
+        pre_restart: Callable[[ActorContext[M], Exception], Awaitable[None]]
+        | None = None,
         post_restart: Callable[[ActorContext[M]], Awaitable[None]] | None = None,
     ) -> Behavior[M]:
         async def setup(ctx: ActorContext[M]) -> Behavior[M]:
@@ -212,7 +214,9 @@ class Behaviors:
             if ref is not None:
                 ref.tell(Deregister(key=key, ref=ctx.self))
 
-        return Behaviors.with_lifecycle(behavior, pre_start=pre_start, post_stop=post_stop)
+        return Behaviors.with_lifecycle(
+            behavior, pre_start=pre_start, post_stop=post_stop
+        )
 
     @staticmethod
     def broadcasted[M](

@@ -87,21 +87,31 @@ async def worker(
         try:
             match op:
                 case "counter_increment":
-                    counter.tell(ShardEnvelope(entity, Increment(amount=random.randint(1, 5))))  # type: ignore[union-attr]
+                    counter.tell(
+                        ShardEnvelope(entity, Increment(amount=random.randint(1, 5)))
+                    )  # type: ignore[union-attr]
                 case "counter_read":
                     await client.ask(
                         counter,  # type: ignore[arg-type]
-                        lambda r, eid=entity: ShardEnvelope(eid, GetCounter(reply_to=r)),
+                        lambda r, eid=entity: ShardEnvelope(
+                            eid, GetCounter(reply_to=r)
+                        ),
                         timeout=2.0,
                     )
                 case "kv_put":
                     key = f"key-{random.randint(0, 9)}"
-                    kv.tell(ShardEnvelope(entity, Put(key=key, value=f"val-{random.randint(0, 999)}")))  # type: ignore[union-attr]
+                    kv.tell(
+                        ShardEnvelope(
+                            entity, Put(key=key, value=f"val-{random.randint(0, 999)}")
+                        )
+                    )  # type: ignore[union-attr]
                 case "kv_get":
                     key = f"key-{random.randint(0, 9)}"
                     await client.ask(
                         kv,  # type: ignore[arg-type]
-                        lambda r, eid=entity, k=key: ShardEnvelope(eid, Get(key=k, reply_to=r)),
+                        lambda r, eid=entity, k=key: ShardEnvelope(
+                            eid, Get(key=k, reply_to=r)
+                        ),
                         timeout=2.0,
                     )
         except Exception as exc:  # noqa: BLE001
@@ -153,7 +163,6 @@ async def query_cluster_state(node_index: int = 0) -> str:
     return await asyncio.to_thread(query_cluster_state_sync, node_index)
 
 
-
 async def chaos_monkey(stats: Stats, stop: asyncio.Event) -> None:
     """Inject faults on a schedule, independent of load."""
     await asyncio.sleep(WARMUP)
@@ -193,7 +202,10 @@ async def chaos_monkey(stats: Stats, stop: asyncio.Event) -> None:
                 docker_kill(victim)
                 await asyncio.sleep(10)
                 cluster_after_kill = await query_cluster_state()
-                log.info("CHAOS: cluster state 10s after leader kill:\n%s", cluster_after_kill)
+                log.info(
+                    "CHAOS: cluster state 10s after leader kill:\n%s",
+                    cluster_after_kill,
+                )
                 await asyncio.sleep(10)
                 log.info("CHAOS: restarting leader %s", victim)
                 stats.record_fault(f"restart {victim}")
@@ -208,7 +220,10 @@ async def chaos_monkey(stats: Stats, stop: asyncio.Event) -> None:
                 docker_kill(v2)
                 await asyncio.sleep(10)
                 cluster_after_kill = await query_cluster_state()
-                log.info("CHAOS: cluster state 10s after double kill:\n%s", cluster_after_kill)
+                log.info(
+                    "CHAOS: cluster state 10s after double kill:\n%s",
+                    cluster_after_kill,
+                )
                 await asyncio.sleep(5)
                 log.info("CHAOS: restarting %s and %s", v1, v2)
                 stats.record_fault(f"restart {v1}+{v2}")
@@ -238,7 +253,12 @@ async def printer(stats: Stats, stop: asyncio.Event) -> None:
         p50 = sorted(recent)[len(recent) // 2] if recent else 0
         log.info(
             "[%5.0fs] %3.0f rps | %d reqs (%d err, %.1f%% window) | p50=%.1fms",
-            elapsed, rps, stats.requests, stats.errors, err_pct, p50,
+            elapsed,
+            rps,
+            stats.requests,
+            stats.errors,
+            err_pct,
+            p50,
         )
 
 
@@ -247,7 +267,13 @@ async def main() -> None:
     stop = asyncio.Event()
 
     log.info("=== Load + Chaos Test (ClusterClient) ===")
-    log.info("Contact: %s:%d | Workers: %d | Duration: %ds", CONTACT_HOST, CASTY_PORT, NUM_WORKERS, DURATION)
+    log.info(
+        "Contact: %s:%d | Workers: %d | Duration: %ds",
+        CONTACT_HOST,
+        CASTY_PORT,
+        NUM_WORKERS,
+        DURATION,
+    )
 
     async with ClusterClient(
         contact_points=[(CONTACT_HOST, CASTY_PORT)],
@@ -281,14 +307,21 @@ async def main() -> None:
         await chaos_task
 
     log.info("=== Results ===")
-    log.info("Total: %d reqs | %d errors (%.1f%%)",
-             stats.requests, stats.errors,
-             stats.errors / max(stats.requests, 1) * 100)
+    log.info(
+        "Total: %d reqs | %d errors (%.1f%%)",
+        stats.requests,
+        stats.errors,
+        stats.errors / max(stats.requests, 1) * 100,
+    )
 
     if stats.latencies:
         s = sorted(stats.latencies)
-        log.info("Latency: p50=%.1fms p95=%.1fms p99=%.1fms",
-                 s[len(s) // 2], s[int(len(s) * 0.95)], s[int(len(s) * 0.99)])
+        log.info(
+            "Latency: p50=%.1fms p95=%.1fms p99=%.1fms",
+            s[len(s) // 2],
+            s[int(len(s) * 0.95)],
+            s[int(len(s) * 0.99)],
+        )
 
     if stats.faults:
         log.info("Faults:")

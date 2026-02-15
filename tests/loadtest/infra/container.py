@@ -1,4 +1,5 @@
 """ECR repository and Docker image build/push."""
+
 from __future__ import annotations
 
 import pulumi

@@ -3,6 +3,7 @@
 Allows up to *max_permits* concurrent holders.  Additional acquirers are
 queued and granted a permit as existing holders release.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -61,7 +62,9 @@ class DestroySemaphore:
     reply_to: ActorRef[bool]
 
 
-type SemaphoreMsg = SemaphoreAcquire | SemaphoreTryAcquire | SemaphoreRelease | DestroySemaphore
+type SemaphoreMsg = (
+    SemaphoreAcquire | SemaphoreTryAcquire | SemaphoreRelease | DestroySemaphore
+)
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +194,8 @@ class Semaphore:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._name, DestroySemaphore(reply_to=reply_to),
+                self._name,
+                DestroySemaphore(reply_to=reply_to),
             ),
             timeout=self._timeout,
         )

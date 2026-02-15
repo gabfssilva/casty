@@ -275,6 +275,7 @@ class ShardAllocation:
     >>> alloc.replicas
     ()
     """
+
     primary: NodeAddress
     replicas: tuple[NodeAddress, ...] = ()
 
@@ -314,9 +315,7 @@ class ClusterState:
     1
     """
 
-    members: frozenset[Member] = field(
-        default_factory=lambda: frozenset[Member]()
-    )
+    members: frozenset[Member] = field(default_factory=lambda: frozenset[Member]())
     unreachable: frozenset[NodeAddress] = field(
         default_factory=lambda: frozenset[NodeAddress]()
     )
@@ -342,7 +341,8 @@ class ClusterState:
             ``True`` when every non-down, non-removed member is in ``seen``.
         """
         active = frozenset(
-            m.address for m in self.members
+            m.address
+            for m in self.members
             if m.status not in (MemberStatus.down, MemberStatus.removed)
         )
         return active <= self.seen
@@ -391,9 +391,7 @@ class ClusterState:
         by_addr.update({m.address: m for m in self.members})
         return frozenset(by_addr.values())
 
-    def update_status(
-        self, address: NodeAddress, status: MemberStatus
-    ) -> ClusterState:
+    def update_status(self, address: NodeAddress, status: MemberStatus) -> ClusterState:
         """Return a new state with the given node's status changed.
 
         Parameters

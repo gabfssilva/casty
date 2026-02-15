@@ -4,6 +4,7 @@ Starts an in-process asyncssh server, creates a forward tunnel from a local
 port to the cluster's TCP port, and verifies that ClusterClient can route
 ShardEnvelope messages end-to-end through the tunnel.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -119,9 +120,7 @@ async def test_client_through_ssh_forward_tunnel() -> None:
                     await asyncio.sleep(0.5)
                     result = await client.ask(
                         echo_ref,
-                        lambda r: ShardEnvelope(
-                            "test-entity", Ping(reply_to=r)
-                        ),
+                        lambda r: ShardEnvelope("test-entity", Ping(reply_to=r)),
                         timeout=5.0,
                     )
                     assert result == "pong-test-entity"
@@ -163,7 +162,9 @@ async def test_client_multiple_asks_through_tunnel() -> None:
             await asyncio.sleep(0.3)
 
             async with asyncssh.connect(
-                "127.0.0.1", ssh_port, known_hosts=None,
+                "127.0.0.1",
+                ssh_port,
+                known_hosts=None,
             ) as ssh_conn:
                 listener = await ssh_conn.forward_local_port(
                     "", 0, "127.0.0.1", cluster_port
@@ -190,9 +191,7 @@ async def test_client_multiple_asks_through_tunnel() -> None:
                         eid = entity_id
                         result = await client.ask(
                             echo_ref,
-                            lambda r, e=eid: ShardEnvelope(
-                                e, Ping(reply_to=r)
-                            ),
+                            lambda r, e=eid: ShardEnvelope(e, Ping(reply_to=r)),
                             timeout=5.0,
                         )
                         assert result == f"pong-{entity_id}"

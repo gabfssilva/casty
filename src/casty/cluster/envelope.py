@@ -23,6 +23,7 @@ class ShardEnvelope[M]:
     --------
     >>> ref.tell(ShardEnvelope("user-42", Deposit(amount=100)))
     """
+
     entity_id: str
     message: M
 

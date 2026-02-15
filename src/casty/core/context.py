@@ -23,7 +23,9 @@ class System(Protocol):
     """Protocol exposing the actor system's public API to behaviors."""
 
     def __make_ref__[M](
-        self, id: str, deliver: Callable[[Any], None],
+        self,
+        id: str,
+        deliver: Callable[[Any], None],
     ) -> ActorRef[M]: ...
 
     @property

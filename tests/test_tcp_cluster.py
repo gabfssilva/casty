@@ -1,5 +1,6 @@
 # tests/test_tcp_cluster.py
 """Integration tests for real TCP inter-node communication."""
+
 from __future__ import annotations
 
 import asyncio

@@ -69,6 +69,10 @@ class MetricsCollector:
                 elapsed = self.now()
                 log.info(
                     "[%6.1fs] %d rps | %d reqs (%d err) | p50=%.1fms",
-                    elapsed, rps, new, errors, p50,
+                    elapsed,
+                    rps,
+                    new,
+                    errors,
+                    p50,
                 )
             last_count = total

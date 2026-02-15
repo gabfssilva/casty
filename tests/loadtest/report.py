@@ -28,12 +28,10 @@ def fault_impact(
     window: float = 10.0,
 ) -> dict[str, object]:
     before = [
-        r for r in requests
-        if fault.timestamp - window <= r.timestamp < fault.timestamp
+        r for r in requests if fault.timestamp - window <= r.timestamp < fault.timestamp
     ]
     after = [
-        r for r in requests
-        if fault.timestamp <= r.timestamp < fault.timestamp + window
+        r for r in requests if fault.timestamp <= r.timestamp < fault.timestamp + window
     ]
 
     before_errs = sum(1 for r in before if r.status_code >= 400 or r.error)
@@ -110,22 +108,32 @@ def print_report(report: dict[str, object]) -> None:
     log.info("=== Casty Load + Resilience Report ===")
     log.info(
         "Duration: %ss | Requests: %s | Throughput: %s rps",
-        report["duration_s"], f"{report['total_requests']:,}", report["throughput_rps"],
+        report["duration_s"],
+        f"{report['total_requests']:,}",
+        report["throughput_rps"],
     )
     log.info(
         "Success: %s (%s%%) | Errors: %s",
-        f"{report['successes']:,}", report["success_rate_pct"], f"{report['errors']:,}",
+        f"{report['successes']:,}",
+        report["success_rate_pct"],
+        f"{report['errors']:,}",
     )
     log.info(
         "Latency: p50=%sms  p95=%sms  p99=%sms  max=%sms",
-        lat["p50_ms"], lat["p95_ms"], lat["p99_ms"], lat["max_ms"],  # type: ignore[index]
+        lat["p50_ms"],
+        lat["p95_ms"],
+        lat["p99_ms"],
+        lat["max_ms"],  # type: ignore[index]
     )
 
     log.info("By Operation:")
     for op, stats in report["by_operation"].items():  # type: ignore[union-attr]
         log.info(
             "  %-25s %7s reqs  p50=%sms  p99=%sms",
-            op, f"{stats['count']:,}", stats["p50_ms"], stats["p99_ms"],
+            op,
+            f"{stats['count']:,}",
+            stats["p50_ms"],
+            stats["p99_ms"],
         )
 
     if report["fault_impacts"]:
@@ -133,9 +141,14 @@ def print_report(report: dict[str, object]) -> None:
         for impact in report["fault_impacts"]:  # type: ignore[union-attr]
             log.info(
                 "  [%6.1fs] %-18s %s -> err +%s, p50 %s->%sms, rps %.0f->%.0f",
-                impact["timestamp"], impact["fault"], impact["target"],
-                impact["err_delta"], impact["p50_before_ms"], impact["p50_after_ms"],
-                impact["rps_before"], impact["rps_after"],
+                impact["timestamp"],
+                impact["fault"],
+                impact["target"],
+                impact["err_delta"],
+                impact["p50_before_ms"],
+                impact["p50_after_ms"],
+                impact["rps_before"],
+                impact["rps_after"],
             )
 
 

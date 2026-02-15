@@ -5,7 +5,12 @@ import logging
 
 import httpx
 
-from .cluster import discover_node_ips, find_leader_ip, get_cluster_status, wait_for_recovery
+from .cluster import (
+    discover_node_ips,
+    find_leader_ip,
+    get_cluster_status,
+    wait_for_recovery,
+)
 from .config import LoadTestConfig
 from .faults import crash_node, heal_partition, partition_node, recover_node
 from .load import run_load
@@ -139,9 +144,7 @@ async def scenario_rolling_restart(
         await recover_node(ip, cfg.ssh_key, cfg.ssh_user)
 
         healthy_urls = exclude_ip(node_urls, ip)
-        await wait_for_recovery(
-            client, healthy_urls, len(node_ips), timeout=60.0
-        )
+        await wait_for_recovery(client, healthy_urls, len(node_ips), timeout=60.0)
         log.info("Node %s back and healthy", ip)
 
     log.info("Rolling restart complete")

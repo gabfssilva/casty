@@ -63,14 +63,24 @@ async def test_replica_region_tracks_multiple_entities() -> None:
         )
         await asyncio.sleep(0.1)
 
-        region.tell(ReplicateEvents(
-            entity_id="alice", shard_id=0,
-            events=[PersistedEvent(sequence_nr=1, event=Deposited(100), timestamp=1.0)],
-        ))
-        region.tell(ReplicateEvents(
-            entity_id="bob", shard_id=1,
-            events=[PersistedEvent(sequence_nr=1, event=Deposited(200), timestamp=1.0)],
-        ))
+        region.tell(
+            ReplicateEvents(
+                entity_id="alice",
+                shard_id=0,
+                events=[
+                    PersistedEvent(sequence_nr=1, event=Deposited(100), timestamp=1.0)
+                ],
+            )
+        )
+        region.tell(
+            ReplicateEvents(
+                entity_id="bob",
+                shard_id=1,
+                events=[
+                    PersistedEvent(sequence_nr=1, event=Deposited(200), timestamp=1.0)
+                ],
+            )
+        )
         await asyncio.sleep(0.1)
 
         alice_events = await journal.load("alice")
@@ -93,14 +103,24 @@ async def test_replica_region_appends_events() -> None:
         )
         await asyncio.sleep(0.1)
 
-        region.tell(ReplicateEvents(
-            entity_id="alice", shard_id=0,
-            events=[PersistedEvent(sequence_nr=1, event=Deposited(100), timestamp=1.0)],
-        ))
-        region.tell(ReplicateEvents(
-            entity_id="alice", shard_id=0,
-            events=[PersistedEvent(sequence_nr=2, event=Deposited(50), timestamp=2.0)],
-        ))
+        region.tell(
+            ReplicateEvents(
+                entity_id="alice",
+                shard_id=0,
+                events=[
+                    PersistedEvent(sequence_nr=1, event=Deposited(100), timestamp=1.0)
+                ],
+            )
+        )
+        region.tell(
+            ReplicateEvents(
+                entity_id="alice",
+                shard_id=0,
+                events=[
+                    PersistedEvent(sequence_nr=2, event=Deposited(50), timestamp=2.0)
+                ],
+            )
+        )
         await asyncio.sleep(0.1)
 
         loaded = await journal.load("alice")

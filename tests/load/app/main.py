@@ -61,11 +61,15 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
         _replication = ReplicationConfig(replicas=2)
         _counter_proxy = system.spawn(
-            Behaviors.sharded(entity_factory=counter_entity, num_shards=20, replication=_replication),
+            Behaviors.sharded(
+                entity_factory=counter_entity, num_shards=20, replication=_replication
+            ),
             "counters",
         )
         _kv_proxy = system.spawn(
-            Behaviors.sharded(entity_factory=kv_entity, num_shards=20, replication=_replication),
+            Behaviors.sharded(
+                entity_factory=kv_entity, num_shards=20, replication=_replication
+            ),
             "kv",
         )
 

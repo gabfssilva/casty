@@ -4,6 +4,7 @@
 regions on demand, providing a simple API for counters, maps, sets, queues,
 locks, semaphores, and barriers.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -32,9 +33,7 @@ def get_or_spawn_region(
     shards: int,
 ) -> ActorRef[Any]:
     if key not in regions:
-        regions[key] = system.spawn(
-            Behaviors.sharded(factory, num_shards=shards), key
-        )
+        regions[key] = system.spawn(Behaviors.sharded(factory, num_shards=shards), key)
     return regions[key]
 
 
@@ -57,7 +56,9 @@ class MapAccessor:
         factory = self._factory
 
         def create(name: str, *, shards: int = 100, timeout: float = 5.0) -> Dict[K, V]:
-            region = get_or_spawn_region(system, regions, f"d-map-{name}", factory, shards)
+            region = get_or_spawn_region(
+                system, regions, f"d-map-{name}", factory, shards
+            )
             return Dict(system=system, region_ref=region, name=name, timeout=timeout)
 
         return create
@@ -80,7 +81,9 @@ class SetAccessor:
         factory = self._factory
 
         def create(name: str, *, shards: int = 100, timeout: float = 5.0) -> Set[V]:
-            region = get_or_spawn_region(system, regions, f"d-set-{name}", factory, shards)
+            region = get_or_spawn_region(
+                system, regions, f"d-set-{name}", factory, shards
+            )
             return Set(system=system, region_ref=region, name=name, timeout=timeout)
 
         return create
@@ -103,7 +106,9 @@ class QueueAccessor:
         factory = self._factory
 
         def create(name: str, *, shards: int = 100, timeout: float = 5.0) -> Queue[V]:
-            region = get_or_spawn_region(system, regions, f"d-queue-{name}", factory, shards)
+            region = get_or_spawn_region(
+                system, regions, f"d-queue-{name}", factory, shards
+            )
             return Queue(system=system, region_ref=region, name=name, timeout=timeout)
 
         return create
@@ -162,11 +167,17 @@ class Distributed:
         >>> await counter.increment()
         1
         """
-        factory = persistent_counter_entity(self._journal) if self._journal is not None else counter_entity
+        factory = (
+            persistent_counter_entity(self._journal)
+            if self._journal is not None
+            else counter_entity
+        )
         region = get_or_spawn_region(
             self._system, self._regions, f"d-counter-{name}", factory, shards
         )
-        return Counter(system=self._system, region_ref=region, name=name, timeout=timeout)
+        return Counter(
+            system=self._system, region_ref=region, name=name, timeout=timeout
+        )
 
     @property
     def map(self) -> MapAccessor:
@@ -182,7 +193,11 @@ class Distributed:
         >>> users = d.map[str, dict]("users")
         >>> await users.put("alice", {"age": 30})
         """
-        factory = persistent_map_entity(self._journal) if self._journal is not None else map_entity
+        factory = (
+            persistent_map_entity(self._journal)
+            if self._journal is not None
+            else map_entity
+        )
         return MapAccessor(self._system, self._regions, factory)
 
     @property
@@ -200,7 +215,11 @@ class Distributed:
         >>> await tags.add("python")
         True
         """
-        factory = persistent_set_entity(self._journal) if self._journal is not None else set_entity
+        factory = (
+            persistent_set_entity(self._journal)
+            if self._journal is not None
+            else set_entity
+        )
         return SetAccessor(self._system, self._regions, factory)
 
     @property
@@ -217,7 +236,11 @@ class Distributed:
         >>> jobs = d.queue[str]("jobs")
         >>> await jobs.enqueue("task-1")
         """
-        factory = persistent_queue_entity(self._journal) if self._journal is not None else queue_entity
+        factory = (
+            persistent_queue_entity(self._journal)
+            if self._journal is not None
+            else queue_entity
+        )
         return QueueAccessor(self._system, self._regions, factory)
 
     def lock(self, name: str, *, shards: int = 100, timeout: float = 5.0) -> Lock:
@@ -275,10 +298,17 @@ class Distributed:
         region = get_or_spawn_region(
             self._system, self._regions, f"d-sem-{name}", factory, shards
         )
-        return Semaphore(system=self._system, region_ref=region, name=name, timeout=timeout)
+        return Semaphore(
+            system=self._system, region_ref=region, name=name, timeout=timeout
+        )
 
     def barrier(
-        self, name: str, *, node_id: str | None = None, shards: int = 10, timeout: float = 60.0
+        self,
+        name: str,
+        *,
+        node_id: str | None = None,
+        shards: int = 10,
+        timeout: float = 60.0,
     ) -> Barrier:
         """Create a distributed barrier.
 
@@ -306,4 +336,10 @@ class Distributed:
         region = get_or_spawn_region(
             self._system, self._regions, f"d-barrier-{name}", barrier_entity, shards
         )
-        return Barrier(system=self._system, region_ref=region, name=name, node_id=nid, timeout=timeout)
+        return Barrier(
+            system=self._system,
+            region_ref=region,
+            name=name,
+            node_id=nid,
+            timeout=timeout,
+        )

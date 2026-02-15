@@ -57,10 +57,13 @@ def task_runner() -> Behavior[TaskRunnerMsg]:
         tasks: set[asyncio.Task[None]] = set()
 
         async def receive(
-            ctx: ActorContext[TaskRunnerMsg], msg: TaskRunnerMsg,
+            ctx: ActorContext[TaskRunnerMsg],
+            msg: TaskRunnerMsg,
         ) -> Behavior[TaskRunnerMsg]:
             match msg:
-                case RunTask(fn=fn, args=args, kwargs=kwargs, reply_to=reply_to, key=key):
+                case RunTask(
+                    fn=fn, args=args, kwargs=kwargs, reply_to=reply_to, key=key
+                ):
 
                     async def tracked() -> None:
                         try:

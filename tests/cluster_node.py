@@ -6,6 +6,7 @@ then the first node (seed) writes the counter and all nodes read it.
 
 Used by docker-compose.test.yml via testcontainers.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -110,5 +111,9 @@ if __name__ == "__main__":
     parser.add_argument("--nodes", type=int, default=1)
     parser.add_argument("--is-seed", action="store_true")
     args = parser.parse_args()
-    host = socket.gethostbyname(socket.gethostname()) if args.host == "auto" else args.host
-    asyncio.run(run_node(host, args.port, args.bind_host, args.seed, args.nodes, args.is_seed))
+    host = (
+        socket.gethostbyname(socket.gethostname()) if args.host == "auto" else args.host
+    )
+    asyncio.run(
+        run_node(host, args.port, args.bind_host, args.seed, args.nodes, args.is_seed)
+    )

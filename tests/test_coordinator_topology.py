@@ -40,10 +40,22 @@ def make_snapshot(
     allocation_epoch: int = 0,
 ) -> TopologySnapshot:
     if members is None:
-        members = frozenset({
-            Member(address=SELF_NODE, status=MemberStatus.up, roles=frozenset(), id="node-1"),
-            Member(address=OTHER_NODE, status=MemberStatus.up, roles=frozenset(), id="node-2"),
-        })
+        members = frozenset(
+            {
+                Member(
+                    address=SELF_NODE,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="node-1",
+                ),
+                Member(
+                    address=OTHER_NODE,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="node-2",
+                ),
+            }
+        )
     return TopologySnapshot(
         members=members,
         leader=leader,
@@ -58,6 +70,7 @@ def fake_topology_actor(
     updates: list[UpdateShardAllocations] | None = None,
 ) -> Behavior[TopologyMsg]:
     """Fake topology actor that captures subscriptions and allows manual snapshot pushes."""
+
     def active(
         subscriber: ActorRef[TopologySnapshot] | None,
     ) -> Behavior[Any]:
@@ -75,6 +88,7 @@ def fake_topology_actor(
                     return Behaviors.same()
                 case _:
                     return Behaviors.same()
+
         return Behaviors.receive(receive)
 
     return active(None)
@@ -109,14 +123,17 @@ async def test_coordinator_transitions_to_leader_on_snapshot() -> None:
 
         def location_collector() -> Behavior[ShardLocation]:
             async def receive(
-                ctx: ActorContext[ShardLocation], msg: ShardLocation,
+                ctx: ActorContext[ShardLocation],
+                msg: ShardLocation,
             ) -> Behavior[ShardLocation]:
                 locations.append(msg)
                 return Behaviors.same()
+
             return Behaviors.receive(receive)
 
         loc_ref: ActorRef[ShardLocation] = system.spawn(
-            location_collector(), "_loc",
+            location_collector(),
+            "_loc",
         )
         coord_ref.tell(GetShardLocation(shard_id=0, reply_to=loc_ref))
         await asyncio.sleep(0.1)
@@ -158,14 +175,17 @@ async def test_coordinator_transitions_to_follower_on_snapshot() -> None:
 
         def location_collector() -> Behavior[ShardLocation]:
             async def receive(
-                ctx: ActorContext[ShardLocation], msg: ShardLocation,
+                ctx: ActorContext[ShardLocation],
+                msg: ShardLocation,
             ) -> Behavior[ShardLocation]:
                 locations.append(msg)
                 return Behaviors.same()
+
             return Behaviors.receive(receive)
 
         loc_ref: ActorRef[ShardLocation] = system.spawn(
-            location_collector(), "_loc",
+            location_collector(),
+            "_loc",
         )
         coord_ref.tell(GetShardLocation(shard_id=0, reply_to=loc_ref))
         await asyncio.sleep(0.1)
@@ -205,14 +225,17 @@ async def test_coordinator_evicts_on_unreachable() -> None:
 
         def location_collector() -> Behavior[ShardLocation]:
             async def receive(
-                ctx: ActorContext[ShardLocation], msg: ShardLocation,
+                ctx: ActorContext[ShardLocation],
+                msg: ShardLocation,
             ) -> Behavior[ShardLocation]:
                 locations.append(msg)
                 return Behaviors.same()
+
             return Behaviors.receive(receive)
 
         loc_ref: ActorRef[ShardLocation] = system.spawn(
-            location_collector(), "_loc",
+            location_collector(),
+            "_loc",
         )
         coord_ref.tell(GetShardLocation(shard_id=0, reply_to=loc_ref))
         await asyncio.sleep(0.1)
@@ -275,14 +298,17 @@ async def test_coordinator_syncs_allocations_from_snapshot() -> None:
 
         def location_collector() -> Behavior[ShardLocation]:
             async def receive(
-                ctx: ActorContext[ShardLocation], msg: ShardLocation,
+                ctx: ActorContext[ShardLocation],
+                msg: ShardLocation,
             ) -> Behavior[ShardLocation]:
                 locations.append(msg)
                 return Behaviors.same()
+
             return Behaviors.receive(receive)
 
         loc_ref: ActorRef[ShardLocation] = system.spawn(
-            location_collector(), "_loc",
+            location_collector(),
+            "_loc",
         )
         coord_ref.tell(GetShardLocation(shard_id=0, reply_to=loc_ref))
         await asyncio.sleep(0.1)

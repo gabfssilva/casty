@@ -46,6 +46,7 @@ class HandshakePayload(TypedDict):
     host: str
     port: int
 
+
 FRAME_HANDSHAKE: int = 0x00
 FRAME_MESSAGE: int = 0x01
 
@@ -79,10 +80,13 @@ class InboundMessageHandler:
         try:
             envelope = MessageEnvelope.from_bytes(data)
             msg: object = self._serializer.deserialize(
-                envelope.payload, ref_factory=self.ref_factory,
+                envelope.payload,
+                ref_factory=self.ref_factory,
             )
             target_addr = ActorAddress.from_uri(envelope.target)
-            self._logger.debug("Received %s -> %s", envelope.type_hint, target_addr.path)
+            self._logger.debug(
+                "Received %s -> %s", envelope.type_hint, target_addr.path
+            )
             self._local.deliver(target_addr, msg)
         except Exception:
             self._logger.warning("Failed to handle inbound message", exc_info=True)
@@ -105,7 +109,9 @@ def make_message_frame(data: bytes) -> bytes:
     return struct.pack("!I", len(frame)) + frame
 
 
-def resolve_race(self_addr: NodeAddr, peer_addr: NodeAddr, new_initiator: NodeAddr) -> bool:
+def resolve_race(
+    self_addr: NodeAddr, peer_addr: NodeAddr, new_initiator: NodeAddr
+) -> bool:
     """Return True if *new_initiator*'s connection should win over an existing one.
 
     The connection initiated by ``min(self_addr, peer_addr)`` wins.
@@ -165,7 +171,9 @@ def peer_connection(
 
         read_task = asyncio.get_running_loop().create_task(read_loop())
 
-        async def receive(ctx: ActorContext[PeerMsg], msg: PeerMsg) -> Behavior[PeerMsg]:
+        async def receive(
+            ctx: ActorContext[PeerMsg], msg: PeerMsg
+        ) -> Behavior[PeerMsg]:
             match msg:
                 case SendFrame(data=data):
                     try:
@@ -242,11 +250,13 @@ class MessageEnvelope:
         bytes
             Binary data: ``[header_len:4][header_json][payload]``.
         """
-        header = json.dumps({
-            "target": self.target,
-            "sender": self.sender,
-            "type_hint": self.type_hint,
-        }).encode("utf-8")
+        header = json.dumps(
+            {
+                "target": self.target,
+                "sender": self.sender,
+                "type_hint": self.type_hint,
+            }
+        ).encode("utf-8")
         return struct.pack("!I", len(header)) + header + self.payload
 
     @staticmethod
@@ -313,7 +323,9 @@ class GetPort:
     reply_to: ActorRef[int]
 
 
-type TcpTransportMsg = SendToNode | InboundAccepted | PeerDown | ClearNodeBlacklist | GetPort
+type TcpTransportMsg = (
+    SendToNode | InboundAccepted | PeerDown | ClearNodeBlacklist | GetPort
+)
 
 
 def tcp_transport(
@@ -362,7 +374,8 @@ def tcp_transport(
         canonical = peer_addr
         try:
             length_bytes = await asyncio.wait_for(
-                reader.readexactly(4), timeout=cfg.connect_timeout,
+                reader.readexactly(4),
+                timeout=cfg.connect_timeout,
             )
             msg_len = struct.unpack("!I", length_bytes)[0]
             frame_data = await reader.readexactly(msg_len)
@@ -370,10 +383,21 @@ def tcp_transport(
             if frame_type == FRAME_HANDSHAKE:
                 hs: HandshakePayload = json.loads(frame_data[1:].decode("utf-8"))
                 canonical = (hs["host"], int(hs["port"]))
-                log.debug("Server handshake: canonical=%s:%d", canonical[0], canonical[1])
-        except (asyncio.IncompleteReadError, ConnectionResetError, OSError,
-                asyncio.CancelledError, json.JSONDecodeError, KeyError, TimeoutError):
-            log.warning("Failed to read handshake reply from %s:%d", peer_addr[0], peer_addr[1])
+                log.debug(
+                    "Server handshake: canonical=%s:%d", canonical[0], canonical[1]
+                )
+        except (
+            asyncio.IncompleteReadError,
+            ConnectionResetError,
+            OSError,
+            asyncio.CancelledError,
+            json.JSONDecodeError,
+            KeyError,
+            TimeoutError,
+        ):
+            log.warning(
+                "Failed to read handshake reply from %s:%d", peer_addr[0], peer_addr[1]
+            )
 
         return reader, writer, canonical
 
@@ -382,6 +406,7 @@ def tcp_transport(
         self_addr: NodeAddr = config.self_address or (config.host, config.port)
 
         if not config.client_only:
+
             async def accept_callback(
                 reader: asyncio.StreamReader,
                 writer: asyncio.StreamWriter,
@@ -399,8 +424,14 @@ def tcp_transport(
                         return
                     hs: HandshakePayload = json.loads(frame_data[1:].decode("utf-8"))
                     peer_addr = (hs["host"], int(hs["port"]))
-                except (asyncio.IncompleteReadError, ConnectionResetError, OSError,
-                        asyncio.CancelledError, json.JSONDecodeError, KeyError):
+                except (
+                    asyncio.IncompleteReadError,
+                    ConnectionResetError,
+                    OSError,
+                    asyncio.CancelledError,
+                    json.JSONDecodeError,
+                    KeyError,
+                ):
                     log.warning("Handshake failed from inbound connection")
                     writer.close()
                     return
@@ -414,15 +445,20 @@ def tcp_transport(
                     writer.close()
                     return
 
-                ctx.self.tell(InboundAccepted(
-                    peer_addr=peer_addr,
-                    initiator=peer_addr,
-                    reader=reader,
-                    writer=writer,
-                ))
+                ctx.self.tell(
+                    InboundAccepted(
+                        peer_addr=peer_addr,
+                        initiator=peer_addr,
+                        reader=reader,
+                        writer=writer,
+                    )
+                )
 
             server = await asyncio.start_server(
-                accept_callback, config.host, config.port, ssl=config.server_ssl,
+                accept_callback,
+                config.host,
+                config.port,
+                ssl=config.server_ssl,
             )
             actual_port: int = server.sockets[0].getsockname()[1]
             if config.port == 0 or actual_port != config.port:
@@ -450,14 +486,20 @@ def tcp_transport(
                         if bl_until is not None:
                             if time.monotonic() < bl_until:
                                 return Behaviors.same()
-                            effective_bl = {k: v for k, v in blacklist.items() if k != canonical}
+                            effective_bl = {
+                                k: v for k, v in blacklist.items() if k != canonical
+                            }
 
                         peer_ref = peers.get(canonical)
                         if peer_ref is not None:
                             peer_ref.tell(SendFrame(data=data))
-                            return active(srv, self_addr, peers, aliases, effective_bl, next_id)
+                            return active(
+                                srv, self_addr, peers, aliases, effective_bl, next_id
+                            )
 
-                        result = await connect_and_handshake(peer_addr, self_addr, config)
+                        result = await connect_and_handshake(
+                            peer_addr, self_addr, config
+                        )
                         if result is None:
                             new_bl = {
                                 **effective_bl,
@@ -465,9 +507,13 @@ def tcp_transport(
                             }
                             log.debug(
                                 "Blacklisted %s:%d for %.1fs",
-                                peer_addr[0], peer_addr[1], config.blacklist_duration,
+                                peer_addr[0],
+                                peer_addr[1],
+                                config.blacklist_duration,
                             )
-                            return active(srv, self_addr, peers, aliases, new_bl, next_id)
+                            return active(
+                                srv, self_addr, peers, aliases, new_bl, next_id
+                            )
 
                         conn_reader, conn_writer, server_canonical = result
                         new_aliases = aliases
@@ -479,61 +525,93 @@ def tcp_transport(
                             if not resolve_race(self_addr, server_canonical, self_addr):
                                 conn_writer.close()
                                 existing.tell(SendFrame(data=data))
-                                return active(srv, self_addr, peers, new_aliases, effective_bl, next_id)
+                                return active(
+                                    srv,
+                                    self_addr,
+                                    peers,
+                                    new_aliases,
+                                    effective_bl,
+                                    next_id,
+                                )
                             ctx.stop(existing)
 
                         new_peer_ref = ctx.spawn(
                             peer_connection(
-                                addr=server_canonical, writer=conn_writer, reader=conn_reader,
-                                handler=handler, parent=ctx.self, logger=log,
+                                addr=server_canonical,
+                                writer=conn_writer,
+                                reader=conn_reader,
+                                handler=handler,
+                                parent=ctx.self,
+                                logger=log,
                             ),
                             f"peer-{server_canonical[0]}-{server_canonical[1]}-{next_id}",
                         )
                         new_peer_ref.tell(SendFrame(data=data))
                         new_peers = {**peers, server_canonical: new_peer_ref}
-                        return active(srv, self_addr, new_peers, new_aliases, effective_bl, next_id + 1)
+                        return active(
+                            srv,
+                            self_addr,
+                            new_peers,
+                            new_aliases,
+                            effective_bl,
+                            next_id + 1,
+                        )
 
                     case InboundAccepted(
-                        peer_addr=pa, initiator=initiator,
-                        reader=reader, writer=writer,
+                        peer_addr=pa,
+                        initiator=initiator,
+                        reader=reader,
+                        writer=writer,
                     ):
                         existing = peers.get(pa)
                         if existing is not None:
                             if not resolve_race(self_addr, pa, initiator):
                                 log.debug(
                                     "Race: keeping existing connection to %s:%d (inbound loses)",
-                                    pa[0], pa[1],
+                                    pa[0],
+                                    pa[1],
                                 )
                                 writer.close()
                                 return Behaviors.same()
                             log.debug(
                                 "Race: replacing existing connection to %s:%d (inbound wins)",
-                                pa[0], pa[1],
+                                pa[0],
+                                pa[1],
                             )
                             ctx.stop(existing)
 
                         peer_ref = ctx.spawn(
                             peer_connection(
-                                addr=pa, writer=writer, reader=reader,
-                                handler=handler, parent=ctx.self, logger=log,
+                                addr=pa,
+                                writer=writer,
+                                reader=reader,
+                                handler=handler,
+                                parent=ctx.self,
+                                logger=log,
                             ),
                             f"peer-{pa[0]}-{pa[1]}-{next_id}",
                         )
                         new_peers = {**peers, pa: peer_ref}
-                        return active(srv, self_addr, new_peers, aliases, blacklist, next_id + 1)
+                        return active(
+                            srv, self_addr, new_peers, aliases, blacklist, next_id + 1
+                        )
 
                     case PeerDown(addr=pa, peer=peer_ref):
                         if peers.get(pa) is not peer_ref:
                             return Behaviors.same()
                         new_peers = {k: v for k, v in peers.items() if k != pa}
                         new_aliases = {k: v for k, v in aliases.items() if v != pa}
-                        return active(srv, self_addr, new_peers, new_aliases, blacklist, next_id)
+                        return active(
+                            srv, self_addr, new_peers, new_aliases, blacklist, next_id
+                        )
 
                     case ClearNodeBlacklist(host=host, port=port):
                         addr: NodeAddr = (host, port)
                         new_bl = {k: v for k, v in blacklist.items() if k != addr}
                         new_aliases = {k: v for k, v in aliases.items() if k != addr}
-                        return active(srv, self_addr, peers, new_aliases, new_bl, next_id)
+                        return active(
+                            srv, self_addr, peers, new_aliases, new_bl, next_id
+                        )
 
                     case GetPort(reply_to=reply_to):
                         if srv is not None and srv.sockets:
@@ -630,8 +708,11 @@ class RemoteTransport:
             if resolved is not None:
                 host, port = resolved
                 return ActorAddress(
-                    system=address.system, path=address.path,
-                    host=host, port=port, node_id=address.node_id,
+                    system=address.system,
+                    path=address.path,
+                    host=host,
+                    port=port,
+                    node_id=address.node_id,
                 )
         return None
 
@@ -654,7 +735,9 @@ class RemoteTransport:
         host = address.host
         port = address.port
         if host is None or port is None:
-            self._logger.warning("Cannot send to address without host:port: %s", address)
+            self._logger.warning(
+                "Cannot send to address without host:port: %s", address
+            )
             return
         try:
             payload = self._serializer.serialize(msg)
@@ -666,16 +749,21 @@ class RemoteTransport:
                 payload=payload,
                 type_hint=type_name,
             )
-            self._logger.debug("Sending %s -> %s:%d%s", type_name, host, port, address.path)
+            self._logger.debug(
+                "Sending %s -> %s:%d%s", type_name, host, port, address.path
+            )
             self._tcp.tell(SendToNode(host=host, port=port, data=envelope.to_bytes()))
         except Exception:
-            self._logger.warning("Failed to serialize message to %s", address, exc_info=True)
+            self._logger.warning(
+                "Failed to serialize message to %s", address, exc_info=True
+            )
             if self._on_send_failure is not None:
                 self._on_send_failure(host, port)
 
     def make_ref(self, address: ActorAddress) -> RemoteActorRef[Any]:
         """Create an ``ActorRef`` with the appropriate transport for the address."""
         from casty.remote.ref import RemoteActorRef
+
         if self._is_local(address):
             return RemoteActorRef[Any](address=address, _transport=self._local)
         return RemoteActorRef[Any](address=address, _transport=self)

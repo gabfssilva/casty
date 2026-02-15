@@ -208,8 +208,7 @@ def _build_listing(
     all_entries = local_entries | cluster_registry
     matching = frozenset(e for e in all_entries if e.key == key_name)
     instances = frozenset(
-        ServiceInstance(ref=_make_ref(e, env), node=e.node)
-        for e in matching
+        ServiceInstance(ref=_make_ref(e, env), node=e.node) for e in matching
     )
     return Listing(key=ServiceKey(key_name), instances=instances)
 
@@ -276,7 +275,8 @@ def receptionist_actor(
         subscribers: Subscribers,
     ) -> Behavior[ReceptionistMsg]:
         async def receive(
-            ctx: ActorContext[ReceptionistMsg], msg: ReceptionistMsg,
+            ctx: ActorContext[ReceptionistMsg],
+            msg: ReceptionistMsg,
         ) -> Behavior[ReceptionistMsg]:
             match msg:
                 case TopologySnapshot() as snapshot:
@@ -290,8 +290,11 @@ def receptionist_actor(
                         changed_keys.add(e.key)
                     for key_name in changed_keys:
                         _notify_subscribers(
-                            key_name, subscribers, local_entries,
-                            remote_entries, env,
+                            key_name,
+                            subscribers,
+                            local_entries,
+                            remote_entries,
+                            env,
                         )
                     return active(local_entries, remote_entries, subscribers)
 
@@ -304,9 +307,14 @@ def receptionist_actor(
                     new_local = local_entries | {entry}
                     if gossip_ref is not None:
                         from casty.cluster.topology_actor import UpdateRegistry
+
                         gossip_ref.tell(UpdateRegistry(entries=new_local))
                     _notify_subscribers(
-                        skey.name, subscribers, new_local, cluster_registry, env,
+                        skey.name,
+                        subscribers,
+                        new_local,
+                        cluster_registry,
+                        env,
                     )
                     return active(new_local, cluster_registry, subscribers)
 
@@ -319,9 +327,14 @@ def receptionist_actor(
                     new_local = local_entries - {entry}
                     if gossip_ref is not None:
                         from casty.cluster.topology_actor import UpdateRegistry
+
                         gossip_ref.tell(UpdateRegistry(entries=new_local))
                     _notify_subscribers(
-                        skey.name, subscribers, new_local, cluster_registry, env,
+                        skey.name,
+                        subscribers,
+                        new_local,
+                        cluster_registry,
+                        env,
                     )
                     return active(new_local, cluster_registry, subscribers)
 
@@ -331,14 +344,20 @@ def receptionist_actor(
                         {**subscribers, skey.name: existing | {reply_to}},
                     )
                     listing = _build_listing(
-                        skey.name, local_entries, cluster_registry, env,
+                        skey.name,
+                        local_entries,
+                        cluster_registry,
+                        env,
                     )
                     reply_to.tell(listing)
                     return active(local_entries, cluster_registry, new_subs)
 
                 case Find(key=skey, reply_to=reply_to):
                     listing = _build_listing(
-                        skey.name, local_entries, cluster_registry, env,
+                        skey.name,
+                        local_entries,
+                        cluster_registry,
+                        env,
                     )
                     reply_to.tell(listing)
                     return Behaviors.same()
@@ -351,11 +370,15 @@ def receptionist_actor(
                         changed_keys = {e.key for e in (local_entries - removed)}
                         if gossip_ref is not None:
                             from casty.cluster.topology_actor import UpdateRegistry
+
                             gossip_ref.tell(UpdateRegistry(entries=removed))
                         for key_name in changed_keys:
                             _notify_subscribers(
-                                key_name, subscribers, removed,
-                                cluster_registry, env,
+                                key_name,
+                                subscribers,
+                                removed,
+                                cluster_registry,
+                                env,
                             )
                         return active(removed, cluster_registry, subscribers)
                     return Behaviors.same()
@@ -372,10 +395,12 @@ def receptionist_actor(
 
             def stopped_forwarder() -> Behavior[ActorStopped]:
                 async def receive(
-                    _ctx: ActorContext[ActorStopped], msg: ActorStopped,
+                    _ctx: ActorContext[ActorStopped],
+                    msg: ActorStopped,
                 ) -> Behavior[ActorStopped]:
                     ctx.self.tell(ActorTerminated(path=msg.ref.id))
                     return Behaviors.same()
+
                 return Behaviors.receive(receive)
 
             forwarder = ctx.spawn(stopped_forwarder(), "_stopped_forwarder")
@@ -383,6 +408,7 @@ def receptionist_actor(
 
         if topology_ref is not None:
             from casty.cluster.topology import SubscribeTopology
+
             topology_ref.tell(SubscribeTopology(reply_to=ctx.self))  # type: ignore[arg-type]
 
         return active(frozenset(), frozenset(), MappingProxyType({}))

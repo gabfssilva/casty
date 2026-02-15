@@ -1,4 +1,5 @@
 """Benchmark fixtures — timing, persistence, and regression detection."""
+
 from __future__ import annotations
 
 import hashlib
@@ -65,11 +66,13 @@ class BenchmarkResult:
             f"  ops/s: {s['ops_per_sec']:,.0f}",
         ]
         if "mean_ms" in s:
-            lines.extend([
-                f"  mean:  {s['mean_ms']:.3f}ms",
-                f"  p50:   {s['p50_ms']:.3f}ms",
-                f"  p99:   {s['p99_ms']:.3f}ms",
-            ])
+            lines.extend(
+                [
+                    f"  mean:  {s['mean_ms']:.3f}ms",
+                    f"  p50:   {s['p50_ms']:.3f}ms",
+                    f"  p99:   {s['p99_ms']:.3f}ms",
+                ]
+            )
         print("\n".join(lines))
 
     def save(self) -> None:
@@ -77,13 +80,18 @@ class BenchmarkResult:
         out_dir = BENCHMARKS_DIR / mid
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{self.test_name}.json"
-        path.write_text(json.dumps({
-            "label": self.label,
-            "machine_id": mid,
-            "platform": platform.platform(),
-            "node": platform.node(),
-            "stats": self.stats(),
-        }, indent=2))
+        path.write_text(
+            json.dumps(
+                {
+                    "label": self.label,
+                    "machine_id": mid,
+                    "platform": platform.platform(),
+                    "node": platform.node(),
+                    "stats": self.stats(),
+                },
+                indent=2,
+            )
+        )
 
     def load_baseline(self) -> dict[str, float] | None:
         path = BENCHMARKS_DIR / machine_id() / f"{self.test_name}.json"
@@ -95,7 +103,9 @@ class BenchmarkResult:
     def check_regression(self) -> None:
         baseline = self.load_baseline()
         if baseline is None:
-            print(f"  [baseline] no previous run for {self.test_name}, saving as baseline")
+            print(
+                f"  [baseline] no previous run for {self.test_name}, saving as baseline"
+            )
             return
 
         current = self.stats()

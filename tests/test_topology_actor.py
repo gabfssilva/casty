@@ -24,7 +24,11 @@ from casty.cluster.topology_actor import (
     JoinRequest,
     PromoteMember,
 )
-from casty.cluster.topology import SubscribeTopology, TopologySnapshot, UnsubscribeTopology
+from casty.cluster.topology import (
+    SubscribeTopology,
+    TopologySnapshot,
+    UnsubscribeTopology,
+)
 from casty.cluster.topology_actor import TopologyMsg, WaitForMembers, topology_actor
 
 
@@ -77,11 +81,13 @@ class CollectSnapshot:
 
 def snapshot_collector() -> Behavior[TopologySnapshot]:
     """Actor that collects topology snapshots for test assertions."""
+
     def active(
         snapshots: tuple[TopologySnapshot, ...],
     ) -> Behavior[TopologySnapshot]:
         async def receive(
-            ctx: ActorContext[TopologySnapshot], msg: TopologySnapshot,
+            ctx: ActorContext[TopologySnapshot],
+            msg: TopologySnapshot,
         ) -> Behavior[TopologySnapshot]:
             return active((*snapshots, msg))
 
@@ -99,7 +105,8 @@ async def test_topology_actor_publishes_on_subscribe() -> None:
 
         def collector_behavior() -> Behavior[TopologySnapshot]:
             async def receive(
-                ctx: ActorContext[TopologySnapshot], msg: TopologySnapshot,
+                ctx: ActorContext[TopologySnapshot],
+                msg: TopologySnapshot,
             ) -> Behavior[TopologySnapshot]:
                 snapshots.append(msg)
                 return Behaviors.same()
@@ -107,7 +114,8 @@ async def test_topology_actor_publishes_on_subscribe() -> None:
             return Behaviors.receive(receive)
 
         collector_ref: ActorRef[TopologySnapshot] = system.spawn(
-            collector_behavior(), "collector",
+            collector_behavior(),
+            "collector",
         )
         topo_ref.tell(SubscribeTopology(reply_to=collector_ref))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
@@ -126,7 +134,8 @@ async def test_topology_actor_merges_gossip() -> None:
 
         def collector_behavior() -> Behavior[TopologySnapshot]:
             async def receive(
-                ctx: ActorContext[TopologySnapshot], msg: TopologySnapshot,
+                ctx: ActorContext[TopologySnapshot],
+                msg: TopologySnapshot,
             ) -> Behavior[TopologySnapshot]:
                 snapshots.append(msg)
                 return Behaviors.same()
@@ -134,7 +143,8 @@ async def test_topology_actor_merges_gossip() -> None:
             return Behaviors.receive(receive)
 
         collector_ref: ActorRef[TopologySnapshot] = system.spawn(
-            collector_behavior(), "collector",
+            collector_behavior(),
+            "collector",
         )
         topo_ref.tell(SubscribeTopology(reply_to=collector_ref))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
@@ -178,7 +188,8 @@ async def test_topology_actor_detects_unreachable() -> None:
 
         def collector_behavior() -> Behavior[TopologySnapshot]:
             async def receive(
-                ctx: ActorContext[TopologySnapshot], msg: TopologySnapshot,
+                ctx: ActorContext[TopologySnapshot],
+                msg: TopologySnapshot,
             ) -> Behavior[TopologySnapshot]:
                 snapshots.append(msg)
                 return Behaviors.same()
@@ -186,7 +197,8 @@ async def test_topology_actor_detects_unreachable() -> None:
             return Behaviors.receive(receive)
 
         collector_ref: ActorRef[TopologySnapshot] = system.spawn(
-            collector_behavior(), "collector",
+            collector_behavior(),
+            "collector",
         )
         topo_ref.tell(SubscribeTopology(reply_to=collector_ref))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
@@ -213,7 +225,8 @@ async def test_topology_actor_join_request() -> None:
 
         def collector_behavior() -> Behavior[TopologySnapshot]:
             async def receive(
-                ctx: ActorContext[TopologySnapshot], msg: TopologySnapshot,
+                ctx: ActorContext[TopologySnapshot],
+                msg: TopologySnapshot,
             ) -> Behavior[TopologySnapshot]:
                 snapshots.append(msg)
                 return Behaviors.same()
@@ -221,7 +234,8 @@ async def test_topology_actor_join_request() -> None:
             return Behaviors.receive(receive)
 
         collector_ref: ActorRef[TopologySnapshot] = system.spawn(
-            collector_behavior(), "collector",
+            collector_behavior(),
+            "collector",
         )
         topo_ref.tell(SubscribeTopology(reply_to=collector_ref))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
@@ -251,14 +265,16 @@ async def test_topology_actor_promotes_member() -> None:
 
     async with ActorSystem(name="test") as system:
         topo_ref = system.spawn(
-            make_topology_actor(state=initial_state), "_topology",
+            make_topology_actor(state=initial_state),
+            "_topology",
         )
 
         snapshots: list[TopologySnapshot] = []
 
         def collector_behavior() -> Behavior[TopologySnapshot]:
             async def receive(
-                ctx: ActorContext[TopologySnapshot], msg: TopologySnapshot,
+                ctx: ActorContext[TopologySnapshot],
+                msg: TopologySnapshot,
             ) -> Behavior[TopologySnapshot]:
                 snapshots.append(msg)
                 return Behaviors.same()
@@ -266,7 +282,8 @@ async def test_topology_actor_promotes_member() -> None:
             return Behaviors.receive(receive)
 
         collector_ref: ActorRef[TopologySnapshot] = system.spawn(
-            collector_behavior(), "collector",
+            collector_behavior(),
+            "collector",
         )
         topo_ref.tell(SubscribeTopology(reply_to=collector_ref))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
@@ -287,14 +304,16 @@ async def test_topology_actor_downs_member() -> None:
 
     async with ActorSystem(name="test") as system:
         topo_ref = system.spawn(
-            make_topology_actor(state=initial_state), "_topology",
+            make_topology_actor(state=initial_state),
+            "_topology",
         )
 
         snapshots: list[TopologySnapshot] = []
 
         def collector_behavior() -> Behavior[TopologySnapshot]:
             async def receive(
-                ctx: ActorContext[TopologySnapshot], msg: TopologySnapshot,
+                ctx: ActorContext[TopologySnapshot],
+                msg: TopologySnapshot,
             ) -> Behavior[TopologySnapshot]:
                 snapshots.append(msg)
                 return Behaviors.same()
@@ -302,7 +321,8 @@ async def test_topology_actor_downs_member() -> None:
             return Behaviors.receive(receive)
 
         collector_ref: ActorRef[TopologySnapshot] = system.spawn(
-            collector_behavior(), "collector",
+            collector_behavior(),
+            "collector",
         )
         topo_ref.tell(SubscribeTopology(reply_to=collector_ref))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
@@ -343,7 +363,8 @@ async def test_topology_actor_dedup_unreachable() -> None:
 
         def collector_behavior() -> Behavior[TopologySnapshot]:
             async def receive(
-                ctx: ActorContext[TopologySnapshot], msg: TopologySnapshot,
+                ctx: ActorContext[TopologySnapshot],
+                msg: TopologySnapshot,
             ) -> Behavior[TopologySnapshot]:
                 snapshots.append(msg)
                 return Behaviors.same()
@@ -351,7 +372,8 @@ async def test_topology_actor_dedup_unreachable() -> None:
             return Behaviors.receive(receive)
 
         collector_ref: ActorRef[TopologySnapshot] = system.spawn(
-            collector_behavior(), "collector",
+            collector_behavior(),
+            "collector",
         )
         topo_ref.tell(SubscribeTopology(reply_to=collector_ref))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
@@ -399,7 +421,8 @@ async def test_topology_actor_rejoin_clears_unreachable() -> None:
 
         def collector_behavior() -> Behavior[TopologySnapshot]:
             async def receive(
-                ctx: ActorContext[TopologySnapshot], msg: TopologySnapshot,
+                ctx: ActorContext[TopologySnapshot],
+                msg: TopologySnapshot,
             ) -> Behavior[TopologySnapshot]:
                 snapshots.append(msg)
                 return Behaviors.same()
@@ -407,7 +430,8 @@ async def test_topology_actor_rejoin_clears_unreachable() -> None:
             return Behaviors.receive(receive)
 
         collector_ref: ActorRef[TopologySnapshot] = system.spawn(
-            collector_behavior(), "collector",
+            collector_behavior(),
+            "collector",
         )
         topo_ref.tell(SubscribeTopology(reply_to=collector_ref))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
@@ -435,7 +459,8 @@ async def test_topology_actor_unsubscribe() -> None:
 
         def collector_behavior() -> Behavior[TopologySnapshot]:
             async def receive(
-                ctx: ActorContext[TopologySnapshot], msg: TopologySnapshot,
+                ctx: ActorContext[TopologySnapshot],
+                msg: TopologySnapshot,
             ) -> Behavior[TopologySnapshot]:
                 snapshots.append(msg)
                 return Behaviors.same()
@@ -443,7 +468,8 @@ async def test_topology_actor_unsubscribe() -> None:
             return Behaviors.receive(receive)
 
         collector_ref: ActorRef[TopologySnapshot] = system.spawn(
-            collector_behavior(), "collector",
+            collector_behavior(),
+            "collector",
         )
         topo_ref.tell(SubscribeTopology(reply_to=collector_ref))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
@@ -471,7 +497,8 @@ async def test_topology_actor_gossip_tick_sends_to_peers() -> None:
 
     async with ActorSystem(name="test") as system:
         topo_ref = system.spawn(
-            make_topology_actor(state=initial_state), "_topology",
+            make_topology_actor(state=initial_state),
+            "_topology",
         )
         # GossipTick without remote_transport should not crash
         topo_ref.tell(GossipTick())  # type: ignore[arg-type]
@@ -484,7 +511,8 @@ async def test_topology_actor_heartbeat_tick_sends_heartbeats() -> None:
 
     async with ActorSystem(name="test") as system:
         topo_ref = system.spawn(
-            make_topology_actor(state=initial_state), "_topology",
+            make_topology_actor(state=initial_state),
+            "_topology",
         )
         topo_ref.tell(HeartbeatTick(members=frozenset({OTHER_NODE})))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)
@@ -496,11 +524,14 @@ async def test_topology_actor_waiters_notified() -> None:
         topo_ref = system.spawn(make_topology_actor(), "_topology")
 
         # Ask for 2 UP members (only 1 currently)
-        result_future: asyncio.Future[ClusterState] = asyncio.get_running_loop().create_future()
+        result_future: asyncio.Future[ClusterState] = (
+            asyncio.get_running_loop().create_future()
+        )
 
         def waiter_behavior() -> Behavior[ClusterState]:
             async def receive(
-                ctx: ActorContext[ClusterState], msg: ClusterState,
+                ctx: ActorContext[ClusterState],
+                msg: ClusterState,
             ) -> Behavior[ClusterState]:
                 if not result_future.done():
                     result_future.set_result(msg)
@@ -509,7 +540,8 @@ async def test_topology_actor_waiters_notified() -> None:
             return Behaviors.receive(receive)
 
         waiter_ref: ActorRef[ClusterState] = system.spawn(
-            waiter_behavior(), "waiter",
+            waiter_behavior(),
+            "waiter",
         )
         topo_ref.tell(WaitForMembers(n=2, reply_to=waiter_ref))  # type: ignore[arg-type]
         await asyncio.sleep(0.1)

@@ -7,7 +7,10 @@
 from __future__ import annotations
 
 from casty.core.ref import ActorRef as ActorRef
-from casty.remote.ref import BroadcastRef as BroadcastRef, RemoteActorRef as RemoteActorRef
+from casty.remote.ref import (
+    BroadcastRef as BroadcastRef,
+    RemoteActorRef as RemoteActorRef,
+)
 
 __all__ = [
     "ActorRef",

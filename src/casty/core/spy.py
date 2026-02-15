@@ -79,7 +79,6 @@ class SpyContext[M]:
         self._inner.register_interceptor(interceptor)
 
 
-
 def spy[M](
     behavior: Behavior[M],
     observer: ActorRef[SpyEvent[M]],
@@ -89,7 +88,9 @@ def spy[M](
     """Wrap a behavior to report every processed message to an observer."""
 
     async def setup(ctx: ActorContext[M]) -> Behavior[M]:
-        effective_ctx: ActorContext[M] = SpyContext(ctx, observer) if spy_children else ctx
+        effective_ctx: ActorContext[M] = (
+            SpyContext(ctx, observer) if spy_children else ctx
+        )
 
         inner = behavior
         if inner.on_setup is not None:
@@ -101,14 +102,18 @@ def spy[M](
                 return spy(inner, observer, spy_children=spy_children)
             return inner
 
-        def spied(handler: Callable[[ActorContext[M], M], Awaitable[Behavior[M]]]) -> Behavior[M]:
+        def spied(
+            handler: Callable[[ActorContext[M], M], Awaitable[Behavior[M]]],
+        ) -> Behavior[M]:
             async def receive(_ctx: ActorContext[M], msg: M) -> Behavior[M]:
                 result = await handler(effective_ctx, msg)
-                observer.tell(SpyEvent(
-                    actor_path=effective_ctx.self.id,
-                    event=msg,
-                    timestamp=_time.monotonic(),
-                ))
+                observer.tell(
+                    SpyEvent(
+                        actor_path=effective_ctx.self.id,
+                        event=msg,
+                        timestamp=_time.monotonic(),
+                    )
+                )
 
                 if result.on_receive is not None:
                     return spied(result.on_receive)

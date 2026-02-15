@@ -65,10 +65,13 @@ def singleton_manager_actor(
     )
 
     if topology_ref is not None and self_node is not None:
+
         async def setup(ctx: ActorContext[Any]) -> Behavior[Any]:
             from casty.cluster.topology import SubscribeTopology
+
             topology_ref.tell(SubscribeTopology(reply_to=ctx.self))  # type: ignore[arg-type]
             return pending(cfg, buffer=(), self_node=self_node)
+
         return Behaviors.setup(setup)
 
     return pending(cfg, buffer=())
@@ -91,12 +94,16 @@ def pending(
                 if snapshot.leader is not None:
                     cfg.logger.info(
                         "Singleton [%s] standby (leader=%s:%d)",
-                        cfg.name, snapshot.leader.host, snapshot.leader.port,
+                        cfg.name,
+                        snapshot.leader.host,
+                        snapshot.leader.port,
                     )
                     if leader_ref := make_leader_ref(cfg, snapshot.leader):
                         for buffered in buffer:
                             leader_ref.tell(buffered)
-                    return standby(cfg, leader_node=snapshot.leader, self_node=self_node)
+                    return standby(
+                        cfg, leader_node=snapshot.leader, self_node=self_node
+                    )
                 return Behaviors.same()
             case _:
                 return pending(cfg, buffer=(*buffer, msg), self_node=self_node)
@@ -117,8 +124,12 @@ def active(
                 if snapshot.leader is not None:
                     cfg.logger.info("Singleton [%s] demoted, stopping child", cfg.name)
                     ctx.stop(child_ref)
-                    return standby(cfg, leader_node=snapshot.leader, self_node=self_node)
-                cfg.logger.info("Singleton [%s] demoted (no leader), stopping child", cfg.name)
+                    return standby(
+                        cfg, leader_node=snapshot.leader, self_node=self_node
+                    )
+                cfg.logger.info(
+                    "Singleton [%s] demoted (no leader), stopping child", cfg.name
+                )
                 ctx.stop(child_ref)
                 return pending(cfg, buffer=(), self_node=self_node)
             case _:
@@ -145,9 +156,13 @@ def standby(
                 if snapshot.leader is not None and snapshot.leader != leader_node:
                     cfg.logger.info(
                         "Singleton [%s] leader changed to %s:%d",
-                        cfg.name, snapshot.leader.host, snapshot.leader.port,
+                        cfg.name,
+                        snapshot.leader.host,
+                        snapshot.leader.port,
                     )
-                    return standby(cfg, leader_node=snapshot.leader, self_node=self_node)
+                    return standby(
+                        cfg, leader_node=snapshot.leader, self_node=self_node
+                    )
                 if snapshot.leader is None:
                     return pending(cfg, buffer=(), self_node=self_node)
                 return Behaviors.same()
@@ -160,7 +175,8 @@ def standby(
 
 
 def make_leader_ref(
-    cfg: SingletonConfig, leader_node: NodeAddress,
+    cfg: SingletonConfig,
+    leader_node: NodeAddress,
 ) -> ActorRef[Any] | None:
     if cfg.remote_transport is None:
         return None

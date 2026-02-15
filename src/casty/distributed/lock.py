@@ -3,6 +3,7 @@
 Waiters are queued in order and granted the lock as the current holder
 releases it.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -177,7 +178,8 @@ class Lock:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._name, DestroyLock(reply_to=reply_to),
+                self._name,
+                DestroyLock(reply_to=reply_to),
             ),
             timeout=self._timeout,
         )

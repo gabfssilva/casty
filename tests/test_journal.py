@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from casty.core.journal import EventJournal, InMemoryJournal, PersistedEvent, Snapshot, SqliteJournal
+from casty.core.journal import (
+    EventJournal,
+    InMemoryJournal,
+    PersistedEvent,
+    Snapshot,
+    SqliteJournal,
+)
 
 
 @dataclass(frozen=True)
@@ -71,8 +77,12 @@ async def test_load_snapshot_nonexistent(journal: EventJournal) -> None:
 
 
 async def test_snapshot_overwrites_previous(journal: EventJournal) -> None:
-    await journal.save_snapshot("acc-1", Snapshot(sequence_nr=5, state="old", timestamp=5.0))
-    await journal.save_snapshot("acc-1", Snapshot(sequence_nr=10, state="new", timestamp=10.0))
+    await journal.save_snapshot(
+        "acc-1", Snapshot(sequence_nr=5, state="old", timestamp=5.0)
+    )
+    await journal.save_snapshot(
+        "acc-1", Snapshot(sequence_nr=10, state="new", timestamp=10.0)
+    )
     loaded = await journal.load_snapshot("acc-1")
     assert loaded is not None
     assert loaded.state == "new"
@@ -80,8 +90,12 @@ async def test_snapshot_overwrites_previous(journal: EventJournal) -> None:
 
 
 async def test_persist_appends_to_existing(journal: EventJournal) -> None:
-    await journal.persist("acc-1", [PersistedEvent(sequence_nr=1, event=Deposited(100), timestamp=1.0)])
-    await journal.persist("acc-1", [PersistedEvent(sequence_nr=2, event=Deposited(200), timestamp=2.0)])
+    await journal.persist(
+        "acc-1", [PersistedEvent(sequence_nr=1, event=Deposited(100), timestamp=1.0)]
+    )
+    await journal.persist(
+        "acc-1", [PersistedEvent(sequence_nr=2, event=Deposited(200), timestamp=2.0)]
+    )
     loaded = await journal.load("acc-1")
     assert len(loaded) == 2
 
@@ -89,8 +103,12 @@ async def test_persist_appends_to_existing(journal: EventJournal) -> None:
 async def test_sqlite_persistence_across_instances(tmp_path: Path) -> None:
     db_path = tmp_path / "test.db"
     journal = SqliteJournal(db_path)
-    await journal.persist("acc-1", [PersistedEvent(sequence_nr=1, event=Deposited(100), timestamp=1.0)])
-    await journal.save_snapshot("acc-1", Snapshot(sequence_nr=1, state={"balance": 100}, timestamp=1.0))
+    await journal.persist(
+        "acc-1", [PersistedEvent(sequence_nr=1, event=Deposited(100), timestamp=1.0)]
+    )
+    await journal.save_snapshot(
+        "acc-1", Snapshot(sequence_nr=1, state={"balance": 100}, timestamp=1.0)
+    )
     journal.close()
 
     journal2 = SqliteJournal(db_path)
@@ -112,12 +130,16 @@ async def test_sqlite_custom_serializer() -> None:
         return json.loads(data)
 
     journal = SqliteJournal(serialize=serialize, deserialize=deserialize)
-    await journal.persist("acc-1", [PersistedEvent(sequence_nr=1, event="deposited", timestamp=1.0)])
+    await journal.persist(
+        "acc-1", [PersistedEvent(sequence_nr=1, event="deposited", timestamp=1.0)]
+    )
     loaded = await journal.load("acc-1")
     assert len(loaded) == 1
     assert loaded[0].event == "deposited"
 
-    await journal.save_snapshot("acc-1", Snapshot(sequence_nr=1, state={"balance": 100}, timestamp=1.0))
+    await journal.save_snapshot(
+        "acc-1", Snapshot(sequence_nr=1, state={"balance": 100}, timestamp=1.0)
+    )
     snap = await journal.load_snapshot("acc-1")
     assert snap is not None
     assert snap.state == {"balance": 100}

@@ -25,7 +25,11 @@ from casty.cluster.state import (
 )
 from casty.cluster.failure_detector import PhiAccrualFailureDetector
 from casty.ref import ActorRef
-from casty.cluster.topology import SubscribeTopology, TopologySnapshot, UnsubscribeTopology
+from casty.cluster.topology import (
+    SubscribeTopology,
+    TopologySnapshot,
+    UnsubscribeTopology,
+)
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
@@ -60,18 +64,21 @@ class GossipTick:
 @dataclass(frozen=True)
 class PromoteMember:
     """Leader tells topology to promote a joining member to up."""
+
     address: NodeAddress
 
 
 @dataclass(frozen=True)
 class DownMember:
     """Mark a member as down (unreachable -> removed from leader election)."""
+
     address: NodeAddress
 
 
 @dataclass(frozen=True)
 class UpdateShardAllocations:
     """Published by coordinator leader -> topology for cluster-wide propagation."""
+
     shard_type: str
     allocations: dict[int, ShardAllocation]
     epoch: int
@@ -80,12 +87,14 @@ class UpdateShardAllocations:
 @dataclass(frozen=True)
 class UpdateRegistry:
     """Update the local service registry (from receptionist)."""
+
     entries: frozenset[ServiceEntry]
 
 
 @dataclass(frozen=True)
 class ResolveNode:
     """Query to resolve a ``NodeId`` to its ``NodeAddress``."""
+
     node_id: NodeId
     reply_to: ActorRef[NodeAddress | None]
 
@@ -93,6 +102,7 @@ class ResolveNode:
 @dataclass(frozen=True)
 class HeartbeatTick:
     """Periodic trigger to send heartbeats."""
+
     members: frozenset[NodeAddress]
 
 
@@ -110,6 +120,7 @@ class HeartbeatResponse:
 @dataclass(frozen=True)
 class CheckAvailability:
     """Request to check which nodes are unreachable."""
+
     reply_to: ActorRef[Any]
 
 
@@ -190,10 +201,12 @@ def merge_gossip(
     merged_members: set[Member] = set()
     for addr in all_addresses:
         local_m = next(
-            (m for m in state.members if m.address == addr), None,
+            (m for m in state.members if m.address == addr),
+            None,
         )
         remote_m = next(
-            (m for m in remote_state.members if m.address == addr), None,
+            (m for m in remote_state.members if m.address == addr),
+            None,
         )
         if local_m and remote_m:
             if state.version.is_before(remote_state.version):
@@ -217,12 +230,12 @@ def merge_gossip(
         merged_epoch = state.allocation_epoch
 
     down_nodes = frozenset(
-        m.address for m in merged_members
+        m.address
+        for m in merged_members
         if m.status in (MemberStatus.down, MemberStatus.removed)
     )
     merged_registry = frozenset(
-        e for e in (state.registry | remote_state.registry)
-        if e.node not in down_nodes
+        e for e in (state.registry | remote_state.registry) if e.node not in down_nodes
     )
 
     members_changed = frozenset(merged_members) != state.members
@@ -232,12 +245,13 @@ def merge_gossip(
         merged_seen = state.seen | remote_state.seen | {self_node, from_node}
 
     alive_addresses = frozenset(
-        m.address for m in merged_members
+        m.address
+        for m in merged_members
         if m.status in (MemberStatus.joining, MemberStatus.up, MemberStatus.leaving)
     )
     merged_unreachable = (
-        (state.unreachable | remote_state.unreachable) - alive_addresses
-    )
+        state.unreachable | remote_state.unreachable
+    ) - alive_addresses
 
     return ClusterState(
         members=frozenset(merged_members),
@@ -271,7 +285,8 @@ def topology_actor(
         handled_unreachable: frozenset[NodeAddress],
     ) -> Behavior[TopologyMsg]:
         async def receive(
-            ctx: ActorContext[TopologyMsg], msg: TopologyMsg,
+            ctx: ActorContext[TopologyMsg],
+            msg: TopologyMsg,
         ) -> Behavior[TopologyMsg]:
             match msg:
                 case SubscribeTopology(reply_to=reply_to):
@@ -294,11 +309,16 @@ def topology_actor(
                 case GossipMessage(remote_state, from_node, is_reply):
                     log.debug(
                         "Gossip from %s:%d (members=%d, reply=%s)",
-                        from_node.host, from_node.port,
-                        len(remote_state.members), is_reply,
+                        from_node.host,
+                        from_node.port,
+                        len(remote_state.members),
+                        is_reply,
                     )
                     new_state = merge_gossip(
-                        state, remote_state, self_node, from_node,
+                        state,
+                        remote_state,
+                        self_node,
+                        from_node,
                     )
 
                     if not is_reply and remote_transport is not None:
@@ -324,7 +344,8 @@ def topology_actor(
                             if m.status == MemberStatus.joining:
                                 log.info(
                                     "Promoting %s:%d -> up",
-                                    m.address.host, m.address.port,
+                                    m.address.host,
+                                    m.address.port,
                                 )
                                 ctx.self.tell(PromoteMember(address=m.address))
 
@@ -333,7 +354,8 @@ def topology_actor(
                     remaining = notify_waiters(new_state, waiters)
 
                     rejoined = frozenset(
-                        m.address for m in new_state.members
+                        m.address
+                        for m in new_state.members
                         if m.address in handled_unreachable
                         and m.status == MemberStatus.joining
                     )
@@ -350,21 +372,20 @@ def topology_actor(
                             m.address
                             for m in state.members
                             if m.address != self_node
-                            and m.status
-                            in (MemberStatus.up, MemberStatus.joining)
+                            and m.status in (MemberStatus.up, MemberStatus.joining)
                         ]
                         if peers:
-                            unseen = [
-                                p for p in peers if p not in state.seen
-                            ]
+                            unseen = [p for p in peers if p not in state.seen]
                             candidates = unseen if unseen else peers
                             targets = random.sample(
-                                candidates, min(fanout, len(candidates)),
+                                candidates,
+                                min(fanout, len(candidates)),
                             )
                             for target_node in targets:
                                 log.debug(
                                     "Gossip -> %s:%d",
-                                    target_node.host, target_node.port,
+                                    target_node.host,
+                                    target_node.port,
                                 )
                                 gossip_addr = ActorAddress(
                                     system=system_name,
@@ -372,19 +393,22 @@ def topology_actor(
                                     host=target_node.host,
                                     port=target_node.port,
                                 )
-                                gossip_ref: ActorRef[Any] = (
-                                    remote_transport.make_ref(gossip_addr)
+                                gossip_ref: ActorRef[Any] = remote_transport.make_ref(
+                                    gossip_addr
                                 )
                                 gossip_ref.tell(
                                     GossipMessage(
-                                        state=state, from_node=self_node,
+                                        state=state,
+                                        from_node=self_node,
                                     ),
                                 )
                     return Behaviors.same()
 
                 case JoinRequest(
-                    node=node, roles=join_roles,
-                    node_id=nid, reply_to=reply_to,
+                    node=node,
+                    roles=join_roles,
+                    node_id=nid,
+                    reply_to=reply_to,
                 ):
                     if node == self_node:
                         if reply_to is not None:
@@ -392,7 +416,9 @@ def topology_actor(
                         return Behaviors.same()
                     log.info(
                         "Join request from %s:%d (id=%s)",
-                        node.host, node.port, nid,
+                        node.host,
+                        node.port,
+                        nid,
                     )
                     if remote_transport is not None:
                         remote_transport.clear_blacklist(node.host, node.port)
@@ -402,9 +428,7 @@ def topology_actor(
                         roles=join_roles,
                         id=nid,
                     )
-                    existing = frozenset(
-                        m for m in state.members if m.address != node
-                    )
+                    existing = frozenset(m for m in state.members if m.address != node)
                     new_state = ClusterState(
                         members=existing | {new_member},
                         unreachable=state.unreachable - {node},
@@ -451,7 +475,10 @@ def topology_actor(
                     push_to_subscribers(snapshot, subscribers)
                     remaining = notify_waiters(new_state, waiters)
                     return active(
-                        new_state, subscribers, remaining, handled_unreachable,
+                        new_state,
+                        subscribers,
+                        remaining,
+                        handled_unreachable,
                     )
 
                 case HeartbeatRequest(from_node=from_node, reply_to=reply_to):
@@ -468,9 +495,9 @@ def topology_actor(
 
                 case HeartbeatTick(members=tick_members):
                     current = frozenset(
-                        m.address for m in state.members
-                        if m.status
-                        in (MemberStatus.up, MemberStatus.joining)
+                        m.address
+                        for m in state.members
+                        if m.status in (MemberStatus.up, MemberStatus.joining)
                     ) - {self_node}
                     removed = tick_members - current - {self_node}
                     for gone in removed:
@@ -483,9 +510,7 @@ def topology_actor(
                                 host=member.host,
                                 port=member.port,
                             )
-                            hb_ref: ActorRef[Any] = (
-                                remote_transport.make_ref(hb_addr)
-                            )
+                            hb_ref: ActorRef[Any] = remote_transport.make_ref(hb_addr)
                             hb_ref.tell(
                                 HeartbeatRequest(
                                     from_node=self_node,
@@ -504,7 +529,8 @@ def topology_actor(
                             if member.address not in handled_unreachable:
                                 log.warning(
                                     "Node unreachable: %s (phi=%.1f)",
-                                    node_key, detector.phi(node_key),
+                                    node_key,
+                                    detector.phi(node_key),
                                 )
                                 new_unreachable.add(member.address)
 
@@ -535,15 +561,15 @@ def topology_actor(
                             roles=m.roles,
                             id=m.id,
                         )
-                        if m.address == address
-                        and m.status == MemberStatus.joining
+                        if m.address == address and m.status == MemberStatus.joining
                         else m
                         for m in state.members
                     )
                     if promoted != state.members:
                         log.info(
                             "Promoted %s:%d -> up",
-                            address.host, address.port,
+                            address.host,
+                            address.port,
                         )
                         new_state = ClusterState(
                             members=promoted,
@@ -558,7 +584,9 @@ def topology_actor(
                         push_to_subscribers(snapshot, subscribers)
                         remaining = notify_waiters(new_state, waiters)
                         return active(
-                            new_state, subscribers, remaining,
+                            new_state,
+                            subscribers,
+                            remaining,
                             handled_unreachable,
                         )
                     return Behaviors.same()
@@ -584,7 +612,8 @@ def topology_actor(
                     if downed != state.members:
                         log.info(
                             "Marked %s:%d -> down",
-                            address.host, address.port,
+                            address.host,
+                            address.port,
                         )
                         pruned_registry = frozenset(
                             e for e in state.registry if e.node != address
@@ -604,7 +633,9 @@ def topology_actor(
                         snapshot = build_snapshot(new_state)
                         push_to_subscribers(snapshot, subscribers)
                         return active(
-                            new_state, subscribers, waiters,
+                            new_state,
+                            subscribers,
+                            waiters,
                             handled_unreachable,
                         )
                     return Behaviors.same()
@@ -617,15 +648,20 @@ def topology_actor(
                     if epoch > state.allocation_epoch:
                         log.debug(
                             "Shard allocations updated: %s epoch %d",
-                            shard_type, epoch,
+                            shard_type,
+                            epoch,
                         )
                         new_state = state.with_allocations(
-                            shard_type, allocations, epoch,
+                            shard_type,
+                            allocations,
+                            epoch,
                         )
                         snapshot = build_snapshot(new_state)
                         push_to_subscribers(snapshot, subscribers)
                         return active(
-                            new_state, subscribers, waiters,
+                            new_state,
+                            subscribers,
+                            waiters,
                             handled_unreachable,
                         )
                     return Behaviors.same()
@@ -644,7 +680,9 @@ def topology_actor(
                     snapshot = build_snapshot(new_state)
                     push_to_subscribers(snapshot, subscribers)
                     return active(
-                        new_state, subscribers, waiters,
+                        new_state,
+                        subscribers,
+                        waiters,
                         handled_unreachable,
                     )
 
@@ -654,8 +692,7 @@ def topology_actor(
 
                 case WaitForMembers(n=n, reply_to=reply_to):
                     up_count = sum(
-                        1 for m in state.members
-                        if m.status == MemberStatus.up
+                        1 for m in state.members if m.status == MemberStatus.up
                     )
                     if up_count >= n:
                         reply_to.tell(state)

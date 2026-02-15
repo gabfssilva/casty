@@ -25,9 +25,7 @@ async def get_cluster_status(
 
 
 def find_leader_ip(status: dict[str, Any]) -> str | None:
-    up_members = [
-        m["address"] for m in status["members"] if m["status"] == "up"
-    ]
+    up_members = [m["address"] for m in status["members"] if m["status"] == "up"]
     if not up_members:
         return None
     up_members.sort()

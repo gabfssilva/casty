@@ -48,7 +48,8 @@ async def test_register_and_find() -> None:
     results: list[Any] = []
     async with ActorSystem(name="test") as system:
         rec = system.spawn(
-            receptionist_actor(self_node=NODE, system_name="test"), "receptionist",
+            receptionist_actor(self_node=NODE, system_name="test"),
+            "receptionist",
         )
         target = system.spawn(collector([]), "ping-service")
         sink = system.spawn(collector(results), "sink")
@@ -75,7 +76,8 @@ async def test_subscribe_receives_listing_immediately() -> None:
     results: list[Any] = []
     async with ActorSystem(name="test") as system:
         rec = system.spawn(
-            receptionist_actor(self_node=NODE, system_name="test"), "receptionist",
+            receptionist_actor(self_node=NODE, system_name="test"),
+            "receptionist",
         )
         sink = system.spawn(collector(results), "sink")
         await asyncio.sleep(0.1)
@@ -96,7 +98,8 @@ async def test_subscribe_notified_on_new_registration() -> None:
     results: list[Any] = []
     async with ActorSystem(name="test") as system:
         rec = system.spawn(
-            receptionist_actor(self_node=NODE, system_name="test"), "receptionist",
+            receptionist_actor(self_node=NODE, system_name="test"),
+            "receptionist",
         )
         target = system.spawn(collector([]), "ping-service")
         sink = system.spawn(collector(results), "sink")
@@ -124,7 +127,8 @@ async def test_deregister_removes_service() -> None:
     results: list[Any] = []
     async with ActorSystem(name="test") as system:
         rec = system.spawn(
-            receptionist_actor(self_node=NODE, system_name="test"), "receptionist",
+            receptionist_actor(self_node=NODE, system_name="test"),
+            "receptionist",
         )
         target = system.spawn(collector([]), "ping-service")
         sink = system.spawn(collector(results), "sink")
@@ -152,13 +156,16 @@ async def test_registry_updated_from_topology_snapshot() -> None:
     remote_node = NodeAddress(host="10.0.0.2", port=2551)
     async with ActorSystem(name="test") as system:
         rec = system.spawn(
-            receptionist_actor(self_node=NODE, system_name="test"), "receptionist",
+            receptionist_actor(self_node=NODE, system_name="test"),
+            "receptionist",
         )
         sink = system.spawn(collector(results), "sink")
         await asyncio.sleep(0.1)
 
         remote_entry = ServiceEntry(
-            key="ping", node=remote_node, path="/user/ping-service",
+            key="ping",
+            node=remote_node,
+            path="/user/ping-service",
         )
         snapshot = TopologySnapshot(
             members=frozenset(),
@@ -235,10 +242,14 @@ PING_KEY: ServiceKey[Ping] = ServiceKey("ping")
 async def test_discoverable_auto_registers() -> None:
     """Spawning a discoverable behavior auto-registers with the receptionist."""
     async with ClusteredActorSystem(
-        name="disc-reg", host="127.0.0.1", port=0, node_id="node-1",
+        name="disc-reg",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
     ) as system:
         ref: ActorRef[Ping] = system.spawn(
-            Behaviors.discoverable(collector([]), key=PING_KEY), "ping-svc",
+            Behaviors.discoverable(collector([]), key=PING_KEY),
+            "ping-svc",
         )
         await asyncio.sleep(0.3)
 
@@ -250,10 +261,14 @@ async def test_discoverable_auto_registers() -> None:
 async def test_discoverable_auto_deregisters_on_stop() -> None:
     """When a discoverable actor stops, it is automatically deregistered."""
     async with ClusteredActorSystem(
-        name="disc-dereg", host="127.0.0.1", port=0, node_id="node-1",
+        name="disc-dereg",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
     ) as system:
         ref: ActorRef[Any] = system.spawn(
-            Behaviors.discoverable(stoppable(), key=PING_KEY), "ping-svc",
+            Behaviors.discoverable(stoppable(), key=PING_KEY),
+            "ping-svc",
         )
         await asyncio.sleep(0.3)
 
@@ -270,14 +285,18 @@ async def test_discoverable_auto_deregisters_on_stop() -> None:
 async def test_discoverable_composes_with_supervise() -> None:
     """Discoverable wraps a supervised behavior — both work correctly."""
     async with ClusteredActorSystem(
-        name="disc-sup", host="127.0.0.1", port=0, node_id="node-1",
+        name="disc-sup",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
     ) as system:
         supervised = Behaviors.supervise(
             collector([]),
             OneForOneStrategy(),
         )
         system.spawn(
-            Behaviors.discoverable(supervised, key=PING_KEY), "ping-svc",
+            Behaviors.discoverable(supervised, key=PING_KEY),
+            "ping-svc",
         )
         await asyncio.sleep(0.3)
 
@@ -305,7 +324,10 @@ async def test_discoverable_via_ctx_spawn() -> None:
         return Behaviors.receive(receive)
 
     async with ClusteredActorSystem(
-        name="disc-ctx", host="127.0.0.1", port=0, node_id="node-1",
+        name="disc-ctx",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
     ) as system:
         parent = system.spawn(parent_actor(), "parent")
         await asyncio.sleep(0.3)

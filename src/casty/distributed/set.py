@@ -2,6 +2,7 @@
 
 Supports optional event sourcing via ``persistent_set_entity``.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -53,9 +54,7 @@ def set_entity(entity_id: str) -> Behavior[SetMsg]:
     """Sharded set entity behavior. State via closure, starts as empty frozenset."""
 
     def active(items: frozenset[Any]) -> Behavior[SetMsg]:
-        async def receive(
-            ctx: ActorContext[SetMsg], msg: SetMsg
-        ) -> Behavior[SetMsg]:
+        async def receive(ctx: ActorContext[SetMsg], msg: SetMsg) -> Behavior[SetMsg]:
             match msg:
                 case Add(value, reply_to):
                     was_absent = value not in items
@@ -219,9 +218,7 @@ class Set[V]:
         """
         return await self._system.ask(
             self._region_ref,
-            lambda reply_to: ShardEnvelope(
-                self._name, DestroySet(reply_to=reply_to)
-            ),
+            lambda reply_to: ShardEnvelope(self._name, DestroySet(reply_to=reply_to)),
             timeout=self._timeout,
         )
 
@@ -301,8 +298,6 @@ class Set[V]:
         """
         return await self._system.ask(
             self._region_ref,
-            lambda reply_to: ShardEnvelope(
-                self._name, SetSize(reply_to=reply_to)
-            ),
+            lambda reply_to: ShardEnvelope(self._name, SetSize(reply_to=reply_to)),
             timeout=self._timeout,
         )

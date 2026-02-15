@@ -68,11 +68,13 @@ async def test_coordinator_promotes_replica_on_node_down() -> None:
         original_replicas = location.replicas
 
         # Simulate primary going down via unreachable in TopologySnapshot
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=members,
-            leader=node_a,
-            unreachable=frozenset({original_primary}),
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=members,
+                leader=node_a,
+                unreachable=frozenset({original_primary}),
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Re-query — should get a different primary (first replica)
@@ -116,11 +118,13 @@ async def test_coordinator_removes_failed_replica() -> None:
         # Pick a replica to fail
         failed_replica = location.replicas[0]
 
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=members,
-            leader=node_a,
-            unreachable=frozenset({failed_replica}),
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=members,
+                leader=node_a,
+                unreachable=frozenset({failed_replica}),
+            )
+        )
         await asyncio.sleep(0.1)
 
         new_location = await system.ask(
@@ -161,11 +165,13 @@ async def test_coordinator_removes_shard_when_no_replicas() -> None:
         )
         original_primary = location.node
 
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=members,
-            leader=node_a,
-            unreachable=frozenset({original_primary}),
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=members,
+                leader=node_a,
+                unreachable=frozenset({original_primary}),
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Re-query — shard should be reallocated to remaining node

@@ -31,7 +31,9 @@ async def test_cluster_actor_spawns_receptionist() -> None:
     config = ClusterConfig(host="127.0.0.1", port=0, node_id="node-1", seed_nodes=())
 
     async with ActorSystem(name="test") as system:
-        cluster = Cluster(system=system, config=config, event_stream=system.event_stream)
+        cluster = Cluster(
+            system=system, config=config, event_stream=system.event_stream
+        )
         await cluster.start()
         await asyncio.sleep(0.3)
 

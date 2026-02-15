@@ -1,5 +1,6 @@
 # tests/test_singleton.py
 """Tests for cluster singleton behavior."""
+
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +18,6 @@ from casty.config import (
 )
 from casty.core.journal import InMemoryJournal
 from casty.cluster.system import ClusteredActorSystem
-
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,6 @@ def counter_behavior(count: int = 0) -> Behavior[CounterMsg]:
                 return Behaviors.same()
 
     return Behaviors.receive(receive)
-
 
 
 async def test_single_node_singleton() -> None:
@@ -220,7 +219,6 @@ async def test_event_sourced_singleton() -> None:
     assert len(events) == 3
 
 
-
 @dataclass(frozen=True)
 class Tick:
     pass
@@ -253,7 +251,8 @@ def ticking_singleton(ticks: list[float], interval: float = 0.3) -> Behavior[Tic
 FAST_CONFIG = CastyConfig(
     heartbeat=HeartbeatConfig(interval=0.2, availability_check_interval=0.5),
     failure_detector=FailureDetectorConfig(
-        threshold=3.0, first_heartbeat_estimate_ms=300.0,
+        threshold=3.0,
+        first_heartbeat_estimate_ms=300.0,
     ),
     gossip=GossipConfig(interval=0.3),
     suppress_dead_letters_on_shutdown=True,
@@ -261,7 +260,10 @@ FAST_CONFIG = CastyConfig(
 
 
 async def wait_for_ticks(
-    ticks: list[float], *, min_count: int, timeout: float = 5.0,
+    ticks: list[float],
+    *,
+    min_count: int,
+    timeout: float = 5.0,
 ) -> None:
     """Poll until ``ticks`` has at least ``min_count`` entries."""
     deadline = asyncio.get_running_loop().time() + timeout
@@ -303,21 +305,31 @@ async def test_singleton_failover_ticking_survives_two_leader_kills() -> None:
 
     # Manually manage lifecycle — we need to shut down specific nodes mid-test
     system_a = ClusteredActorSystem(
-        name="failover", host="127.0.0.1", port=0, node_id="node-1",
+        name="failover",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
         config=FAST_CONFIG,
     )
     await system_a.__aenter__()
     port_a = system_a.self_node.port
 
     system_b = ClusteredActorSystem(
-        name="failover", host="127.0.0.1", port=0, node_id="node-2",
-        seed_nodes=[("127.0.0.1", port_a)], config=FAST_CONFIG,
+        name="failover",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-2",
+        seed_nodes=[("127.0.0.1", port_a)],
+        config=FAST_CONFIG,
     )
     await system_b.__aenter__()
     port_b = system_b.self_node.port
 
     system_c = ClusteredActorSystem(
-        name="failover", host="127.0.0.1", port=0, node_id="node-3",
+        name="failover",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-3",
         seed_nodes=[("127.0.0.1", port_a), ("127.0.0.1", port_b)],
         config=FAST_CONFIG,
     )

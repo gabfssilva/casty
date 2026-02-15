@@ -105,13 +105,28 @@ NODE_SCRIPT = textwrap.dedent("""\
 # -- Args --
 
 SEED_ARGS = [
-    "seed", "--host", "seed", "--port", "25520",
-    "--bind-host", "0.0.0.0", "--n-workers", "2",
+    "seed",
+    "--host",
+    "seed",
+    "--port",
+    "25520",
+    "--bind-host",
+    "0.0.0.0",
+    "--n-workers",
+    "2",
 ]
 WORKER_ARGS = [
-    "worker", "--host", "auto", "--port", "25520",
-    "--bind-host", "0.0.0.0",
-    "--seed-host", "seed", "--seed-port", "25520",
+    "worker",
+    "--host",
+    "auto",
+    "--port",
+    "25520",
+    "--bind-host",
+    "0.0.0.0",
+    "--seed-host",
+    "seed",
+    "--seed-port",
+    "25520",
 ]
 
 
@@ -131,7 +146,9 @@ def resilience_image() -> str:
     return IMAGE_NAME
 
 
-def _node(image: str, network: Network, script: str, args: list[str]) -> DockerContainer:
+def _node(
+    image: str, network: Network, script: str, args: list[str]
+) -> DockerContainer:
     return (
         DockerContainer(image)
         .with_network(network)
@@ -146,7 +163,10 @@ def _get_logs(container: DockerContainer) -> str:
 
 
 def _wait_for_log(
-    container: DockerContainer, marker: str, *, timeout: float = 60.0,
+    container: DockerContainer,
+    marker: str,
+    *,
+    timeout: float = 60.0,
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -159,7 +179,10 @@ def _wait_for_log(
 
 
 def _inject_latency(
-    container: DockerContainer, *, delay: str = "5ms", jitter: str = "3ms",
+    container: DockerContainer,
+    *,
+    delay: str = "5ms",
+    jitter: str = "3ms",
 ) -> None:
     wrapped = container.get_wrapped_container()
     exit_code, output = wrapped.exec_run(

@@ -17,7 +17,9 @@ def setup_logging() -> None:
     root = logging.getLogger("loadtest")
     root.setLevel(logging.DEBUG)
 
-    fmt = logging.Formatter("%(asctime)s %(levelname)-5s %(message)s", datefmt="%H:%M:%S")
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)-5s %(message)s", datefmt="%H:%M:%S"
+    )
 
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setLevel(logging.INFO)
@@ -49,7 +51,12 @@ def main() -> None:
 
     log.info("=== Casty Load + Resilience Test ===")
     log.info("Target: %s", cfg.target_url)
-    log.info("Workers: %d | Duration: %ds | Warmup: %ds", cfg.num_workers, cfg.duration, cfg.warmup)
+    log.info(
+        "Workers: %d | Duration: %ds | Warmup: %ds",
+        cfg.num_workers,
+        cfg.duration,
+        cfg.warmup,
+    )
     if cfg.no_faults:
         log.info("Mode: load only (no fault injection)")
     else:

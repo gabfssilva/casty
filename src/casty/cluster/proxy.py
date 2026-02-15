@@ -45,7 +45,8 @@ def shard_proxy_behavior(
             match msg:
                 case TopologySnapshot() as snapshot:
                     evicted = {
-                        sid: n for sid, n in shard_cache.items()
+                        sid: n
+                        for sid, n in shard_cache.items()
                         if n not in snapshot.unreachable
                     }
                     if len(evicted) < len(shard_cache):
@@ -70,8 +71,8 @@ def shard_proxy_behavior(
                                 host=node.host,
                                 port=node.port,
                             )
-                            remote_ref: ActorRef[Any] = (
-                                remote_transport.make_ref(remote_addr)
+                            remote_ref: ActorRef[Any] = remote_transport.make_ref(
+                                remote_addr
                             )
                             remote_ref.tell(envelope)
                         return Behaviors.same()
@@ -80,18 +81,26 @@ def shard_proxy_behavior(
                     new_buf = (*existing_buf, envelope)
                     new_buffer = {**buffer, shard_id: new_buf}
                     if not existing_buf:
-                        log.debug("Shard %d: requesting location (entity=%s)", shard_id, envelope.entity_id)
+                        log.debug(
+                            "Shard %d: requesting location (entity=%s)",
+                            shard_id,
+                            envelope.entity_id,
+                        )
                         coordinator.tell(
-                            GetShardLocation(
-                                shard_id=shard_id, reply_to=ctx.self
-                            )
+                            GetShardLocation(shard_id=shard_id, reply_to=ctx.self)
                         )
                     return active(shard_cache, new_buffer)
 
                 case ShardLocation(shard_id=sid, node=node):
                     new_cache = {**shard_cache, sid: node}
                     buffered = buffer.get(sid, ())
-                    log.debug("Shard %d -> %s:%d (flushed %d)", sid, node.host, node.port, len(buffered))
+                    log.debug(
+                        "Shard %d -> %s:%d (flushed %d)",
+                        sid,
+                        node.host,
+                        node.port,
+                        len(buffered),
+                    )
                     new_buffer = {k: v for k, v in buffer.items() if k != sid}
                     for envelope in buffered:
                         if node == self_node:
@@ -103,8 +112,8 @@ def shard_proxy_behavior(
                                 host=node.host,
                                 port=node.port,
                             )
-                            remote_ref: ActorRef[Any] = (
-                                remote_transport.make_ref(remote_addr)
+                            remote_ref: ActorRef[Any] = remote_transport.make_ref(
+                                remote_addr
                             )
                             remote_ref.tell(envelope)
                     return active(new_cache, new_buffer)
@@ -115,9 +124,11 @@ def shard_proxy_behavior(
         return Behaviors.receive(receive)
 
     if topology_ref is not None:
+
         async def setup(ctx: Any) -> Any:
             topology_ref.tell(SubscribeTopology(reply_to=ctx.self))
             return active({}, {})
+
         return Behaviors.setup(setup)
 
     return active({}, {})
@@ -144,7 +155,8 @@ def broadcast_proxy_behavior(
             match msg:
                 case TopologySnapshot() as snapshot:
                     up = frozenset(
-                        m.address for m in snapshot.members
+                        m.address
+                        for m in snapshot.members
                         if m.status == MemberStatus.up
                     )
                     return active(up)
@@ -172,9 +184,11 @@ def broadcast_proxy_behavior(
         return Behaviors.receive(receive)
 
     if topology_ref is not None:
+
         async def setup(ctx: Any) -> Any:
             topology_ref.tell(SubscribeTopology(reply_to=ctx.self))
             return active(frozenset({self_node}))
+
         return Behaviors.setup(setup)
 
     return active(frozenset({self_node}))

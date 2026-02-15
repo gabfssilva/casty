@@ -1,4 +1,5 @@
 """Root conftest — registers CLI options available to all test suites."""
+
 from __future__ import annotations
 
 import pytest

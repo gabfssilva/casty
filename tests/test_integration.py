@@ -23,6 +23,7 @@ from casty import (
 
 # --- Messages ---
 
+
 @dataclass(frozen=True)
 class Greet:
     name: str
@@ -51,6 +52,7 @@ type WorkerMsg = WorkItem | GetResults
 
 # --- Behaviors ---
 
+
 def greeter(count: int = 0) -> Behavior[GreeterMsg]:
     async def receive(ctx: Any, msg: GreeterMsg) -> Any:
         match msg:
@@ -66,6 +68,7 @@ def greeter(count: int = 0) -> Behavior[GreeterMsg]:
 
 
 # --- Integration Tests ---
+
 
 async def test_full_lifecycle_greeter() -> None:
     """Spawn a greeter, send messages, ask for count, shutdown."""
@@ -89,6 +92,7 @@ async def test_parent_child_hierarchy() -> None:
         async def receive(ctx: Any, msg: WorkItem) -> Any:
             child_results.append(msg.data)
             return Behaviors.same()
+
         return Behaviors.receive(receive)
 
     @dataclass(frozen=True)
@@ -117,7 +121,9 @@ async def test_parent_child_hierarchy() -> None:
                         return Behaviors.same()
                     case _:
                         return Behaviors.unhandled()
+
             return Behaviors.receive(receive)
+
         return Behaviors.setup(setup)
 
     async with ActorSystem() as system:
@@ -146,6 +152,7 @@ async def test_supervision_restart_on_failure() -> None:
                 raise RuntimeError("boom")
             processed.append(msg)
             return Behaviors.same()
+
         return Behaviors.receive(receive)
 
     strategy = OneForOneStrategy(
@@ -243,9 +250,7 @@ async def test_suppress_dead_letters_on_shutdown() -> None:
     system.event_stream.tell(ESSubscribe(event_type=DeadLetter, handler=observer))
     await asyncio.sleep(0.05)
 
-    ref = system.spawn(
-        Behaviors.receive(lambda ctx, msg: Behaviors.same()), "sticky"
-    )
+    ref = system.spawn(Behaviors.receive(lambda ctx, msg: Behaviors.same()), "sticky")
     await asyncio.sleep(0.05)
 
     await system.shutdown()
@@ -257,6 +262,7 @@ async def test_suppress_dead_letters_on_shutdown() -> None:
 
 async def test_ask_timeout_raises() -> None:
     """Ask with no reply raises TimeoutError."""
+
     async def silent(ctx: Any, msg: Any) -> Any:
         return Behaviors.same()
 
@@ -276,7 +282,8 @@ async def test_bounded_mailbox_integration() -> None:
         return Behaviors.same()
 
     mailbox: Mailbox[int] = Mailbox(
-        capacity=2, overflow=MailboxOverflowStrategy.drop_new,
+        capacity=2,
+        overflow=MailboxOverflowStrategy.drop_new,
     )
 
     async with ActorSystem() as system:

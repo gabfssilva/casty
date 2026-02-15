@@ -63,11 +63,7 @@ class SubscriptionTimeout:
 
 
 type ClientProxyMsg = (
-    ShardEnvelope[Any]
-    | ShardLocation
-    | TopologySnapshot
-    | NodeFailed
-    | RetryShardQuery
+    ShardEnvelope[Any] | ShardLocation | TopologySnapshot | NodeFailed | RetryShardQuery
 )
 
 type TopologySubscriberMsg = TopologySnapshot | RegisterProxy | SubscriptionTimeout
@@ -203,9 +199,9 @@ def client_proxy_behavior(
                             for sid in still_buffered:
                                 if sid not in allocations:
                                     _query_coordinator(sid, new_leader, ctx.self)
-                        healthy_addrs = (
-                            {m.address for m in snapshot.members} - snapshot.unreachable
-                        )
+                        healthy_addrs = {
+                            m.address for m in snapshot.members
+                        } - snapshot.unreachable
                         new_failed = failed_nodes - healthy_addrs
                         log.debug(
                             "Topology: %d shards, leader=%s (epoch=%d)",
@@ -429,8 +425,10 @@ class _RemoteActorSystem(ActorSystem):
         self._local_transport.register(path, deliver)
         if self._remote is not None:
             addr = ActorAddress(
-                system=self._name, path=path,
-                host=self._host, port=self._port,
+                system=self._name,
+                path=path,
+                host=self._host,
+                port=self._port,
             )
             return self._remote.make_ref(addr)
         return super().__make_ref__(id, deliver)
@@ -538,7 +536,8 @@ class ClusterClient:
         )
         tcp_ref: ActorRef[TcpTransportMsg] = self._system.spawn(
             tcp_transport(
-                tcp_config, inbound,
+                tcp_config,
+                inbound,
                 logger=logging.getLogger(f"casty.client.tcp.{self._system_name}"),
             ),
             "_tcp_transport",
@@ -546,7 +545,9 @@ class ClusterClient:
 
         # 3. Ask for actual port and update system address
         actual_port: int = await self._system.ask(
-            tcp_ref, lambda r: GetPort(reply_to=r), timeout=5.0,
+            tcp_ref,
+            lambda r: GetPort(reply_to=r),
+            timeout=5.0,
         )
         if actual_port != self._client_port:
             self._client_port = actual_port

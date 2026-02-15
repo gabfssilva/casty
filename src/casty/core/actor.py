@@ -135,7 +135,8 @@ class CellContext[M]:
                     ref.tell(on_failure(exc))
                 else:
                     self._cell.logger.warning(
-                        "pipe_to_self failed (no on_failure handler): %s", exc,
+                        "pipe_to_self failed (no on_failure handler): %s",
+                        exc,
                     )
 
         tr = self._cell.task_runner

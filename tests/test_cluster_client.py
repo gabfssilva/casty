@@ -1,5 +1,6 @@
 # tests/test_cluster_client.py
 """Integration tests for ClusterClient — topology-aware routing without membership."""
+
 from __future__ import annotations
 
 import asyncio
@@ -297,15 +298,29 @@ async def test_proxy_rejects_stale_allocation_after_node_failure() -> None:
         await asyncio.sleep(0.1)
 
         # Send a TopologySnapshot with node-A as leader so the proxy has a leader
-        proxy.tell(TopologySnapshot(
-            members=frozenset({
-                Member(address=node_a, status=MemberStatus.up, roles=frozenset(), id="a"),
-                Member(address=node_b, status=MemberStatus.up, roles=frozenset(), id="b"),
-            }),
-            leader=node_a,
-            shard_allocations={},
-            allocation_epoch=1,
-        ))
+        proxy.tell(
+            TopologySnapshot(
+                members=frozenset(
+                    {
+                        Member(
+                            address=node_a,
+                            status=MemberStatus.up,
+                            roles=frozenset(),
+                            id="a",
+                        ),
+                        Member(
+                            address=node_b,
+                            status=MemberStatus.up,
+                            roles=frozenset(),
+                            id="b",
+                        ),
+                    }
+                ),
+                leader=node_a,
+                shard_allocations={},
+                allocation_epoch=1,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Node-A fails via TCP
@@ -364,14 +379,23 @@ async def test_proxy_clears_failed_nodes_on_healthy_topology() -> None:
         await asyncio.sleep(0.1)
 
         # Give it a leader
-        proxy.tell(TopologySnapshot(
-            members=frozenset({
-                Member(address=node_a, status=MemberStatus.up, roles=frozenset(), id="a"),
-            }),
-            leader=node_a,
-            shard_allocations={},
-            allocation_epoch=1,
-        ))
+        proxy.tell(
+            TopologySnapshot(
+                members=frozenset(
+                    {
+                        Member(
+                            address=node_a,
+                            status=MemberStatus.up,
+                            roles=frozenset(),
+                            id="a",
+                        ),
+                    }
+                ),
+                leader=node_a,
+                shard_allocations={},
+                allocation_epoch=1,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Node-A fails
@@ -379,15 +403,24 @@ async def test_proxy_clears_failed_nodes_on_healthy_topology() -> None:
         await asyncio.sleep(0.1)
 
         # Topology snapshot shows node-A is back and healthy
-        proxy.tell(TopologySnapshot(
-            members=frozenset({
-                Member(address=node_a, status=MemberStatus.up, roles=frozenset(), id="a"),
-            }),
-            leader=node_a,
-            shard_allocations={},
-            allocation_epoch=2,
-            unreachable=frozenset(),
-        ))
+        proxy.tell(
+            TopologySnapshot(
+                members=frozenset(
+                    {
+                        Member(
+                            address=node_a,
+                            status=MemberStatus.up,
+                            roles=frozenset(),
+                            id="a",
+                        ),
+                    }
+                ),
+                leader=node_a,
+                shard_allocations={},
+                allocation_epoch=2,
+                unreachable=frozenset(),
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Now ShardLocation pointing to node-A should be accepted (not rejected)
@@ -399,9 +432,7 @@ async def test_proxy_clears_failed_nodes_on_healthy_topology() -> None:
         from casty.cluster import entity_shard
 
         target_id = next(
-            eid
-            for i in range(1000)
-            if entity_shard(eid := f"e-{i}", 10) == 5
+            eid for i in range(1000) if entity_shard(eid := f"e-{i}", 10) == 5
         )
         proxy.tell(ShardEnvelope(target_id, Increment(amount=1)))
         await asyncio.sleep(0.1)
@@ -427,7 +458,9 @@ async def test_subscriber_reconnects_on_timeout() -> None:
                     self._port = port
 
                 def tell(self, msg: Any) -> None:
-                    sent_messages.append((f"{self._host}:{self._port}{self._path}", msg))
+                    sent_messages.append(
+                        (f"{self._host}:{self._port}{self._path}", msg)
+                    )
 
             return _Ref(addr.path, addr.host, addr.port)
 
@@ -476,7 +509,9 @@ async def test_subscriber_resets_liveness_on_snapshot() -> None:
                     self._port = port
 
                 def tell(self, msg: Any) -> None:
-                    sent_messages.append((f"{self._host}:{self._port}{self._path}", msg))
+                    sent_messages.append(
+                        (f"{self._host}:{self._port}{self._path}", msg)
+                    )
 
             return _Ref(addr.path, addr.host, addr.port)
 
@@ -499,21 +534,25 @@ async def test_subscriber_resets_liveness_on_snapshot() -> None:
             await asyncio.sleep(0.1)
 
             # Send a topology snapshot to reset the liveness timer
-            sub_ref.tell(TopologySnapshot(
-                members=frozenset(),
-                leader=None,
-                shard_allocations={},
-                allocation_epoch=1,
-            ))
+            sub_ref.tell(
+                TopologySnapshot(
+                    members=frozenset(),
+                    leader=None,
+                    shard_allocations={},
+                    allocation_epoch=1,
+                )
+            )
             await asyncio.sleep(0.3)
 
             # Send another snapshot (within the 0.5s window)
-            sub_ref.tell(TopologySnapshot(
-                members=frozenset(),
-                leader=None,
-                shard_allocations={},
-                allocation_epoch=2,
-            ))
+            sub_ref.tell(
+                TopologySnapshot(
+                    members=frozenset(),
+                    leader=None,
+                    shard_allocations={},
+                    allocation_epoch=2,
+                )
+            )
             await asyncio.sleep(0.3)
 
             # No reconnection should have happened — only initial subscription
@@ -572,19 +611,39 @@ async def test_client_lookup_returns_matching_services() -> None:
             system_name="cluster",
         ) as client:
             # Simulate receiving a snapshot with registry entries
-            client._on_topology_update(TopologySnapshot(
-                members=frozenset({
-                    Member(address=node_a, status=MemberStatus.up, roles=frozenset(), id="a"),
-                    Member(address=node_b, status=MemberStatus.up, roles=frozenset(), id="b"),
-                }),
-                leader=node_a,
-                shard_allocations={},
-                allocation_epoch=1,
-                registry=frozenset({
-                    ServiceEntry(key="counter", node=node_a, path="/user/counter-1"),
-                    ServiceEntry(key="counter", node=node_b, path="/user/counter-2"),
-                }),
-            ))
+            client._on_topology_update(
+                TopologySnapshot(
+                    members=frozenset(
+                        {
+                            Member(
+                                address=node_a,
+                                status=MemberStatus.up,
+                                roles=frozenset(),
+                                id="a",
+                            ),
+                            Member(
+                                address=node_b,
+                                status=MemberStatus.up,
+                                roles=frozenset(),
+                                id="b",
+                            ),
+                        }
+                    ),
+                    leader=node_a,
+                    shard_allocations={},
+                    allocation_epoch=1,
+                    registry=frozenset(
+                        {
+                            ServiceEntry(
+                                key="counter", node=node_a, path="/user/counter-1"
+                            ),
+                            ServiceEntry(
+                                key="counter", node=node_b, path="/user/counter-2"
+                            ),
+                        }
+                    ),
+                )
+            )
 
             key: ServiceKey[int] = ServiceKey("counter")
             listing = client.lookup(key)
@@ -611,19 +670,36 @@ async def test_client_lookup_filters_by_key() -> None:
             contact_points=[("127.0.0.1", port)],
             system_name="cluster",
         ) as client:
-            client._on_topology_update(TopologySnapshot(
-                members=frozenset({
-                    Member(address=node_a, status=MemberStatus.up, roles=frozenset(), id="a"),
-                }),
-                leader=node_a,
-                shard_allocations={},
-                allocation_epoch=1,
-                registry=frozenset({
-                    ServiceEntry(key="counter", node=node_a, path="/user/counter"),
-                    ServiceEntry(key="logger", node=node_a, path="/user/logger"),
-                    ServiceEntry(key="counter", node=node_a, path="/user/counter-2"),
-                }),
-            ))
+            client._on_topology_update(
+                TopologySnapshot(
+                    members=frozenset(
+                        {
+                            Member(
+                                address=node_a,
+                                status=MemberStatus.up,
+                                roles=frozenset(),
+                                id="a",
+                            ),
+                        }
+                    ),
+                    leader=node_a,
+                    shard_allocations={},
+                    allocation_epoch=1,
+                    registry=frozenset(
+                        {
+                            ServiceEntry(
+                                key="counter", node=node_a, path="/user/counter"
+                            ),
+                            ServiceEntry(
+                                key="logger", node=node_a, path="/user/logger"
+                            ),
+                            ServiceEntry(
+                                key="counter", node=node_a, path="/user/counter-2"
+                            ),
+                        }
+                    ),
+                )
+            )
 
             counter_listing = client.lookup(ServiceKey("counter"))
             assert len(counter_listing.instances) == 2

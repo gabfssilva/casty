@@ -2,6 +2,7 @@
 
 Supports optional event sourcing via ``persistent_queue_entity``.
 """
+
 from __future__ import annotations
 
 from collections import deque
@@ -62,9 +63,7 @@ def queue_entity(entity_id: str) -> Behavior[QueueMsg]:
     """Sharded queue entity behavior. State via mutable deque in closure."""
     items: deque[Any] = deque()
 
-    async def receive(
-        ctx: ActorContext[QueueMsg], msg: QueueMsg
-    ) -> Behavior[QueueMsg]:
+    async def receive(ctx: ActorContext[QueueMsg], msg: QueueMsg) -> Behavior[QueueMsg]:
         match msg:
             case Enqueue(value, reply_to):
                 items.append(value)
@@ -233,9 +232,7 @@ class Queue[V]:
         """
         return await self._system.ask(
             self._region_ref,
-            lambda reply_to: ShardEnvelope(
-                self._name, DestroyQueue(reply_to=reply_to)
-            ),
+            lambda reply_to: ShardEnvelope(self._name, DestroyQueue(reply_to=reply_to)),
             timeout=self._timeout,
         )
 
@@ -268,9 +265,7 @@ class Queue[V]:
         """
         return await self._system.ask(
             self._region_ref,
-            lambda reply_to: ShardEnvelope(
-                self._name, Dequeue(reply_to=reply_to)
-            ),
+            lambda reply_to: ShardEnvelope(self._name, Dequeue(reply_to=reply_to)),
             timeout=self._timeout,
         )
 
@@ -288,9 +283,7 @@ class Queue[V]:
         """
         return await self._system.ask(
             self._region_ref,
-            lambda reply_to: ShardEnvelope(
-                self._name, Peek(reply_to=reply_to)
-            ),
+            lambda reply_to: ShardEnvelope(self._name, Peek(reply_to=reply_to)),
             timeout=self._timeout,
         )
 
@@ -308,8 +301,6 @@ class Queue[V]:
         """
         return await self._system.ask(
             self._region_ref,
-            lambda reply_to: ShardEnvelope(
-                self._name, QueueSize(reply_to=reply_to)
-            ),
+            lambda reply_to: ShardEnvelope(self._name, QueueSize(reply_to=reply_to)),
             timeout=self._timeout,
         )

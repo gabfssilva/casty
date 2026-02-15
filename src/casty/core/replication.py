@@ -4,6 +4,7 @@ Defines ``ReplicationConfig``, ``ReplicateEvents``, and ``ReplicateEventsAck``
 — the protocol primitives needed by ``core/event_sourcing.py`` (L1) and
 consumed by sharding actors at higher layers.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ class ReplicationConfig:
     >>> ReplicationConfig(replicas=2, min_acks=1, ack_timeout=3.0)
     ReplicationConfig(replicas=2, min_acks=1, ack_timeout=3.0)
     """
+
     replicas: int = 0
     min_acks: int = 0
     ack_timeout: float = 5.0
@@ -63,6 +65,7 @@ class ReplicateEvents:
     >>> ReplicateEvents("user-1", shard_id=7, events=(evt,))
     ReplicateEvents(entity_id='user-1', shard_id=7, ...)
     """
+
     entity_id: str
     shard_id: int
     events: tuple[PersistedEvent[Any], ...]
@@ -85,5 +88,6 @@ class ReplicateEventsAck:
     >>> ReplicateEventsAck("user-1", sequence_nr=5)
     ReplicateEventsAck(entity_id='user-1', sequence_nr=5)
     """
+
     entity_id: str
     sequence_nr: int

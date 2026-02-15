@@ -194,7 +194,11 @@ async def test_event_sourced_pushes_to_replicas() -> None:
 
 async def test_event_sourced_waits_for_acks() -> None:
     """When min_acks > 0, primary waits for replica acks."""
-    from casty.core.replication import ReplicateEvents, ReplicateEventsAck, ReplicationConfig
+    from casty.core.replication import (
+        ReplicateEvents,
+        ReplicateEventsAck,
+        ReplicationConfig,
+    )
 
     journal = InMemoryJournal()
     replica_journal = InMemoryJournal()
@@ -207,7 +211,9 @@ async def test_event_sourced_waits_for_acks() -> None:
                 ack_events.append(msg)
                 if reply_to is not None:
                     highest_seq = events[-1].sequence_nr if events else 0
-                    reply_to.tell(ReplicateEventsAck(entity_id=eid, sequence_nr=highest_seq))
+                    reply_to.tell(
+                        ReplicateEventsAck(entity_id=eid, sequence_nr=highest_seq)
+                    )
         return Behaviors.same()
 
     async with ActorSystem(name="test") as system:
@@ -313,7 +319,9 @@ async def test_centralized_journal_replica_skips_persist() -> None:
         )
         await asyncio.sleep(0.1)
 
-        replica.tell(ReplicateEvents(entity_id="c1", shard_id=0, events=events, reply_to=ack_ref))
+        replica.tell(
+            ReplicateEvents(entity_id="c1", shard_id=0, events=events, reply_to=ack_ref)
+        )
         await asyncio.sleep(0.1)
 
         loaded = await replica_journal.load("c1")

@@ -135,9 +135,7 @@ async def test_spy_is_transparent_to_replies() -> None:
     async with ActorSystem("spy-reply") as system:
         replies: list[str] = []
 
-        async def reply_collector(
-            ctx: ActorContext[str], msg: str
-        ) -> Behavior[str]:
+        async def reply_collector(ctx: ActorContext[str], msg: str) -> Behavior[str]:
             replies.append(msg)
             return Behaviors.same()
 
@@ -352,9 +350,7 @@ def any_collector(
 
 async def test_spy_children_observes_child_messages() -> None:
     async with ActorSystem("spy-children") as system:
-        observer: ActorRef[AnyCollectorMsg] = system.spawn(
-            any_collector(), "observer"
-        )
+        observer: ActorRef[AnyCollectorMsg] = system.spawn(any_collector(), "observer")
 
         spied = system.spawn(
             Behaviors.spy(parent_behavior(), observer, spy_children=True),  # type: ignore[arg-type]
@@ -365,7 +361,9 @@ async def test_spy_children_observes_child_messages() -> None:
         await asyncio.sleep(0.1)
 
         child_ref: ActorRef[ChildMsg] = await system.ask(
-            spied, lambda r: GetChildRef(reply_to=r), timeout=2.0  # type: ignore[arg-type]
+            spied,
+            lambda r: GetChildRef(reply_to=r),
+            timeout=2.0,  # type: ignore[arg-type]
         )
 
         child_ref.tell(ChildMsg(value=42))
@@ -380,14 +378,14 @@ async def test_spy_children_observes_child_messages() -> None:
 
         assert len(parent_events) >= 1
         assert len(child_events) >= 1
-        assert any(isinstance(e.event, ChildMsg) and e.event.value == 42 for e in child_events)
+        assert any(
+            isinstance(e.event, ChildMsg) and e.event.value == 42 for e in child_events
+        )
 
 
 async def test_spy_children_false_does_not_spy_children() -> None:
     async with ActorSystem("spy-no-children") as system:
-        observer: ActorRef[AnyCollectorMsg] = system.spawn(
-            any_collector(), "observer"
-        )
+        observer: ActorRef[AnyCollectorMsg] = system.spawn(any_collector(), "observer")
 
         spied = system.spawn(
             Behaviors.spy(parent_behavior(), observer),  # type: ignore[arg-type]
@@ -398,7 +396,9 @@ async def test_spy_children_false_does_not_spy_children() -> None:
         await asyncio.sleep(0.1)
 
         child_ref: ActorRef[ChildMsg] = await system.ask(
-            spied, lambda r: GetChildRef(reply_to=r), timeout=2.0  # type: ignore[arg-type]
+            spied,
+            lambda r: GetChildRef(reply_to=r),
+            timeout=2.0,  # type: ignore[arg-type]
         )
 
         child_ref.tell(ChildMsg(value=99))
@@ -482,9 +482,7 @@ async def test_spy_children_survives_with_lifecycle() -> None:
     parent spy and the child spy must remain active.
     """
     async with ActorSystem("spy-lifecycle") as system:
-        observer: ActorRef[AnyCollectorMsg] = system.spawn(
-            any_collector(), "observer"
-        )
+        observer: ActorRef[AnyCollectorMsg] = system.spawn(any_collector(), "observer")
 
         parent_ref = system.spawn(
             Behaviors.spy(lifecycle_parent(), observer, spy_children=True),  # type: ignore[arg-type]
@@ -505,7 +503,7 @@ async def test_spy_children_survives_with_lifecycle() -> None:
         assert monitor_ref is not None, "Monitor child must exist"
 
         for i in range(5):
-            monitor_ref.tell(_Tick(Metric(f"inst-1", "cpu", float(i * 20))))
+            monitor_ref.tell(_Tick(Metric("inst-1", "cpu", float(i * 20))))
         await asyncio.sleep(0.3)
 
         events = await system.ask(
@@ -514,13 +512,15 @@ async def test_spy_children_survives_with_lifecycle() -> None:
 
         # Child spy: _Tick messages processed by the monitor
         child_tick_events = [
-            e for e in events
+            e
+            for e in events
             if "parent/monitor" in e.actor_path and isinstance(e.event, _Tick)
         ]
 
         # Parent spy: Metric messages forwarded by monitor to parent
         parent_metric_events = [
-            e for e in events
+            e
+            for e in events
             if e.actor_path == "parent" and isinstance(e.event, Metric)
         ]
 
@@ -566,9 +566,7 @@ def watcher_parent() -> Behavior[WatcherMsg]:
 
 async def test_spy_captures_terminated_from_watched_child() -> None:
     async with ActorSystem("spy-watch") as system:
-        observer: ActorRef[AnyCollectorMsg] = system.spawn(
-            any_collector(), "observer"
-        )
+        observer: ActorRef[AnyCollectorMsg] = system.spawn(any_collector(), "observer")
 
         spied = system.spawn(
             Behaviors.spy(watcher_parent(), observer),  # type: ignore[arg-type]
@@ -586,6 +584,8 @@ async def test_spy_captures_terminated_from_watched_child() -> None:
         )
 
         watcher_events = [e for e in events if e.actor_path == "watcher"]
-        terminated_events = [e for e in watcher_events if isinstance(e.event, Terminated)]
+        terminated_events = [
+            e for e in watcher_events if isinstance(e.event, Terminated)
+        ]
 
         assert len(terminated_events) == 1

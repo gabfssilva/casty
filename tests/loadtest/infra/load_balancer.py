@@ -1,4 +1,5 @@
 """Application Load Balancer, target group, and listener."""
+
 from __future__ import annotations
 
 import pulumi_aws as aws

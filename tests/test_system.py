@@ -101,15 +101,15 @@ async def test_system_event_stream() -> None:
 
     async with ActorSystem() as system:
         observer = system.spawn(
-            Behaviors.receive(lambda ctx, msg: (events.append(msg), Behaviors.same())[1]),
+            Behaviors.receive(
+                lambda ctx, msg: (events.append(msg), Behaviors.same())[1]
+            ),
             "observer",
         )
         system.event_stream.tell(ESSubscribe(event_type=ActorStarted, handler=observer))
         await asyncio.sleep(0.05)
 
-        system.spawn(
-            Behaviors.receive(lambda ctx, msg: Behaviors.same()), "actor"
-        )
+        system.spawn(Behaviors.receive(lambda ctx, msg: Behaviors.same()), "actor")
         await asyncio.sleep(0.1)
 
     assert len(events) >= 1

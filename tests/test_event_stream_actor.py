@@ -20,9 +20,12 @@ async def test_event_stream_actor_subscribe_and_publish() -> None:
         value: int
 
     def collector() -> Behavior[MyEvent]:
-        async def receive(ctx: ActorContext[MyEvent], msg: MyEvent) -> Behavior[MyEvent]:
+        async def receive(
+            ctx: ActorContext[MyEvent], msg: MyEvent
+        ) -> Behavior[MyEvent]:
             received.append(msg)
             return Behaviors.same()
+
         return Behaviors.receive(receive)
 
     async with ActorSystem("test") as system:
@@ -49,6 +52,7 @@ async def test_event_stream_unsubscribe() -> None:
         async def receive(ctx: ActorContext[Evt], msg: Evt) -> Behavior[Evt]:
             received.append(msg)
             return Behaviors.same()
+
         return Behaviors.receive(receive)
 
     async with ActorSystem("test") as system:

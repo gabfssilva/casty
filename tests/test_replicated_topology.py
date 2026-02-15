@@ -1,5 +1,6 @@
 # tests/test_replicated_topology.py
 """Replicated topology: ClusterState allocations, topology merge, leader/follower coordinator."""
+
 from __future__ import annotations
 
 import asyncio
@@ -32,9 +33,17 @@ from casty.remote.serialization import JsonSerializer, TypeRegistry
 
 
 def make_member(
-    address: NodeAddress, *, status: MemberStatus = MemberStatus.up, node_id: str = "",
+    address: NodeAddress,
+    *,
+    status: MemberStatus = MemberStatus.up,
+    node_id: str = "",
 ) -> Member:
-    return Member(address=address, status=status, roles=frozenset(), id=node_id or f"{address.host}:{address.port}")
+    return Member(
+        address=address,
+        status=status,
+        roles=frozenset(),
+        id=node_id or f"{address.host}:{address.port}",
+    )
 
 
 def make_snapshot(
@@ -73,7 +82,9 @@ def test_cluster_state_with_allocations() -> None:
 
 def test_cluster_state_with_allocations_preserves_members() -> None:
     node = NodeAddress(host="10.0.0.1", port=25520)
-    member = Member(address=node, status=MemberStatus.up, roles=frozenset(), id="node-1")
+    member = Member(
+        address=node, status=MemberStatus.up, roles=frozenset(), id="node-1"
+    )
     state = ClusterState().add_member(member)
     alloc = ShardAllocation(primary=node)
     new_state = state.with_allocations("counters", {0: alloc}, epoch=1)
@@ -88,7 +99,9 @@ def test_cluster_state_mutations_preserve_allocations() -> None:
     alloc = ShardAllocation(primary=node_a)
     base = ClusterState().with_allocations("test", {0: alloc}, epoch=5)
 
-    member = Member(address=node_b, status=MemberStatus.joining, roles=frozenset(), id="node-b")
+    member = Member(
+        address=node_b, status=MemberStatus.joining, roles=frozenset(), id="node-b"
+    )
     s1 = base.add_member(member)
     assert s1.allocation_epoch == 5
     assert s1.shard_allocations["test"][0] == alloc
@@ -117,7 +130,14 @@ async def test_gossip_merge_higher_epoch_wins() -> None:
     async with ActorSystem(name="test") as system:
         local_state = (
             ClusterState()
-            .add_member(Member(address=node_a, status=MemberStatus.up, roles=frozenset(), id="node-a"))
+            .add_member(
+                Member(
+                    address=node_a,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="node-a",
+                )
+            )
             .with_allocations("shard", {0: alloc_a}, epoch=1)
         )
         topo_ref = system.spawn(
@@ -135,7 +155,14 @@ async def test_gossip_merge_higher_epoch_wins() -> None:
         # Remote state has epoch=3 — should win
         remote_state = (
             ClusterState()
-            .add_member(Member(address=node_b, status=MemberStatus.up, roles=frozenset(), id="node-b"))
+            .add_member(
+                Member(
+                    address=node_b,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="node-b",
+                )
+            )
             .with_allocations("shard", {0: alloc_b}, epoch=3)
         )
         topo_ref.tell(GossipMessage(state=remote_state, from_node=node_b))
@@ -161,7 +188,14 @@ async def test_gossip_merge_lower_epoch_keeps_local() -> None:
     async with ActorSystem(name="test") as system:
         local_state = (
             ClusterState()
-            .add_member(Member(address=node_a, status=MemberStatus.up, roles=frozenset(), id="node-a"))
+            .add_member(
+                Member(
+                    address=node_a,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="node-a",
+                )
+            )
             .with_allocations("shard", {0: alloc_a}, epoch=5)
         )
         topo_ref = system.spawn(
@@ -178,7 +212,14 @@ async def test_gossip_merge_lower_epoch_keeps_local() -> None:
 
         remote_state = (
             ClusterState()
-            .add_member(Member(address=node_b, status=MemberStatus.up, roles=frozenset(), id="node-b"))
+            .add_member(
+                Member(
+                    address=node_b,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="node-b",
+                )
+            )
             .with_allocations("shard", {0: alloc_b}, epoch=2)
         )
         topo_ref.tell(GossipMessage(state=remote_state, from_node=node_b))
@@ -214,11 +255,13 @@ async def test_gossip_update_shard_allocations() -> None:
         )
         await asyncio.sleep(0.1)
 
-        topo_ref.tell(UpdateShardAllocations(
-            shard_type="counters",
-            allocations={0: alloc, 1: alloc},
-            epoch=1,
-        ))
+        topo_ref.tell(
+            UpdateShardAllocations(
+                shard_type="counters",
+                allocations={0: alloc, 1: alloc},
+                epoch=1,
+            )
+        )
         await asyncio.sleep(0.1)
 
         result: ClusterState = await system.ask(
@@ -234,12 +277,18 @@ async def test_gossip_update_shard_allocations_stale_epoch_ignored() -> None:
     """UpdateShardAllocations with stale epoch is ignored."""
     node = NodeAddress(host="10.0.0.1", port=25520)
     alloc_old = ShardAllocation(primary=node)
-    alloc_new = ShardAllocation(primary=node, replicas=(NodeAddress("10.0.0.2", 25520),))
+    alloc_new = ShardAllocation(
+        primary=node, replicas=(NodeAddress("10.0.0.2", 25520),)
+    )
 
     async with ActorSystem(name="test") as system:
         initial = (
             ClusterState()
-            .add_member(Member(address=node, status=MemberStatus.up, roles=frozenset(), id="node-1"))
+            .add_member(
+                Member(
+                    address=node, status=MemberStatus.up, roles=frozenset(), id="node-1"
+                )
+            )
             .with_allocations("counters", {0: alloc_new}, epoch=5)
         )
         topo_ref = system.spawn(
@@ -255,11 +304,13 @@ async def test_gossip_update_shard_allocations_stale_epoch_ignored() -> None:
         await asyncio.sleep(0.1)
 
         # Try updating with lower epoch — should be ignored
-        topo_ref.tell(UpdateShardAllocations(
-            shard_type="counters",
-            allocations={0: alloc_old},
-            epoch=3,
-        ))
+        topo_ref.tell(
+            UpdateShardAllocations(
+                shard_type="counters",
+                allocations={0: alloc_old},
+                epoch=3,
+            )
+        )
         await asyncio.sleep(0.1)
 
         result: ClusterState = await system.ask(
@@ -277,14 +328,18 @@ async def test_gossip_update_shard_allocations_stale_epoch_ignored() -> None:
 def test_serialization_shard_allocations_round_trip() -> None:
     """dict[str, dict[int, ShardAllocation]] serializes and deserializes correctly."""
     registry = TypeRegistry()
-    registry.register_all(ClusterState, Member, ShardAllocation, NodeAddress, MemberStatus)
+    registry.register_all(
+        ClusterState, Member, ShardAllocation, NodeAddress, MemberStatus
+    )
     serializer = JsonSerializer(registry)
 
     node = NodeAddress(host="10.0.0.1", port=25520)
     alloc = ShardAllocation(primary=node, replicas=(NodeAddress("10.0.0.2", 25520),))
     state = (
         ClusterState()
-        .add_member(Member(address=node, status=MemberStatus.up, roles=frozenset(), id="node-1"))
+        .add_member(
+            Member(address=node, status=MemberStatus.up, roles=frozenset(), id="node-1")
+        )
         .with_allocations("counters", {0: alloc, 1: alloc}, epoch=42)
     )
 
@@ -294,7 +349,9 @@ def test_serialization_shard_allocations_round_trip() -> None:
     assert restored.allocation_epoch == 42
     assert len(restored.shard_allocations["counters"]) == 2
     assert restored.shard_allocations["counters"][0].primary == node
-    assert restored.shard_allocations["counters"][0].replicas == (NodeAddress("10.0.0.2", 25520),)
+    assert restored.shard_allocations["counters"][0].replicas == (
+        NodeAddress("10.0.0.2", 25520),
+    )
 
 
 # ===========================================================================
@@ -324,17 +381,21 @@ async def test_pending_buffers_until_topology_snapshot_leader() -> None:
         async def _noop(_ctx: Any, _msg: Any) -> Any:
             return Behaviors.same()
 
-        loc_ref: ActorRef[ShardLocation] = system.spawn(Behaviors.receive(_noop), "reply_sink")
+        loc_ref: ActorRef[ShardLocation] = system.spawn(
+            Behaviors.receive(_noop), "reply_sink"
+        )
         coord.tell(GetShardLocation(shard_id=0, reply_to=loc_ref))
         await asyncio.sleep(0.1)
 
         # Now send TopologySnapshot with self as leader — buffered message should be drained
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member}),
-            leader=node,
-            shard_allocations={},
-            allocation_epoch=0,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member}),
+                leader=node,
+                shard_allocations={},
+                allocation_epoch=0,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Ask again — should work immediately
@@ -371,12 +432,14 @@ async def test_follower_serves_cached_allocations() -> None:
         await asyncio.sleep(0.1)
 
         # Activate as follower with allocations
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member_a, member_b}),
-            leader=node_a,
-            shard_allocations={"counters": {0: alloc}},
-            allocation_epoch=1,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member_a, member_b}),
+                leader=node_a,
+                shard_allocations={"counters": {0: alloc}},
+                allocation_epoch=1,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Now ask for the synced shard — should be served from cache
@@ -412,12 +475,14 @@ async def test_follower_buffers_unknown_shards_drains_on_sync() -> None:
         await asyncio.sleep(0.1)
 
         # Activate as follower (no allocations yet)
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member, other_member}),
-            leader=other_node,
-            shard_allocations={},
-            allocation_epoch=0,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member, other_member}),
+                leader=other_node,
+                shard_allocations={},
+                allocation_epoch=0,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Ask for shard 5 — unknown, will be buffered
@@ -434,12 +499,14 @@ async def test_follower_buffers_unknown_shards_drains_on_sync() -> None:
         assert len(reply_holder) == 0  # Buffered, not answered
 
         # Send updated TopologySnapshot with shard 5 allocation
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member, other_member}),
-            leader=other_node,
-            shard_allocations={"counters": {5: alloc}},
-            allocation_epoch=1,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member, other_member}),
+                leader=other_node,
+                shard_allocations={"counters": {5: alloc}},
+                allocation_epoch=1,
+            )
+        )
         await asyncio.sleep(0.2)
 
         assert len(reply_holder) == 1
@@ -454,6 +521,7 @@ async def test_leader_publishes_allocations() -> None:
     published: list[UpdateShardAllocations] = []
 
     async with ActorSystem(name="test") as system:
+
         async def _capture_publish(_ctx: Any, msg: Any) -> Any:
             if isinstance(msg, UpdateShardAllocations):
                 published.append(msg)
@@ -477,12 +545,14 @@ async def test_leader_publishes_allocations() -> None:
         await asyncio.sleep(0.1)
 
         # Activate as leader
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member}),
-            leader=node,
-            shard_allocations={},
-            allocation_epoch=0,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member}),
+                leader=node,
+                shard_allocations={},
+                allocation_epoch=0,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Allocate a shard
@@ -521,12 +591,14 @@ async def test_leader_to_follower_demotion() -> None:
         await asyncio.sleep(0.1)
 
         # Start as leader
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member_a}),
-            leader=node_a,
-            shard_allocations={},
-            allocation_epoch=0,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member_a}),
+                leader=node_a,
+                shard_allocations={},
+                allocation_epoch=0,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Allocate shard 0
@@ -538,12 +610,14 @@ async def test_leader_to_follower_demotion() -> None:
         assert loc.node == node_a
 
         # Demote to follower via snapshot with different leader
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member_a, member_b}),
-            leader=node_b,
-            shard_allocations={"counters": {0: ShardAllocation(primary=node_a)}},
-            allocation_epoch=1,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member_a, member_b}),
+                leader=node_b,
+                shard_allocations={"counters": {0: ShardAllocation(primary=node_a)}},
+                allocation_epoch=1,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Should still serve cached shard 0
@@ -592,12 +666,14 @@ async def test_pending_waits_for_topology_snapshot() -> None:
         assert len(reply_holder) == 0
 
         # Now send TopologySnapshot with existing allocation — activates as leader
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member_a, member_b}),
-            leader=node_a,
-            shard_allocations={"counters": {0: alloc}},
-            allocation_epoch=1,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member_a, member_b}),
+                leader=node_a,
+                shard_allocations={"counters": {0: alloc}},
+                allocation_epoch=1,
+            )
+        )
         await asyncio.sleep(0.2)
 
         # Buffered request should have been served with the synced allocation
@@ -632,11 +708,13 @@ async def test_topology_updates_state_via_update_shard_allocations() -> None:
         await asyncio.sleep(0.1)
 
         # Send UpdateShardAllocations
-        topo_ref.tell(UpdateShardAllocations(
-            shard_type="counters",
-            allocations={0: alloc},
-            epoch=1,
-        ))
+        topo_ref.tell(
+            UpdateShardAllocations(
+                shard_type="counters",
+                allocations={0: alloc},
+                epoch=1,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Verify state was updated
@@ -649,12 +727,16 @@ async def test_topology_updates_state_via_update_shard_allocations() -> None:
         assert state.shard_allocations["counters"][0] == alloc
 
         # Update with higher epoch
-        alloc2 = ShardAllocation(primary=node, replicas=(NodeAddress("10.0.0.2", 25520),))
-        topo_ref.tell(UpdateShardAllocations(
-            shard_type="counters",
-            allocations={0: alloc2},
-            epoch=2,
-        ))
+        alloc2 = ShardAllocation(
+            primary=node, replicas=(NodeAddress("10.0.0.2", 25520),)
+        )
+        topo_ref.tell(
+            UpdateShardAllocations(
+                shard_type="counters",
+                allocations={0: alloc2},
+                epoch=2,
+            )
+        )
         await asyncio.sleep(0.1)
 
         state2: ClusterState = await system.ask(
@@ -663,7 +745,9 @@ async def test_topology_updates_state_via_update_shard_allocations() -> None:
             timeout=5.0,
         )
         assert state2.allocation_epoch == 2
-        assert state2.shard_allocations["counters"][0].replicas == (NodeAddress("10.0.0.2", 25520),)
+        assert state2.shard_allocations["counters"][0].replicas == (
+            NodeAddress("10.0.0.2", 25520),
+        )
 
 
 # ===========================================================================
@@ -694,21 +778,25 @@ async def test_follower_promoted_to_leader_responds_immediately() -> None:
         await asyncio.sleep(0.1)
 
         # Activate as follower with shard 0 allocated
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member_a, member_b}),
-            leader=node_a,
-            shard_allocations={"counters": {0: alloc}},
-            allocation_epoch=1,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member_a, member_b}),
+                leader=node_a,
+                shard_allocations={"counters": {0: alloc}},
+                allocation_epoch=1,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Promote to leader via snapshot
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member_a, member_b}),
-            leader=node_b,
-            shard_allocations={"counters": {0: alloc}},
-            allocation_epoch=1,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member_a, member_b}),
+                leader=node_b,
+                shard_allocations={"counters": {0: alloc}},
+                allocation_epoch=1,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Should serve known shard immediately
@@ -739,6 +827,7 @@ async def test_follower_promotion_publishes_new_allocations() -> None:
     published: list[UpdateShardAllocations] = []
 
     async with ActorSystem(name="test") as system:
+
         async def capture_publish(_ctx: Any, msg: Any) -> Any:
             if isinstance(msg, UpdateShardAllocations):
                 published.append(msg)
@@ -763,21 +852,25 @@ async def test_follower_promotion_publishes_new_allocations() -> None:
         await asyncio.sleep(0.1)
 
         # Start as follower
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member_a, member_b}),
-            leader=node_a,
-            shard_allocations={},
-            allocation_epoch=0,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member_a, member_b}),
+                leader=node_a,
+                shard_allocations={},
+                allocation_epoch=0,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Promote to leader
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member_a, member_b}),
-            leader=node_b,
-            shard_allocations={},
-            allocation_epoch=0,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member_a, member_b}),
+                leader=node_b,
+                shard_allocations={},
+                allocation_epoch=0,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Allocate a new shard
@@ -808,6 +901,7 @@ async def test_promoted_leader_handles_node_down() -> None:
     published: list[UpdateShardAllocations] = []
 
     async with ActorSystem(name="test") as system:
+
         async def capture_publish(_ctx: Any, msg: Any) -> Any:
             if isinstance(msg, UpdateShardAllocations):
                 published.append(msg)
@@ -833,31 +927,37 @@ async def test_promoted_leader_handles_node_down() -> None:
         await asyncio.sleep(0.1)
 
         # Start as follower with existing allocation
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member_a, member_b, member_c}),
-            leader=node_a,
-            shard_allocations={"counters": {0: alloc}},
-            allocation_epoch=1,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member_a, member_b, member_c}),
+                leader=node_a,
+                shard_allocations={"counters": {0: alloc}},
+                allocation_epoch=1,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Promote to leader (node_a went down, node_c takes over as leader)
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member_a, member_b, member_c}),
-            leader=node_c,
-            shard_allocations={"counters": {0: alloc}},
-            allocation_epoch=1,
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member_a, member_b, member_c}),
+                leader=node_c,
+                shard_allocations={"counters": {0: alloc}},
+                allocation_epoch=1,
+            )
+        )
         await asyncio.sleep(0.1)
 
         # Report node_a as unreachable — replica node_b should be promoted to primary
-        coord.tell(make_snapshot(  # type: ignore[arg-type]
-            members=frozenset({member_a, member_b, member_c}),
-            leader=node_c,
-            shard_allocations={"counters": {0: alloc}},
-            allocation_epoch=1,
-            unreachable=frozenset({node_a}),
-        ))
+        coord.tell(
+            make_snapshot(  # type: ignore[arg-type]
+                members=frozenset({member_a, member_b, member_c}),
+                leader=node_c,
+                shard_allocations={"counters": {0: alloc}},
+                allocation_epoch=1,
+                unreachable=frozenset({node_a}),
+            )
+        )
         await asyncio.sleep(0.1)
 
         loc: ShardLocation = await system.ask(
@@ -933,7 +1033,9 @@ async def test_three_node_consistency_after_leader_change() -> None:
                 lambda r, sid=i: GetShardLocation(shard_id=sid, reply_to=r),
                 timeout=5.0,
             )
-            allocations[loc.shard_id] = ShardAllocation(primary=loc.node, replicas=loc.replicas)
+            allocations[loc.shard_id] = ShardAllocation(
+                primary=loc.node, replicas=loc.replicas
+            )
         await asyncio.sleep(0.1)
 
         # Sync allocations to followers (simulating topology push)
@@ -965,4 +1067,6 @@ async def test_three_node_consistency_after_leader_change() -> None:
                 lambda r, sid=i: GetShardLocation(shard_id=sid, reply_to=r),
                 timeout=5.0,
             )
-            assert loc_b.node == allocations[i].primary, f"Shard {i} inconsistent after promotion"
+            assert loc_b.node == allocations[i].primary, (
+                f"Shard {i} inconsistent after promotion"
+            )

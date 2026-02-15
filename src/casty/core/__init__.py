@@ -26,7 +26,11 @@ from casty.core.journal import (
 from casty.core.mailbox import Mailbox, MailboxOverflowStrategy
 from casty.core.messages import Terminated
 from casty.core.ref import ActorId, ActorRef, LocalActorRef
-from casty.core.replication import ReplicateEvents, ReplicateEventsAck, ReplicationConfig
+from casty.core.replication import (
+    ReplicateEvents,
+    ReplicateEventsAck,
+    ReplicationConfig,
+)
 from casty.core.scheduler import (
     CancelSchedule,
     ScheduleOnce,

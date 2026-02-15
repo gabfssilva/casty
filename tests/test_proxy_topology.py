@@ -44,10 +44,22 @@ def make_snapshot(
     registry: frozenset[ServiceEntry] | None = None,
 ) -> TopologySnapshot:
     if members is None:
-        members = frozenset({
-            Member(address=SELF_NODE, status=MemberStatus.up, roles=frozenset(), id="node-1"),
-            Member(address=OTHER_NODE, status=MemberStatus.up, roles=frozenset(), id="node-2"),
-        })
+        members = frozenset(
+            {
+                Member(
+                    address=SELF_NODE,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="node-1",
+                ),
+                Member(
+                    address=OTHER_NODE,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="node-2",
+                ),
+            }
+        )
     return TopologySnapshot(
         members=members,
         leader=leader,
@@ -70,7 +82,9 @@ def fake_topology_actor() -> Behavior[TopologyMsg]:
                     return Behaviors.same()
                 case _:
                     return Behaviors.same()
+
         return Behaviors.receive(receive)
+
     return active(None)
 
 
@@ -83,6 +97,7 @@ async def test_shard_proxy_evicts_on_unreachable_snapshot() -> None:
             async def receive(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
                 received.append(msg)
                 return Behaviors.same()
+
             return Behaviors.receive(receive)
 
         topo_ref = system.spawn(fake_topology_actor(), "_topology")
@@ -145,6 +160,7 @@ async def test_broadcast_proxy_updates_members_from_snapshot() -> None:
             async def receive(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
                 received_local.append(msg)
                 return Behaviors.same()
+
             return Behaviors.receive(receive)
 
         topo_ref = system.spawn(fake_topology_actor(), "_topology")
@@ -200,9 +216,12 @@ async def test_receptionist_updates_registry_from_snapshot() -> None:
         listings: list[Listing[Any]] = []
 
         def listing_collector() -> Behavior[Listing[Any]]:
-            async def receive(ctx: ActorContext[Listing[Any]], msg: Listing[Any]) -> Behavior[Listing[Any]]:
+            async def receive(
+                ctx: ActorContext[Listing[Any]], msg: Listing[Any]
+            ) -> Behavior[Listing[Any]]:
                 listings.append(msg)
                 return Behaviors.same()
+
             return Behaviors.receive(receive)
 
         collector = system.spawn(listing_collector(), "_listing")

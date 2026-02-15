@@ -14,7 +14,12 @@ from casty.cluster.state import (
 )
 from casty.ref import ActorRef
 from casty.remote.ref import RemoteActorRef
-from casty.remote.serialization import JsonSerializer, PickleSerializer, Serializer, TypeRegistry
+from casty.remote.serialization import (
+    JsonSerializer,
+    PickleSerializer,
+    Serializer,
+    TypeRegistry,
+)
 from casty.cluster import ShardEnvelope
 from casty.core.transport import LocalTransport
 from casty.cluster.coordinator import GetShardLocation, ShardLocation
@@ -147,9 +152,14 @@ def test_frozenset_roundtrip() -> None:
 
     node1 = NodeAddress(host="127.0.0.1", port=25520)
     node2 = NodeAddress(host="127.0.0.1", port=25521)
-    member1 = Member(id="node-1", address=node1, status=MemberStatus.up, roles=frozenset({"web"}))
+    member1 = Member(
+        id="node-1", address=node1, status=MemberStatus.up, roles=frozenset({"web"})
+    )
     member2 = Member(
-        id="node-2", address=node2, status=MemberStatus.joining, roles=frozenset({"worker"})
+        id="node-2",
+        address=node2,
+        status=MemberStatus.joining,
+        roles=frozenset({"worker"}),
     )
     state = ClusterState(members=frozenset({member1, member2}))
 
@@ -168,7 +178,9 @@ def test_enum_roundtrip() -> None:
     serializer = JsonSerializer(registry)
 
     node = NodeAddress(host="127.0.0.1", port=25520)
-    member = Member(id="node-1", address=node, status=MemberStatus.leaving, roles=frozenset())
+    member = Member(
+        id="node-1", address=node, status=MemberStatus.leaving, roles=frozenset()
+    )
 
     data = serializer.serialize(member)
     restored = serializer.deserialize(data, ref_factory=_ref_factory)
@@ -202,7 +214,10 @@ def test_full_cluster_state_roundtrip() -> None:
     node1 = NodeAddress(host="10.0.0.1", port=25520)
     node2 = NodeAddress(host="10.0.0.2", port=25521)
     member1 = Member(
-        id="node-1", address=node1, status=MemberStatus.up, roles=frozenset({"seed", "web"})
+        id="node-1",
+        address=node1,
+        status=MemberStatus.up,
+        roles=frozenset({"seed", "web"}),
     )
     member2 = Member(
         id="node-2", address=node2, status=MemberStatus.up, roles=frozenset({"worker"})
@@ -320,8 +335,15 @@ def test_pickle_frozenset_roundtrip() -> None:
     serializer = PickleSerializer()
     node1 = NodeAddress(host="127.0.0.1", port=25520)
     node2 = NodeAddress(host="127.0.0.1", port=25521)
-    member1 = Member(id="node-1", address=node1, status=MemberStatus.up, roles=frozenset({"web"}))
-    member2 = Member(id="node-2", address=node2, status=MemberStatus.joining, roles=frozenset({"worker"}))
+    member1 = Member(
+        id="node-1", address=node1, status=MemberStatus.up, roles=frozenset({"web"})
+    )
+    member2 = Member(
+        id="node-2",
+        address=node2,
+        status=MemberStatus.joining,
+        roles=frozenset({"worker"}),
+    )
     state = ClusterState(members=frozenset({member1, member2}))
 
     data = serializer.serialize(state)
@@ -337,7 +359,9 @@ def test_pickle_frozenset_roundtrip() -> None:
 def test_pickle_enum_roundtrip() -> None:
     serializer = PickleSerializer()
     node = NodeAddress(host="127.0.0.1", port=25520)
-    member = Member(id="node-1", address=node, status=MemberStatus.leaving, roles=frozenset())
+    member = Member(
+        id="node-1", address=node, status=MemberStatus.leaving, roles=frozenset()
+    )
 
     data = serializer.serialize(member)
     restored = serializer.deserialize(data)
@@ -366,8 +390,15 @@ def test_pickle_full_cluster_state_roundtrip() -> None:
     serializer = PickleSerializer()
     node1 = NodeAddress(host="10.0.0.1", port=25520)
     node2 = NodeAddress(host="10.0.0.2", port=25521)
-    member1 = Member(id="node-1", address=node1, status=MemberStatus.up, roles=frozenset({"seed", "web"}))
-    member2 = Member(id="node-2", address=node2, status=MemberStatus.up, roles=frozenset({"worker"}))
+    member1 = Member(
+        id="node-1",
+        address=node1,
+        status=MemberStatus.up,
+        roles=frozenset({"seed", "web"}),
+    )
+    member2 = Member(
+        id="node-2", address=node2, status=MemberStatus.up, roles=frozenset({"worker"})
+    )
     clock = VectorClock().increment(node1).increment(node2)
     state = ClusterState(
         members=frozenset({member1, member2}),

@@ -1,5 +1,10 @@
 from casty.cluster.cluster import Cluster, ClusterConfig
-from casty.cluster.events import MemberLeft, MemberUp, ReachableMember, UnreachableMember
+from casty.cluster.events import (
+    MemberLeft,
+    MemberUp,
+    ReachableMember,
+    UnreachableMember,
+)
 from casty.cluster.failure_detector import PhiAccrualFailureDetector
 from casty.cluster.receptionist import (
     Deregister,
@@ -20,7 +25,11 @@ from casty.cluster.state import (
     ShardAllocation,
     VectorClock,
 )
-from casty.cluster.topology import SubscribeTopology, TopologySnapshot, UnsubscribeTopology
+from casty.cluster.topology import (
+    SubscribeTopology,
+    TopologySnapshot,
+    UnsubscribeTopology,
+)
 from casty.cluster.topology_actor import ResolveNode
 from casty.cluster.envelope import ShardEnvelope, entity_shard
 from casty.cluster.system import ClusteredActorSystem

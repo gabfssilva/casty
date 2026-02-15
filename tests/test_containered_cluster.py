@@ -4,6 +4,7 @@ End-to-end Docker cluster tests using testcontainers + Docker Compose.
 Each test spins up a compose environment with symmetric nodes,
 waits for all containers to exit, and asserts expected output in logs.
 """
+
 from __future__ import annotations
 
 import os
@@ -26,7 +27,11 @@ def _run_cluster(services: list[str]) -> DockerCompose:
         services=services,
     )
     project = f"casty-test-{uuid.uuid4().hex[:8]}"
-    compose.compose_command_property = [*compose.compose_command_property, "-p", project]
+    compose.compose_command_property = [
+        *compose.compose_command_property,
+        "-p",
+        project,
+    ]
     compose.start()
     return compose
 

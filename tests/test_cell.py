@@ -46,7 +46,8 @@ async def test_cell_processes_messages() -> None:
         return Behaviors.same()
 
     cell: ActorCell[Ping] = ActorCell(
-        behavior=Behaviors.receive(handler), id="test",
+        behavior=Behaviors.receive(handler),
+        id="test",
     )
     await cell.start()
 
@@ -66,10 +67,12 @@ async def test_cell_behavior_state_transition() -> None:
             new_count = count + 1
             results.append(new_count)
             return counter(new_count)
+
         return Behaviors.receive(handler)
 
     cell: ActorCell[Ping] = ActorCell(
-        behavior=counter(), id="counter",
+        behavior=counter(),
+        id="counter",
     )
     await cell.start()
 
@@ -91,7 +94,8 @@ async def test_cell_setup_behavior() -> None:
         return Behaviors.receive(lambda ctx, msg: Behaviors.same())
 
     cell: ActorCell[str] = ActorCell(
-        behavior=Behaviors.setup(setup), id="setup-test",
+        behavior=Behaviors.setup(setup),
+        id="setup-test",
     )
     await cell.start()
     await asyncio.sleep(0.05)
@@ -105,7 +109,8 @@ async def test_cell_stopped_behavior_stops_actor() -> None:
         return Behaviors.stopped()
 
     cell: ActorCell[str] = ActorCell(
-        behavior=Behaviors.receive(handler), id="stopper",
+        behavior=Behaviors.receive(handler),
+        id="stopper",
     )
     await cell.start()
     cell.ref.tell("stop")
@@ -140,7 +145,8 @@ async def test_cell_lifecycle_hooks() -> None:
         post_stop=post_stop,
     )
     cell: ActorCell[Any] = ActorCell(
-        behavior=behavior, id="lifecycle",
+        behavior=behavior,
+        id="lifecycle",
     )
     await cell.start()
     await asyncio.sleep(0.05)
@@ -220,10 +226,12 @@ async def test_cell_watch_receives_terminated() -> None:
         return Behaviors.stopped()
 
     watcher: ActorCell[Any] = ActorCell(
-        behavior=Behaviors.receive(watcher_handler), id="watcher",
+        behavior=Behaviors.receive(watcher_handler),
+        id="watcher",
     )
     watched: ActorCell[str] = ActorCell(
-        behavior=Behaviors.receive(watched_handler), id="watched",
+        behavior=Behaviors.receive(watched_handler),
+        id="watched",
     )
     await watcher.start()
     await watched.start()
@@ -250,7 +258,8 @@ async def test_cell_supervision_restarts_on_failure() -> None:
     behavior = Behaviors.supervise(Behaviors.receive(failing_handler), strategy)
 
     cell: ActorCell[str] = ActorCell(
-        behavior=behavior, id="restartable",
+        behavior=behavior,
+        id="restartable",
     )
     await cell.start()
 
@@ -268,6 +277,7 @@ async def test_cell_publishes_events_to_stream() -> None:
         async def handler(ctx: Any, msg: Any) -> Behavior[Any]:
             events.append(msg)
             return Behaviors.same()
+
         return Behaviors.receive(handler)
 
     async with ActorSystem("test") as system:
@@ -297,6 +307,7 @@ async def test_cell_dead_letter_on_tell_after_stop() -> None:
         async def handler(ctx: Any, msg: DeadLetter) -> Behavior[Any]:
             dead.append(msg)
             return Behaviors.same()
+
         return Behaviors.receive(handler)
 
     async with ActorSystem("test") as system:

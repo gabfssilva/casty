@@ -31,7 +31,9 @@ class ActorSystem:
     Use as an async context manager for automatic shutdown.
     """
 
-    def __init__(self, name: str = "casty-system", *, config: CastyConfig | None = None) -> None:
+    def __init__(
+        self, name: str = "casty-system", *, config: CastyConfig | None = None
+    ) -> None:
         self._name = name
         self._config = config
         self._root_cells: dict[str, ActorCell[Any]] = {}
@@ -148,7 +150,8 @@ class ActorSystem:
                 future.set_result(msg)
 
         temp_ref: ActorRef[R] = self.__make_ref__(
-            f"_ask/{id(future)}", on_reply,
+            f"_ask/{id(future)}",
+            on_reply,
         )
         ref.tell(msg_factory(temp_ref))
         return await asyncio.wait_for(future, timeout=timeout)

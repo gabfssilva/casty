@@ -42,7 +42,9 @@ async def test_bounded_drop_oldest_discards_oldest() -> None:
 
 
 async def test_bounded_backpressure_blocks_until_space() -> None:
-    mb: Mailbox[int] = Mailbox(capacity=1, overflow=MailboxOverflowStrategy.backpressure)
+    mb: Mailbox[int] = Mailbox(
+        capacity=1, overflow=MailboxOverflowStrategy.backpressure
+    )
     mb.put(1)
 
     put_done = False

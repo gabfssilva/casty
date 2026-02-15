@@ -30,10 +30,22 @@ def make_snapshot(
     unreachable: frozenset[NodeAddress] | None = None,
 ) -> TopologySnapshot:
     if members is None:
-        members = frozenset({
-            Member(address=SELF_NODE, status=MemberStatus.up, roles=frozenset(), id="node-1"),
-            Member(address=OTHER_NODE, status=MemberStatus.up, roles=frozenset(), id="node-2"),
-        })
+        members = frozenset(
+            {
+                Member(
+                    address=SELF_NODE,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="node-1",
+                ),
+                Member(
+                    address=OTHER_NODE,
+                    status=MemberStatus.up,
+                    roles=frozenset(),
+                    id="node-2",
+                ),
+            }
+        )
     return TopologySnapshot(
         members=members,
         leader=leader,
@@ -46,6 +58,7 @@ def make_snapshot(
 
 def fake_topology_actor() -> Behavior[TopologyMsg]:
     """Fake topology actor that captures subscriptions."""
+
     def active(
         subscriber: ActorRef[TopologySnapshot] | None,
     ) -> Behavior[Any]:
@@ -59,6 +72,7 @@ def fake_topology_actor() -> Behavior[TopologyMsg]:
                     return Behaviors.same()
                 case _:
                     return Behaviors.same()
+
         return Behaviors.receive(receive)
 
     return active(None)
@@ -77,12 +91,14 @@ async def test_singleton_activates_on_leader_snapshot() -> None:
                         return Behaviors.same()
                     case _:
                         return Behaviors.same()
+
             return Behaviors.receive(receive)
 
         def pong_collector() -> Behavior[str]:
             async def receive(ctx: ActorContext[str], msg: str) -> Behavior[str]:
                 pongs.append(msg)
                 return Behaviors.same()
+
             return Behaviors.receive(receive)
 
         topo_ref = system.spawn(fake_topology_actor(), "_topology")
@@ -124,6 +140,7 @@ async def test_singleton_goes_standby_on_follower_snapshot() -> None:
             async def receive(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
                 forwarded.append(msg)
                 return Behaviors.same()
+
             return Behaviors.receive(receive)
 
         topo_ref = system.spawn(fake_topology_actor(), "_topology")
@@ -164,6 +181,7 @@ async def test_singleton_transitions_active_to_standby() -> None:
         def tracked_behavior() -> Behavior[Any]:
             async def receive(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
                 return Behaviors.same()
+
             spawned.append("spawned")
             return Behaviors.receive(receive)
 

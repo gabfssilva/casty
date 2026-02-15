@@ -149,9 +149,7 @@ class EventJournal(Protocol):
         """
         ...
 
-    async def save_snapshot(
-        self, entity_id: str, snapshot: Snapshot[Any]
-    ) -> None:
+    async def save_snapshot(self, entity_id: str, snapshot: Snapshot[Any]) -> None:
         """Save a snapshot for an entity, replacing any previous one.
 
         Parameters
@@ -168,9 +166,7 @@ class EventJournal(Protocol):
         """
         ...
 
-    async def load_snapshot(
-        self, entity_id: str
-    ) -> Snapshot[Any] | None:
+    async def load_snapshot(self, entity_id: str) -> Snapshot[Any] | None:
         """Load the latest snapshot for an entity, if one exists.
 
         Parameters
@@ -259,9 +255,7 @@ class InMemoryJournal:
         events = self._events.get(entity_id, [])
         return [e for e in events if e.sequence_nr >= from_sequence_nr]
 
-    async def save_snapshot(
-        self, entity_id: str, snapshot: Snapshot[Any]
-    ) -> None:
+    async def save_snapshot(self, entity_id: str, snapshot: Snapshot[Any]) -> None:
         """Save a snapshot, replacing any previous one for this entity.
 
         Parameters
@@ -278,9 +272,7 @@ class InMemoryJournal:
         """
         self._snapshots[entity_id] = snapshot
 
-    async def load_snapshot(
-        self, entity_id: str
-    ) -> Snapshot[Any] | None:
+    async def load_snapshot(self, entity_id: str) -> Snapshot[Any] | None:
         """Load the latest snapshot for an entity.
 
         Parameters
@@ -400,12 +392,14 @@ class SqliteJournal:
             for row in cursor
         ]
 
-    async def save_snapshot(
-        self, entity_id: str, snapshot: Snapshot[Any]
-    ) -> None:
+    async def save_snapshot(self, entity_id: str, snapshot: Snapshot[Any]) -> None:
         data = self._serialize(snapshot.state)
         await asyncio.to_thread(
-            self._save_snapshot_sync, entity_id, snapshot.sequence_nr, data, snapshot.timestamp
+            self._save_snapshot_sync,
+            entity_id,
+            snapshot.sequence_nr,
+            data,
+            snapshot.timestamp,
         )
 
     def _save_snapshot_sync(
@@ -419,9 +413,7 @@ class SqliteJournal:
             )
             self._conn.commit()
 
-    async def load_snapshot(
-        self, entity_id: str
-    ) -> Snapshot[Any] | None:
+    async def load_snapshot(self, entity_id: str) -> Snapshot[Any] | None:
         return await asyncio.to_thread(self._load_snapshot_sync, entity_id)
 
     def _load_snapshot_sync(self, entity_id: str) -> Snapshot[Any] | None:

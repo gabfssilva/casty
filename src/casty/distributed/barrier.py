@@ -3,6 +3,7 @@
 Blocks callers until a specified number of nodes have arrived, then releases
 all waiters simultaneously.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -110,7 +111,8 @@ class Barrier:
         return await self._system.ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
-                self._name, DestroyBarrier(reply_to=reply_to),
+                self._name,
+                DestroyBarrier(reply_to=reply_to),
             ),
             timeout=self._timeout,
         )

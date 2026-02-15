@@ -1,4 +1,5 @@
 """EC2 instances: N cluster nodes + 1 load generator."""
+
 from __future__ import annotations
 
 import json
@@ -73,8 +74,8 @@ def create_compute(
         private_ip = f"10.0.1.{10 + i}"
 
         user_data = pulumi.Output.all(image_url, image_id).apply(
-            lambda args, idx=i, pip=private_ip, sip=seed_ip, nc=node_count: _build_node_user_data(
-                args[0], args[1], idx, pip, sip, nc
+            lambda args, idx=i, pip=private_ip, sip=seed_ip, nc=node_count: (
+                _build_node_user_data(args[0], args[1], idx, pip, sip, nc)
             )
         )
 

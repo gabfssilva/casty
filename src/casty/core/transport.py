@@ -75,7 +75,9 @@ class LocalTransport:
         self._path_factories: list[tuple[str, Callable[[str], None]]] = []
 
     def register_path_factory(
-        self, prefix: str, factory: Callable[[str], None],
+        self,
+        prefix: str,
+        factory: Callable[[str], None],
     ) -> None:
         """Register a factory that lazily spawns handlers for paths with a given prefix.
 
@@ -154,7 +156,9 @@ class LocalTransport:
             handler(msg)
             return
         if address.path in self._dead:
-            logger.warning("No handler for path %s, dropping %s", address.path, type(msg).__name__)
+            logger.warning(
+                "No handler for path %s, dropping %s", address.path, type(msg).__name__
+            )
             return
         for prefix, factory in self._path_factories:
             if address.path.startswith(prefix) and address.path not in self._handlers:
@@ -166,6 +170,10 @@ class LocalTransport:
             return
         buf = self._pending.get(address.path)
         if buf is not None and len(buf) >= self._max_pending_per_path:
-            logger.warning("Pending buffer full for path %s, dropping %s", address.path, type(msg).__name__)
+            logger.warning(
+                "Pending buffer full for path %s, dropping %s",
+                address.path,
+                type(msg).__name__,
+            )
             return
         self._pending.setdefault(address.path, []).append(msg)
