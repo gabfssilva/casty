@@ -413,6 +413,126 @@ async def test_spy_children_false_does_not_spy_children() -> None:
 
 
 @dataclass(frozen=True)
+class Metric:
+    instance_id: str
+    name: str
+    value: float
+
+
+@dataclass(frozen=True)
+class StartMonitor:
+    pass
+
+
+@dataclass(frozen=True)
+class _Tick:
+    metric: Metric
+
+
+def lifecycle_child(parent_ref: ActorRef[Any]) -> Behavior[_Tick]:
+    """Child with with_lifecycle — mirrors Skyward's instance_monitor."""
+
+    async def _setup(ctx: ActorContext[_Tick]) -> Behavior[_Tick]:
+        return Behaviors.with_lifecycle(
+            streaming(count=0),
+            post_stop=lambda _: asyncio.sleep(0),
+        )
+
+    def streaming(count: int) -> Behavior[_Tick]:
+        async def receive(ctx: ActorContext[_Tick], msg: _Tick) -> Behavior[_Tick]:
+            match msg:
+                case _Tick(metric=metric):
+                    parent_ref.tell(metric)
+                    return streaming(count + 1)
+            return Behaviors.same()
+
+        return Behaviors.receive(receive)
+
+    return Behaviors.setup(_setup)
+
+
+def lifecycle_parent() -> Behavior[Any]:
+    """Parent that spawns lifecycle child — mirrors Skyward's pool + provider."""
+
+    def idle() -> Behavior[Any]:
+        async def receive(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+            match msg:
+                case StartMonitor():
+                    child = ctx.spawn(lifecycle_child(ctx.self), "monitor")
+                    return active(child)
+                case _:
+                    return Behaviors.same()
+
+        return Behaviors.receive(receive)
+
+    def active(monitor_ref: ActorRef[_Tick]) -> Behavior[Any]:
+        async def receive(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+            return Behaviors.same()
+
+        return Behaviors.receive(receive)
+
+    return idle()
+
+
+async def test_spy_children_survives_with_lifecycle() -> None:
+    """Spy must survive when a child uses Behaviors.with_lifecycle().
+
+    Replicates the Skyward scenario where instance_monitor (child with
+    lifecycle) sends Metric events to pool_ref (spied parent). Both the
+    parent spy and the child spy must remain active.
+    """
+    async with ActorSystem("spy-lifecycle") as system:
+        observer: ActorRef[AnyCollectorMsg] = system.spawn(
+            any_collector(), "observer"
+        )
+
+        parent_ref = system.spawn(
+            Behaviors.spy(lifecycle_parent(), observer, spy_children=True),  # type: ignore[arg-type]
+            "parent",
+        )
+
+        parent_ref.tell(StartMonitor())
+        await asyncio.sleep(0.1)
+
+        events: tuple[SpyEvent[Any], ...] = await system.ask(
+            observer, lambda r: GetAnyCollected(reply_to=r), timeout=2.0
+        )
+        parent_start_events = [e for e in events if e.actor_path == "parent"]
+        assert len(parent_start_events) >= 1, "Parent spy must capture StartMonitor"
+
+        # Look up the monitor ref via system
+        monitor_ref = system.lookup("/parent/monitor")
+        assert monitor_ref is not None, "Monitor child must exist"
+
+        for i in range(5):
+            monitor_ref.tell(_Tick(Metric(f"inst-1", "cpu", float(i * 20))))
+        await asyncio.sleep(0.3)
+
+        events = await system.ask(
+            observer, lambda r: GetAnyCollected(reply_to=r), timeout=2.0
+        )
+
+        # Child spy: _Tick messages processed by the monitor
+        child_tick_events = [
+            e for e in events
+            if "parent/monitor" in e.actor_path and isinstance(e.event, _Tick)
+        ]
+
+        # Parent spy: Metric messages forwarded by monitor to parent
+        parent_metric_events = [
+            e for e in events
+            if e.actor_path == "parent" and isinstance(e.event, Metric)
+        ]
+
+        assert len(child_tick_events) == 5, (
+            f"Child spy must capture all 5 _Tick messages, got {len(child_tick_events)}"
+        )
+        assert len(parent_metric_events) == 5, (
+            f"Parent spy must capture all 5 Metric messages, got {len(parent_metric_events)}"
+        )
+
+
+@dataclass(frozen=True)
 class KillChild:
     pass
 

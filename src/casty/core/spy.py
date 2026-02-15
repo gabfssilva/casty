@@ -97,6 +97,8 @@ def spy[M](
 
         original = inner.on_receive
         if original is None:
+            if inner.on_setup is not None:
+                return spy(inner, observer, spy_children=spy_children)
             return inner
 
         def spied(handler: Callable[[ActorContext[M], M], Awaitable[Behavior[M]]]) -> Behavior[M]:
