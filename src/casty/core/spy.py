@@ -111,6 +111,9 @@ def spy[M](
                 if result.on_receive is not None:
                     return spied(result.on_receive)
 
+                if result.on_setup is not None:
+                    return spy(result, observer, spy_children=spy_children)
+
                 return result
 
             return Behavior.receive(receive)
