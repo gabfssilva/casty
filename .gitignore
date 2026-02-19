@@ -4,6 +4,7 @@
 .pytest_cache/
 __pycache__/
 *.pyc
+src/casty/_version.py
 .ruff_cache/
 .claude/
 docs/plans/

@@ -1,3 +1,8 @@
+try:
+    from casty._version import __version__ as __version__
+except ModuleNotFoundError:
+    __version__: str = "0.0.0+unknown"
+
 from casty.actor import (
     Behavior,
     Behaviors,
@@ -159,6 +164,7 @@ from casty.cluster.envelope import ShardEnvelope
 from casty.cluster.system import ClusteredActorSystem
 
 __all__ = [
+    "__version__",
     # Core
     "Behavior",
     "Behaviors",
