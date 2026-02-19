@@ -107,6 +107,22 @@ from casty.core.task_runner import (
     TaskResult,
     TaskRunnerMsg,
 )
+from casty.core.streams import (
+    CompleteStream,
+    GetSink,
+    GetSource,
+    SinkRef,
+    SourceRef,
+    StreamCancel,
+    StreamCompleted,
+    StreamConsumerMsg,
+    StreamDemand,
+    StreamElement,
+    StreamProducerMsg,
+    Subscribe as StreamSubscribe,
+    stream_consumer,
+    stream_producer,
+)
 from casty.core.transport import LocalTransport, MessageTransport
 from casty.cluster.failure_detector import PhiAccrualFailureDetector
 from casty.distributed import (
@@ -278,6 +294,21 @@ __all__ = [
     "TaskRunnerMsg",
     # TLS
     "tls",
+    # Streams
+    "stream_producer",
+    "stream_consumer",
+    "SinkRef",
+    "SourceRef",
+    "GetSink",
+    "GetSource",
+    "CompleteStream",
+    "StreamSubscribe",
+    "StreamDemand",
+    "StreamCancel",
+    "StreamElement",
+    "StreamCompleted",
+    "StreamProducerMsg",
+    "StreamConsumerMsg",
     # Distributed Data Structures
     "Distributed",
     "Barrier",

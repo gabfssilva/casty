@@ -52,6 +52,7 @@ MODULE_TO_PAGE: dict[str, tuple[str, str]] = {
     "casty.remote.serialization": ("reference/serialization.md", "Serialization"),
     "casty.config": ("reference/config.md", "Configuration"),
     "casty.core.task_runner": ("reference/task-runner.md", "Task Runner"),
+    "casty.core.streams": ("reference/streams.md", "Streams"),
 }
 
 pages: dict[str, list[str]] = defaultdict(list)

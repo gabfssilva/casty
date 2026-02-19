@@ -58,7 +58,11 @@ markdown_extensions:
   - pymdownx.snippets:
       base_path: ["."]
       dedent_subsections: true
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
   - admonition
@@ -109,6 +113,7 @@ nav:
       - Client + Cluster: guides/cluster-client.md
       - Custom Serialization: guides/custom-serialization.md
       - Stateful Companion: guides/stateful-companion.md
+      - Reactive Streams: guides/streams.md
   - API Reference:
       - Core:
           - Behaviors: reference/behaviors.md
@@ -121,6 +126,7 @@ nav:
           - Scheduler: reference/scheduler.md
           - Event Sourcing: reference/journal.md
           - Task Runner: reference/task-runner.md
+          - Streams: reference/streams.md
       - Clustering:
           - Cluster: reference/cluster.md
           - Cluster State: reference/cluster-state.md
