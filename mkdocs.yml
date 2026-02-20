@@ -114,6 +114,7 @@ nav:
       - Custom Serialization: guides/custom-serialization.md
       - Stateful Companion: guides/stateful-companion.md
       - Reactive Streams: guides/streams.md
+      - Streams over the Network: guides/streams-network.md
   - API Reference:
       - Core:
           - Behaviors: reference/behaviors.md

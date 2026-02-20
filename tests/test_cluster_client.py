@@ -21,6 +21,19 @@ from casty.cluster.coordinator import ShardLocation
 from casty.cluster.system import ClusteredActorSystem
 from casty.cluster.envelope import ShardEnvelope
 from casty.cluster.topology import SubscribeTopology, TopologySnapshot
+from casty.core.streams import (
+    GetSink,
+    GetSource,
+    SinkRef,
+    SourceRef,
+    StreamCompleted,
+    StreamDemand,
+    StreamElement,
+    StreamProducerMsg,
+    Subscribe,
+    stream_consumer,
+    stream_producer,
+)
 
 
 @dataclass(frozen=True)
@@ -878,3 +891,174 @@ async def test_client_ask_with_advertised_host_port() -> None:
                 timeout=5.0,
             )
             assert result == 42
+
+
+async def test_client_consumes_stream_from_cluster() -> None:
+    """ClusterClient spawns a local stream_consumer and iterates a remote stream."""
+    key: ServiceKey[StreamProducerMsg[int]] = ServiceKey(name="producer")
+
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        port = system.self_node.port
+
+        producer = system.spawn(
+            Behaviors.discoverable(stream_producer(), key=key), "producer"
+        )
+        await asyncio.sleep(0.5)
+
+        sink: SinkRef[int] = await system.ask(
+            producer, lambda r: GetSink(reply_to=r), timeout=5.0
+        )
+
+        async with ClusterClient(
+            contact_points=[("127.0.0.1", port)],
+            system_name="cluster",
+        ) as client:
+            await asyncio.sleep(1.0)
+
+            listing = client.lookup(key)
+            assert len(listing.instances) >= 1
+            remote_producer = next(iter(listing.instances)).ref
+
+            consumer = client.spawn(
+                stream_consumer(remote_producer, timeout=5.0), "consumer"
+            )
+            await asyncio.sleep(0.5)
+
+            source: SourceRef[int] = await client.ask(
+                consumer, lambda r: GetSource(reply_to=r), timeout=5.0
+            )
+
+            results: list[int] = []
+
+            async def consume() -> None:
+                async for item in source:
+                    results.append(item)
+
+            consume_task = asyncio.create_task(consume())
+
+            await sink.put(1)
+            await sink.put(2)
+            await sink.put(3)
+            await sink.complete()
+
+            await asyncio.wait_for(consume_task, timeout=5.0)
+            assert results == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Messages for the server-side stream collector
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ConsumeFrom:
+    producer: ActorRef[StreamProducerMsg[int]]
+
+
+@dataclass(frozen=True)
+class GetCollected:
+    reply_to: ActorRef[tuple[int, ...]]
+
+
+type CollectorMsg = ConsumeFrom | GetCollected | StreamElement[int] | StreamCompleted
+
+
+def stream_collector() -> Behavior[CollectorMsg]:
+    """Server-side actor that subscribes to a remote producer and collects elements."""
+
+    def idle() -> Behavior[CollectorMsg]:
+        async def receive(_ctx: Any, msg: Any) -> Any:
+            match msg:
+                case ConsumeFrom(producer=producer):
+                    producer.tell(Subscribe(consumer=_ctx.self, demand=16))
+                    return collecting(producer, ())
+                case _:
+                    return Behaviors.unhandled()
+
+        return Behaviors.receive(receive)
+
+    def collecting(
+        producer: ActorRef[StreamProducerMsg[int]],
+        results: tuple[int, ...],
+    ) -> Behavior[CollectorMsg]:
+        async def receive(_ctx: Any, msg: Any) -> Any:
+            match msg:
+                case StreamElement(element=element):
+                    producer.tell(StreamDemand(n=1))
+                    return collecting(producer, (*results, element))
+                case StreamCompleted():
+                    return done(results)
+                case _:
+                    return Behaviors.unhandled()
+
+        return Behaviors.receive(receive)
+
+    def done(results: tuple[int, ...]) -> Behavior[CollectorMsg]:
+        async def receive(_ctx: Any, msg: Any) -> Any:
+            match msg:
+                case GetCollected(reply_to=reply_to):
+                    reply_to.tell(results)
+                    return Behaviors.same()
+                case _:
+                    return Behaviors.unhandled()
+
+        return Behaviors.receive(receive)
+
+    return idle()
+
+
+async def test_client_produces_stream_for_cluster() -> None:
+    """Client-side producer feeds a server-side consumer over TCP."""
+    collector_key: ServiceKey[CollectorMsg] = ServiceKey(name="collector")
+
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        port = system.self_node.port
+
+        system.spawn(
+            Behaviors.discoverable(stream_collector(), key=collector_key),
+            "collector",
+        )
+        await asyncio.sleep(0.5)
+
+        async with ClusterClient(
+            contact_points=[("127.0.0.1", port)],
+            system_name="cluster",
+        ) as client:
+            await asyncio.sleep(1.0)
+
+            producer = client.spawn(stream_producer(), "producer")
+            await asyncio.sleep(0.1)
+
+            sink: SinkRef[int] = await client.ask(
+                producer, lambda r: GetSink(reply_to=r), timeout=5.0
+            )
+
+            listing = client.lookup(collector_key)
+            assert len(listing.instances) >= 1
+            remote_collector = next(iter(listing.instances)).ref
+
+            remote_collector.tell(ConsumeFrom(producer=producer))
+            await asyncio.sleep(0.5)
+
+            await sink.put(10)
+            await sink.put(20)
+            await sink.put(30)
+            await sink.complete()
+            await asyncio.sleep(1.0)
+
+            results: tuple[int, ...] = await client.ask(
+                remote_collector,
+                lambda r: GetCollected(reply_to=r),
+                timeout=5.0,
+            )
+            assert results == (10, 20, 30)

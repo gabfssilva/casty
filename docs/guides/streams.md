@@ -132,6 +132,8 @@ sequenceDiagram
 
 The cross-node communication flows through actor messages (`Subscribe`, `StreamDemand`, `StreamElement`, `StreamCompleted`) — the same protocol that powers single-node streams. No special configuration needed.
 
+For detailed coverage of streaming across cluster nodes, external clients, and Docker deployments, see [Reactive Streams over the Network](streams-network.md).
+
 ## Run the Full Example
 
 ```bash
@@ -146,7 +148,7 @@ uv run python examples/guides/10_streams.py
 
 - **`SinkRef`** wraps the producer's bounded queue — `await sink.put(elem)` blocks when full, providing input-side backpressure.
 - **`stream_producer(buffer_size=N)`** creates a bounded internal queue. `buffer_size=0` means unbounded.
-- **`stream_consumer`** subscribes to a producer and exposes the stream as an `SourceRef` via `GetSource`.
+- **`stream_consumer`** subscribes to a producer and exposes the stream as a `SourceRef` via `GetSource`.
 - **Push and consume run concurrently** — streams can be infinite, no need to complete before consuming.
 - **Demand is automatic** — each consumed element replenishes demand one-for-one.
 - **`break`, `return`, and exceptions** all trigger `StreamCancel` via the async generator's `finally` block — deterministic cleanup with no manual resource management.

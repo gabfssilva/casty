@@ -1,0 +1,53 @@
+x-node: &node
+  build:
+    context: ../..
+    dockerfile: examples/17_stream_pipeline/Dockerfile.node
+
+services:
+  node-1:
+    <<: *node
+    hostname: node-1
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "node-1:25520",
+        "--nodes", "3",
+        "--sensor", "temp",
+      ]
+  node-2:
+    <<: *node
+    hostname: node-2
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "node-1:25520",
+        "--nodes", "3",
+        "--sensor", "humidity",
+      ]
+  node-3:
+    <<: *node
+    hostname: node-3
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "node-1:25520",
+        "--nodes", "3",
+        "--sensor", "pressure",
+        "--alert-monitor",
+      ]
+  client:
+    build:
+      context: ../..
+      dockerfile: examples/17_stream_pipeline/Dockerfile.client
+    hostname: client
+    command: ["--contact", "node-1:25520", "--producers", "3"]
+    depends_on:
+      - node-1
+      - node-2
+      - node-3

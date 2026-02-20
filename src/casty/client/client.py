@@ -648,6 +648,27 @@ class ClusterClient:
         )
         return Listing(key=key, instances=instances)
 
+    def spawn[M](self, behavior: Behavior[M], name: str) -> ActorRef[M]:
+        """Spawn a local actor on this client's internal actor system.
+
+        The actor is remotely addressable — cluster nodes can send
+        messages back to it via TCP.
+
+        Parameters
+        ----------
+        behavior
+            The behavior for the new actor.
+        name
+            Unique name for the actor.
+
+        Returns
+        -------
+        ActorRef[M]
+            A ref to the newly spawned actor.
+        """
+        system, _ = self._require_started()
+        return system.spawn(behavior, name)
+
     def entity_ref(
         self, shard_type: str, *, num_shards: int
     ) -> ActorRef[ShardEnvelope[Any]]:
