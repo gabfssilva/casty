@@ -17,6 +17,7 @@ smaller ``(host, port)`` wins.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import socket
@@ -501,7 +502,11 @@ def tcp_transport(
             aliases: dict[NodeAddr, NodeAddr],
             blacklist: dict[NodeAddr, float],
             next_id: int = 0,
+            executors: dict[NodeAddr, concurrent.futures.ThreadPoolExecutor]
+            | None = None,
         ) -> Behavior[TcpTransportMsg]:
+            execs = executors or {}
+
             async def receive(
                 ctx: ActorContext[TcpTransportMsg],
                 msg: TcpTransportMsg,
@@ -635,8 +640,18 @@ def tcp_transport(
                             return Behaviors.same()
                         new_peers = {k: v for k, v in peers.items() if k != pa}
                         new_aliases = {k: v for k, v in aliases.items() if v != pa}
+                        removed_exec = execs.get(pa)
+                        remaining_execs = {k: v for k, v in execs.items() if k != pa}
+                        if removed_exec is not None:
+                            removed_exec.shutdown(wait=False)
                         return active(
-                            srv, self_addr, new_peers, new_aliases, blacklist, next_id
+                            srv,
+                            self_addr,
+                            new_peers,
+                            new_aliases,
+                            blacklist,
+                            next_id,
+                            remaining_execs,
                         )
 
                     case ClearNodeBlacklist(host=host, port=port):
@@ -686,11 +701,21 @@ def tcp_transport(
                                 type_hint=type_hint,
                             ).to_bytes()
 
+                        peer_exec = execs.get(canonical_d)
+                        new_execs = execs
+                        if peer_exec is None:
+                            peer_exec = concurrent.futures.ThreadPoolExecutor(
+                                max_workers=1
+                            )
+                            new_execs = {**execs, canonical_d: peer_exec}
+
+                        loop = asyncio.get_running_loop()
+
                         peer_ref_d = peers.get(canonical_d)
                         if peer_ref_d is not None:
                             captured_peer = peer_ref_d
                             ctx.pipe_to_self(
-                                asyncio.to_thread(build_frame),
+                                loop.run_in_executor(peer_exec, build_frame),
                                 lambda frame_data, _p=captured_peer: SendFrameToNode(
                                     data=frame_data, peer=_p
                                 ),
@@ -705,10 +730,11 @@ def tcp_transport(
                                 aliases,
                                 effective_bl,
                                 next_id,
+                                new_execs,
                             )
 
                         ctx.pipe_to_self(
-                            asyncio.to_thread(build_frame),
+                            loop.run_in_executor(peer_exec, build_frame),
                             lambda frame_data: SendToNode(
                                 host=d_host, port=d_port, data=frame_data
                             ),
@@ -723,6 +749,7 @@ def tcp_transport(
                             aliases,
                             effective_bl,
                             next_id,
+                            new_execs,
                         )
 
                     case LogSerializationFailure(address=fail_addr, exc=fail_exc):
