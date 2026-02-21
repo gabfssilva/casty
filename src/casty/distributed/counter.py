@@ -16,8 +16,8 @@ from casty.cluster.envelope import ShardEnvelope
 if TYPE_CHECKING:
     from casty.context import ActorContext
     from casty.core.journal import EventJournal
+    from casty.distributed.distributed import EntityGateway
     from casty.ref import ActorRef
-    from casty.core.system import ActorSystem
 
 
 @dataclass(frozen=True)
@@ -182,12 +182,12 @@ class Counter:
     def __init__(
         self,
         *,
-        system: ActorSystem,
+        gateway: EntityGateway,
         region_ref: ActorRef[ShardEnvelope[CounterMsg]],
         name: str,
         timeout: float = 5.0,
     ) -> None:
-        self._system = system
+        self._gateway = gateway
         self._region_ref = region_ref
         self._name = name
         self._timeout = timeout
@@ -210,7 +210,7 @@ class Counter:
         >>> await counter.increment()
         1
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name, Increment(amount=amount, reply_to=reply_to)
@@ -236,7 +236,7 @@ class Counter:
         >>> await counter.decrement()
         -1
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name, Decrement(amount=amount, reply_to=reply_to)
@@ -252,7 +252,7 @@ class Counter:
         bool
             ``True`` if destroyed.
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name, DestroyCounter(reply_to=reply_to)
@@ -272,7 +272,7 @@ class Counter:
         >>> await counter.get()
         0
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(self._name, GetValue(reply_to=reply_to)),
             timeout=self._timeout,

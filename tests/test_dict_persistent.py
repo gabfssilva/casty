@@ -38,7 +38,7 @@ async def test_persistent_dict_multinode_recovery() -> None:
         await asyncio.sleep(0.1)
 
         users: Dict[str, str] = Dict(
-            system=system_a, region_ref=region_ref, name="users"
+            gateway=system_a, region_ref=region_ref, name="users"
         )
         await users.put("alice", "Alice Smith")
         await users.put("bob", "Bob Jones")
@@ -66,7 +66,7 @@ async def test_persistent_dict_multinode_recovery() -> None:
         await asyncio.sleep(0.1)
 
         users: Dict[str, str] = Dict(
-            system=system_b, region_ref=region_ref, name="users"
+            gateway=system_b, region_ref=region_ref, name="users"
         )
         assert await users.get("alice") == "Alice Smith"
         assert await users.get("bob") == "Bob Jones"
@@ -100,7 +100,7 @@ async def test_persistent_dict_delete_survives_recovery() -> None:
         await asyncio.sleep(0.1)
 
         users: Dict[str, str] = Dict(
-            system=system_a, region_ref=region_ref, name="users"
+            gateway=system_a, region_ref=region_ref, name="users"
         )
         await users.put("alice", "Alice")
         await users.delete("alice")
@@ -128,7 +128,7 @@ async def test_persistent_dict_delete_survives_recovery() -> None:
         await asyncio.sleep(0.1)
 
         users: Dict[str, str] = Dict(
-            system=system_b, region_ref=region_ref, name="users"
+            gateway=system_b, region_ref=region_ref, name="users"
         )
         assert await users.get("alice") is None
         assert await users.contains("alice") is False

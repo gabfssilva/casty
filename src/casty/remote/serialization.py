@@ -7,18 +7,23 @@ mapping between type names and Python classes.
 
 from __future__ import annotations
 
+import bz2
 import dataclasses
 import enum
+import gzip
 import importlib
 import json
 import logging
+import lzma
 import pickle
+import zlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from casty.core.address import ActorAddress
 
 if TYPE_CHECKING:
+    from casty.config import CompressionConfig, SerializationConfig
     from casty.remote.ref import RemoteActorRef
 
 logger = logging.getLogger("casty.serialization")
@@ -408,12 +413,139 @@ class PickleSerializer:
         from casty.remote import ref as _ref_module
 
         if ref_factory is not None:
-            previous = _ref_module.ref_restore_hook
-            _ref_module.ref_restore_hook = lambda uri: ref_factory(
-                ActorAddress.from_uri(uri)
+            previous = getattr(_ref_module.thread_local, "ref_restore_hook", None)
+            _ref_module.thread_local.ref_restore_hook = lambda uri: ref_factory(  # pyright: ignore[reportUnknownLambdaType]
+                ActorAddress.from_uri(uri)  # pyright: ignore[reportUnknownArgumentType]
             )
             try:
                 return pickle.loads(data)  # noqa: S301
             finally:
-                _ref_module.ref_restore_hook = previous
+                _ref_module.thread_local.ref_restore_hook = previous
         return pickle.loads(data)  # noqa: S301
+
+
+def _build_codec(
+    config: CompressionConfig,
+) -> tuple[Callable[[bytes], bytes], Callable[[bytes], bytes]]:
+    match config.algorithm:
+        case "zlib":
+            return lambda data: zlib.compress(data, config.level), zlib.decompress
+        case "gzip":
+            return (
+                lambda data: gzip.compress(data, compresslevel=config.level),
+                gzip.decompress,
+            )
+        case "bz2":
+            return (
+                lambda data: bz2.compress(data, compresslevel=config.level),
+                bz2.decompress,
+            )
+        case "lzma":
+            return (
+                lambda data: lzma.compress(data, preset=config.level),
+                lzma.decompress,
+            )
+
+
+class CompressedSerializer:
+    """Composable wrapper that adds compression to any ``Serializer``.
+
+    Applies compression on ``serialize()`` and decompression on
+    ``deserialize()``, delegating the actual serialization to the
+    wrapped *inner* serializer.
+
+    Parameters
+    ----------
+    inner : PickleSerializer | JsonSerializer
+        The underlying serializer to wrap.
+    config : CompressionConfig
+        Compression algorithm and level settings.
+
+    Examples
+    --------
+    >>> from casty.config import CompressionConfig
+    >>> ser = CompressedSerializer(PickleSerializer(), CompressionConfig(level=9))
+    >>> ser.deserialize(ser.serialize({"key": "value"}))
+    {'key': 'value'}
+    """
+
+    def __init__(
+        self,
+        inner: PickleSerializer | JsonSerializer,
+        config: CompressionConfig,
+    ) -> None:
+        self._inner = inner
+        self._compress, self._decompress = _build_codec(config)
+
+    def serialize[M](self, obj: M) -> bytes:
+        """Serialize and compress an object to bytes.
+
+        Parameters
+        ----------
+        obj : M
+            Object to serialize.
+
+        Returns
+        -------
+        bytes
+            Compressed serialized bytes.
+        """
+        return self._compress(self._inner.serialize(obj))
+
+    def deserialize[M, R](
+        self,
+        data: bytes,
+        *,
+        ref_factory: Callable[[ActorAddress], RemoteActorRef[R]] | None = None,
+    ) -> M:
+        """Decompress and deserialize bytes back to an object.
+
+        Parameters
+        ----------
+        data : bytes
+            Compressed bytes from ``serialize``.
+        ref_factory : Callable or None
+            Factory for reconstructing ``ActorRef`` instances.
+
+        Returns
+        -------
+        Any
+        """
+        return self._inner.deserialize(self._decompress(data), ref_factory=ref_factory)
+
+
+def build_serializer(
+    config: SerializationConfig,
+    *,
+    registry: TypeRegistry | None = None,
+) -> PickleSerializer | JsonSerializer | CompressedSerializer:
+    """Build a ``Serializer`` chain from configuration.
+
+    Parameters
+    ----------
+    config : SerializationConfig
+        Serialization settings (serializer kind + optional compression).
+    registry : TypeRegistry | None
+        Type registry required when ``config.serializer == "json"``.
+
+    Returns
+    -------
+    PickleSerializer | JsonSerializer | CompressedSerializer
+        Ready-to-use serializer, possibly wrapped with compression.
+
+    Examples
+    --------
+    >>> from casty.config import SerializationConfig, CompressionConfig
+    >>> config = SerializationConfig(compression=CompressionConfig(level=9))
+    >>> ser = build_serializer(config)
+    """
+    inner: PickleSerializer | JsonSerializer
+    match config.serializer:
+        case "pickle":
+            inner = PickleSerializer()
+        case "json":
+            inner = JsonSerializer(registry or TypeRegistry())
+
+    if config.compression is not None:
+        return CompressedSerializer(inner, config.compression)
+    return inner

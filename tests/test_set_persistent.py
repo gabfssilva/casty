@@ -38,7 +38,7 @@ async def test_persistent_set_multinode_recovery() -> None:
         await asyncio.sleep(0.1)
 
         sessions: Set[str] = Set(
-            system=system_a, region_ref=region_ref, name="sessions"
+            gateway=system_a, region_ref=region_ref, name="sessions"
         )
         await sessions.add("sess-1")
         await sessions.add("sess-2")
@@ -67,7 +67,7 @@ async def test_persistent_set_multinode_recovery() -> None:
         await asyncio.sleep(0.1)
 
         sessions: Set[str] = Set(
-            system=system_b, region_ref=region_ref, name="sessions"
+            gateway=system_b, region_ref=region_ref, name="sessions"
         )
         assert await sessions.contains("sess-1") is True
         assert await sessions.contains("sess-2") is True
@@ -102,7 +102,7 @@ async def test_persistent_set_remove_survives_recovery() -> None:
         )
         await asyncio.sleep(0.1)
 
-        tags: Set[str] = Set(system=system_a, region_ref=region_ref, name="tags")
+        tags: Set[str] = Set(gateway=system_a, region_ref=region_ref, name="tags")
         await tags.add("python")
         await tags.add("rust")
         await tags.add("go")
@@ -130,7 +130,7 @@ async def test_persistent_set_remove_survives_recovery() -> None:
         )
         await asyncio.sleep(0.1)
 
-        tags: Set[str] = Set(system=system_b, region_ref=region_ref, name="tags")
+        tags: Set[str] = Set(gateway=system_b, region_ref=region_ref, name="tags")
         assert await tags.contains("python") is True
         assert await tags.contains("go") is True
         assert await tags.contains("rust") is False

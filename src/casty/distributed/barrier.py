@@ -13,8 +13,8 @@ from casty.actor import Behavior, Behaviors
 from casty.cluster.envelope import ShardEnvelope
 
 if TYPE_CHECKING:
+    from casty.distributed.distributed import EntityGateway
     from casty.ref import ActorRef
-    from casty.core.system import ActorSystem
 
 
 @dataclass(frozen=True)
@@ -88,13 +88,13 @@ class Barrier:
     def __init__(
         self,
         *,
-        system: ActorSystem,
+        gateway: EntityGateway,
         region_ref: ActorRef[ShardEnvelope[BarrierMsg]],
         name: str,
         node_id: str,
         timeout: float = 60.0,
     ) -> None:
-        self._system = system
+        self._gateway = gateway
         self._region_ref = region_ref
         self._name = name
         self._node_id = node_id
@@ -108,7 +108,7 @@ class Barrier:
         bool
             ``True`` if destroyed.
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,
@@ -129,7 +129,7 @@ class Barrier:
         --------
         >>> await barrier.arrive(expected=3)
         """
-        await self._system.ask(
+        await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,

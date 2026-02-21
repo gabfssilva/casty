@@ -70,6 +70,9 @@ testpaths = ["tests"]
 addopts = "-m 'not benchmark' --durations=0 -n auto"
 markers = ["benchmark: performance benchmarks (deselect with '-m not benchmark')"]
 
+[tool.ruff]
+extend-exclude = ["src/casty/_version.py"]
+
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

@@ -8,9 +8,8 @@ locks, semaphores, and barriers.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, TYPE_CHECKING
+from typing import Any, Protocol, TYPE_CHECKING
 
-from casty.actor import Behaviors
 from casty.distributed.barrier import Barrier, barrier_entity
 from casty.distributed.counter import Counter, counter_entity, persistent_counter_entity
 from casty.distributed.dict import Dict, map_entity, persistent_map_entity
@@ -20,46 +19,75 @@ from casty.distributed.semaphore import Semaphore, semaphore_entity_factory
 from casty.distributed.set import Set, set_entity, persistent_set_entity
 
 if TYPE_CHECKING:
+    from casty.actor import Behavior
     from casty.core.journal import EventJournal
     from casty.ref import ActorRef
-    from casty.cluster.system import ClusteredActorSystem
+    from casty.cluster.envelope import ShardEnvelope
+
+
+class EntityGateway(Protocol):
+    """Protocol for backends that provide access to sharded entities.
+
+    Both ``ClusteredActorSystem`` and ``ClusterClient`` satisfy this
+    protocol structurally, allowing ``Distributed`` to work with either.
+    """
+
+    def region_ref(
+        self,
+        key: str,
+        factory: Callable[[str], Behavior[Any]],
+        *,
+        num_shards: int,
+    ) -> ActorRef[ShardEnvelope[Any]]:
+        """Return a ref that routes ``ShardEnvelope`` to the named region."""
+        ...
+
+    async def entity_ask(
+        self,
+        ref: ActorRef[Any],
+        msg_factory: Callable[[ActorRef[Any]], Any],
+        *,
+        timeout: float,
+    ) -> Any:
+        """Send a message and wait for a reply."""
+        ...
 
 
 def get_or_spawn_region(
-    system: ClusteredActorSystem,
+    gateway: EntityGateway,
     regions: dict[str, ActorRef[Any]],
     key: str,
     factory: Callable[[str], Any],
     shards: int,
 ) -> ActorRef[Any]:
     if key not in regions:
-        regions[key] = system.spawn(Behaviors.sharded(factory, num_shards=shards), key)
+        regions[key] = gateway.region_ref(key, factory, num_shards=shards)
     return regions[key]
 
 
 class MapAccessor:
     def __init__(
         self,
-        system: ClusteredActorSystem,
+        gateway: EntityGateway,
         regions: dict[str, ActorRef[Any]],
         factory: Callable[[str], Any],
     ) -> None:
-        self._system = system
+        self._gateway = gateway
         self._regions = regions
         self._factory = factory
 
     def __getitem__[K, V](
         self, params: tuple[type[K], type[V]]
     ) -> Callable[..., Dict[K, V]]:
-        system = self._system
+        gateway = self._gateway
         regions = self._regions
         factory = self._factory
 
         def create(name: str, *, shards: int = 100, timeout: float = 5.0) -> Dict[K, V]:
             region = get_or_spawn_region(
-                system, regions, f"d-map-{name}", factory, shards
+                gateway, regions, f"d-map-{name}", factory, shards
             )
-            return Dict(system=system, region_ref=region, name=name, timeout=timeout)
+            return Dict(gateway=gateway, region_ref=region, name=name, timeout=timeout)
 
         return create
 
@@ -67,24 +95,24 @@ class MapAccessor:
 class SetAccessor:
     def __init__(
         self,
-        system: ClusteredActorSystem,
+        gateway: EntityGateway,
         regions: dict[str, ActorRef[Any]],
         factory: Callable[[str], Any],
     ) -> None:
-        self._system = system
+        self._gateway = gateway
         self._regions = regions
         self._factory = factory
 
     def __getitem__[V](self, param: type[V]) -> Callable[..., Set[V]]:
-        system = self._system
+        gateway = self._gateway
         regions = self._regions
         factory = self._factory
 
         def create(name: str, *, shards: int = 100, timeout: float = 5.0) -> Set[V]:
             region = get_or_spawn_region(
-                system, regions, f"d-set-{name}", factory, shards
+                gateway, regions, f"d-set-{name}", factory, shards
             )
-            return Set(system=system, region_ref=region, name=name, timeout=timeout)
+            return Set(gateway=gateway, region_ref=region, name=name, timeout=timeout)
 
         return create
 
@@ -92,24 +120,24 @@ class SetAccessor:
 class QueueAccessor:
     def __init__(
         self,
-        system: ClusteredActorSystem,
+        gateway: EntityGateway,
         regions: dict[str, ActorRef[Any]],
         factory: Callable[[str], Any],
     ) -> None:
-        self._system = system
+        self._gateway = gateway
         self._regions = regions
         self._factory = factory
 
     def __getitem__[V](self, param: type[V]) -> Callable[..., Queue[V]]:
-        system = self._system
+        gateway = self._gateway
         regions = self._regions
         factory = self._factory
 
         def create(name: str, *, shards: int = 100, timeout: float = 5.0) -> Queue[V]:
             region = get_or_spawn_region(
-                system, regions, f"d-queue-{name}", factory, shards
+                gateway, regions, f"d-queue-{name}", factory, shards
             )
-            return Queue(system=system, region_ref=region, name=name, timeout=timeout)
+            return Queue(gateway=gateway, region_ref=region, name=name, timeout=timeout)
 
         return create
 
@@ -121,8 +149,9 @@ class Distributed:
 
     Parameters
     ----------
-    system : ClusteredActorSystem
-        The cluster-aware actor system to create structures on.
+    gateway : EntityGateway
+        Backend that provides access to sharded entities.  Both
+        ``ClusteredActorSystem`` and ``ClusterClient`` satisfy this.
     journal : EventJournal | None
         If provided, structures use event sourcing for durability.
 
@@ -137,11 +166,11 @@ class Distributed:
 
     def __init__(
         self,
-        system: ClusteredActorSystem,
+        gateway: EntityGateway,
         *,
         journal: EventJournal | None = None,
     ) -> None:
-        self._system = system
+        self._gateway = gateway
         self._journal = journal
         self._regions: dict[str, ActorRef[Any]] = {}
 
@@ -173,10 +202,10 @@ class Distributed:
             else counter_entity
         )
         region = get_or_spawn_region(
-            self._system, self._regions, f"d-counter-{name}", factory, shards
+            self._gateway, self._regions, f"d-counter-{name}", factory, shards
         )
         return Counter(
-            system=self._system, region_ref=region, name=name, timeout=timeout
+            gateway=self._gateway, region_ref=region, name=name, timeout=timeout
         )
 
     @property
@@ -198,7 +227,7 @@ class Distributed:
             if self._journal is not None
             else map_entity
         )
-        return MapAccessor(self._system, self._regions, factory)
+        return MapAccessor(self._gateway, self._regions, factory)
 
     @property
     def set(self) -> SetAccessor:
@@ -220,7 +249,7 @@ class Distributed:
             if self._journal is not None
             else set_entity
         )
-        return SetAccessor(self._system, self._regions, factory)
+        return SetAccessor(self._gateway, self._regions, factory)
 
     @property
     def queue(self) -> QueueAccessor:
@@ -241,7 +270,7 @@ class Distributed:
             if self._journal is not None
             else queue_entity
         )
-        return QueueAccessor(self._system, self._regions, factory)
+        return QueueAccessor(self._gateway, self._regions, factory)
 
     def lock(self, name: str, *, shards: int = 100, timeout: float = 5.0) -> Lock:
         """Create a distributed lock.
@@ -265,9 +294,11 @@ class Distributed:
         >>> await lock.acquire()
         """
         region = get_or_spawn_region(
-            self._system, self._regions, f"d-lock-{name}", lock_entity, shards
+            self._gateway, self._regions, f"d-lock-{name}", lock_entity, shards
         )
-        return Lock(system=self._system, region_ref=region, name=name, timeout=timeout)
+        return Lock(
+            gateway=self._gateway, region_ref=region, name=name, timeout=timeout
+        )
 
     def semaphore(
         self, name: str, permits: int, *, shards: int = 100, timeout: float = 5.0
@@ -296,10 +327,10 @@ class Distributed:
         """
         factory = semaphore_entity_factory(permits)
         region = get_or_spawn_region(
-            self._system, self._regions, f"d-sem-{name}", factory, shards
+            self._gateway, self._regions, f"d-sem-{name}", factory, shards
         )
         return Semaphore(
-            system=self._system, region_ref=region, name=name, timeout=timeout
+            gateway=self._gateway, region_ref=region, name=name, timeout=timeout
         )
 
     def barrier(
@@ -318,6 +349,7 @@ class Distributed:
             Logical barrier name (used as entity ID).
         node_id : str | None
             Identifier for this node (defaults to ``host:port``).
+            Required when using ``ClusterClient`` as the gateway.
         shards : int
             Number of shards for the backing region.
         timeout : float
@@ -332,12 +364,19 @@ class Distributed:
         >>> barrier = d.barrier("init-sync")
         >>> await barrier.arrive(expected=3)
         """
-        nid = node_id or f"{self._system.self_node.host}:{self._system.self_node.port}"
+        if node_id is not None:
+            nid = node_id
+        elif hasattr(self._gateway, "self_node"):
+            self_node = getattr(self._gateway, "self_node")
+            nid = f"{self_node.host}:{self_node.port}"
+        else:
+            msg = "node_id is required when using Distributed from a ClusterClient"
+            raise TypeError(msg)
         region = get_or_spawn_region(
-            self._system, self._regions, f"d-barrier-{name}", barrier_entity, shards
+            self._gateway, self._regions, f"d-barrier-{name}", barrier_entity, shards
         )
         return Barrier(
-            system=self._system,
+            gateway=self._gateway,
             region_ref=region,
             name=name,
             node_id=nid,

@@ -8,10 +8,12 @@ import pytest
 from casty.config import (
     ActorConfig,
     CastyConfig,
+    CompressionConfig,
     FailureDetectorConfig,
     GossipConfig,
     HeartbeatConfig,
     MailboxConfig,
+    SerializationConfig,
     ShardingConfig,
     SupervisionConfig,
     discover_config,
@@ -544,3 +546,105 @@ class TestClusteredSystemFromConfig:
         system = ClusteredActorSystem.from_config(config, host="127.0.0.1", port=0)
         assert system._host == "127.0.0.1"
         assert system._port == 0
+
+
+# ---------------------------------------------------------------------------
+# CompressionConfig
+# ---------------------------------------------------------------------------
+
+
+class TestCompressionConfig:
+    def test_defaults(self) -> None:
+        cfg = CompressionConfig()
+        assert cfg.algorithm == "zlib"
+        assert cfg.level == 6
+
+    def test_custom(self) -> None:
+        cfg = CompressionConfig(algorithm="lzma", level=3)
+        assert cfg.algorithm == "lzma"
+        assert cfg.level == 3
+
+    def test_frozen(self) -> None:
+        cfg = CompressionConfig()
+        with pytest.raises(AttributeError):
+            cfg.level = 9  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# SerializationConfig
+# ---------------------------------------------------------------------------
+
+
+class TestSerializationConfig:
+    def test_defaults(self) -> None:
+        cfg = SerializationConfig()
+        assert cfg.serializer == "pickle"
+        assert cfg.compression is None
+
+    def test_with_compression(self) -> None:
+        cfg = SerializationConfig(
+            serializer="json",
+            compression=CompressionConfig(algorithm="gzip", level=9),
+        )
+        assert cfg.serializer == "json"
+        assert cfg.compression is not None
+        assert cfg.compression.algorithm == "gzip"
+        assert cfg.compression.level == 9
+
+
+# ---------------------------------------------------------------------------
+# CastyConfig.serialization
+# ---------------------------------------------------------------------------
+
+
+class TestCastyConfigSerialization:
+    def test_default_serialization(self) -> None:
+        cfg = CastyConfig()
+        assert cfg.serialization.serializer == "pickle"
+        assert cfg.serialization.compression is None
+
+
+# ---------------------------------------------------------------------------
+# Serialization from TOML
+# ---------------------------------------------------------------------------
+
+
+class TestSerializationConfigFromToml:
+    def test_no_serialization_section(self, tmp_path: Path) -> None:
+        toml_file = tmp_path / "casty.toml"
+        toml_file.write_text("")
+        cfg = load_config(toml_file)
+        assert cfg.serialization.serializer == "pickle"
+        assert cfg.serialization.compression is None
+
+    def test_serializer_only(self, tmp_path: Path) -> None:
+        toml_file = tmp_path / "casty.toml"
+        toml_file.write_text('[serialization]\nserializer = "json"\n')
+        cfg = load_config(toml_file)
+        assert cfg.serialization.serializer == "json"
+        assert cfg.serialization.compression is None
+
+    def test_with_compression(self, tmp_path: Path) -> None:
+        toml_file = tmp_path / "casty.toml"
+        toml_file.write_text(
+            "[serialization]\n"
+            'serializer = "pickle"\n\n'
+            "[serialization.compression]\n"
+            'algorithm = "gzip"\n'
+            "level = 9\n"
+        )
+        cfg = load_config(toml_file)
+        assert cfg.serialization.serializer == "pickle"
+        assert cfg.serialization.compression is not None
+        assert cfg.serialization.compression.algorithm == "gzip"
+        assert cfg.serialization.compression.level == 9
+
+    def test_compression_defaults(self, tmp_path: Path) -> None:
+        toml_file = tmp_path / "casty.toml"
+        toml_file.write_text(
+            '[serialization]\nserializer = "pickle"\n\n[serialization.compression]\n'
+        )
+        cfg = load_config(toml_file)
+        assert cfg.serialization.compression is not None
+        assert cfg.serialization.compression.algorithm == "zlib"
+        assert cfg.serialization.compression.level == 6

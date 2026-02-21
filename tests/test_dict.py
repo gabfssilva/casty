@@ -38,7 +38,7 @@ async def test_dict_put_and_get() -> None:
         await asyncio.sleep(0.1)
 
         dmap: Dict[str, int] = Dict(
-            system=system, region_ref=region_ref, name="my-map", timeout=5.0
+            gateway=system, region_ref=region_ref, name="my-map", timeout=5.0
         )
 
         # Get missing key -> None
@@ -87,7 +87,7 @@ async def test_dict_delete_and_contains() -> None:
         await asyncio.sleep(0.1)
 
         dmap: Dict[str, str] = Dict(
-            system=system, region_ref=region_ref, name="map", timeout=5.0
+            gateway=system, region_ref=region_ref, name="map", timeout=5.0
         )
 
         # Put a key

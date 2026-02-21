@@ -7,6 +7,7 @@ thin subclass used by the broadcast layer.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -14,14 +15,17 @@ from typing import Any
 from casty.core.address import ActorAddress
 from casty.core.transport import MessageTransport
 
-ref_restore_hook: Callable[[str], RemoteActorRef[Any]] | None = None
+thread_local = threading.local()
 
 
 def restore_actor_ref(uri: str) -> RemoteActorRef[Any]:
-    if ref_restore_hook is None:
+    hook: Callable[[str], RemoteActorRef[Any]] | None = getattr(
+        thread_local, "ref_restore_hook", None
+    )
+    if hook is None:
         msg = "Cannot unpickle ActorRef: no restore hook installed"
         raise RuntimeError(msg)
-    return ref_restore_hook(uri)
+    return hook(uri)
 
 
 @dataclass(frozen=True)

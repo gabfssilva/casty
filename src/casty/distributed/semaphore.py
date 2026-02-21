@@ -15,8 +15,8 @@ from casty.actor import Behavior, Behaviors
 from casty.cluster.envelope import ShardEnvelope
 
 if TYPE_CHECKING:
+    from casty.distributed.distributed import EntityGateway
     from casty.ref import ActorRef
-    from casty.core.system import ActorSystem
 
 
 # ---------------------------------------------------------------------------
@@ -172,12 +172,12 @@ class Semaphore:
     def __init__(
         self,
         *,
-        system: ActorSystem,
+        gateway: EntityGateway,
         region_ref: ActorRef[ShardEnvelope[SemaphoreMsg]],
         name: str,
         timeout: float = 5.0,
     ) -> None:
-        self._system = system
+        self._gateway = gateway
         self._region_ref = region_ref
         self._name = name
         self._timeout = timeout
@@ -191,7 +191,7 @@ class Semaphore:
         bool
             ``True`` if destroyed.
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,
@@ -207,7 +207,7 @@ class Semaphore:
         --------
         >>> await sem.acquire()
         """
-        await self._system.ask(
+        await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,
@@ -229,7 +229,7 @@ class Semaphore:
         >>> await sem.try_acquire()
         True
         """
-        result: SemaphoreTryResult = await self._system.ask(
+        result: SemaphoreTryResult = await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,
@@ -252,7 +252,7 @@ class Semaphore:
         >>> await sem.release()
         True
         """
-        result: SemaphoreReleased = await self._system.ask(
+        result: SemaphoreReleased = await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,

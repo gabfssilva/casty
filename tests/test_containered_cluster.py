@@ -24,6 +24,7 @@ def _run_cluster(services: list[str]) -> DockerCompose:
         context=PROJECT_ROOT,
         compose_file_name="tests/docker-compose.test.yml",
         build=True,
+        wait=False,
         services=services,
     )
     project = f"casty-test-{uuid.uuid4().hex[:8]}"
@@ -48,6 +49,7 @@ def _wait_all_exited(compose: DockerCompose, timeout: float = 60.0) -> None:
     raise TimeoutError(msg)
 
 
+@pytest.mark.timeout(120)
 class TestContaineredCluster:
     def test_single_node(self) -> None:
         """Single seed node writes counter=10 and reads it back."""

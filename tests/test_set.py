@@ -39,7 +39,7 @@ async def test_set_add_contains_remove() -> None:
         await asyncio.sleep(0.1)
 
         s: Set[str] = Set(
-            system=system, region_ref=region_ref, name="my-set", timeout=5.0
+            gateway=system, region_ref=region_ref, name="my-set", timeout=5.0
         )
 
         # Empty set: size 0, contains returns False

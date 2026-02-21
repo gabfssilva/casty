@@ -21,12 +21,16 @@ from casty.remote.tls import Config as TlsConfig
 __all__ = [
     "ActorConfig",
     "CastyConfig",
+    "CompressionAlgorithm",
+    "CompressionConfig",
     "FailureDetectorConfig",
     "GossipConfig",
     "HeartbeatConfig",
     "MailboxConfig",
     "MailboxStrategy",
     "ResolvedActorConfig",
+    "SerializationConfig",
+    "SerializerKind",
     "ShardingConfig",
     "SupervisionConfig",
     "TlsConfig",
@@ -37,6 +41,51 @@ __all__ = [
 
 
 type MailboxStrategy = Literal["drop_new", "drop_oldest", "backpressure"]
+
+type CompressionAlgorithm = Literal["zlib", "gzip", "bz2", "lzma"]
+type SerializerKind = Literal["pickle", "json"]
+
+
+@dataclass(frozen=True)
+class CompressionConfig:
+    """Compression settings for serialized messages.
+
+    Parameters
+    ----------
+    algorithm : CompressionAlgorithm
+        Compression algorithm: ``"zlib"``, ``"gzip"``, ``"bz2"``, or ``"lzma"``.
+    level : int
+        Compression level (0-9 for zlib/gzip/bz2, 0-9 for lzma preset).
+
+    Examples
+    --------
+    >>> CompressionConfig(algorithm="gzip", level=9)
+    CompressionConfig(algorithm='gzip', level=9)
+    """
+
+    algorithm: CompressionAlgorithm = "zlib"
+    level: int = 6
+
+
+@dataclass(frozen=True)
+class SerializationConfig:
+    """Serialization settings for inter-node communication.
+
+    Parameters
+    ----------
+    serializer : SerializerKind
+        Serializer implementation: ``"pickle"`` or ``"json"``.
+    compression : CompressionConfig | None
+        Compression settings. ``None`` means no compression (opt-in).
+
+    Examples
+    --------
+    >>> SerializationConfig(serializer="pickle", compression=CompressionConfig())
+    SerializationConfig(serializer='pickle', compression=CompressionConfig(...))
+    """
+
+    serializer: SerializerKind = "pickle"
+    compression: CompressionConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -280,6 +329,8 @@ class CastyConfig:
         Cluster settings (``None`` for local-only systems).
     transport : TransportConfig
         Transport-layer tuning.
+    serialization : SerializationConfig
+        Serialization settings for inter-node communication.
     gossip : GossipConfig
         Gossip protocol tuning.
     heartbeat : HeartbeatConfig
@@ -310,6 +361,7 @@ class CastyConfig:
     cluster: ClusterConfig | None = None
     tls: TlsConfig | None = None
     transport: TransportConfig = field(default_factory=TransportConfig)
+    serialization: SerializationConfig = field(default_factory=SerializationConfig)
     gossip: GossipConfig = field(default_factory=GossipConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
     failure_detector: FailureDetectorConfig = field(
@@ -456,6 +508,16 @@ def load_config(path: Path | None = None) -> CastyConfig:
 
     transport = TransportConfig(**raw.get("transport", {}))
 
+    serialization_raw = raw.get("serialization", {})
+    compression_raw = serialization_raw.get("compression")
+    compression = (
+        CompressionConfig(**compression_raw) if compression_raw is not None else None
+    )
+    serialization = SerializationConfig(
+        serializer=serialization_raw.get("serializer", "pickle"),
+        compression=compression,
+    )
+
     defaults_raw = raw.get("defaults", {})
     defaults_mailbox = MailboxConfig(**defaults_raw.get("mailbox", {}))
     defaults_supervision = SupervisionConfig(**defaults_raw.get("supervision", {}))
@@ -518,6 +580,7 @@ def load_config(path: Path | None = None) -> CastyConfig:
         cluster=cluster,
         tls=tls,
         transport=transport,
+        serialization=serialization,
         gossip=gossip,
         heartbeat=heartbeat,
         failure_detector=failure_detector,

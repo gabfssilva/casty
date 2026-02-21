@@ -65,6 +65,7 @@ async def _spawn_tcp(
     address_map: dict[tuple[str, int], tuple[str, int]] | None = None,
     server_ssl: ssl.SSLContext | None = None,
     client_ssl: ssl.SSLContext | None = None,
+    serializer: JsonSerializer | None = None,
 ) -> tuple[ActorRef[TcpTransportMsg], int]:
     """Spawn a ``tcp_transport`` actor and return its ref + resolved port."""
     config = TcpTransportConfig(
@@ -75,7 +76,7 @@ async def _spawn_tcp(
         client_ssl=client_ssl,
         address_map=address_map or {},
     )
-    ref = system.spawn(tcp_transport(config, handler), "_tcp")
+    ref = system.spawn(tcp_transport(config, handler, serializer=serializer), "_tcp")
     actual_port: int = await system.ask(ref, lambda r: GetPort(reply_to=r), timeout=5.0)
     return ref, actual_port
 
@@ -109,13 +110,12 @@ async def _start_remote_pair() -> tuple[
         local=local_b, serializer=serializer_b, system_name="sys-b"
     )
 
-    ref_a, port_a = await _spawn_tcp(sys_a, inbound_a)
-    ref_b, port_b = await _spawn_tcp(sys_b, inbound_b)
+    ref_a, port_a = await _spawn_tcp(sys_a, inbound_a, serializer=serializer_a)
+    ref_b, port_b = await _spawn_tcp(sys_b, inbound_b, serializer=serializer_b)
 
     remote_a = RemoteTransport(
         local=local_a,
         tcp=ref_a,
-        serializer=serializer_a,
         local_host="127.0.0.1",
         local_port=port_a,
         system_name="sys-a",
@@ -123,7 +123,6 @@ async def _start_remote_pair() -> tuple[
     remote_b = RemoteTransport(
         local=local_b,
         tcp=ref_b,
-        serializer=serializer_b,
         local_host="127.0.0.1",
         local_port=port_b,
         system_name="sys-b",
@@ -218,7 +217,6 @@ async def test_remote_transport_local_delivery() -> None:
     remote = RemoteTransport(
         local=local,
         tcp=ref,
-        serializer=JsonSerializer(TypeRegistry()),
         local_host="127.0.0.1",
         local_port=25520,
         system_name="test",
@@ -464,12 +462,11 @@ async def test_remote_transport_sender_uses_advertised_address() -> None:
     inbound = InboundMessageHandler(
         local=local, serializer=serializer, system_name="test-sys"
     )
-    ref, _ = await _spawn_tcp(sys, inbound, client_only=True)
+    ref, _ = await _spawn_tcp(sys, inbound, client_only=True, serializer=serializer)
 
     remote = RemoteTransport(
         local=local,
         tcp=ref,
-        serializer=serializer,
         local_host="127.0.0.1",
         local_port=5000,
         system_name="test-sys",

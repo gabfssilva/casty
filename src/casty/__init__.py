@@ -51,11 +51,15 @@ from casty.client.client import ClusterClient
 from casty.config import (
     ActorConfig,
     CastyConfig,
+    CompressionAlgorithm,
+    CompressionConfig,
     FailureDetectorConfig,
     GossipConfig,
     HeartbeatConfig,
     MailboxConfig,
     ResolvedActorConfig,
+    SerializationConfig,
+    SerializerKind,
     ShardingConfig,
     SupervisionConfig,
     TransportConfig,
@@ -135,6 +139,7 @@ from casty.distributed import (
     Counter,
     Dict,
     Distributed,
+    EntityGateway,
     Lock,
     Queue,
     Semaphore,
@@ -143,13 +148,16 @@ from casty.distributed import (
 from casty.core.ref import ActorRef
 from casty.remote.ref import RemoteActorRef, BroadcastRef
 from casty.remote.serialization import (
+    CompressedSerializer,
     JsonSerializer,
     PickleSerializer,
     Serializer,
     TypeRegistry,
+    build_serializer,
 )
 from casty.remote.tcp_transport import (
     ClearNodeBlacklist,
+    DeliverToNode,
     GetPort,
     InboundMessageHandler,
     MessageEnvelope,
@@ -219,6 +227,7 @@ __all__ = [
     "TcpTransportMsg",
     "tcp_transport",
     "SendToNode",
+    "DeliverToNode",
     "ClearNodeBlacklist",
     "GetPort",
     "InboundMessageHandler",
@@ -226,7 +235,9 @@ __all__ = [
     "TypeRegistry",
     "JsonSerializer",
     "PickleSerializer",
+    "CompressedSerializer",
     "Serializer",
+    "build_serializer",
     # Journal / Event Sourcing
     "EventJournal",
     "InMemoryJournal",
@@ -241,7 +252,11 @@ __all__ = [
     "load_config",
     "discover_config",
     "ActorConfig",
+    "CompressionAlgorithm",
+    "CompressionConfig",
     "MailboxConfig",
+    "SerializationConfig",
+    "SerializerKind",
     "SupervisionConfig",
     "ShardingConfig",
     "FailureDetectorConfig",
@@ -317,6 +332,7 @@ __all__ = [
     "StreamConsumerMsg",
     # Distributed Data Structures
     "Distributed",
+    "EntityGateway",
     "Barrier",
     "Counter",
     "Dict",

@@ -135,6 +135,27 @@ class ActorSystem:
         self._logger.info("Spawning root actor: %s", name)
         return cell.ref
 
+    def region_ref(
+        self,
+        key: str,
+        factory: Callable[[str], Behavior[Any]],
+        *,
+        num_shards: int,
+    ) -> ActorRef[Any]:
+        """Not supported on plain ActorSystem — use ClusteredActorSystem."""
+        msg = "region_ref() requires ClusteredActorSystem or ClusterClient"
+        raise NotImplementedError(msg)
+
+    async def entity_ask[M, R](
+        self,
+        ref: ActorRef[M],
+        msg_factory: Callable[[ActorRef[R]], M],
+        *,
+        timeout: float,
+    ) -> R:
+        """Send a message and wait for a reply (EntityGateway protocol)."""
+        return await self.ask(ref, msg_factory, timeout=timeout)
+
     async def ask[M, R](
         self,
         ref: ActorRef[M],

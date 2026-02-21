@@ -15,8 +15,8 @@ from casty.cluster.envelope import ShardEnvelope
 if TYPE_CHECKING:
     from casty.context import ActorContext
     from casty.core.journal import EventJournal
+    from casty.distributed.distributed import EntityGateway
     from casty.ref import ActorRef
-    from casty.core.system import ActorSystem
 
 
 @dataclass(frozen=True)
@@ -198,12 +198,12 @@ class Set[V]:
     def __init__(
         self,
         *,
-        system: ActorSystem,
+        gateway: EntityGateway,
         region_ref: ActorRef[ShardEnvelope[SetMsg]],
         name: str,
         timeout: float = 5.0,
     ) -> None:
-        self._system = system
+        self._gateway = gateway
         self._region_ref = region_ref
         self._name = name
         self._timeout = timeout
@@ -216,7 +216,7 @@ class Set[V]:
         bool
             ``True`` if destroyed.
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(self._name, DestroySet(reply_to=reply_to)),
             timeout=self._timeout,
@@ -235,7 +235,7 @@ class Set[V]:
         >>> await tags.add("python")
         True
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name, Add(value=value, reply_to=reply_to)
@@ -256,7 +256,7 @@ class Set[V]:
         >>> await tags.remove("python")
         True
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name, Remove(value=value, reply_to=reply_to)
@@ -276,7 +276,7 @@ class Set[V]:
         >>> await tags.contains("python")
         True
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name, SetContains(value=value, reply_to=reply_to)
@@ -296,7 +296,7 @@ class Set[V]:
         >>> await tags.size()
         1
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(self._name, SetSize(reply_to=reply_to)),
             timeout=self._timeout,

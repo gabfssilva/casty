@@ -8,6 +8,7 @@ from casty.remote.serialization import (
 )
 from casty.remote.tcp_transport import (
     ClearNodeBlacklist,
+    DeliverToNode,
     GetPort,
     InboundMessageHandler,
     MessageEnvelope,
@@ -21,6 +22,7 @@ from casty.remote.tcp_transport import (
 __all__ = [
     "BroadcastRef",
     "ClearNodeBlacklist",
+    "DeliverToNode",
     "GetPort",
     "InboundMessageHandler",
     "JsonSerializer",

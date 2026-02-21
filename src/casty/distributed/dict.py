@@ -15,8 +15,8 @@ from casty.cluster.envelope import ShardEnvelope
 if TYPE_CHECKING:
     from casty.context import ActorContext
     from casty.core.journal import EventJournal
+    from casty.distributed.distributed import EntityGateway
     from casty.ref import ActorRef
-    from casty.core.system import ActorSystem
 
 
 @dataclass(frozen=True)
@@ -175,12 +175,12 @@ class Dict[K, V]:
     def __init__(
         self,
         *,
-        system: ActorSystem,
+        gateway: EntityGateway,
         region_ref: ActorRef[ShardEnvelope[MapEntryMsg]],
         name: str,
         timeout: float = 5.0,
     ) -> None:
-        self._system = system
+        self._gateway = gateway
         self._region_ref = region_ref
         self._name = name
         self._timeout = timeout
@@ -200,7 +200,7 @@ class Dict[K, V]:
         --------
         >>> await users.put("alice", {"age": 30})
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._entity_id(key), Put(value=value, reply_to=reply_to)
@@ -227,7 +227,7 @@ class Dict[K, V]:
         >>> await users.get("alice")
         {'age': 30}
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._entity_id(key), Get(reply_to=reply_to)
@@ -248,7 +248,7 @@ class Dict[K, V]:
         >>> await users.delete("alice")
         True
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._entity_id(key), Delete(reply_to=reply_to)
@@ -268,7 +268,7 @@ class Dict[K, V]:
         >>> await users.contains("alice")
         True
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._entity_id(key), Contains(reply_to=reply_to)

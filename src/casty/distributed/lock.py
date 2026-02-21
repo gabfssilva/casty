@@ -14,8 +14,8 @@ from casty.actor import Behavior, Behaviors
 from casty.cluster.envelope import ShardEnvelope
 
 if TYPE_CHECKING:
+    from casty.distributed.distributed import EntityGateway
     from casty.ref import ActorRef
-    from casty.core.system import ActorSystem
 
 
 # ---------------------------------------------------------------------------
@@ -156,12 +156,12 @@ class Lock:
     def __init__(
         self,
         *,
-        system: ActorSystem,
+        gateway: EntityGateway,
         region_ref: ActorRef[ShardEnvelope[LockMsg]],
         name: str,
         timeout: float = 5.0,
     ) -> None:
-        self._system = system
+        self._gateway = gateway
         self._region_ref = region_ref
         self._name = name
         self._timeout = timeout
@@ -175,7 +175,7 @@ class Lock:
         bool
             ``True`` if destroyed.
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,
@@ -191,7 +191,7 @@ class Lock:
         --------
         >>> await lock.acquire()
         """
-        await self._system.ask(
+        await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,
@@ -213,7 +213,7 @@ class Lock:
         >>> await lock.try_acquire()
         True
         """
-        result: LockTryResult = await self._system.ask(
+        result: LockTryResult = await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,
@@ -236,7 +236,7 @@ class Lock:
         >>> await lock.release()
         True
         """
-        result: LockReleased = await self._system.ask(
+        result: LockReleased = await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,

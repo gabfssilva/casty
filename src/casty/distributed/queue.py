@@ -16,8 +16,8 @@ from casty.cluster.envelope import ShardEnvelope
 if TYPE_CHECKING:
     from casty.context import ActorContext
     from casty.core.journal import EventJournal
+    from casty.distributed.distributed import EntityGateway
     from casty.ref import ActorRef
-    from casty.core.system import ActorSystem
 
 
 # ---------------------------------------------------------------------------
@@ -212,12 +212,12 @@ class Queue[V]:
     def __init__(
         self,
         *,
-        system: ActorSystem,
+        gateway: EntityGateway,
         region_ref: ActorRef[ShardEnvelope[QueueMsg]],
         name: str,
         timeout: float = 5.0,
     ) -> None:
-        self._system = system
+        self._gateway = gateway
         self._region_ref = region_ref
         self._name = name
         self._timeout = timeout
@@ -230,7 +230,7 @@ class Queue[V]:
         bool
             ``True`` if destroyed.
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(self._name, DestroyQueue(reply_to=reply_to)),
             timeout=self._timeout,
@@ -243,7 +243,7 @@ class Queue[V]:
         --------
         >>> await jobs.enqueue("task-1")
         """
-        await self._system.ask(
+        await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name, Enqueue(value=value, reply_to=reply_to)
@@ -263,7 +263,7 @@ class Queue[V]:
         >>> await jobs.dequeue()
         'task-1'
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(self._name, Dequeue(reply_to=reply_to)),
             timeout=self._timeout,
@@ -281,7 +281,7 @@ class Queue[V]:
         >>> await jobs.peek()
         'task-1'
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(self._name, Peek(reply_to=reply_to)),
             timeout=self._timeout,
@@ -299,7 +299,7 @@ class Queue[V]:
         >>> await jobs.size()
         0
         """
-        return await self._system.ask(
+        return await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(self._name, QueueSize(reply_to=reply_to)),
             timeout=self._timeout,

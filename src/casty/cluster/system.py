@@ -32,7 +32,7 @@ from casty.core.system import ActorSystem
 from casty.ref import ActorRef, BroadcastRef
 from casty.remote.ref import RemoteActorRef
 from casty.core.address import ActorAddress
-from casty.remote.serialization import PickleSerializer
+from casty.remote.serialization import PickleSerializer, build_serializer
 from casty.remote.tcp_transport import (
     GetPort,
     InboundMessageHandler,
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from casty.config import CastyConfig
     from casty.distributed import Distributed
     from casty.core.journal import EventJournal
+    from casty.remote.serialization import CompressedSerializer, JsonSerializer
 
 
 class ClusteredActorSystem(ActorSystem):
@@ -116,6 +117,10 @@ class ClusteredActorSystem(ActorSystem):
         config: CastyConfig | None = None,
         tls: TlsConfig | None = None,
         required_quorum: int | None = None,
+        serializer: PickleSerializer
+        | JsonSerializer
+        | CompressedSerializer
+        | None = None,
     ) -> None:
         super().__init__(name=name, config=config)
         self._local_transport = LocalTransport()
@@ -132,7 +137,7 @@ class ClusteredActorSystem(ActorSystem):
         self._required_quorum = required_quorum
         self._logger = logging.getLogger(f"casty.cluster.{name}")
         self._tls = tls
-        self._serializer = PickleSerializer()
+        self._serializer = serializer or PickleSerializer()
         self._remote_transport: RemoteTransport | None = None
         self._tcp_ref: ActorRef[TcpTransportMsg] | None = None
 
@@ -207,6 +212,8 @@ class ClusteredActorSystem(ActorSystem):
             msg = "CastyConfig has no [cluster] section"
             raise ValueError(msg)
 
+        serializer_instance = build_serializer(config.serialization)
+
         return cls(
             name=config.system_name,
             host=host or cluster.host,
@@ -218,6 +225,7 @@ class ClusteredActorSystem(ActorSystem):
             config=config,
             tls=tls if tls is not None else config.tls,
             required_quorum=required_quorum,
+            serializer=serializer_instance,
         )
 
     async def __aenter__(self) -> ClusteredActorSystem:
@@ -233,7 +241,6 @@ class ClusteredActorSystem(ActorSystem):
                 server_ssl=self._tls.server_context if self._tls else None,
                 client_ssl=self._tls.client_context if self._tls else None,
             )
-            self._serializer = PickleSerializer()
             inbound = InboundMessageHandler(
                 local=self._local_transport,
                 serializer=self._serializer,  # pyright: ignore[reportArgumentType]
@@ -244,6 +251,7 @@ class ClusteredActorSystem(ActorSystem):
                     tcp_config,
                     inbound,
                     logger=logging.getLogger(f"casty.tcp.{self._name}"),
+                    serializer=self._serializer,  # pyright: ignore[reportArgumentType]
                 ),
                 "_tcp_transport",
             )
@@ -262,7 +270,6 @@ class ClusteredActorSystem(ActorSystem):
             self._remote_transport = RemoteTransport(
                 local=self._local_transport,
                 tcp=self._tcp_ref,
-                serializer=self._serializer,  # pyright: ignore[reportArgumentType]
                 local_host=self._host,
                 local_port=self._port,
                 system_name=self._name,
@@ -787,6 +794,33 @@ class ClusteredActorSystem(ActorSystem):
             lambda r: Find(key=key, reply_to=r),
             timeout=timeout,
         )
+
+    def region_ref(
+        self,
+        key: str,
+        factory: Callable[[str], Behavior[Any]],
+        *,
+        num_shards: int,
+    ) -> ActorRef[ShardEnvelope[Any]]:
+        """Return a ref that routes ``ShardEnvelope`` to a sharded region.
+
+        Spawns a new shard region if one with the given *key* does not
+        already exist.
+        """
+        return cast(
+            ActorRef[ShardEnvelope[Any]],
+            self.spawn(Behaviors.sharded(factory, num_shards=num_shards), key),
+        )
+
+    async def entity_ask[M, R](
+        self,
+        ref: ActorRef[M],
+        msg_factory: Callable[[ActorRef[R]], M],
+        *,
+        timeout: float,
+    ) -> R:
+        """Send a message to a sharded entity and wait for a reply."""
+        return await self.ask(ref, msg_factory, timeout=timeout)
 
     def distributed(self, *, journal: EventJournal | None = None) -> Distributed:
         """Create a ``Distributed`` facade for this system.

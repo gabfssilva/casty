@@ -38,6 +38,8 @@ from casty.core.transport import LocalTransport
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
+    from casty.distributed import Distributed
+    from casty.remote.serialization import CompressedSerializer, JsonSerializer
 
 SUBSCRIPTION_TIMEOUT = 10.0
 
@@ -491,6 +493,10 @@ class ClusterClient:
         advertised_host: str | None = None,
         advertised_port: int | None = None,
         address_map: dict[tuple[str, int], tuple[str, int]] | None = None,
+        serializer: PickleSerializer
+        | JsonSerializer
+        | CompressedSerializer
+        | None = None,
     ) -> None:
         self._contact_points = contact_points
         self._system_name = system_name
@@ -503,7 +509,7 @@ class ClusterClient:
         self._subscriber_ref: ActorRef[TopologySubscriberMsg] | None = None
         self._last_snapshot: TopologySnapshot | None = None
         self._logger = logging.getLogger(f"casty.client.{system_name}")
-        self._serializer = PickleSerializer()
+        self._serializer = serializer or PickleSerializer()
         self._system: _RemoteActorSystem | None = None
         self._remote_transport: RemoteTransport | None = None
 
@@ -539,6 +545,7 @@ class ClusterClient:
                 tcp_config,
                 inbound,
                 logger=logging.getLogger(f"casty.client.tcp.{self._system_name}"),
+                serializer=self._serializer,  # pyright: ignore[reportArgumentType]
             ),
             "_tcp_transport",
         )
@@ -559,7 +566,6 @@ class ClusterClient:
         self._remote_transport = RemoteTransport(
             local=self._system.local_transport,
             tcp=tcp_ref,
-            serializer=self._serializer,  # pyright: ignore[reportArgumentType]
             local_host=self._client_host,
             local_port=self._client_port,
             system_name=client_name,
@@ -771,3 +777,43 @@ class ClusterClient:
             return await asyncio.wait_for(future, timeout=timeout)
         finally:
             system.local_transport.unregister(temp_path)
+
+    def region_ref(
+        self,
+        key: str,
+        factory: Callable[[str], Any],
+        *,
+        num_shards: int,
+    ) -> ActorRef[ShardEnvelope[Any]]:
+        """Return a ref that routes ``ShardEnvelope`` to a cluster region.
+
+        Delegates to ``entity_ref``; *factory* is ignored because the
+        entities already exist on the cluster nodes.
+        """
+        return self.entity_ref(key, num_shards=num_shards)
+
+    async def entity_ask[M, R](
+        self,
+        ref: ActorRef[M],
+        msg_factory: Callable[[ActorRef[R]], M],
+        *,
+        timeout: float,
+    ) -> R:
+        """Send a message to a sharded entity and wait for a reply."""
+        return await self.ask(ref, msg_factory, timeout=timeout)
+
+    def distributed(self) -> Distributed:
+        """Create a ``Distributed`` facade for this client.
+
+        Returns
+        -------
+        Distributed
+
+        Examples
+        --------
+        >>> d = client.distributed()
+        >>> counter = d.counter("hits")
+        """
+        from casty.distributed import Distributed
+
+        return Distributed(self)

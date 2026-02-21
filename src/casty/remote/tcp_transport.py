@@ -79,7 +79,8 @@ class InboundMessageHandler:
     async def on_message(self, data: bytes) -> None:
         try:
             envelope = MessageEnvelope.from_bytes(data)
-            msg: object = self._serializer.deserialize(
+            msg: object = await asyncio.to_thread(
+                self._serializer.deserialize,
                 envelope.payload,
                 ref_factory=self.ref_factory,
             )
@@ -130,6 +131,12 @@ class PeerDisconnected:
 
 
 type PeerMsg = SendFrame | PeerDisconnected
+
+
+@dataclass(frozen=True)
+class SendFrameToNode:
+    data: bytes
+    peer: ActorRef[PeerMsg]
 
 
 @dataclass(frozen=True)
@@ -323,8 +330,30 @@ class GetPort:
     reply_to: ActorRef[int]
 
 
+@dataclass(frozen=True)
+class DeliverToNode:
+    host: str
+    port: int
+    msg: Any
+    target: str
+    sender: str
+
+
+@dataclass(frozen=True)
+class LogSerializationFailure:
+    address: str
+    exc: Exception
+
+
 type TcpTransportMsg = (
-    SendToNode | InboundAccepted | PeerDown | ClearNodeBlacklist | GetPort
+    SendToNode
+    | SendFrameToNode
+    | InboundAccepted
+    | PeerDown
+    | ClearNodeBlacklist
+    | GetPort
+    | DeliverToNode
+    | LogSerializationFailure
 )
 
 
@@ -332,6 +361,7 @@ def tcp_transport(
     config: TcpTransportConfig,
     handler: InboundHandler,
     logger: logging.Logger | None = None,
+    serializer: Serializer | None = None,
 ) -> Behavior[TcpTransportMsg]:
     """Actor managing TCP connections to all peers.
 
@@ -477,6 +507,10 @@ def tcp_transport(
                 msg: TcpTransportMsg,
             ) -> Behavior[TcpTransportMsg]:
                 match msg:
+                    case SendFrameToNode(data=data, peer=peer):
+                        peer.tell(SendFrame(data=data))
+                        return Behaviors.same()
+
                     case SendToNode(host=host, port=port, data=data):
                         peer_addr: NodeAddr = (host, port)
                         canonical = aliases.get(peer_addr, peer_addr)
@@ -620,6 +654,88 @@ def tcp_transport(
                             reply_to.tell(self_addr[1])
                         return Behaviors.same()
 
+                    case DeliverToNode(
+                        host=d_host,
+                        port=d_port,
+                        msg=raw_msg,
+                        target=target,
+                        sender=sender_uri,
+                    ) if serializer is not None:
+                        peer_addr_d: NodeAddr = (d_host, d_port)
+                        canonical_d = aliases.get(peer_addr_d, peer_addr_d)
+
+                        effective_bl = blacklist
+                        bl_until = blacklist.get(canonical_d)
+                        if bl_until is not None:
+                            if time.monotonic() < bl_until:
+                                return Behaviors.same()
+                            effective_bl = {
+                                k: v for k, v in blacklist.items() if k != canonical_d
+                            }
+
+                        ser = serializer
+
+                        def build_frame() -> bytes:
+                            payload = ser.serialize(raw_msg)
+                            msg_cls = raw_msg.__class__
+                            type_hint = f"{msg_cls.__module__}.{msg_cls.__qualname__}"
+                            return MessageEnvelope(
+                                target=target,
+                                sender=sender_uri,
+                                payload=payload,
+                                type_hint=type_hint,
+                            ).to_bytes()
+
+                        peer_ref_d = peers.get(canonical_d)
+                        if peer_ref_d is not None:
+                            captured_peer = peer_ref_d
+                            ctx.pipe_to_self(
+                                asyncio.to_thread(build_frame),
+                                lambda frame_data, _p=captured_peer: SendFrameToNode(
+                                    data=frame_data, peer=_p
+                                ),
+                                lambda exc: LogSerializationFailure(
+                                    address=target, exc=exc
+                                ),
+                            )
+                            return active(
+                                srv,
+                                self_addr,
+                                peers,
+                                aliases,
+                                effective_bl,
+                                next_id,
+                            )
+
+                        ctx.pipe_to_self(
+                            asyncio.to_thread(build_frame),
+                            lambda frame_data: SendToNode(
+                                host=d_host, port=d_port, data=frame_data
+                            ),
+                            lambda exc: LogSerializationFailure(
+                                address=target, exc=exc
+                            ),
+                        )
+                        return active(
+                            srv,
+                            self_addr,
+                            peers,
+                            aliases,
+                            effective_bl,
+                            next_id,
+                        )
+
+                    case LogSerializationFailure(address=fail_addr, exc=fail_exc):
+                        log.warning(
+                            "Serialization failed for %s: %s",
+                            fail_addr,
+                            fail_exc,
+                        )
+                        return Behaviors.same()
+
+                    case _:
+                        return Behaviors.same()
+
             return Behaviors.receive(receive)
 
         async def post_stop(ctx: ActorContext[TcpTransportMsg]) -> None:
@@ -646,7 +762,6 @@ class RemoteTransport:
         *,
         local: LocalTransport,
         tcp: ActorRef[TcpTransportMsg],
-        serializer: Serializer,
         local_host: str,
         local_port: int,
         system_name: str,
@@ -658,7 +773,6 @@ class RemoteTransport:
     ) -> None:
         self._local = local
         self._tcp = tcp
-        self._serializer = serializer
         self._local_host = local_host
         self._local_port = local_port
         self._advertised_host = advertised_host
@@ -739,26 +853,15 @@ class RemoteTransport:
                 "Cannot send to address without host:port: %s", address
             )
             return
-        try:
-            payload = self._serializer.serialize(msg)
-            msg_cls = msg.__class__
-            type_name = f"{msg_cls.__module__}.{msg_cls.__qualname__}"
-            envelope = MessageEnvelope(
+        self._tcp.tell(
+            DeliverToNode(
+                host=host,
+                port=port,
+                msg=msg,
                 target=address.to_uri(),
                 sender=f"casty://{self._system_name}@{self.sender_host}:{self.sender_port}/",
-                payload=payload,
-                type_hint=type_name,
             )
-            self._logger.debug(
-                "Sending %s -> %s:%d%s", type_name, host, port, address.path
-            )
-            self._tcp.tell(SendToNode(host=host, port=port, data=envelope.to_bytes()))
-        except Exception:
-            self._logger.warning(
-                "Failed to serialize message to %s", address, exc_info=True
-            )
-            if self._on_send_failure is not None:
-                self._on_send_failure(host, port)
+        )
 
     def make_ref(self, address: ActorAddress) -> RemoteActorRef[Any]:
         """Create an ``ActorRef`` with the appropriate transport for the address."""

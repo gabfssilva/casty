@@ -14,11 +14,14 @@ from casty.cluster.state import (
 )
 from casty.ref import ActorRef
 from casty.remote.ref import RemoteActorRef
+from casty.config import CompressionConfig, SerializationConfig
 from casty.remote.serialization import (
+    CompressedSerializer,
     JsonSerializer,
     PickleSerializer,
     Serializer,
     TypeRegistry,
+    build_serializer,
 )
 from casty.cluster import ShardEnvelope
 from casty.core.transport import LocalTransport
@@ -415,3 +418,106 @@ def test_pickle_full_cluster_state_roundtrip() -> None:
     assert node2 in restored.unreachable
     assert restored.version.version_of(node1) == 1
     assert restored.version.version_of(node2) == 1
+
+
+# --- CompressedSerializer and build_serializer tests ---
+
+
+class TestCompressedSerializer:
+    @pytest.mark.parametrize("algorithm", ["zlib", "gzip", "bz2", "lzma"])
+    def test_roundtrip_pickle_all_algorithms(self, algorithm: str) -> None:
+        inner = PickleSerializer()
+        config = CompressionConfig(algorithm=algorithm, level=6)  # type: ignore[arg-type]
+        serializer = CompressedSerializer(inner, config)
+        original = Greet(name="Alice")
+        data = serializer.serialize(original)
+        restored = serializer.deserialize(data)
+        assert restored == original
+
+    @pytest.mark.parametrize("algorithm", ["zlib", "gzip", "bz2", "lzma"])
+    def test_roundtrip_json_all_algorithms(self, algorithm: str) -> None:
+        registry = TypeRegistry()
+        registry.register(Greet)
+        inner = JsonSerializer(registry)
+        config = CompressionConfig(algorithm=algorithm, level=6)  # type: ignore[arg-type]
+        serializer = CompressedSerializer(inner, config)
+        original = Greet(name="Alice")
+        data = serializer.serialize(original)
+        restored = serializer.deserialize(data)
+        assert restored == original
+
+    def test_compression_reduces_size(self) -> None:
+        inner = PickleSerializer()
+        config = CompressionConfig(algorithm="zlib", level=9)
+        serializer = CompressedSerializer(inner, config)
+        large_payload = Greet(name="A" * 10_000)
+        raw = inner.serialize(large_payload)
+        compressed = serializer.serialize(large_payload)
+        assert len(compressed) < len(raw)
+
+    def test_level_1_vs_level_9(self) -> None:
+        inner = PickleSerializer()
+        large_payload = Greet(name="B" * 10_000)
+        low = CompressedSerializer(inner, CompressionConfig(level=1))
+        high = CompressedSerializer(inner, CompressionConfig(level=9))
+        data_low = low.serialize(large_payload)
+        data_high = high.serialize(large_payload)
+        assert low.deserialize(data_low) == large_payload
+        assert high.deserialize(data_high) == large_payload
+        assert len(data_high) <= len(data_low)
+
+    def test_implements_protocol(self) -> None:
+        inner = PickleSerializer()
+        config = CompressionConfig()
+        serializer = CompressedSerializer(inner, config)
+        assert isinstance(serializer, Serializer)
+
+    def test_ref_factory_passes_through(self) -> None:
+        inner = PickleSerializer()
+        config = CompressionConfig()
+        serializer = CompressedSerializer(inner, config)
+        reply_ref: ActorRef[ShardLocation] = RemoteActorRef(
+            address=ActorAddress(
+                system="test", path="/reply", host="127.0.0.1", port=25521
+            ),
+            _transport=LocalTransport(),
+        )
+        msg = GetShardLocation(shard_id=7, reply_to=reply_ref)
+        data = serializer.serialize(msg)
+        restored = serializer.deserialize(data, ref_factory=_ref_factory)
+        assert isinstance(restored, GetShardLocation)
+        assert restored.shard_id == 7
+        assert isinstance(restored.reply_to, RemoteActorRef)
+
+
+class TestBuildSerializer:
+    def test_pickle_no_compression(self) -> None:
+        config = SerializationConfig(serializer="pickle")
+        ser = build_serializer(config)
+        assert isinstance(ser, PickleSerializer)
+
+    def test_json_no_compression(self) -> None:
+        registry = TypeRegistry()
+        config = SerializationConfig(serializer="json")
+        ser = build_serializer(config, registry=registry)
+        assert isinstance(ser, JsonSerializer)
+
+    def test_pickle_with_compression(self) -> None:
+        config = SerializationConfig(
+            serializer="pickle",
+            compression=CompressionConfig(algorithm="zlib", level=9),
+        )
+        ser = build_serializer(config)
+        assert isinstance(ser, CompressedSerializer)
+
+    def test_json_with_compression(self) -> None:
+        registry = TypeRegistry()
+        registry.register(Greet)
+        config = SerializationConfig(
+            serializer="json",
+            compression=CompressionConfig(algorithm="gzip", level=3),
+        )
+        ser = build_serializer(config, registry=registry)
+        assert isinstance(ser, CompressedSerializer)
+        original = Greet(name="test")
+        assert ser.deserialize(ser.serialize(original)) == original

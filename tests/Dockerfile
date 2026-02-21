@@ -4,4 +4,4 @@ COPY . /app
 WORKDIR /app
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
 RUN uv sync --no-dev
-ENTRYPOINT ["uv", "run", "python"]
+ENTRYPOINT [".venv/bin/python"]

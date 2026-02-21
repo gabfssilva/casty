@@ -2,6 +2,11 @@ x-node: &node
   build:
     context: ..
     dockerfile: tests/Dockerfile
+  deploy:
+    resources:
+      limits:
+        cpus: "1"
+        memory: 1g
   command:
     [
       "tests/cluster_node.py",

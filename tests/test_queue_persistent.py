@@ -37,7 +37,7 @@ async def test_persistent_queue_multinode_recovery() -> None:
         )
         await asyncio.sleep(0.1)
 
-        q: Queue[str] = Queue(system=system_a, region_ref=region_ref, name="work")
+        q: Queue[str] = Queue(gateway=system_a, region_ref=region_ref, name="work")
         await q.enqueue("job-1")
         await q.enqueue("job-2")
         await q.enqueue("job-3")
@@ -64,7 +64,7 @@ async def test_persistent_queue_multinode_recovery() -> None:
         )
         await asyncio.sleep(0.1)
 
-        q: Queue[str] = Queue(system=system_b, region_ref=region_ref, name="work")
+        q: Queue[str] = Queue(gateway=system_b, region_ref=region_ref, name="work")
         assert await q.size() == 3
         assert await q.peek() == "job-1"
         assert await q.dequeue() == "job-1"
@@ -100,7 +100,7 @@ async def test_persistent_queue_partial_dequeue_recovery() -> None:
         )
         await asyncio.sleep(0.1)
 
-        q: Queue[str] = Queue(system=system_a, region_ref=region_ref, name="tasks")
+        q: Queue[str] = Queue(gateway=system_a, region_ref=region_ref, name="tasks")
         await q.enqueue("a")
         await q.enqueue("b")
         await q.enqueue("c")
@@ -128,7 +128,7 @@ async def test_persistent_queue_partial_dequeue_recovery() -> None:
         )
         await asyncio.sleep(0.1)
 
-        q: Queue[str] = Queue(system=system_b, region_ref=region_ref, name="tasks")
+        q: Queue[str] = Queue(gateway=system_b, region_ref=region_ref, name="tasks")
         assert await q.size() == 2
         assert await q.dequeue() == "b"
         assert await q.dequeue() == "c"

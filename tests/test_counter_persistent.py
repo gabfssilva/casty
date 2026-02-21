@@ -37,7 +37,7 @@ async def test_persistent_counter_survives_replay() -> None:
         await asyncio.sleep(0.1)
 
         counter = Counter(
-            system=system, region_ref=region_ref, name="hits", timeout=5.0
+            gateway=system, region_ref=region_ref, name="hits", timeout=5.0
         )
 
         val = await counter.increment(5)
@@ -71,7 +71,7 @@ async def test_persistent_counter_survives_replay() -> None:
         await asyncio.sleep(0.1)
 
         counter = Counter(
-            system=system, region_ref=region_ref, name="hits", timeout=5.0
+            gateway=system, region_ref=region_ref, name="hits", timeout=5.0
         )
 
         # Should recover to 8 from journal events
@@ -106,7 +106,7 @@ async def test_persistent_counter_decrement_survives_replay() -> None:
         await asyncio.sleep(0.1)
 
         counter = Counter(
-            system=system, region_ref=region_ref, name="score", timeout=5.0
+            gateway=system, region_ref=region_ref, name="score", timeout=5.0
         )
 
         val = await counter.increment(10)
@@ -137,7 +137,7 @@ async def test_persistent_counter_decrement_survives_replay() -> None:
         await asyncio.sleep(0.1)
 
         counter = Counter(
-            system=system, region_ref=region_ref, name="score", timeout=5.0
+            gateway=system, region_ref=region_ref, name="score", timeout=5.0
         )
 
         val = await counter.get()
@@ -174,7 +174,7 @@ async def test_persistent_counter_events_in_journal() -> None:
         await asyncio.sleep(0.1)
 
         counter = Counter(
-            system=system, region_ref=region_ref, name="metrics", timeout=5.0
+            gateway=system, region_ref=region_ref, name="metrics", timeout=5.0
         )
 
         await counter.increment(5)
