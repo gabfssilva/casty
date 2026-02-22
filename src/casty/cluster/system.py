@@ -120,7 +120,7 @@ class ClusteredActorSystem(ActorSystem):
         serializer: PickleSerializer
         | JsonSerializer
         | CompressedSerializer
-        | None = None,
+        | Any = None,
     ) -> None:
         super().__init__(name=name, config=config)
         self._local_transport = LocalTransport()

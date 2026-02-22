@@ -521,3 +521,170 @@ class TestBuildSerializer:
         assert isinstance(ser, CompressedSerializer)
         original = Greet(name="test")
         assert ser.deserialize(ser.serialize(original)) == original
+
+
+# --- MsgpackSerializer tests ---
+
+msgpack = pytest.importorskip("msgpack")
+
+from casty.remote.extras import (  # noqa: E402
+    CloudPickleSerializer,
+    Lz4CompressedSerializer,
+    MsgpackSerializer,
+)
+
+
+class TestMsgpackSerializer:
+    def test_implements_protocol(self) -> None:
+        ser = MsgpackSerializer(TypeRegistry())
+        assert isinstance(ser, Serializer)
+
+    def test_roundtrip_simple(self) -> None:
+        registry = TypeRegistry()
+        registry.register(Greet)
+        ser = MsgpackSerializer(registry)
+        original = Greet(name="Alice")
+        assert ser.deserialize(ser.serialize(original)) == original
+
+    def test_nested_dataclass_roundtrip(self) -> None:
+        ser = MsgpackSerializer(_make_registry())
+        inner = UserGreet(name="Alice", count=42)
+        envelope = ShardEnvelope(entity_id="user-1", message=inner)
+        restored = ser.deserialize(ser.serialize(envelope), ref_factory=_ref_factory)
+        assert isinstance(restored, ShardEnvelope)
+        assert restored.message == inner
+
+    def test_actor_ref_roundtrip(self) -> None:
+        ser = MsgpackSerializer(_make_registry())
+        reply_ref: ActorRef[ShardLocation] = RemoteActorRef(
+            address=ActorAddress(
+                system="test", path="/reply", host="127.0.0.1", port=25521
+            ),
+            _transport=LocalTransport(),
+        )
+        msg = GetShardLocation(shard_id=7, reply_to=reply_ref)
+        restored = ser.deserialize(ser.serialize(msg), ref_factory=_ref_factory)
+        assert isinstance(restored, GetShardLocation)
+        assert restored.shard_id == 7
+        assert isinstance(restored.reply_to, RemoteActorRef)
+
+    def test_frozenset_roundtrip(self) -> None:
+        ser = MsgpackSerializer(_make_registry())
+        node1 = NodeAddress(host="127.0.0.1", port=25520)
+        node2 = NodeAddress(host="127.0.0.1", port=25521)
+        member1 = Member(
+            id="node-1", address=node1, status=MemberStatus.up, roles=frozenset({"web"})
+        )
+        member2 = Member(
+            id="node-2",
+            address=node2,
+            status=MemberStatus.joining,
+            roles=frozenset({"worker"}),
+        )
+        state = ClusterState(members=frozenset({member1, member2}))
+        restored = ser.deserialize(ser.serialize(state), ref_factory=_ref_factory)
+        assert isinstance(restored, ClusterState)
+        assert len(restored.members) == 2
+
+    def test_output_is_smaller_than_json(self) -> None:
+        registry = TypeRegistry()
+        json_ser = JsonSerializer(registry)
+        msgpack_ser = MsgpackSerializer(registry)
+        large = Greet(name="A" * 1_000)
+        assert len(msgpack_ser.serialize(large)) < len(json_ser.serialize(large))
+
+
+# --- CloudPickleSerializer tests ---
+
+cloudpickle = pytest.importorskip("cloudpickle")
+
+
+class TestCloudPickleSerializer:
+    def test_implements_protocol(self) -> None:
+        ser = CloudPickleSerializer()
+        assert isinstance(ser, Serializer)
+
+    def test_roundtrip_simple(self) -> None:
+        ser = CloudPickleSerializer()
+        original = Greet(name="Alice")
+        assert ser.deserialize(ser.serialize(original)) == original
+
+    def test_roundtrip_lambda(self) -> None:
+        ser = CloudPickleSerializer()
+        fn = lambda x: x + 1  # noqa: E731
+        restored = ser.deserialize(ser.serialize(fn))
+        assert restored(41) == 42
+
+    def test_nested_dataclass_roundtrip(self) -> None:
+        ser = CloudPickleSerializer()
+        inner = UserGreet(name="Alice", count=42)
+        envelope = ShardEnvelope(entity_id="user-1", message=inner)
+        restored = ser.deserialize(ser.serialize(envelope))
+        assert isinstance(restored, ShardEnvelope)
+        assert restored.message == inner
+
+    def test_actor_ref_roundtrip(self) -> None:
+        ser = CloudPickleSerializer()
+        reply_ref: ActorRef[ShardLocation] = RemoteActorRef(
+            address=ActorAddress(
+                system="test", path="/reply", host="127.0.0.1", port=25521
+            ),
+            _transport=LocalTransport(),
+        )
+        msg = GetShardLocation(shard_id=7, reply_to=reply_ref)
+        restored = ser.deserialize(ser.serialize(msg), ref_factory=_ref_factory)
+        assert isinstance(restored, GetShardLocation)
+        assert restored.shard_id == 7
+        assert isinstance(restored.reply_to, RemoteActorRef)
+
+
+# --- Lz4CompressedSerializer tests ---
+
+lz4 = pytest.importorskip("lz4")
+
+
+class TestLz4CompressedSerializer:
+    def test_implements_protocol(self) -> None:
+        ser = Lz4CompressedSerializer(PickleSerializer())
+        assert isinstance(ser, Serializer)
+
+    def test_roundtrip_with_pickle(self) -> None:
+        ser = Lz4CompressedSerializer(PickleSerializer())
+        original = Greet(name="Alice")
+        assert ser.deserialize(ser.serialize(original)) == original
+
+    def test_roundtrip_with_json(self) -> None:
+        registry = TypeRegistry()
+        registry.register(Greet)
+        ser = Lz4CompressedSerializer(JsonSerializer(registry))
+        original = Greet(name="Alice")
+        assert ser.deserialize(ser.serialize(original)) == original
+
+    def test_roundtrip_with_msgpack(self) -> None:
+        registry = TypeRegistry()
+        registry.register(Greet)
+        ser = Lz4CompressedSerializer(MsgpackSerializer(registry))
+        original = Greet(name="Alice")
+        assert ser.deserialize(ser.serialize(original)) == original
+
+    def test_compression_reduces_size(self) -> None:
+        inner = PickleSerializer()
+        ser = Lz4CompressedSerializer(inner)
+        large = Greet(name="A" * 10_000)
+        raw = inner.serialize(large)
+        compressed = ser.serialize(large)
+        assert len(compressed) < len(raw)
+
+    def test_ref_factory_passes_through(self) -> None:
+        ser = Lz4CompressedSerializer(PickleSerializer())
+        reply_ref: ActorRef[ShardLocation] = RemoteActorRef(
+            address=ActorAddress(
+                system="test", path="/reply", host="127.0.0.1", port=25521
+            ),
+            _transport=LocalTransport(),
+        )
+        msg = GetShardLocation(shard_id=7, reply_to=reply_ref)
+        restored = ser.deserialize(ser.serialize(msg), ref_factory=_ref_factory)
+        assert isinstance(restored, GetShardLocation)
+        assert restored.shard_id == 7
+        assert isinstance(restored.reply_to, RemoteActorRef)

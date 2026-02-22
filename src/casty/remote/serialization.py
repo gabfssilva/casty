@@ -236,7 +236,7 @@ class JsonSerializer:
         bytes
             UTF-8 encoded JSON.
         """
-        payload = self._to_dict(obj)
+        payload = self.to_dict(obj)
         return json.dumps(payload).encode("utf-8")
 
     def deserialize[M, R](
@@ -259,9 +259,9 @@ class JsonSerializer:
         Any
         """
         payload: object = json.loads(data.decode("utf-8"))
-        return self._from_dict(payload, ref_factory=ref_factory)
+        return self.from_dict(payload, ref_factory=ref_factory)
 
-    def _to_dict(self, value: Any) -> object:
+    def to_dict(self, value: Any) -> object:
         from casty.remote.ref import RemoteActorRef
 
         match value:
@@ -276,7 +276,7 @@ class JsonSerializer:
             case frozenset():
                 return {
                     "__frozenset__": [
-                        self._to_dict(item) for item in cast(frozenset[object], value)
+                        self.to_dict(item) for item in cast(frozenset[object], value)
                     ]
                 }
             case _ if dataclasses.is_dataclass(value) and not isinstance(value, type):
@@ -284,27 +284,27 @@ class JsonSerializer:
                 result: dict[str, object] = {"_type": type_name}
                 for f in dataclasses.fields(value):
                     field_value: object = getattr(value, f.name)
-                    result[f.name] = self._to_dict(field_value)
+                    result[f.name] = self.to_dict(field_value)
                 return result
             case dict():
                 return {
                     "__dict__": [
-                        [self._to_dict(k), self._to_dict(v)]
+                        [self.to_dict(k), self.to_dict(v)]
                         for k, v in cast(dict[object, object], value).items()
                     ]
                 }
             case list():
-                return [self._to_dict(item) for item in cast(list[object], value)]
+                return [self.to_dict(item) for item in cast(list[object], value)]
             case tuple():
                 return {
                     "__tuple__": [
-                        self._to_dict(item) for item in cast(tuple[object, ...], value)
+                        self.to_dict(item) for item in cast(tuple[object, ...], value)
                     ]
                 }
             case _:
                 return value
 
-    def _from_dict[R](
+    def from_dict[R](
         self,
         value: object,
         *,
@@ -323,12 +323,12 @@ class JsonSerializer:
             case {"__frozenset__": list() as _fs}:  # pyright: ignore[reportUnknownVariableType]
                 items = cast(list[object], _fs)
                 return frozenset(
-                    self._from_dict(item, ref_factory=ref_factory) for item in items
+                    self.from_dict(item, ref_factory=ref_factory) for item in items
                 )
             case {"__dict__": list() as _pairs}:  # pyright: ignore[reportUnknownVariableType]
                 pairs = cast(list[list[object]], _pairs)
                 return {
-                    self._from_dict(pair[0], ref_factory=ref_factory): self._from_dict(
+                    self.from_dict(pair[0], ref_factory=ref_factory): self.from_dict(
                         pair[1], ref_factory=ref_factory
                     )
                     for pair in pairs
@@ -336,7 +336,7 @@ class JsonSerializer:
             case {"__tuple__": list() as _tup}:  # pyright: ignore[reportUnknownVariableType]
                 items = cast(list[object], _tup)
                 return tuple(
-                    self._from_dict(item, ref_factory=ref_factory) for item in items
+                    self.from_dict(item, ref_factory=ref_factory) for item in items
                 )
             case {"_type": str() as type_name}:
                 cls = self._registry.resolve(type_name)
@@ -345,7 +345,7 @@ class JsonSerializer:
                 kwargs: dict[str, Any] = {}
                 for f in fields:
                     if f.name in str_dict:
-                        kwargs[f.name] = self._from_dict(
+                        kwargs[f.name] = self.from_dict(
                             str_dict[f.name], ref_factory=ref_factory
                         )
                 return cls(**kwargs)
@@ -353,7 +353,7 @@ class JsonSerializer:
                 return cast(dict[str, object], value)
             case list():
                 return [
-                    self._from_dict(item, ref_factory=ref_factory)
+                    self.from_dict(item, ref_factory=ref_factory)
                     for item in cast(list[object], value)
                 ]
             case _:
@@ -445,6 +445,12 @@ def _build_codec(
                 lambda data: lzma.compress(data, preset=config.level),
                 lzma.decompress,
             )
+        case "lz4":
+            lz4_frame = importlib.import_module("lz4.frame")
+            return (
+                lambda data: lz4_frame.compress(data, compression_level=config.level),
+                lz4_frame.decompress,
+            )
 
 
 class CompressedSerializer:
@@ -456,7 +462,7 @@ class CompressedSerializer:
 
     Parameters
     ----------
-    inner : PickleSerializer | JsonSerializer
+    inner : Serializer
         The underlying serializer to wrap.
     config : CompressionConfig
         Compression algorithm and level settings.
@@ -471,7 +477,7 @@ class CompressedSerializer:
 
     def __init__(
         self,
-        inner: PickleSerializer | JsonSerializer,
+        inner: PickleSerializer | JsonSerializer | Any,
         config: CompressionConfig,
     ) -> None:
         self._inner = inner
@@ -518,7 +524,7 @@ def build_serializer(
     config: SerializationConfig,
     *,
     registry: TypeRegistry | None = None,
-) -> PickleSerializer | JsonSerializer | CompressedSerializer:
+) -> PickleSerializer | JsonSerializer | CompressedSerializer | Any:
     """Build a ``Serializer`` chain from configuration.
 
     Parameters
@@ -539,12 +545,18 @@ def build_serializer(
     >>> config = SerializationConfig(compression=CompressionConfig(level=9))
     >>> ser = build_serializer(config)
     """
-    inner: PickleSerializer | JsonSerializer
+    from casty.remote.extras import CloudPickleSerializer, MsgpackSerializer
+
+    inner: PickleSerializer | JsonSerializer | MsgpackSerializer | CloudPickleSerializer
     match config.serializer:
         case "pickle":
             inner = PickleSerializer()
         case "json":
             inner = JsonSerializer(registry or TypeRegistry())
+        case "msgpack":
+            inner = MsgpackSerializer(registry)
+        case "cloudpickle":
+            inner = CloudPickleSerializer()
 
     if config.compression is not None:
         return CompressedSerializer(inner, config.compression)

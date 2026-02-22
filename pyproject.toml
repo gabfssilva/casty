@@ -23,6 +23,15 @@ classifiers = [
 performance = [
     "uvloop>=0.22.1",
 ]
+msgpack = [
+    "msgpack>=1.0",
+]
+cloudpickle = [
+    "cloudpickle>=3.0",
+]
+lz4 = [
+    "lz4>=4.0",
+]
 
 [project.urls]
 Homepage = "https://gabfssilva.github.io/casty/"
@@ -56,6 +65,8 @@ dev = [
     "trustme>=1.2.1",
     "asyncssh>=2.22.0",
     "cloudpickle>=3.1.2",
+    "msgpack>=1.0",
+    "lz4>=4.0",
 ]
 docs = [
     "mkdocs-gen-files>=0.6.0",

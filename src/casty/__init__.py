@@ -155,6 +155,11 @@ from casty.remote.serialization import (
     TypeRegistry,
     build_serializer,
 )
+from casty.remote.extras import (
+    CloudPickleSerializer,
+    Lz4CompressedSerializer,
+    MsgpackSerializer,
+)
 from casty.remote.tcp_transport import (
     ClearNodeBlacklist,
     DeliverToNode,
@@ -238,6 +243,9 @@ __all__ = [
     "CompressedSerializer",
     "Serializer",
     "build_serializer",
+    "MsgpackSerializer",
+    "CloudPickleSerializer",
+    "Lz4CompressedSerializer",
     # Journal / Event Sourcing
     "EventJournal",
     "InMemoryJournal",

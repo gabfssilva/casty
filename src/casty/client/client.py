@@ -496,7 +496,7 @@ class ClusterClient:
         serializer: PickleSerializer
         | JsonSerializer
         | CompressedSerializer
-        | None = None,
+        | Any = None,
     ) -> None:
         self._contact_points = contact_points
         self._system_name = system_name

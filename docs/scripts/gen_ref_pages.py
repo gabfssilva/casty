@@ -50,6 +50,7 @@ MODULE_TO_PAGE: dict[str, tuple[str, str]] = {
     "casty.core.transport": ("reference/transport.md", "Transport"),
     "casty.remote.tcp_transport": ("reference/transport.md", "Transport"),
     "casty.remote.serialization": ("reference/serialization.md", "Serialization"),
+    "casty.remote.extras": ("reference/serialization.md", "Serialization"),
     "casty.config": ("reference/config.md", "Configuration"),
     "casty.core.task_runner": ("reference/task-runner.md", "Task Runner"),
     "casty.core.streams": ("reference/streams.md", "Streams"),
