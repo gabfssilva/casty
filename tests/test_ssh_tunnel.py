@@ -103,16 +103,17 @@ async def test_client_through_ssh_forward_tunnel() -> None:
                 # tunnel endpoint. The topology snapshot will report the real
                 # node address ("127.0.0.1", cluster_port), which also needs
                 # mapping through the tunnel.
+                tunnel_map = {
+                    ("10.99.99.1", 25520): ("127.0.0.1", tunnel_port),
+                    ("127.0.0.1", cluster_port): (
+                        "127.0.0.1",
+                        tunnel_port,
+                    ),
+                }
                 async with ClusterClient(
                     contact_points=[("10.99.99.1", 25520)],
                     system_name="tunnel-cluster",
-                    address_map={
-                        ("10.99.99.1", 25520): ("127.0.0.1", tunnel_port),
-                        ("127.0.0.1", cluster_port): (
-                            "127.0.0.1",
-                            tunnel_port,
-                        ),
-                    },
+                    address_map=lambda addr: tunnel_map.get(addr, addr),
                 ) as client:
                     await asyncio.sleep(1.5)
 
@@ -171,16 +172,17 @@ async def test_client_multiple_asks_through_tunnel() -> None:
                 )
                 tunnel_port = listener.get_port()
 
+                tunnel_map = {
+                    ("10.99.99.1", 25520): ("127.0.0.1", tunnel_port),
+                    ("127.0.0.1", cluster_port): (
+                        "127.0.0.1",
+                        tunnel_port,
+                    ),
+                }
                 async with ClusterClient(
                     contact_points=[("10.99.99.1", 25520)],
                     system_name="tunnel-cluster",
-                    address_map={
-                        ("10.99.99.1", 25520): ("127.0.0.1", tunnel_port),
-                        ("127.0.0.1", cluster_port): (
-                            "127.0.0.1",
-                            tunnel_port,
-                        ),
-                    },
+                    address_map=lambda addr: tunnel_map.get(addr, addr),
                 ) as client:
                     await asyncio.sleep(1.5)
 

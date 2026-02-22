@@ -492,7 +492,7 @@ class ClusterClient:
         client_port: int = 0,
         advertised_host: str | None = None,
         advertised_port: int | None = None,
-        address_map: dict[tuple[str, int], tuple[str, int]] | None = None,
+        address_map: Callable[[tuple[str, int]], tuple[str, int]] | None = None,
         serializer: PickleSerializer
         | JsonSerializer
         | CompressedSerializer
@@ -533,7 +533,7 @@ class ClusterClient:
             port=self._client_port,
             self_address=(effective_host, effective_port),
             client_only=True,
-            address_map=self._address_map or {},
+            address_map=self._address_map or (lambda addr: addr),
         )
         inbound = InboundMessageHandler(
             local=self._system.local_transport,

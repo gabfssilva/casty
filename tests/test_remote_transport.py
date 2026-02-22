@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ssl
 import struct
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pytest
@@ -62,7 +63,7 @@ async def _spawn_tcp(
     host: str = "127.0.0.1",
     port: int = 0,
     client_only: bool = False,
-    address_map: dict[tuple[str, int], tuple[str, int]] | None = None,
+    address_map: Callable[[tuple[str, int]], tuple[str, int]] | None = None,
     server_ssl: ssl.SSLContext | None = None,
     client_ssl: ssl.SSLContext | None = None,
     serializer: JsonSerializer | None = None,
@@ -74,7 +75,7 @@ async def _spawn_tcp(
         client_only=client_only,
         server_ssl=server_ssl,
         client_ssl=client_ssl,
-        address_map=address_map or {},
+        address_map=address_map or (lambda addr: addr),
     )
     ref = system.spawn(tcp_transport(config, handler, serializer=serializer), "_tcp")
     actual_port: int = await system.ask(ref, lambda r: GetPort(reply_to=r), timeout=5.0)
@@ -424,7 +425,9 @@ async def test_tcp_address_map_translates_on_send() -> None:
         sys,
         handler,
         client_only=True,
-        address_map={("10.0.1.10", 25520): ("127.0.0.1", actual_port)},
+        address_map=lambda addr: {("10.0.1.10", 25520): ("127.0.0.1", actual_port)}.get(
+            addr, addr
+        ),
     )
 
     try:

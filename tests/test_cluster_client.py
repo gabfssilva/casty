@@ -797,12 +797,11 @@ async def test_client_routes_through_address_map() -> None:
         await asyncio.sleep(0.3)
 
         # Map a fake logical address to the real cluster port
+        mapping = {("10.99.99.1", 25520): ("127.0.0.1", real_port)}
         async with ClusterClient(
             contact_points=[("10.99.99.1", 25520)],
             system_name="cluster",
-            address_map={
-                ("10.99.99.1", 25520): ("127.0.0.1", real_port),
-            },
+            address_map=lambda addr: mapping.get(addr, addr),
         ) as client:
             await asyncio.sleep(1.0)
 
@@ -834,12 +833,11 @@ async def test_client_ask_through_address_map() -> None:
         )
         await asyncio.sleep(0.3)
 
+        mapping = {("10.99.99.1", 25520): ("127.0.0.1", real_port)}
         async with ClusterClient(
             contact_points=[("10.99.99.1", 25520)],
             system_name="cluster",
-            address_map={
-                ("10.99.99.1", 25520): ("127.0.0.1", real_port),
-            },
+            address_map=lambda addr: mapping.get(addr, addr),
         ) as client:
             await asyncio.sleep(1.0)
 

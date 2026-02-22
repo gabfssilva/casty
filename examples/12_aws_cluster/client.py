@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 import cyclopts
@@ -29,15 +29,16 @@ def build_address_map(
     node_count: int,
     casty_port: int = CASTY_PORT,
     local_base_port: int = LOCAL_BASE_PORT,
-) -> dict[tuple[str, int], tuple[str, int]]:
+) -> Callable[[tuple[str, int]], tuple[str, int]]:
     """Map each node's private address to a localhost tunnel port.
 
     Assumes manual SSH tunnels: ``-L {local_base_port+i}:10.0.1.{10+i}:{casty_port}``
     """
-    return {
+    mapping = {
         (f"10.0.1.{10 + i}", casty_port): ("127.0.0.1", local_base_port + i)
         for i in range(node_count)
     }
+    return lambda addr: mapping.get(addr, addr)
 
 
 @asynccontextmanager

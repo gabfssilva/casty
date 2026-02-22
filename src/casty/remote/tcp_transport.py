@@ -40,7 +40,11 @@ if TYPE_CHECKING:
     from casty.remote.ref import RemoteActorRef
 
 type NodeAddr = tuple[str, int]
-type AddressMap = dict[NodeAddr, NodeAddr]
+type AddressMap = Callable[[NodeAddr], NodeAddr]
+
+
+def _identity_address(addr: NodeAddr) -> NodeAddr:
+    return addr
 
 
 class HandshakePayload(TypedDict):
@@ -302,7 +306,7 @@ class TcpTransportConfig:
     client_ssl: ssl.SSLContext | None = None
     connect_timeout: float = 2.0
     blacklist_duration: float = 5.0
-    address_map: AddressMap = field(default_factory=lambda: {})
+    address_map: AddressMap = field(default_factory=lambda: _identity_address)
 
 
 @dataclass(frozen=True)
@@ -379,7 +383,7 @@ def tcp_transport(
         self_addr: NodeAddr,
         cfg: TcpTransportConfig,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, NodeAddr] | None:
-        actual_host, actual_port = cfg.address_map.get(peer_addr, peer_addr)
+        actual_host, actual_port = cfg.address_map(peer_addr)
         log.debug("TCP connect -> %s:%d", actual_host, actual_port)
         try:
             reader, writer = await asyncio.wait_for(
