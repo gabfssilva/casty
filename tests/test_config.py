@@ -30,13 +30,13 @@ from casty.core.replication import ReplicationConfig
 class TestMailboxConfig:
     def test_defaults(self) -> None:
         cfg = MailboxConfig()
-        assert cfg.capacity == 1000
+        assert cfg.capacity is None
         assert cfg.strategy == "drop_new"
 
     def test_custom(self) -> None:
-        cfg = MailboxConfig(capacity=500, strategy="backpressure")
+        cfg = MailboxConfig(capacity=500, strategy="reject")
         assert cfg.capacity == 500
-        assert cfg.strategy == "backpressure"
+        assert cfg.strategy == "reject"
 
     def test_frozen(self) -> None:
         cfg = MailboxConfig()
@@ -214,12 +214,12 @@ class TestResolveActor:
             replication_overrides={},
         )
         cfg_with_actor = CastyConfig(
-            defaults_mailbox=MailboxConfig(capacity=5000, strategy="backpressure"),
+            defaults_mailbox=MailboxConfig(capacity=5000, strategy="reject"),
             actors=(actor,),
         )
         resolved = cfg_with_actor.resolve_actor("myactor")
         assert resolved.mailbox.capacity == 100
-        assert resolved.mailbox.strategy == "backpressure"
+        assert resolved.mailbox.strategy == "reject"
 
     def test_custom_defaults_used_when_no_match(self) -> None:
         cfg = CastyConfig(
@@ -249,7 +249,7 @@ max_pending_per_path = 128
 
 [defaults.mailbox]
 capacity = 5000
-strategy = "backpressure"
+strategy = "reject"
 
 [defaults.supervision]
 strategy = "stop"
@@ -296,7 +296,7 @@ mailbox = { capacity = 50 }
 
         # Defaults
         assert cfg.defaults_mailbox.capacity == 5000
-        assert cfg.defaults_mailbox.strategy == "backpressure"
+        assert cfg.defaults_mailbox.strategy == "reject"
         assert cfg.defaults_supervision.strategy == "stop"
         assert cfg.defaults_sharding.num_shards == 512
         assert cfg.defaults_replication.replicas == 3
@@ -401,7 +401,7 @@ mailbox = { capacity = 50 }
         toml_file.write_text("""\
 [defaults.mailbox]
 capacity = 5000
-strategy = "backpressure"
+strategy = "reject"
 
 [actors.orders]
 sharding = { num_shards = 1024 }
@@ -417,7 +417,7 @@ mailbox = { capacity = 100, strategy = "drop_oldest" }
         assert orders.sharding.num_shards == 1024
         assert orders.replication.replicas == 5
         assert orders.mailbox.capacity == 5000
-        assert orders.mailbox.strategy == "backpressure"
+        assert orders.mailbox.strategy == "reject"
 
         # my-worker: mailbox overridden
         worker = cfg.resolve_actor("my-worker")
@@ -427,7 +427,7 @@ mailbox = { capacity = 100, strategy = "drop_oldest" }
         # unknown: all defaults
         unknown = cfg.resolve_actor("unknown")
         assert unknown.mailbox.capacity == 5000
-        assert unknown.mailbox.strategy == "backpressure"
+        assert unknown.mailbox.strategy == "reject"
         assert unknown.sharding.num_shards == 256
 
 
@@ -488,7 +488,7 @@ class TestActorSystemWithConfig:
         toml_file.write_text(
             '[system]\nname = "configured"\n\n'
             "[actors.my-actor]\n"
-            'mailbox = { capacity = 10, strategy = "backpressure" }\n'
+            'mailbox = { capacity = 10, strategy = "reject" }\n'
         )
         config = load_config(toml_file)
 

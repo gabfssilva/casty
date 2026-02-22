@@ -15,7 +15,7 @@ name = "my-app"
 # --- Global defaults (apply to all actors) ---
 [defaults.mailbox]
 capacity = 1000
-strategy = "drop_new"         # drop_new | drop_oldest | backpressure
+strategy = "drop_new"         # drop_new | drop_oldest | reject
 
 [defaults.supervision]
 strategy = "restart"          # restart | stop | escalate
@@ -62,7 +62,7 @@ sharding = { num_shards = 512 }
 replication = { replicas = 3, min_acks = 2 }
 
 [actors.my-worker]
-mailbox = { capacity = 5000, strategy = "backpressure" }
+mailbox = { capacity = 5000, strategy = "reject" }
 supervision = { strategy = "stop" }
 
 [actors."child-\\d+"]

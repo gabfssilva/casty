@@ -74,7 +74,7 @@ ref = system.spawn(
 |----------|----------|
 | `drop_new` (default) | Discard the incoming message when the mailbox is full |
 | `drop_oldest` | Discard the oldest message in the mailbox to make room for the new one |
-| `backpressure` | Raise `asyncio.QueueFull`, propagating pressure to the sender |
+| `reject` | Raise `asyncio.QueueFull`, rejecting the message |
 
 ## Scheduling
 

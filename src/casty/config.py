@@ -40,10 +40,10 @@ __all__ = [
 ]
 
 
-type MailboxStrategy = Literal["drop_new", "drop_oldest", "backpressure"]
+type MailboxStrategy = Literal["drop_new", "drop_oldest", "reject"]
 
-type CompressionAlgorithm = Literal["zlib", "gzip", "bz2", "lzma"]
-type SerializerKind = Literal["pickle", "json"]
+type CompressionAlgorithm = Literal["zlib", "gzip", "bz2", "lzma", "lz4"]
+type SerializerKind = Literal["pickle", "json", "msgpack", "cloudpickle"]
 
 
 @dataclass(frozen=True)
@@ -112,11 +112,11 @@ class MailboxConfig:
 
     Parameters
     ----------
-    capacity : int
-        Maximum number of messages in the mailbox.
+    capacity : int | None
+        Maximum number of messages in the mailbox. ``None`` for unbounded.
     strategy : MailboxStrategy
-        Backpressure strategy: ``"drop_new"``, ``"drop_oldest"``, or
-        ``"backpressure"``.
+        Overflow strategy: ``"drop_new"``, ``"drop_oldest"``, or
+        ``"reject"``.
 
     Examples
     --------
@@ -124,7 +124,7 @@ class MailboxConfig:
     MailboxConfig(capacity=500, strategy='drop_oldest')
     """
 
-    capacity: int = 1000
+    capacity: int | None = None
     strategy: MailboxStrategy = "drop_new"
 
 

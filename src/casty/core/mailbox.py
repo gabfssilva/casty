@@ -1,7 +1,7 @@
 """Actor mailbox with configurable overflow strategies.
 
 Provides a bounded or unbounded async message queue with three
-overflow policies: drop newest, drop oldest, or backpressure.
+overflow policies: drop newest, drop oldest, or reject.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ class MailboxOverflowStrategy(Enum):
 
     drop_new = auto()
     drop_oldest = auto()
-    backpressure = auto()
+    reject = auto()
 
 
 class Mailbox[M]:
@@ -67,7 +67,7 @@ class Mailbox[M]:
         Raises
         ------
         asyncio.QueueFull
-            When the overflow strategy is ``backpressure`` and the
+            When the overflow strategy is ``reject`` and the
             mailbox is at capacity.
 
         Examples
@@ -91,7 +91,7 @@ class Mailbox[M]:
                     except asyncio.QueueEmpty:
                         pass
                 self._queue.put_nowait(msg)
-            case MailboxOverflowStrategy.backpressure:
+            case MailboxOverflowStrategy.reject:
                 if not self._queue.full():
                     self._queue.put_nowait(msg)
                 else:
