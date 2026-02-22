@@ -115,6 +115,7 @@ nav:
       - Stateful Companion: guides/stateful-companion.md
       - Reactive Streams: guides/streams.md
       - Streams over the Network: guides/streams-network.md
+      - Job Executor: guides/job-executor.md
   - API Reference:
       - Core:
           - Behaviors: reference/behaviors.md

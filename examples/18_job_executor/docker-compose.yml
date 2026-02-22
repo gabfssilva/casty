@@ -1,0 +1,143 @@
+x-node: &node
+  build:
+    context: ../..
+    dockerfile: examples/18_job_executor/Dockerfile.node
+
+services:
+  seed:
+    <<: *node
+    hostname: seed
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "seed:25520",
+        "--nodes", "10",
+      ]
+
+  worker-1:
+    <<: *node
+    hostname: worker-1
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "seed:25520",
+        "--nodes", "10",
+      ]
+
+  worker-2:
+    <<: *node
+    hostname: worker-2
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "seed:25520",
+        "--nodes", "10",
+      ]
+
+  worker-3:
+    <<: *node
+    hostname: worker-3
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "seed:25520",
+        "--nodes", "10",
+      ]
+
+  worker-4:
+    <<: *node
+    hostname: worker-4
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "seed:25520",
+        "--nodes", "10",
+      ]
+
+  worker-5:
+    <<: *node
+    hostname: worker-5
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "seed:25520",
+        "--nodes", "10",
+      ]
+
+  worker-6:
+    <<: *node
+    hostname: worker-6
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "seed:25520",
+        "--nodes", "10",
+      ]
+
+  worker-7:
+    <<: *node
+    hostname: worker-7
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "seed:25520",
+        "--nodes", "10",
+      ]
+
+  worker-8:
+    <<: *node
+    hostname: worker-8
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "seed:25520",
+        "--nodes", "10",
+      ]
+
+  worker-9:
+    <<: *node
+    hostname: worker-9
+    command:
+      [
+        "--port", "25520",
+        "--host", "auto",
+        "--bind-host", "0.0.0.0",
+        "--seed", "seed:25520",
+        "--nodes", "10",
+      ]
+
+  client:
+    build:
+      context: ../..
+      dockerfile: examples/18_job_executor/Dockerfile.client
+    hostname: client
+    command: ["--contact", "seed:25520", "--workers", "10"]
+    depends_on:
+      - seed
+      - worker-1
+      - worker-2
+      - worker-3
+      - worker-4
+      - worker-5
+      - worker-6
+      - worker-7
+      - worker-8
+      - worker-9
