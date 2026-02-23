@@ -411,6 +411,126 @@ async def test_cross_node_stream() -> None:
             assert results == [1, 2, 3]
 
 
+async def _run_stream_cycle(
+    source_system: ClusteredActorSystem,
+    target_system: ClusteredActorSystem,
+    key_name: str,
+    actor_suffix: str,
+    data: list[int],
+) -> list[int]:
+    """Spawn a discoverable producer on *source_system*, look it up from
+    *target_system*, stream *data* through, and return the consumed results."""
+    key: ServiceKey[StreamProducerMsg[int]] = ServiceKey(name=key_name)
+    producer = source_system.spawn(
+        Behaviors.discoverable(stream_producer(), key=key),
+        f"producer-{actor_suffix}",
+    )
+    await asyncio.sleep(2.0)
+
+    sink: SinkRef[int] = await source_system.ask(
+        producer, lambda r: GetSink(reply_to=r), timeout=5.0
+    )
+
+    listing = await target_system.lookup(key)
+    assert len(listing.instances) >= 1
+    remote_producer = next(iter(listing.instances)).ref
+
+    consumer = target_system.spawn(
+        stream_consumer(remote_producer, timeout=5.0),
+        f"consumer-{actor_suffix}",
+    )
+    await asyncio.sleep(0.5)
+
+    source: SourceRef[int] = await target_system.ask(
+        consumer, lambda r: GetSource(reply_to=r), timeout=5.0
+    )
+
+    results: list[int] = []
+
+    async def consume() -> None:
+        async for item in source:
+            results.append(item)
+
+    consume_task = asyncio.create_task(consume())
+
+    for item in data:
+        await sink.put(item)
+    await sink.complete()
+
+    await asyncio.wait_for(consume_task, timeout=5.0)
+    return results
+
+
+async def test_cross_node_consecutive_output() -> None:
+    async with ClusteredActorSystem(
+        name="cluster", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system_a:
+        port_a = system_a.self_node.port
+
+        async with ClusteredActorSystem(
+            name="cluster",
+            host="127.0.0.1",
+            port=0,
+            node_id="node-2",
+            seed_nodes=[("127.0.0.1", port_a)],
+        ) as system_b:
+            await system_a.wait_for(2, timeout=10.0)
+
+            r1 = await _run_stream_cycle(
+                system_a, system_b, "out-1", "out-1", [1, 2, 3]
+            )
+            assert r1 == [1, 2, 3]
+
+            r2 = await _run_stream_cycle(
+                system_a, system_b, "out-2", "out-2", [4, 5, 6]
+            )
+            assert r2 == [4, 5, 6]
+
+
+async def test_cross_node_consecutive_input() -> None:
+    async with ClusteredActorSystem(
+        name="cluster", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system_a:
+        port_a = system_a.self_node.port
+
+        async with ClusteredActorSystem(
+            name="cluster",
+            host="127.0.0.1",
+            port=0,
+            node_id="node-2",
+            seed_nodes=[("127.0.0.1", port_a)],
+        ) as system_b:
+            await system_a.wait_for(2, timeout=10.0)
+
+            r1 = await _run_stream_cycle(system_b, system_a, "in-1", "in-1", [1, 2, 3])
+            assert r1 == [1, 2, 3]
+
+            r2 = await _run_stream_cycle(system_b, system_a, "in-2", "in-2", [4, 5, 6])
+            assert r2 == [4, 5, 6]
+
+
+async def test_cross_node_consecutive_bidirectional() -> None:
+    async with ClusteredActorSystem(
+        name="cluster", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system_a:
+        port_a = system_a.self_node.port
+
+        async with ClusteredActorSystem(
+            name="cluster",
+            host="127.0.0.1",
+            port=0,
+            node_id="node-2",
+            seed_nodes=[("127.0.0.1", port_a)],
+        ) as system_b:
+            await system_a.wait_for(2, timeout=10.0)
+
+            r1 = await _run_stream_cycle(system_a, system_b, "bi-1", "bi-1", [1, 2, 3])
+            assert r1 == [1, 2, 3]
+
+            r2 = await _run_stream_cycle(system_b, system_a, "bi-2", "bi-2", [4, 5, 6])
+            assert r2 == [4, 5, 6]
+
+
 async def test_dead_letters_after_cancel() -> None:
     dead: list[DeadLetter] = []
 
