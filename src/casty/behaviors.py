@@ -76,6 +76,18 @@ class Behaviors:
             if pre_start is not None:
                 await pre_start(ctx)
 
+            fired = False
+
+            async def fire_post_stop() -> None:
+                nonlocal fired
+                if fired or post_stop is None:
+                    return
+                fired = True
+                await post_stop(ctx)
+
+            if post_stop is not None:
+                ctx.on_stop(fire_post_stop)
+
             inner = behavior
             if inner.on_setup is not None:
                 inner = await inner.on_setup(ctx)
@@ -94,8 +106,7 @@ class Behaviors:
 
                 match result.signal:
                     case Signal.stopped:
-                        if post_stop is not None:
-                            await post_stop(ctx)
+                        await fire_post_stop()
                         return result
                     case Signal.restart:
                         if post_restart is not None:

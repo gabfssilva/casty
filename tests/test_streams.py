@@ -14,6 +14,7 @@ from casty.core.streams import (
     Push,
     SinkRef,
     SourceRef,
+    StreamCancel,
     StreamCompleted,
     StreamDemand,
     StreamElement,
@@ -356,6 +357,40 @@ async def test_multiple_pushes_preserve_order() -> None:
         assert results == ["first", "second", "third"]
 
 
+async def test_high_volume_local_ordering() -> None:
+    """500 elements through a local stream with simulated network delay."""
+    async with ActorSystem("test") as system:
+        producer = system.spawn(stream_producer(), "producer")
+        consumer = system.spawn(
+            stream_consumer(producer, timeout=5.0, initial_demand=4), "consumer"
+        )
+        await asyncio.sleep(0.05)
+
+        source: SourceRef[int] = await system.ask(
+            consumer, lambda r: GetSource(reply_to=r), timeout=1.0
+        )
+        sink: SinkRef[int] = await system.ask(
+            producer, lambda r: GetSink(reply_to=r), timeout=1.0
+        )
+
+        results: list[int] = []
+
+        async def consume() -> None:
+            async for item in source:
+                results.append(item)
+                await asyncio.sleep(0.01)
+
+        consume_task = asyncio.create_task(consume())
+
+        data = list(range(500))
+        for item in data:
+            await sink.put(item)
+        await sink.complete()
+
+        await asyncio.wait_for(consume_task, timeout=10.0)
+        assert results == data
+
+
 async def test_cross_node_stream() -> None:
     async with ClusteredActorSystem(
         name="cluster", host="127.0.0.1", port=0, node_id="node-1"
@@ -561,3 +596,265 @@ async def test_dead_letters_after_cancel() -> None:
         await asyncio.sleep(0.1)
 
         assert len(dead) >= 1
+
+
+async def test_sink_put_unblocks_on_producer_stop() -> None:
+    """Pending sink.put() must not hang forever when the producer stops."""
+    async with ActorSystem("test") as system:
+        producer = system.spawn(stream_producer(buffer_size=2), "producer")
+        system.spawn(stream_consumer(producer), "consumer")
+        await asyncio.sleep(0.05)
+
+        sink: SinkRef[int] = await system.ask(
+            producer, lambda r: GetSink(reply_to=r), timeout=1.0
+        )
+
+        # Fill the bounded buffer (demand=0 because GetSource was never called)
+        await sink.put(1)
+        await sink.put(2)
+
+        # 3rd put blocks — buffer full, no demand to drain
+        put_done = asyncio.Event()
+
+        async def blocked_put() -> None:
+            await sink.put(3)
+            put_done.set()
+
+        task = asyncio.create_task(blocked_put())
+        await asyncio.sleep(0.1)
+        assert not put_done.is_set(), "put should block on full buffer"
+
+        # Producer stops via StreamCancel
+        producer.tell(StreamCancel())
+        await asyncio.sleep(0.1)
+
+        # Pending put must unblock — not hang forever
+        await asyncio.wait_for(task, timeout=2.0)
+
+
+async def test_source_completes_when_producer_stops_mid_stream() -> None:
+    """SourceRef should complete via timeout when producer stops without
+    sending StreamCompleted while data was actively flowing."""
+    async with ActorSystem("test") as system:
+        producer = system.spawn(stream_producer(), "producer")
+        consumer = system.spawn(stream_consumer(producer, timeout=0.5), "consumer")
+        await asyncio.sleep(0.05)
+
+        sink: SinkRef[int] = await system.ask(
+            producer, lambda r: GetSink(reply_to=r), timeout=1.0
+        )
+        source: SourceRef[int] = await system.ask(
+            consumer, lambda r: GetSource(reply_to=r), timeout=1.0
+        )
+
+        results: list[int] = []
+
+        async def consume() -> None:
+            async for item in source:
+                results.append(item)
+
+        consume_task = asyncio.create_task(consume())
+
+        await sink.put(1)
+        await sink.put(2)
+        await asyncio.sleep(0.1)
+
+        # Kill producer without completing — no StreamCompleted sent
+        producer.tell(StreamCancel())
+
+        # SourceRef should exit via its timeout (0.5s), not hang
+        await asyncio.wait_for(consume_task, timeout=3.0)
+        assert results == [1, 2]
+
+
+async def test_high_volume_cross_node() -> None:
+    """500 elements through a cross-node stream with low initial demand."""
+    async with ClusteredActorSystem(
+        name="cluster", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system_a:
+        port_a = system_a.self_node.port
+
+        async with ClusteredActorSystem(
+            name="cluster",
+            host="127.0.0.1",
+            port=0,
+            node_id="node-2",
+            seed_nodes=[("127.0.0.1", port_a)],
+        ) as system_b:
+            await system_a.wait_for(2, timeout=10.0)
+
+            key: ServiceKey[StreamProducerMsg[int]] = ServiceKey(name="volume")
+            producer = system_a.spawn(
+                Behaviors.discoverable(stream_producer(), key=key), "producer"
+            )
+            await asyncio.sleep(2.0)
+
+            sink: SinkRef[int] = await system_a.ask(
+                producer, lambda r: GetSink(reply_to=r), timeout=5.0
+            )
+
+            listing = await system_b.lookup(key)
+            assert len(listing.instances) >= 1
+            remote_producer = next(iter(listing.instances)).ref
+
+            consumer = system_b.spawn(
+                stream_consumer(remote_producer, timeout=5.0, initial_demand=4),
+                "consumer",
+            )
+            await asyncio.sleep(0.5)
+
+            source: SourceRef[int] = await system_b.ask(
+                consumer, lambda r: GetSource(reply_to=r), timeout=5.0
+            )
+
+            results: list[int] = []
+
+            async def consume() -> None:
+                async for item in source:
+                    results.append(item)
+
+            consume_task = asyncio.create_task(consume())
+
+            data = list(range(500))
+            for item in data:
+                await sink.put(item)
+            await sink.complete()
+
+            await asyncio.wait_for(consume_task, timeout=30.0)
+            mismatches = [
+                (i, results[i], data[i])
+                for i in range(min(len(results), len(data)))
+                if results[i] != data[i]
+            ]
+            if mismatches:
+                print(f"\n{len(mismatches)} mismatches out of {len(results)} elements:")
+                for idx, got, expected in mismatches[:20]:
+                    print(f"  [{idx}] got={got} expected={expected}")
+            assert results == data
+
+
+async def test_concurrent_cross_node_streams() -> None:
+    """5 independent streams between the same two nodes concurrently."""
+    async with ClusteredActorSystem(
+        name="cluster", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system_a:
+        port_a = system_a.self_node.port
+
+        async with ClusteredActorSystem(
+            name="cluster",
+            host="127.0.0.1",
+            port=0,
+            node_id="node-2",
+            seed_nodes=[("127.0.0.1", port_a)],
+        ) as system_b:
+            await system_a.wait_for(2, timeout=10.0)
+
+            async def stream_cycle(idx: int) -> list[int]:
+                key: ServiceKey[StreamProducerMsg[int]] = ServiceKey(name=f"conc-{idx}")
+                prod = system_a.spawn(
+                    Behaviors.discoverable(stream_producer(), key=key),
+                    f"producer-{idx}",
+                )
+                await asyncio.sleep(2.0)
+
+                sink: SinkRef[int] = await system_a.ask(
+                    prod, lambda r: GetSink(reply_to=r), timeout=5.0
+                )
+
+                listing = await system_b.lookup(key)
+                assert len(listing.instances) >= 1
+                remote_prod = next(iter(listing.instances)).ref
+
+                cons = system_b.spawn(
+                    stream_consumer(remote_prod, timeout=5.0),
+                    f"consumer-{idx}",
+                )
+                await asyncio.sleep(0.5)
+
+                source: SourceRef[int] = await system_b.ask(
+                    cons, lambda r: GetSource(reply_to=r), timeout=5.0
+                )
+
+                collected: list[int] = []
+
+                async def consume() -> None:
+                    async for item in source:
+                        collected.append(item)
+
+                consume_task = asyncio.create_task(consume())
+
+                payload = list(range(idx * 10, idx * 10 + 10))
+                for item in payload:
+                    await sink.put(item)
+                await sink.complete()
+
+                await asyncio.wait_for(consume_task, timeout=10.0)
+                return collected
+
+            tasks = [asyncio.create_task(stream_cycle(i)) for i in range(5)]
+            all_results = await asyncio.gather(*tasks)
+
+            for i, result in enumerate(all_results):
+                expected = list(range(i * 10, i * 10 + 10))
+                assert result == expected
+
+
+async def test_rapid_stream_create_destroy() -> None:
+    """10 stream cycles in quick succession on a single node."""
+    async with ActorSystem("test") as system:
+        for cycle in range(10):
+            producer = system.spawn(stream_producer(), f"producer-{cycle}")
+            consumer = system.spawn(
+                stream_consumer(producer, timeout=1.0), f"consumer-{cycle}"
+            )
+            await asyncio.sleep(0.05)
+
+            sink: SinkRef[int] = await system.ask(
+                producer, lambda r: GetSink(reply_to=r), timeout=1.0
+            )
+            source: SourceRef[int] = await system.ask(
+                consumer, lambda r: GetSource(reply_to=r), timeout=1.0
+            )
+
+            results: list[int] = []
+
+            async def consume() -> None:
+                async for item in source:
+                    results.append(item)
+
+            consume_task = asyncio.create_task(consume())
+
+            data = [cycle * 100 + j for j in range(5)]
+            for item in data:
+                await sink.put(item)
+            await sink.complete()
+
+            await asyncio.wait_for(consume_task, timeout=3.0)
+            assert results == data
+
+
+async def test_rapid_stream_create_destroy_cross_node() -> None:
+    """5 stream cycles in quick succession across two cluster nodes."""
+    async with ClusteredActorSystem(
+        name="cluster", host="127.0.0.1", port=0, node_id="node-1"
+    ) as system_a:
+        port_a = system_a.self_node.port
+
+        async with ClusteredActorSystem(
+            name="cluster",
+            host="127.0.0.1",
+            port=0,
+            node_id="node-2",
+            seed_nodes=[("127.0.0.1", port_a)],
+        ) as system_b:
+            await system_a.wait_for(2, timeout=10.0)
+
+            for cycle in range(5):
+                result = await _run_stream_cycle(
+                    system_a,
+                    system_b,
+                    f"rapid-{cycle}",
+                    f"rapid-{cycle}",
+                    [cycle * 10 + j for j in range(5)],
+                )
+                assert result == [cycle * 10 + j for j in range(5)]

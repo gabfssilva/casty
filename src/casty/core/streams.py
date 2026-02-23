@@ -158,13 +158,29 @@ class SinkRef[E]:
         self,
         queue: asyncio.Queue[E],
         producer: ActorRef[StreamProducerMsg[E]],
+        closed: asyncio.Event,
     ) -> None:
         self._queue = queue
         self._producer = producer
+        self._closed = closed
 
     async def put(self, element: E) -> None:
-        """Push an element, blocking if the buffer is full."""
-        await self._queue.put(element)
+        """Push an element, blocking if the buffer is full.
+
+        Returns silently if the producer stops while waiting.
+        """
+        if self._closed.is_set():
+            return
+        put_task = asyncio.ensure_future(self._queue.put(element))
+        closed_task = asyncio.ensure_future(self._closed.wait())
+        done, pending = await asyncio.wait(
+            {put_task, closed_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+        if closed_task in done:
+            return
         self._producer.tell(InputReady())
 
     async def complete(self) -> None:
@@ -188,13 +204,15 @@ def stream_producer[E](*, buffer_size: int = 0) -> Behavior[StreamProducerMsg[E]
         ctx: ActorContext[StreamProducerMsg[E]],
     ) -> Behavior[StreamProducerMsg[E]]:
         queue: asyncio.Queue[E] = asyncio.Queue(maxsize=buffer_size)
-        return idle(queue, completed=False)
+        closed = asyncio.Event()
+        return idle(queue, completed=False, closed=closed)
 
     def drain(
         queue: asyncio.Queue[E],
         consumer: ActorRef[StreamElement[E] | StreamCompleted],
         demand: int,
         completed: bool,
+        closed: asyncio.Event,
     ) -> Behavior[StreamProducerMsg[E]] | None:
         """Drain the queue up to *demand* elements. Return new behavior or None."""
         sent = 0
@@ -205,14 +223,16 @@ def stream_producer[E](*, buffer_size: int = 0) -> Behavior[StreamProducerMsg[E]
             sent += 1
         if queue.empty() and completed:
             consumer.tell(StreamCompleted())
+            closed.set()
             return Behaviors.stopped()
         if sent > 0:
-            return subscribed(consumer, demand, queue, completed)
+            return subscribed(consumer, demand, queue, completed, closed)
         return None
 
     def idle(
         queue: asyncio.Queue[E],
         completed: bool,
+        closed: asyncio.Event,
     ) -> Behavior[StreamProducerMsg[E]]:
         async def receive(
             ctx: ActorContext[StreamProducerMsg[E]],
@@ -221,19 +241,21 @@ def stream_producer[E](*, buffer_size: int = 0) -> Behavior[StreamProducerMsg[E]
             match msg:
                 case Push(element=element):
                     queue.put_nowait(element)
-                    return idle(queue, completed)
+                    return idle(queue, completed, closed)
                 case CompleteStream():
-                    return idle(queue, completed=True)
+                    return idle(queue, completed=True, closed=closed)
                 case GetSink(reply_to=reply_to):
-                    reply_to.tell(SinkRef(queue=queue, producer=ctx.self))
+                    reply_to.tell(
+                        SinkRef(queue=queue, producer=ctx.self, closed=closed)
+                    )
                     return Behaviors.same()
                 case InputReady():
                     return Behaviors.same()
                 case Subscribe(consumer=consumer, demand=demand):
-                    result = drain(queue, consumer, demand, completed)
+                    result = drain(queue, consumer, demand, completed, closed)
                     if result is not None:
                         return result
-                    return subscribed(consumer, demand, queue, completed)
+                    return subscribed(consumer, demand, queue, completed, closed)
                 case _:
                     return Behaviors.unhandled()
 
@@ -244,6 +266,7 @@ def stream_producer[E](*, buffer_size: int = 0) -> Behavior[StreamProducerMsg[E]
         demand: int,
         queue: asyncio.Queue[E],
         completed: bool,
+        closed: asyncio.Event,
     ) -> Behavior[StreamProducerMsg[E]]:
         async def receive(
             ctx: ActorContext[StreamProducerMsg[E]],
@@ -251,31 +274,37 @@ def stream_producer[E](*, buffer_size: int = 0) -> Behavior[StreamProducerMsg[E]
         ) -> Behavior[StreamProducerMsg[E]]:
             match msg:
                 case Push(element=element):
-                    if demand > 0:
-                        consumer.tell(StreamElement(element=element))
-                        return subscribed(consumer, demand - 1, queue, completed)
                     queue.put_nowait(element)
+                    result = drain(queue, consumer, demand, completed, closed)
+                    if result is not None:
+                        return result
                     return Behaviors.same()
                 case GetSink(reply_to=reply_to):
-                    reply_to.tell(SinkRef(queue=queue, producer=ctx.self))
+                    reply_to.tell(
+                        SinkRef(queue=queue, producer=ctx.self, closed=closed)
+                    )
                     return Behaviors.same()
                 case InputReady():
-                    result = drain(queue, consumer, demand, completed)
+                    result = drain(queue, consumer, demand, completed, closed)
                     if result is not None:
                         return result
                     return Behaviors.same()
                 case StreamDemand(n=n):
                     new_demand = demand + n
-                    result = drain(queue, consumer, new_demand, completed)
+                    result = drain(queue, consumer, new_demand, completed, closed)
                     if result is not None:
                         return result
-                    return subscribed(consumer, new_demand, queue, completed)
+                    return subscribed(consumer, new_demand, queue, completed, closed)
                 case CompleteStream():
                     if queue.empty():
                         consumer.tell(StreamCompleted())
+                        closed.set()
                         return Behaviors.stopped()
-                    return subscribed(consumer, demand, queue, completed=True)
+                    return subscribed(
+                        consumer, demand, queue, completed=True, closed=closed
+                    )
                 case StreamCancel():
+                    closed.set()
                     return Behaviors.stopped()
                 case _:
                     return Behaviors.unhandled()

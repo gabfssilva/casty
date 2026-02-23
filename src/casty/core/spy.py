@@ -72,6 +72,9 @@ class SpyContext[M]:
     def unwatch(self, ref: ActorRef[Any]) -> None:
         self._inner.unwatch(ref)
 
+    def on_stop(self, callback: Callable[[], Awaitable[None]]) -> None:
+        self._inner.on_stop(callback)
+
     def pipe_to_self(self, *args: Any, **kwargs: Any) -> None:
         self._inner.pipe_to_self(*args, **kwargs)
 

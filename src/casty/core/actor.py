@@ -96,6 +96,9 @@ class CellContext[M]:
                     sibling.watchers.discard(self._cell)
                     return
 
+    def on_stop(self, callback: Callable[[], Awaitable[None]]) -> None:
+        self._cell.add_stop_callback(callback)
+
     def register_interceptor(self, interceptor: Callable[[object], bool]) -> None:
         self._cell.add_interceptor(interceptor)
 
@@ -178,6 +181,7 @@ class ActorCell[M]:
         self._current_handler: Callable[..., Awaitable[Behavior[M]]] | None = None
         self._loop_task: asyncio.Task[None] | None = None
         self._interceptors: list[Callable[[object], bool]] = []
+        self._stop_callbacks: list[Callable[[], Awaitable[None]]] = []
 
         self._ctx: CellContext[M] = CellContext(self)
         if system is not None:
@@ -232,6 +236,9 @@ class ActorCell[M]:
     @mailbox.setter
     def mailbox(self, value: Mailbox[Any]) -> None:
         self._mailbox = value
+
+    def add_stop_callback(self, callback: Callable[[], Awaitable[None]]) -> None:
+        self._stop_callbacks.append(callback)
 
     def add_interceptor(self, interceptor: Callable[[object], bool]) -> None:
         self._interceptors.append(interceptor)
@@ -333,6 +340,13 @@ class ActorCell[M]:
                 await child.stop()
             except Exception:
                 self._logger.exception("Error stopping child %s", child.id)
+
+        for callback in self._stop_callbacks:
+            try:
+                await callback()
+            except Exception:
+                self._logger.exception("Error in stop callback")
+        self._stop_callbacks.clear()
 
         for watcher in self._watchers:
             try:

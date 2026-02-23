@@ -499,6 +499,48 @@ def tcp_transport(
             if config.port == 0 or actual_port != config.port:
                 self_addr = (self_addr[0], actual_port)
 
+        outbound_executor = concurrent.futures.ThreadPoolExecutor()
+        outbound_queues: dict[
+            NodeAddr, asyncio.Queue[tuple[Callable[[], bytes], str]]
+        ] = {}
+        drainer_tasks: dict[NodeAddr, asyncio.Task[None]] = {}
+
+        def start_drainer(
+            peer_addr: NodeAddr, peer_ref: ActorRef[PeerMsg]
+        ) -> asyncio.Queue[tuple[Callable[[], bytes], str]]:
+            queue: asyncio.Queue[tuple[Callable[[], bytes], str]] = asyncio.Queue()
+            outbound_queues[peer_addr] = queue
+
+            async def drain() -> None:
+                try:
+                    while True:
+                        build_fn, target_uri = await queue.get()
+                        try:
+                            frame_data = (
+                                await asyncio.get_running_loop().run_in_executor(
+                                    outbound_executor, build_fn
+                                )
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "Serialization failed for %s: %s",
+                                target_uri,
+                                exc,
+                            )
+                            continue
+                        peer_ref.tell(SendFrame(data=frame_data))
+                except asyncio.CancelledError:
+                    return
+
+            drainer_tasks[peer_addr] = asyncio.create_task(drain())
+            return queue
+
+        def cancel_drainer(peer_addr: NodeAddr) -> None:
+            task = drainer_tasks.pop(peer_addr, None)
+            if task is not None:
+                task.cancel()
+            outbound_queues.pop(peer_addr, None)
+
         def active(
             srv: asyncio.Server | None,
             self_addr: NodeAddr,
@@ -506,10 +548,7 @@ def tcp_transport(
             aliases: dict[NodeAddr, NodeAddr],
             blacklist: dict[NodeAddr, float],
             next_id: int = 0,
-            executors: dict[NodeAddr, concurrent.futures.ThreadPoolExecutor]
-            | None = None,
         ) -> Behavior[TcpTransportMsg]:
-            execs = executors or {}
 
             async def receive(
                 ctx: ActorContext[TcpTransportMsg],
@@ -576,6 +615,7 @@ def tcp_transport(
                                     effective_bl,
                                     next_id,
                                 )
+                            cancel_drainer(server_canonical)
                             ctx.stop(existing)
 
                         new_peer_ref = ctx.spawn(
@@ -621,6 +661,7 @@ def tcp_transport(
                                 pa[0],
                                 pa[1],
                             )
+                            cancel_drainer(pa)
                             ctx.stop(existing)
 
                         peer_ref = ctx.spawn(
@@ -642,12 +683,9 @@ def tcp_transport(
                     case PeerDown(addr=pa, peer=peer_ref):
                         if peers.get(pa) is not peer_ref:
                             return Behaviors.same()
+                        cancel_drainer(pa)
                         new_peers = {k: v for k, v in peers.items() if k != pa}
                         new_aliases = {k: v for k, v in aliases.items() if v != pa}
-                        removed_exec = execs.get(pa)
-                        remaining_execs = {k: v for k, v in execs.items() if k != pa}
-                        if removed_exec is not None:
-                            removed_exec.shutdown(wait=False)
                         return active(
                             srv,
                             self_addr,
@@ -655,7 +693,6 @@ def tcp_transport(
                             new_aliases,
                             blacklist,
                             next_id,
-                            remaining_execs,
                         )
 
                     case ClearNodeBlacklist(host=host, port=port):
@@ -705,28 +742,12 @@ def tcp_transport(
                                 type_hint=type_hint,
                             ).to_bytes()
 
-                        peer_exec = execs.get(canonical_d)
-                        new_execs = execs
-                        if peer_exec is None:
-                            peer_exec = concurrent.futures.ThreadPoolExecutor(
-                                max_workers=1
-                            )
-                            new_execs = {**execs, canonical_d: peer_exec}
-
-                        loop = asyncio.get_running_loop()
-
                         peer_ref_d = peers.get(canonical_d)
                         if peer_ref_d is not None:
-                            captured_peer = peer_ref_d
-                            ctx.pipe_to_self(
-                                loop.run_in_executor(peer_exec, build_frame),
-                                lambda frame_data, _p=captured_peer: SendFrameToNode(
-                                    data=frame_data, peer=_p
-                                ),
-                                lambda exc: LogSerializationFailure(
-                                    address=target, exc=exc
-                                ),
-                            )
+                            queue = outbound_queues.get(canonical_d)
+                            if queue is None:
+                                queue = start_drainer(canonical_d, peer_ref_d)
+                            queue.put_nowait((build_frame, target))
                             return active(
                                 srv,
                                 self_addr,
@@ -734,17 +755,20 @@ def tcp_transport(
                                 aliases,
                                 effective_bl,
                                 next_id,
-                                new_execs,
                             )
 
-                        ctx.pipe_to_self(
-                            loop.run_in_executor(peer_exec, build_frame),
-                            lambda frame_data: SendToNode(
-                                host=d_host, port=d_port, data=frame_data
-                            ),
-                            lambda exc: LogSerializationFailure(
-                                address=target, exc=exc
-                            ),
+                        try:
+                            frame_data = (
+                                await asyncio.get_running_loop().run_in_executor(
+                                    outbound_executor, build_frame
+                                )
+                            )
+                        except Exception as exc:
+                            log.warning("Serialization failed for %s: %s", target, exc)
+                            return Behaviors.same()
+
+                        ctx.self.tell(
+                            SendToNode(host=d_host, port=d_port, data=frame_data)
                         )
                         return active(
                             srv,
@@ -753,7 +777,6 @@ def tcp_transport(
                             aliases,
                             effective_bl,
                             next_id,
-                            new_execs,
                         )
 
                     case LogSerializationFailure(address=fail_addr, exc=fail_exc):
@@ -769,7 +792,15 @@ def tcp_transport(
 
             return Behaviors.receive(receive)
 
-        async def post_stop(ctx: ActorContext[TcpTransportMsg]) -> None:
+        async def post_stop(_ctx: ActorContext[TcpTransportMsg]) -> None:
+            for task in drainer_tasks.values():
+                task.cancel()
+            for task in drainer_tasks.values():
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            outbound_executor.shutdown(wait=False)
             if server is not None:
                 server.close()
 

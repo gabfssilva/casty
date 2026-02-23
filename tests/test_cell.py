@@ -157,6 +157,28 @@ async def test_cell_lifecycle_hooks() -> None:
     assert "post_stop" in hooks_called
 
 
+async def test_post_stop_runs_on_forced_stop() -> None:
+    hooks_called: list[str] = []
+
+    async def post_stop(ctx: Any) -> None:
+        hooks_called.append("post_stop")
+
+    async def handler(ctx: Any, msg: Any) -> Behavior[Any]:
+        return Behaviors.same()
+
+    behavior = Behaviors.with_lifecycle(
+        Behaviors.receive(handler),
+        post_stop=post_stop,
+    )
+    cell: ActorCell[Any] = ActorCell(
+        behavior=behavior,
+        id="forced-stop",
+    )
+    await cell.start()
+    await cell.stop()
+    assert "post_stop" in hooks_called
+
+
 async def test_cell_spawns_children() -> None:
     child_received: list[str] = []
 

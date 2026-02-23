@@ -1060,3 +1060,220 @@ async def test_client_produces_stream_for_cluster() -> None:
                 timeout=5.0,
             )
             assert results == (10, 20, 30)
+
+
+async def test_client_consumes_stream_loop() -> None:
+    """Reproduce Skyward pattern: loop creating producers on cluster,
+    consumers on client. Each iteration is a full stream cycle."""
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        port = system.self_node.port
+
+        async with ClusterClient(
+            contact_points=[("127.0.0.1", port)],
+            system_name="cluster",
+        ) as client:
+            await asyncio.sleep(1.0)
+
+            for cycle in range(10):
+                key: ServiceKey[StreamProducerMsg[int]] = ServiceKey(
+                    name=f"loop-producer-{cycle}"
+                )
+                producer = system.spawn(
+                    Behaviors.discoverable(stream_producer(), key=key),
+                    f"producer-{cycle}",
+                )
+                await asyncio.sleep(0.5)
+
+                sink: SinkRef[int] = await system.ask(
+                    producer, lambda r: GetSink(reply_to=r), timeout=5.0
+                )
+
+                listing = client.lookup(key)
+                assert len(listing.instances) >= 1, f"cycle {cycle}: no listing"
+                remote_producer = next(iter(listing.instances)).ref
+
+                consumer = client.spawn(
+                    stream_consumer(remote_producer, timeout=5.0),
+                    f"consumer-{cycle}",
+                )
+                await asyncio.sleep(0.3)
+
+                source: SourceRef[int] = await client.ask(
+                    consumer, lambda r: GetSource(reply_to=r), timeout=5.0
+                )
+
+                results: list[int] = []
+
+                async def consume(_src: SourceRef[int] = source) -> None:
+                    async for item in _src:
+                        results.append(item)
+
+                consume_task = asyncio.create_task(consume())
+
+                data = [cycle * 100 + j for j in range(10)]
+                for item in data:
+                    await sink.put(item)
+                await sink.complete()
+
+                await asyncio.wait_for(consume_task, timeout=10.0)
+                assert results == data, f"cycle {cycle}: {results} != {data}"
+
+
+async def test_client_consumes_stream_loop_sync_bridge() -> None:
+    """Reproduce the exact Skyward pattern: loop where each iteration wraps
+    the async SourceRef in a sync iterator via a drain task + thread-safe
+    queue, then reads from a worker thread (asyncio.to_thread)."""
+    import queue as queue_mod
+
+    _sentinel = object()
+
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        port = system.self_node.port
+
+        async with ClusterClient(
+            contact_points=[("127.0.0.1", port)],
+            system_name="cluster",
+        ) as client:
+            await asyncio.sleep(1.0)
+            loop = asyncio.get_running_loop()
+
+            for cycle in range(20):
+                key: ServiceKey[StreamProducerMsg[int]] = ServiceKey(
+                    name=f"sync-{cycle}"
+                )
+                producer = system.spawn(
+                    Behaviors.discoverable(stream_producer(), key=key),
+                    f"sync-producer-{cycle}",
+                )
+                await asyncio.sleep(0.5)
+
+                sink: SinkRef[int] = await system.ask(
+                    producer, lambda r: GetSink(reply_to=r), timeout=5.0
+                )
+
+                listing = client.lookup(key)
+                assert len(listing.instances) >= 1, f"cycle {cycle}: no listing"
+                remote_producer = next(iter(listing.instances)).ref
+
+                consumer = client.spawn(
+                    stream_consumer(remote_producer, timeout=5.0),
+                    f"sync-consumer-{cycle}",
+                )
+
+                source: SourceRef[int] = await client.ask(
+                    consumer, lambda r: GetSource(reply_to=r), timeout=5.0
+                )
+
+                # --- Sync bridge (same pattern as Skyward _SyncSource) ---
+                q: queue_mod.Queue[int | BaseException | object] = queue_mod.Queue()
+
+                async def drain(_src: SourceRef[int] = source) -> None:
+                    try:
+                        async for elem in _src:
+                            q.put(elem)
+                    except BaseException as exc:
+                        q.put(exc)
+                    finally:
+                        q.put(_sentinel)
+
+                drain_task = loop.create_task(drain())
+
+                # Pump data into sink from a worker thread (like Skyward _pump)
+                data = [cycle * 100 + j for j in range(20)]
+
+                async def pump() -> None:
+                    for item in data:
+                        await sink.put(item)
+                    await sink.complete()
+
+                pump_task = loop.create_task(pump())
+
+                # Read from sync queue in a thread (like Skyward main thread)
+                def sync_read() -> list[int]:
+                    results: list[int] = []
+                    while True:
+                        item = q.get(timeout=10.0)
+                        if item is _sentinel:
+                            break
+                        if isinstance(item, BaseException):
+                            raise item
+                        results.append(item)  # type: ignore[arg-type]
+                    return results
+
+                results = await asyncio.to_thread(sync_read)
+                await pump_task
+                await drain_task
+
+                assert results == data, f"cycle {cycle}: {results} != {data}"
+
+
+async def test_client_consumes_stream_loop_no_sleep() -> None:
+    """Same as above but without sleep between spawn and ask — mimics
+    Skyward's _resolve_output_stream which has no sleep."""
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+    ) as system:
+        port = system.self_node.port
+
+        async with ClusterClient(
+            contact_points=[("127.0.0.1", port)],
+            system_name="cluster",
+        ) as client:
+            await asyncio.sleep(1.0)
+
+            for cycle in range(20):
+                key: ServiceKey[StreamProducerMsg[int]] = ServiceKey(
+                    name=f"fast-{cycle}"
+                )
+                producer = system.spawn(
+                    Behaviors.discoverable(stream_producer(), key=key),
+                    f"fast-producer-{cycle}",
+                )
+                await asyncio.sleep(0.5)
+
+                sink: SinkRef[int] = await system.ask(
+                    producer, lambda r: GetSink(reply_to=r), timeout=5.0
+                )
+
+                listing = client.lookup(key)
+                assert len(listing.instances) >= 1, f"cycle {cycle}: no listing"
+                remote_producer = next(iter(listing.instances)).ref
+
+                # No sleep between spawn and ask — matches Skyward pattern
+                consumer = client.spawn(
+                    stream_consumer(remote_producer, timeout=5.0),
+                    f"fast-consumer-{cycle}",
+                )
+
+                source: SourceRef[int] = await client.ask(
+                    consumer, lambda r: GetSource(reply_to=r), timeout=5.0
+                )
+
+                results: list[int] = []
+
+                async def consume(_src: SourceRef[int] = source) -> None:
+                    async for item in _src:
+                        results.append(item)
+
+                consume_task = asyncio.create_task(consume())
+
+                data = [cycle * 100 + j for j in range(20)]
+                for item in data:
+                    await sink.put(item)
+                await sink.complete()
+
+                await asyncio.wait_for(consume_task, timeout=10.0)
+                assert results == data, f"cycle {cycle}: {results} != {data}"

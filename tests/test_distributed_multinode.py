@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 
-from casty.distributed import Distributed
 from casty.cluster.system import ClusteredActorSystem
 
 
@@ -45,6 +44,8 @@ async def test_distributed_counter_five_nodes() -> None:
     systems: list[ClusteredActorSystem] = []
     base_port = 26540
 
+    start_tasks = []
+
     try:
         for idx in range(5):
             port = base_port + idx
@@ -55,14 +56,14 @@ async def test_distributed_counter_five_nodes() -> None:
                 port=port,
                 node_id=f"node-{idx + 1}",
                 seed_nodes=seeds,
+                required_quorum=5,
             )
-            await s.__aenter__()
+            start_tasks.append(s.__aenter__())
             systems.append(s)
 
-        await systems[0].wait_for(5, timeout=10.0)
+        await asyncio.gather(*start_tasks)
 
-        dists = [Distributed(s) for s in systems]
-        await asyncio.sleep(0.5)
+        dists = [s.distributed() for s in systems]
 
         views = dists[0].counter("page-views", shards=50)
         likes = dists[2].counter("likes", shards=50)
