@@ -6,18 +6,20 @@ TLS Cluster — Sharded Counter
 times, then all nodes read and verify the result.
 
 Usage (local):
-    bash examples/14_tls_cluster/gen-certs.sh
+    pip install casty[cert]
+    casty cert create-ca --out certs/
+    casty cert create-node 127.0.0.1 --ca-dir certs/ --out certs/node-1/
+    casty cert create-node 127.0.0.1 --ca-dir certs/ --out certs/node-2/
     uv run python examples/14_tls_cluster/main.py --port 25520 \
-        --certfile examples/14_tls_cluster/certs/node-1.pem \
-        --cafile examples/14_tls_cluster/certs/ca.pem
+        --certfile certs/node-1/node.crt --keyfile certs/node-1/node.key \
+        --cafile certs/ca.crt
     uv run python examples/14_tls_cluster/main.py --port 25521 \
         --seed 127.0.0.1:25520 \
-        --certfile examples/14_tls_cluster/certs/node-2.pem \
-        --cafile examples/14_tls_cluster/certs/ca.pem
+        --certfile certs/node-2/node.crt --keyfile certs/node-2/node.key \
+        --cafile certs/ca.crt
 
 Usage (Docker Compose):
     cd examples/14_tls_cluster
-    bash gen-certs.sh
     docker compose up --build
 """
 
@@ -186,6 +188,7 @@ def main() -> None:
     parser.add_argument(
         "--certfile", required=True, help="Path to node certificate (PEM)"
     )
+    parser.add_argument("--keyfile", default=None, help="Path to node private key (PEM)")
     parser.add_argument("--cafile", required=True, help="Path to CA certificate (PEM)")
     args = parser.parse_args()
 
@@ -204,7 +207,9 @@ def main() -> None:
         seed_host, seed_port_str = args.seed.rsplit(":", maxsplit=1)
         seed_nodes = [(seed_host, int(seed_port_str))]
 
-    tls_config = tls.Config.from_paths(certfile=args.certfile, cafile=args.cafile)
+    tls_config = tls.Config.from_paths(
+        certfile=args.certfile, keyfile=args.keyfile, cafile=args.cafile
+    )
 
     asyncio.run(
         run_node(host, args.port, bind_host, seed_nodes, args.nodes, tls_config)

@@ -13,8 +13,9 @@ services:
         "--host", "node-1",
         "--bind-host", "0.0.0.0",
         "--nodes", "5",
-        "--certfile", "certs/node-1.pem",
-        "--cafile", "certs/ca.pem",
+        "--certfile", "certs/node-1/node.crt",
+        "--keyfile", "certs/node-1/node.key",
+        "--cafile", "certs/ca.crt",
       ]
   node-2:
     <<: *node
@@ -26,8 +27,9 @@ services:
         "--bind-host", "0.0.0.0",
         "--seed", "node-1:25520",
         "--nodes", "5",
-        "--certfile", "certs/node-2.pem",
-        "--cafile", "certs/ca.pem",
+        "--certfile", "certs/node-2/node.crt",
+        "--keyfile", "certs/node-2/node.key",
+        "--cafile", "certs/ca.crt",
       ]
   node-3:
     <<: *node
@@ -39,8 +41,9 @@ services:
         "--bind-host", "0.0.0.0",
         "--seed", "node-1:25520",
         "--nodes", "5",
-        "--certfile", "certs/node-3.pem",
-        "--cafile", "certs/ca.pem",
+        "--certfile", "certs/node-3/node.crt",
+        "--keyfile", "certs/node-3/node.key",
+        "--cafile", "certs/ca.crt",
       ]
   node-4:
     <<: *node
@@ -52,8 +55,9 @@ services:
         "--bind-host", "0.0.0.0",
         "--seed", "node-1:25520",
         "--nodes", "5",
-        "--certfile", "certs/node-4.pem",
-        "--cafile", "certs/ca.pem",
+        "--certfile", "certs/node-4/node.crt",
+        "--keyfile", "certs/node-4/node.key",
+        "--cafile", "certs/ca.crt",
       ]
   node-5:
     <<: *node
@@ -65,6 +69,7 @@ services:
         "--bind-host", "0.0.0.0",
         "--seed", "node-1:25520",
         "--nodes", "5",
-        "--certfile", "certs/node-5.pem",
-        "--cafile", "certs/ca.pem",
+        "--certfile", "certs/node-5/node.crt",
+        "--keyfile", "certs/node-5/node.key",
+        "--cafile", "certs/ca.crt",
       ]

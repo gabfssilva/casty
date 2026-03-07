@@ -43,6 +43,9 @@ name = "casty"
 source = { editable = "." }
 
 [package.optional-dependencies]
+cert = [
+    { name = "cryptography" },
+]
 cloudpickle = [
     { name = "cloudpickle" },
 ]
@@ -60,6 +63,7 @@ performance = [
 dev = [
     { name = "asyncssh" },
     { name = "cloudpickle" },
+    { name = "cryptography" },
     { name = "lz4" },
     { name = "msgpack" },
     { name = "pyright" },
@@ -82,16 +86,18 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "cloudpickle", marker = "extra == 'cloudpickle'", specifier = ">=3.0" },
+    { name = "cryptography", marker = "extra == 'cert'", specifier = ">=44.0" },
     { name = "lz4", marker = "extra == 'lz4'", specifier = ">=4.0" },
     { name = "msgpack", marker = "extra == 'msgpack'", specifier = ">=1.0" },
     { name = "uvloop", marker = "extra == 'performance'", specifier = ">=0.22.1" },
 ]
-provides-extras = ["cloudpickle", "lz4", "msgpack", "performance"]
+provides-extras = ["cert", "cloudpickle", "lz4", "msgpack", "performance"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "asyncssh", specifier = ">=2.22.0" },
     { name = "cloudpickle", specifier = ">=3.1.2" },
+    { name = "cryptography", specifier = ">=44.0" },
     { name = "lz4", specifier = ">=4.0" },
     { name = "msgpack", specifier = ">=1.0" },
     { name = "pyright", specifier = ">=1.1" },
