@@ -35,6 +35,7 @@ from casty.cluster.envelope import ShardEnvelope, entity_shard
 from casty.core.system import ActorSystem
 from casty.cluster.topology import SubscribeTopology, TopologySnapshot
 from casty.core.transport import LocalTransport
+from casty.remote.tls import Config as TlsConfig
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
@@ -468,6 +469,10 @@ class ClusterClient:
         Advertised hostname for this client (for receiving responses).
     client_port
         Advertised port for this client (``0`` for auto-assignment).
+    tls
+        Optional ``TlsConfig`` for TLS connections to cluster nodes.
+        Only ``client_context`` is used (outbound connections).
+        When ``None`` (default), plain TCP is used.
 
     Examples
     --------
@@ -497,6 +502,7 @@ class ClusterClient:
         | JsonSerializer
         | CompressedSerializer
         | Any = None,
+        tls: TlsConfig | None = None,
     ) -> None:
         self._contact_points = contact_points
         self._system_name = system_name
@@ -505,6 +511,7 @@ class ClusterClient:
         self._advertised_host = advertised_host
         self._advertised_port = advertised_port
         self._address_map = address_map
+        self._tls = tls
         self._proxies: dict[str, ActorRef[ClientProxyMsg]] = {}
         self._subscriber_ref: ActorRef[TopologySubscriberMsg] | None = None
         self._last_snapshot: TopologySnapshot | None = None
@@ -533,6 +540,7 @@ class ClusterClient:
             port=self._client_port,
             self_address=(effective_host, effective_port),
             client_only=True,
+            client_ssl=self._tls.client_context if self._tls else None,
             address_map=self._address_map or (lambda addr: addr),
         )
         inbound = InboundMessageHandler(

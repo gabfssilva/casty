@@ -4,8 +4,13 @@
 from __future__ import annotations
 
 import asyncio
+import ssl
 from dataclasses import dataclass
 from typing import Any
+
+import trustme
+
+from casty.remote.tls import Config as TlsConfig
 
 from casty import Behaviors, ActorRef, Behavior, ActorSystem, MemberStatus, Member
 from casty import ServiceKey, ServiceEntry
@@ -81,6 +86,50 @@ async def test_client_connects_and_receives_topology() -> None:
             system_name="cluster",
         ):
             await asyncio.sleep(1.0)
+
+
+async def test_client_routes_tell_through_tls() -> None:
+    """ClusterClient routes messages over a TLS connection."""
+    ca = trustme.CA()
+    server_cert = ca.issue_cert("127.0.0.1")
+
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_cert.configure_cert(server_ctx)
+    ca.configure_trust(server_ctx)
+
+    client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ca.configure_trust(client_ctx)
+
+    tls = TlsConfig(server_context=server_ctx, client_context=client_ctx)
+
+    async with ClusteredActorSystem(
+        name="cluster",
+        host="127.0.0.1",
+        port=0,
+        node_id="node-1",
+        tls=tls,
+    ) as system:
+        port = system.self_node.port
+
+        system.spawn(
+            Behaviors.sharded(entity_factory=counter_entity, num_shards=10),
+            "counters",
+        )
+        await asyncio.sleep(0.3)
+
+        async with ClusterClient(
+            contact_points=[("127.0.0.1", port)],
+            system_name="cluster",
+            tls=tls,
+        ) as client:
+            await asyncio.sleep(1.0)
+
+            result = await client.ask(
+                client.entity_ref("counters", num_shards=10),
+                lambda r: ShardEnvelope("alice", GetBalance(reply_to=r)),
+                timeout=5.0,
+            )
+            assert result == 0
 
 
 async def test_client_routes_tell_to_cluster() -> None:

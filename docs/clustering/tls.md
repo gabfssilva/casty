@@ -35,6 +35,24 @@ tls=Config.from_paths(
 
 When `tls` is omitted, the cluster runs in plaintext.
 
+### ClusterClient
+
+`ClusterClient` accepts the same `Config` object. Only the `client_context` is
+used (the client opens outbound connections only):
+
+```python
+tls = Config.from_paths(certfile="certs/client/node.crt",
+                        keyfile="certs/client/node.key",
+                        cafile="certs/ca.crt")
+
+async with ClusterClient(
+    contact_points=[("10.0.0.1", 25520)],
+    system_name="my-cluster",
+    tls=tls,
+) as client:
+    ...
+```
+
 ## Mutual TLS
 
 TLS in Casty is always mutual. Every connection authenticates both sides: the

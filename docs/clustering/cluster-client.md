@@ -153,6 +153,7 @@ async with ClusterClient(
 | `client_host` | `"127.0.0.1"` | Local bind address |
 | `client_port` | `0` | Local bind port (`0` for auto-assignment) |
 | `address_map` | `None` | `dict[tuple[str, int], tuple[str, int]]` — logical-to-tunnel address mapping |
+| `tls` | `None` | `TlsConfig` — enables TLS on outbound connections (see [TLS](tls.md)) |
 | `advertised_host` | `None` | Override host in reply addresses (for advanced network setups) |
 | `advertised_port` | `None` | Override port in reply addresses (for advanced network setups) |
 
