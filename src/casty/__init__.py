@@ -1,249 +1,136 @@
-try:
-    from casty._version import __version__ as __version__
-except ModuleNotFoundError:
-    __version__: str = "0.0.0+unknown"
+"""Typed, clustered actor framework. Virtual actors (Orleans-style) are the
+single primitive: identity is `(class, key)`, activation happens on demand on
+the node that owns the key's token, deactivation happens on idle. Collections,
+services and streaming are sugar over that.
 
-from casty.actor import (
-    Behavior,
-    Behaviors,
-    BroadcastedBehavior,
-    EventSourcedBehavior,
-    PersistedBehavior,
-    ShardedBehavior,
-    SingletonBehavior,
-    SnapshotEvery,
-    SnapshotPolicy,
-    SpyEvent,
+Declare with `@actor` / `@service` / `@message`, run with `start` (cluster),
+`connect` (lite client) or `local` (in-process), reach actors through
+`ActorSystem.actor` and the collection factories.
+"""
+
+from casty import inspection
+from casty.actors.context import ActorContext, Schedule
+from casty.actors.context import current_context as context
+from casty.actors.host import Reply
+from casty.actors.registry import (
+    Consistency,
+    Directive,
+    FailureContext,
+    Pager,
+    PageSet,
+    Supervisor,
+    activate,
+    actor,
+    deactivate,
+    explain,
+    paged,
+    transient,
 )
-from casty.client.client import ClusterClient
-from casty.cluster.envelope import ShardEnvelope
-from casty.cluster.events import (
-    MemberLeft,
-    MemberUp,
-    ReachableMember,
-    UnreachableMember,
-)
-from casty.cluster.receptionist import (
-    Deregister,
-    Find,
-    Listing,
-    Register,
-    ServiceInstance,
-    ServiceKey,
-    Subscribe,
-)
-from casty.cluster.system import ClusteredActorSystem
-from casty.config import (
-    ActorConfig,
-    CastyConfig,
-    CompressionAlgorithm,
-    CompressionConfig,
-    FailureDetectorConfig,
-    GossipConfig,
-    HeartbeatConfig,
-    MailboxConfig,
-    SerializationConfig,
-    SerializerKind,
-    ShardingConfig,
-    SupervisionConfig,
-    TransportConfig,
-    discover_config,
-    load_config,
-)
-from casty.context import ActorContext, Interceptor
-from casty.core.behavior import Signal
-from casty.core.event_stream import (
-    EventStreamMsg,
-    Publish,
-    Subscribe as EventStreamSubscribe,
-    Unsubscribe as EventStreamUnsubscribe,
-)
-from casty.core.events import (
-    ActorRestarted,
-    ActorStarted,
-    ActorStopped,
-    DeadLetter,
-    UnhandledMessage,
-)
-from casty.core.journal import (
-    EventJournal,
-    InMemoryJournal,
-    JournalKind,
-    PersistedEvent,
-    Snapshot,
-    SqliteJournal,
-)
-from casty.core.mailbox import Mailbox, MailboxOverflowStrategy
-from casty.core.messages import Terminated
-from casty.core.ref import ActorRef
-from casty.core.replication import ReplicationConfig
-from casty.core.scheduler import (
-    CancelSchedule,
-    ScheduleOnce,
-    SchedulerMsg,
-    ScheduleTick,
-)
-from casty.core.streams import (
-    CompleteStream,
-    GetSink,
-    GetSource,
-    SinkRef,
-    SourceRef,
-    StreamConsumerMsg,
-    StreamProducerMsg,
-    stream_consumer,
-    stream_producer,
-)
-from casty.core.supervision import Directive, OneForOneStrategy, SupervisionStrategy
-from casty.core.system import ActorSystem
-from casty.core.task_runner import (
-    RunTask,
-    TaskCancelled,
-    TaskCompleted,
-    TaskFailed,
-    TaskResult,
-    TaskRunnerMsg,
-)
-from casty.distributed import (
-    Barrier,
+from casty.collections import (
     Counter,
-    Dict,
-    Distributed,
+    Lease,
     Lock,
+    Map,
+    MultiMap,
     Queue,
+    Register,
     Semaphore,
     Set,
 )
-from casty.remote import tls
-from casty.remote.extras import (
-    CloudPickleSerializer,
-    Lz4CompressedSerializer,
-    MsgpackSerializer,
+from casty.config import TLS, CompressionConfig, MembershipConfig, TransportConfig
+from casty.errors import (
+    ActorFailedError,
+    ActorUnavailableError,
+    CastyError,
+    CastyTimeoutError,
+    ConnectionLostError,
+    HandshakeError,
+    ProtocolError,
+    QuorumUnavailableError,
+    RangeMovingError,
+    ReentrancyError,
+    RemoteError,
+    SerializationError,
+    SerializationSchemaError,
+    StreamResetError,
+    TransportError,
+    UnknownActorTypeError,
 )
-from casty.remote.ref import BroadcastRef
-from casty.remote.serialization import (
-    CompressedSerializer,
-    JsonSerializer,
-    PickleSerializer,
-    Serializer,
-)
+from casty.local import local
+from casty.node import Client, Config, Managed, Node, connect, start
+from casty.serde.registry import message
+from casty.services import service
+from casty.system import ActorSystem
+
+KEEP = Directive.KEEP
+RESET = Directive.RESET
+STOP = Directive.STOP
+
+ONE = Consistency.ONE
+MAJORITY = Consistency.MAJORITY
+ALL = Consistency.ALL
 
 __all__ = [
-    "__version__",
-    # Actors
-    "Behavior",
-    "Behaviors",
-    "Signal",
+    "ALL",
+    "KEEP",
+    "MAJORITY",
+    "ONE",
+    "RESET",
+    "STOP",
+    "TLS",
     "ActorContext",
-    "Interceptor",
-    "ActorRef",
-    "BroadcastRef",
+    "ActorFailedError",
     "ActorSystem",
-    "Terminated",
-    "Mailbox",
-    "MailboxOverflowStrategy",
-    # Behavior markers
-    "BroadcastedBehavior",
-    "EventSourcedBehavior",
-    "PersistedBehavior",
-    "ShardedBehavior",
-    "SingletonBehavior",
-    "SnapshotPolicy",
-    "SnapshotEvery",
-    "SpyEvent",
-    # Supervision
-    "SupervisionStrategy",
-    "OneForOneStrategy",
-    "Directive",
-    # Observability events
-    "ActorStarted",
-    "ActorStopped",
-    "ActorRestarted",
-    "DeadLetter",
-    "UnhandledMessage",
-    "MemberUp",
-    "MemberLeft",
-    "UnreachableMember",
-    "ReachableMember",
-    # Event stream
-    "EventStreamMsg",
-    "EventStreamSubscribe",
-    "EventStreamUnsubscribe",
-    "Publish",
-    # Scheduler
-    "SchedulerMsg",
-    "ScheduleTick",
-    "ScheduleOnce",
-    "CancelSchedule",
-    # Task runner
-    "TaskRunnerMsg",
-    "RunTask",
-    "TaskResult",
-    "TaskCompleted",
-    "TaskFailed",
-    "TaskCancelled",
-    # Persistence
-    "EventJournal",
-    "InMemoryJournal",
-    "SqliteJournal",
-    "JournalKind",
-    "PersistedEvent",
-    "Snapshot",
-    "ReplicationConfig",
-    # Config
-    "CastyConfig",
-    "load_config",
-    "discover_config",
-    "ActorConfig",
-    "MailboxConfig",
-    "SupervisionConfig",
-    "SerializationConfig",
-    "SerializerKind",
+    "ActorUnavailableError",
+    "CastyError",
+    "CastyTimeoutError",
+    "Client",
     "CompressionConfig",
-    "CompressionAlgorithm",
-    "ShardingConfig",
-    "GossipConfig",
-    "HeartbeatConfig",
-    "FailureDetectorConfig",
-    "TransportConfig",
-    # Serialization
-    "Serializer",
-    "JsonSerializer",
-    "PickleSerializer",
-    "MsgpackSerializer",
-    "CloudPickleSerializer",
-    "CompressedSerializer",
-    "Lz4CompressedSerializer",
-    # Cluster
-    "ClusteredActorSystem",
-    "ClusterClient",
-    "ShardEnvelope",
-    "tls",
-    # Receptionist
-    "ServiceKey",
-    "ServiceInstance",
-    "Listing",
-    "Register",
-    "Deregister",
-    "Subscribe",
-    "Find",
-    # Streams
-    "stream_producer",
-    "stream_consumer",
-    "SinkRef",
-    "SourceRef",
-    "GetSink",
-    "GetSource",
-    "CompleteStream",
-    "StreamProducerMsg",
-    "StreamConsumerMsg",
-    # Distributed data structures
-    "Distributed",
-    "Barrier",
+    "Config",
+    "ConnectionLostError",
+    "Consistency",
     "Counter",
-    "Dict",
+    "Directive",
+    "FailureContext",
+    "HandshakeError",
+    "Lease",
     "Lock",
+    "Managed",
+    "Map",
+    "MembershipConfig",
+    "MultiMap",
+    "Node",
+    "PageSet",
+    "Pager",
+    "ProtocolError",
     "Queue",
+    "QuorumUnavailableError",
+    "RangeMovingError",
+    "ReentrancyError",
+    "Register",
+    "RemoteError",
+    "Reply",
+    "Schedule",
     "Semaphore",
+    "SerializationError",
+    "SerializationSchemaError",
     "Set",
+    "StreamResetError",
+    "Supervisor",
+    "TransportConfig",
+    "TransportError",
+    "UnknownActorTypeError",
+    "activate",
+    "actor",
+    "connect",
+    "context",
+    "deactivate",
+    "explain",
+    "inspection",
+    "local",
+    "message",
+    "paged",
+    "service",
+    "start",
+    "transient",
 ]

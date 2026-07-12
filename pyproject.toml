@@ -1,7 +1,7 @@
 [project]
 name = "casty"
 dynamic = ["version"]
-description = "Typed, clustered actor framework for Python. Pure asyncio, zero dependencies."
+description = "Typed, clustered actor framework for Python"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -18,31 +18,29 @@ classifiers = [
     "Framework :: AsyncIO",
     "Typing :: Typed",
 ]
-
-[project.optional-dependencies]
-performance = [
-    "uvloop>=0.22.1",
-]
-msgpack = [
-    "msgpack>=1.0",
-]
-cloudpickle = [
-    "cloudpickle>=3.0",
-]
-lz4 = [
-    "lz4>=4.0",
-]
-cert = [
-    "cryptography>=44.0",
-]
-
-[project.scripts]
-casty = "casty.cli:main"
+dependencies = ["msgpack>=1.0"]
 
 [project.urls]
-Homepage = "https://gabfssilva.github.io/casty/"
 Repository = "https://github.com/gabfssilva/casty"
-Documentation = "https://gabfssilva.github.io/casty/"
+
+[project.optional-dependencies]
+lz4 = ["lz4>=4.0"]
+zstd = ["zstandard>=0.22"]
+uvloop = ["uvloop>=0.21"]
+# copy-on-write is the whole diff, and it is only guaranteed from pandas 3.0
+pandas = ["pandas>=3.0", "pyarrow>=17"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.11",
+    "ruff>=0.6",
+    "msgpack-types>=0.3",
+    "pandas>=3.0",
+    "pandas-stubs>=2.2",
+    "pyarrow>=17",
+]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
@@ -57,41 +55,25 @@ version-file = "src/casty/_version.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/casty"]
 
-[dependency-groups]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.25",
-    "pytest-cov>=7.0.0",
-    "pyright>=1.1",
-    "ruff>=0.9",
-    "testcontainers>=4.14.1",
-    "pytest-sugar>=1.1.1",
-    "pytest-xdist>=3.8.0",
-    "pytest-timeout>=2.4.0",
-    "trustme>=1.2.1",
-    "asyncssh>=2.22.0",
-    "cloudpickle>=3.1.2",
-    "msgpack>=1.0",
-    "lz4>=4.0",
-    "cryptography>=44.0",
-]
-docs = [
-    "mkdocs-gen-files>=0.6.0",
-    "mkdocs-material>=9.7.1",
-    "mkdocstrings[python]>=1.0.3",
-]
+[tool.mypy]
+strict = true
+python_version = "3.12"
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["lz4.*", "zstandard.*", "docker.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-addopts = "-m 'not benchmark' --durations=0 -n auto"
-markers = ["benchmark: performance benchmarks (deselect with '-m not benchmark')"]
 
-[tool.ruff]
-extend-exclude = ["src/casty/_version.py"]
-
-[tool.pyright]
-pythonVersion = "3.12"
-typeCheckingMode = "strict"
-reportInvalidTypeVarUse = false
+[tool.uv]
+package = true
