@@ -68,7 +68,7 @@ Each call to `system.spawn(Behaviors.singleton(factory), name)` creates a **sing
 - **Active.** This node is the leader. The manager spawns the actual singleton actor as a child and forwards all messages to it.
 - **Standby.** Another node is the leader. The manager forwards messages to the leader's manager over TCP.
 
-On startup, the manager subscribes to the topology actor via `SubscribeTopology` and receives `TopologySnapshot` pushes whenever the cluster state changes. When a leadership change occurs (a node goes down, a new leader is elected), every singleton manager receives an updated `TopologySnapshot`. The old leader's manager stops its child. The new leader's manager spawns a fresh instance from the factory.
+On startup, the manager subscribes to the topology actor via `SubscribeTopology` and receives `TopologySnapshot` pushes whenever the cluster state changes. When a leadership change occurs, ownership is **handed over**: the old leader's manager stops its child, waits for it to terminate, and only then notifies the new leader's manager (`HandoverDone`), which spawns a fresh instance from the factory. If the old leader is already gone — crashed, downed, or unreachable in the new snapshot — the new leader skips the wait and spawns immediately. Messages arriving at either manager during the transition are buffered and delivered to the new instance.
 
 ## Failover
 
@@ -77,9 +77,11 @@ The singleton tracks leadership, not individual node health. When the leader nod
 1. The phi accrual failure detector marks the node as unreachable.
 2. The topology actor transitions the member to `down` status via `DownMember`.
 3. Leader election (deterministic — lowest address among `up` members) produces a new leader.
-4. The topology actor pushes a new `TopologySnapshot` to all subscribers, and the new leader's singleton manager spawns the singleton.
+4. The topology actor pushes a new `TopologySnapshot` to all subscribers. The new leader's manager sees the dead node as gone and spawns the singleton without waiting for a handover.
 
 Messages sent during the transition are buffered by the manager on the sending node and delivered once the new singleton is active.
+
+The exactly-one guarantee is strict for graceful leader changes (both nodes alive and connected): the new instance never starts before the old one has fully stopped. Under a network partition the guarantee is best-effort — the majority side eventually downs the isolated leader and activates a new instance while the old one may still be running on the other side of the partition, until it heals and observes the new topology. This matches Akka's cluster singleton semantics; design singletons to tolerate a brief overlap after partitions (e.g. idempotent effects, event-sourced state).
 
 ## Event-Sourced Singleton
 

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
-from casty import ActorSystem, PhiAccrualFailureDetector
+from casty import ActorSystem
+from casty.cluster.failure_detector import PhiAccrualFailureDetector
 from casty.cluster.state import (
     ClusterState,
     Member,

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from casty import ActorSystem, InMemoryJournal
 from casty.cluster.coordinator import LeastShardStrategy, shard_coordinator_actor
 from casty.cluster.region import shard_region_actor
 from casty.cluster.state import NodeAddress
 from casty.distributed import Queue
-from casty.distributed.queue import persistent_queue_entity
+from casty.distributed.queue import QueueEmpty, persistent_queue_entity
 
 
 async def test_persistent_queue_multinode_recovery() -> None:
@@ -70,7 +72,8 @@ async def test_persistent_queue_multinode_recovery() -> None:
         assert await q.dequeue() == "job-1"
         assert await q.dequeue() == "job-2"
         assert await q.dequeue() == "job-3"
-        assert await q.dequeue() is None
+        with pytest.raises(QueueEmpty):
+            await q.dequeue()
 
 
 async def test_persistent_queue_partial_dequeue_recovery() -> None:
@@ -132,4 +135,5 @@ async def test_persistent_queue_partial_dequeue_recovery() -> None:
         assert await q.size() == 2
         assert await q.dequeue() == "b"
         assert await q.dequeue() == "c"
-        assert await q.dequeue() is None
+        with pytest.raises(QueueEmpty):
+            await q.dequeue()

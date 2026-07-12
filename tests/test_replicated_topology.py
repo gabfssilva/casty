@@ -6,7 +6,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from casty import ActorSystem, Behaviors, ClusterState, NodeAddress
+from casty import ActorSystem, Behaviors
+from casty.cluster.state import ClusterState, NodeAddress
 from casty.cluster.topology_actor import (
     GetState as TopologyGetState,
     GossipMessage,

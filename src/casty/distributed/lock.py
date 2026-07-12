@@ -31,7 +31,7 @@ class LockAcquire:
 
 @dataclass(frozen=True)
 class LockAcquired:
-    pass
+    granted: bool = True
 
 
 @dataclass(frozen=True)
@@ -98,6 +98,12 @@ def lock_held(
 ) -> Behavior[LockMsg]:
     async def receive(_ctx: Any, msg: LockMsg) -> Behavior[LockMsg]:
         match msg:
+            case LockAcquire(owner=owner, reply_to=reply_to) if owner == holder:
+                # The lock is not reentrant: reacquire by the current
+                # holder would enqueue it behind itself and deadlock.
+                # Refuse instead.
+                reply_to.tell(LockAcquired(granted=False))
+                return Behaviors.same()
             case LockAcquire(owner=owner, reply_to=reply_to):
                 return lock_held(
                     holder=holder,
@@ -187,11 +193,18 @@ class Lock:
     async def acquire(self) -> None:
         """Block until the lock is acquired.
 
+        Raises
+        ------
+        RuntimeError
+            If this instance already holds the lock. The lock is not
+            reentrant; reacquiring by the holder is refused rather than
+            deadlocking.
+
         Examples
         --------
         >>> await lock.acquire()
         """
-        await self._gateway.entity_ask(
+        result: LockAcquired = await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,
@@ -199,6 +212,9 @@ class Lock:
             ),
             timeout=self._timeout,
         )
+        if not result.granted:
+            msg = f"lock {self._name!r} is already held by this owner (not reentrant)"
+            raise RuntimeError(msg)
 
     async def try_acquire(self) -> bool:
         """Try to acquire the lock without blocking.

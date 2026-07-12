@@ -65,6 +65,11 @@ class CellContext[M]:
         if mailbox is not None:
             child.mailbox = mailbox
         self._cell.children[name] = child
+        if self._cell.is_stopped:
+            # The parent has already stopped (e.g. spawn from post_stop):
+            # never start an orphan that nothing supervises.
+            child._stopped = True
+            return child.ref
         asyncio.get_running_loop().create_task(child.start())
         return child.ref
 
@@ -77,13 +82,23 @@ class CellContext[M]:
     def watch(self, ref: ActorRef[Any]) -> None:
         for child in self._cell.children.values():
             if child.ref.id == ref.id:
-                child.watchers.add(self._cell)
+                if child.is_stopped:
+                    self._cell._deliver(Terminated(ref=ref))
+                else:
+                    child.watchers.add(self._cell)
                 return
         if self._cell.parent is not None:
             for sibling in self._cell.parent.children.values():
                 if sibling.ref.id == ref.id:
-                    sibling.watchers.add(self._cell)
+                    if sibling.is_stopped:
+                        self._cell._deliver(Terminated(ref=ref))
+                    else:
+                        sibling.watchers.add(self._cell)
                     return
+        # Target already stopped and gone (removed from the children dict
+        # on stop): deliver Terminated immediately, matching watch on a
+        # live-then-dead actor.
+        self._cell._deliver(Terminated(ref=ref))
 
     def unwatch(self, ref: ActorRef[Any]) -> None:
         for child in self._cell.children.values():
@@ -325,8 +340,26 @@ class ActorCell[M]:
 
     async def _do_restart(self) -> None:
         self._logger.info("Restarting")
+        await self._reset_incarnation()
         await self._initialize(self._initial_behavior)
         self._publish(ActorRestarted(ref=self._ref, exception=RuntimeError("restart")))
+
+    async def _reset_incarnation(self) -> None:
+        """Discard per-incarnation state before re-running setup.
+
+        A restart is a fresh incarnation: the previous one's children,
+        stop callbacks and interceptors must not carry over, or they leak
+        (orphaned children, multiply-firing post_stop). Stop callbacks are
+        cleared without firing — restart is not a stop.
+        """
+        for child in list(self._children.values()):
+            try:
+                await child.stop()
+            except Exception:
+                self._logger.exception("Error stopping child %s on restart", child.id)
+        self._children.clear()
+        self._stop_callbacks.clear()
+        self._interceptors.clear()
 
     async def _do_stop(self) -> None:
         if self._stopped:
@@ -353,6 +386,13 @@ class ActorCell[M]:
                 watcher._deliver(Terminated(ref=self._ref))
             except Exception:
                 self._logger.exception("Error notifying watcher")
+
+        if self._parent is not None:
+            siblings = self._parent._children
+            for name, cell in list(siblings.items()):
+                if cell is self:
+                    del siblings[name]
+                    break
 
         self._publish(ActorStopped(ref=self._ref))
 

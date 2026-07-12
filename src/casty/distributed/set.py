@@ -131,20 +131,20 @@ def persistent_set_entity(
         ) -> Behavior[SetMsg]:
             match msg:
                 case Add(value, reply_to):
-                    was_absent = value not in state
-                    reply_to.tell(was_absent)
-                    if was_absent:
+                    if value not in state:
                         return Behaviors.persisted(
-                            [ItemAdded(value)], then=Behaviors.same()
+                            [ItemAdded(value)],
+                            reply=lambda: reply_to.tell(True),
                         )
+                    reply_to.tell(False)
                     return Behaviors.same()
                 case Remove(value, reply_to):
-                    was_present = value in state
-                    reply_to.tell(was_present)
-                    if was_present:
+                    if value in state:
                         return Behaviors.persisted(
-                            [ItemRemoved(value)], then=Behaviors.same()
+                            [ItemRemoved(value)],
+                            reply=lambda: reply_to.tell(True),
                         )
+                    reply_to.tell(False)
                     return Behaviors.same()
                 case SetContains(value, reply_to):
                     reply_to.tell(value in state)

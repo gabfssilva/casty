@@ -337,7 +337,6 @@ class Distributed:
         self,
         name: str,
         *,
-        node_id: str | None = None,
         shards: int = 10,
         timeout: float = 60.0,
     ) -> Barrier:
@@ -347,9 +346,6 @@ class Distributed:
         ----------
         name : str
             Logical barrier name (used as entity ID).
-        node_id : str | None
-            Identifier for this node (defaults to ``host:port``).
-            Required when using ``ClusterClient`` as the gateway.
         shards : int
             Number of shards for the backing region.
         timeout : float
@@ -364,14 +360,6 @@ class Distributed:
         >>> barrier = d.barrier("init-sync")
         >>> await barrier.arrive(expected=3)
         """
-        if node_id is not None:
-            nid = node_id
-        elif hasattr(self._gateway, "self_node"):
-            self_node = getattr(self._gateway, "self_node")
-            nid = f"{self_node.host}:{self_node.port}"
-        else:
-            msg = "node_id is required when using Distributed from a ClusterClient"
-            raise TypeError(msg)
         region = get_or_spawn_region(
             self._gateway, self._regions, f"d-barrier-{name}", barrier_entity, shards
         )
@@ -379,6 +367,5 @@ class Distributed:
             gateway=self._gateway,
             region_ref=region,
             name=name,
-            node_id=nid,
             timeout=timeout,
         )

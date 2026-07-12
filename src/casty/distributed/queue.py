@@ -12,6 +12,11 @@ from typing import Any, TYPE_CHECKING
 
 from casty.actor import Behavior, Behaviors, ShardedBehavior
 from casty.cluster.envelope import ShardEnvelope
+from casty.distributed._optional import EMPTY, Some
+
+
+class QueueEmpty(Exception):
+    """Raised by ``dequeue`` / ``peek`` when the queue is empty."""
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
@@ -70,12 +75,10 @@ def queue_entity(entity_id: str) -> Behavior[QueueMsg]:
                 reply_to.tell(None)
                 return Behaviors.same()
             case Dequeue(reply_to):
-                value = items.popleft() if items else None
-                reply_to.tell(value)
+                reply_to.tell(Some(items.popleft()) if items else EMPTY)
                 return Behaviors.same()
             case Peek(reply_to):
-                value = items[0] if items else None
-                reply_to.tell(value)
+                reply_to.tell(Some(items[0]) if items else EMPTY)
                 return Behaviors.same()
             case QueueSize(reply_to):
                 reply_to.tell(len(items))
@@ -139,20 +142,21 @@ def persistent_queue_entity(
         ) -> Behavior[QueueMsg]:
             match msg:
                 case Enqueue(value, reply_to):
-                    reply_to.tell(None)
                     return Behaviors.persisted(
-                        [ItemEnqueued(value)], then=Behaviors.same()
+                        [ItemEnqueued(value)],
+                        reply=lambda: reply_to.tell(None),
                     )
                 case Dequeue(reply_to):
                     if state:
-                        reply_to.tell(state[0])
+                        head = state[0]
                         return Behaviors.persisted(
-                            [ItemDequeued()], then=Behaviors.same()
+                            [ItemDequeued()],
+                            reply=lambda: reply_to.tell(Some(head)),
                         )
-                    reply_to.tell(None)
+                    reply_to.tell(EMPTY)
                     return Behaviors.same()
                 case Peek(reply_to):
-                    reply_to.tell(state[0] if state else None)
+                    reply_to.tell(Some(state[0]) if state else EMPTY)
                     return Behaviors.same()
                 case QueueSize(reply_to):
                     reply_to.tell(len(state))
@@ -251,41 +255,59 @@ class Queue[V]:
             timeout=self._timeout,
         )
 
-    async def dequeue(self) -> V | None:
-        """Remove and return the front value, or ``None`` if empty.
+    async def dequeue(self) -> V:
+        """Remove and return the front value.
 
         Returns
         -------
-        V | None
+        V
+
+        Raises
+        ------
+        QueueEmpty
+            If the queue is empty. This lets a queue of nullable values
+            (``V`` includes ``None``) distinguish a real ``None`` payload
+            from an empty queue.
 
         Examples
         --------
         >>> await jobs.dequeue()
         'task-1'
         """
-        return await self._gateway.entity_ask(
+        result = await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(self._name, Dequeue(reply_to=reply_to)),
             timeout=self._timeout,
         )
+        if result is EMPTY:
+            raise QueueEmpty(self._name)
+        return result.value
 
-    async def peek(self) -> V | None:
-        """Return the front value without removing, or ``None`` if empty.
+    async def peek(self) -> V:
+        """Return the front value without removing it.
 
         Returns
         -------
-        V | None
+        V
+
+        Raises
+        ------
+        QueueEmpty
+            If the queue is empty.
 
         Examples
         --------
         >>> await jobs.peek()
         'task-1'
         """
-        return await self._gateway.entity_ask(
+        result = await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(self._name, Peek(reply_to=reply_to)),
             timeout=self._timeout,
         )
+        if result is EMPTY:
+            raise QueueEmpty(self._name)
+        return result.value
 
     async def size(self) -> int:
         """Return the number of items in the queue.

@@ -76,6 +76,10 @@ Every node in the cluster runs the same code — only `host`, `port`, and `node_
 
 `ClusteredActorSystem` extends `ActorSystem`. Spawning a `ShardedBehavior` (produced by `Behaviors.sharded()`) returns an `ActorRef[ShardEnvelope[M]]`. All other spawns work identically to the local `ActorSystem`. This means existing actors that don't need distribution require no changes when moving to a clustered deployment.
 
+## Delivery semantics
+
+Message delivery to sharded entities is **at-most-once**, like actor messaging generally. A message may be dropped without notice during network failures, rebalancing, or the window while an entity self-stops (`Behaviors.stopped()`) before its region observes the termination. Casty does not buffer, retry, or replay these messages — reliable delivery is the application's responsibility (e.g. idempotent commands with acknowledgements, or event-sourced entities whose state survives redelivery). This is a deliberate design choice: a two-phase passivation protocol would add coordination that most workloads don't need.
+
 ---
 
 **Next:** [Cluster Broadcast](cluster-broadcast.md)

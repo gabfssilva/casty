@@ -121,14 +121,16 @@ def persistent_counter_entity(
         ) -> Behavior[CounterMsg]:
             match msg:
                 case Increment(amount, reply_to):
-                    reply_to.tell(state + amount)
+                    new_value = state + amount
                     return Behaviors.persisted(
-                        [Incremented(amount)], then=Behaviors.same()
+                        [Incremented(amount)],
+                        reply=lambda: reply_to.tell(new_value),
                     )
                 case Decrement(amount, reply_to):
-                    reply_to.tell(state - amount)
+                    new_value = state - amount
                     return Behaviors.persisted(
-                        [Decremented(amount)], then=Behaviors.same()
+                        [Decremented(amount)],
+                        reply=lambda: reply_to.tell(new_value),
                     )
                 case GetValue(reply_to):
                     reply_to.tell(state)

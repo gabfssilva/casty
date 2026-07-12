@@ -3,18 +3,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from casty import (
-    ActorContext,
-    ActorRef,
-    ActorSystem,
-    Behavior,
-    Behaviors,
-    ClusterState,
-    Member,
-    MemberStatus,
-    NodeAddress,
-    PhiAccrualFailureDetector,
-)
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
+from casty.cluster.failure_detector import PhiAccrualFailureDetector
+from casty.cluster.state import ClusterState, Member, MemberStatus, NodeAddress
 from casty.cluster.topology_actor import (
     CheckAvailability,
     DownMember,

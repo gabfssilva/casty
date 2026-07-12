@@ -151,7 +151,7 @@ def supervise[M](
                 try:
                     result = await handler(ctx, msg)
                 except Exception as exc:
-                    directive = strategy.decide(exc, child_id="")
+                    directive = strategy.decide(exc, child_id=str(ctx.self.id))
                     match directive:
                         case Directive.restart:
                             return B.restart()

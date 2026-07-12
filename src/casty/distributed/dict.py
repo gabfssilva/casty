@@ -11,6 +11,7 @@ from typing import Any, TYPE_CHECKING
 
 from casty.actor import Behavior, Behaviors, ShardedBehavior
 from casty.cluster.envelope import ShardEnvelope
+from casty.distributed._optional import EMPTY, Maybe, Some
 
 if TYPE_CHECKING:
     from casty.context import ActorContext
@@ -44,30 +45,33 @@ type MapEntryMsg = Put | Get | Delete | Contains
 
 
 def map_entity(entity_id: str) -> Behavior[MapEntryMsg]:
-    """Sharded map entry behavior. State via closure, starts as None."""
+    """Sharded map entry behavior. State via closure, starts unset.
 
-    def active(value: Any) -> Behavior[MapEntryMsg]:
+    Set-ness is tracked with an internal sentinel so a key explicitly set
+    to ``None`` is distinct from an unset key.
+    """
+
+    def active(entry: Maybe) -> Behavior[MapEntryMsg]:
         async def receive(
             ctx: ActorContext[MapEntryMsg], msg: MapEntryMsg
         ) -> Behavior[MapEntryMsg]:
             match msg:
                 case Put(new_value, reply_to):
-                    reply_to.tell(value)
-                    return active(new_value)
+                    reply_to.tell(entry.value if isinstance(entry, Some) else None)
+                    return active(Some(new_value))
                 case Get(reply_to):
-                    reply_to.tell(value)
+                    reply_to.tell(entry.value if isinstance(entry, Some) else None)
                     return Behaviors.same()
                 case Delete(reply_to):
-                    existed = value is not None
-                    reply_to.tell(existed)
+                    reply_to.tell(isinstance(entry, Some))
                     return Behaviors.stopped()
                 case Contains(reply_to):
-                    reply_to.tell(value is not None)
+                    reply_to.tell(isinstance(entry, Some))
                     return Behaviors.same()
 
         return Behaviors.receive(receive)
 
-    return active(None)
+    return active(EMPTY)
 
 
 # --- Event sourcing events ---
@@ -86,13 +90,17 @@ class ValueDeleted:
 type MapEntryEvent = ValueSet | ValueDeleted
 
 
-def apply_event(state: Any, event: MapEntryEvent) -> Any:
-    """Pure event applier for persistent map entry."""
+def apply_event(state: Maybe, event: MapEntryEvent) -> Maybe:
+    """Pure event applier for persistent map entry.
+
+    State is a ``Maybe`` sentinel so a persisted ``ValueSet(None)`` stays
+    distinct from an unset key across replay.
+    """
     match event:
         case ValueSet(value):
-            return value
+            return Some(value)
         case ValueDeleted():
-            return None
+            return EMPTY
         case _:
             msg = f"Unknown map entry event: {type(event)}"
             raise TypeError(msg)
@@ -118,24 +126,28 @@ def persistent_map_entity(
         ) -> Behavior[MapEntryMsg]:
             match msg:
                 case Put(new_value, reply_to):
-                    reply_to.tell(state)
+                    previous = state.value if isinstance(state, Some) else None
                     return Behaviors.persisted(
-                        [ValueSet(new_value)], then=Behaviors.same()
+                        [ValueSet(new_value)],
+                        reply=lambda: reply_to.tell(previous),
                     )
                 case Get(reply_to):
-                    reply_to.tell(state)
+                    reply_to.tell(state.value if isinstance(state, Some) else None)
                     return Behaviors.same()
                 case Delete(reply_to):
-                    reply_to.tell(state is not None)
-                    return Behaviors.persisted([ValueDeleted()], then=Behaviors.same())
+                    existed = isinstance(state, Some)
+                    return Behaviors.persisted(
+                        [ValueDeleted()],
+                        reply=lambda: reply_to.tell(existed),
+                    )
                 case Contains(reply_to):
-                    reply_to.tell(state is not None)
+                    reply_to.tell(isinstance(state, Some))
                     return Behaviors.same()
 
         return Behaviors.event_sourced(
             entity_id=entity_id,
             journal=journal,
-            initial_state=None,
+            initial_state=EMPTY,
             on_event=apply_event,
             on_command=on_command,
         )

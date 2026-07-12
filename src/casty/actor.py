@@ -51,6 +51,12 @@ type SnapshotPolicy = SnapshotEvery
 class PersistedBehavior[M, E]:
     events: tuple[E, ...]
     then: Behavior[M]
+    # Invoked only after the events are durably persisted (and the
+    # replication ack quorum met, when configured). Replies to callers
+    # must go through this hook, never directly inside on_command —
+    # otherwise a journal failure leaves the caller believing the
+    # operation succeeded.
+    reply: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)

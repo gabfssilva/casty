@@ -3,16 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from casty import (
-    ActorContext,
-    ActorRef,
-    ActorSystem,
-    Behavior,
-    Behaviors,
-    Member,
-    MemberStatus,
-    NodeAddress,
-)
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
+from casty.cluster.state import Member, MemberStatus, NodeAddress
 from casty.cluster.state import ShardAllocation
 from casty.core.replication import ReplicationConfig
 from casty.cluster.coordinator import (

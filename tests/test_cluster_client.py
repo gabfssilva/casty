@@ -12,8 +12,10 @@ import trustme
 
 from casty.remote.tls import Config as TlsConfig
 
-from casty import Behaviors, ActorRef, Behavior, ActorSystem, MemberStatus, Member
-from casty import ServiceKey, ServiceEntry
+from casty import Behaviors, ActorRef, Behavior, ActorSystem
+from casty.cluster.state import Member, MemberStatus
+from casty import ServiceKey
+from casty.cluster.state import ServiceEntry
 from casty.client.client import (
     ClusterClient,
     NodeFailed,

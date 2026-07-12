@@ -16,14 +16,8 @@ from dataclasses import dataclass
 
 import cloudpickle
 
-from casty import (
-    ActorAddress,
-    ActorContext,
-    ActorRef,
-    ActorSystem,
-    Behavior,
-    Behaviors,
-)
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
+from casty.core.address import ActorAddress
 
 
 # ── The Serializer protocol (for reference) ──────────────────────────

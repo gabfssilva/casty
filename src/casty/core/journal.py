@@ -378,18 +378,20 @@ class SqliteJournal:
     def _load_sync(
         self, entity_id: str, from_sequence_nr: int
     ) -> list[PersistedEvent[Any]]:
-        cursor = self._conn.execute(
-            "SELECT sequence_nr, event_data, timestamp FROM events "
-            "WHERE entity_id = ? AND sequence_nr >= ? ORDER BY sequence_nr",
-            (entity_id, from_sequence_nr),
-        )
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT sequence_nr, event_data, timestamp FROM events "
+                "WHERE entity_id = ? AND sequence_nr >= ? ORDER BY sequence_nr",
+                (entity_id, from_sequence_nr),
+            )
+            rows = cursor.fetchall()
         return [
             PersistedEvent(
                 sequence_nr=row[0],
                 event=self._deserialize(row[1]),
                 timestamp=row[2],
             )
-            for row in cursor
+            for row in rows
         ]
 
     async def save_snapshot(self, entity_id: str, snapshot: Snapshot[Any]) -> None:
@@ -417,11 +419,12 @@ class SqliteJournal:
         return await asyncio.to_thread(self._load_snapshot_sync, entity_id)
 
     def _load_snapshot_sync(self, entity_id: str) -> Snapshot[Any] | None:
-        cursor = self._conn.execute(
-            "SELECT sequence_nr, state_data, timestamp FROM snapshots WHERE entity_id = ?",
-            (entity_id,),
-        )
-        row = cursor.fetchone()
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT sequence_nr, state_data, timestamp FROM snapshots WHERE entity_id = ?",
+                (entity_id,),
+            )
+            row = cursor.fetchone()
         if row is None:
             return None
         return Snapshot(

@@ -44,17 +44,22 @@ def shard_proxy_behavior(
         async def receive(ctx: Any, msg: Any) -> Any:
             match msg:
                 case TopologySnapshot() as snapshot:
-                    evicted = {
+                    up_nodes = frozenset(
+                        m.address
+                        for m in snapshot.members
+                        if m.status == MemberStatus.up
+                    )
+                    kept = {
                         sid: n
                         for sid, n in shard_cache.items()
-                        if n not in snapshot.unreachable
+                        if n in up_nodes and n not in snapshot.unreachable
                     }
-                    if len(evicted) < len(shard_cache):
+                    if len(kept) < len(shard_cache):
                         log.info(
-                            "Evicted %d cached shards (unreachable nodes)",
-                            len(shard_cache) - len(evicted),
+                            "Evicted %d cached shards (nodes no longer up)",
+                            len(shard_cache) - len(kept),
                         )
-                    return active(evicted, buffer)
+                    return active(kept, buffer)
 
                 case ShardEnvelope():
                     envelope = cast(ShardEnvelope[Any], msg)

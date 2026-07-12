@@ -35,10 +35,14 @@ def replica_region_actor[S, E](
                 ):
                     state = entity_states.get(entity_id, initial_state)
 
-                    if journal.kind == JournalKind.local:
+                    highest_seq = entity_sequence_nrs.get(entity_id, 0)
+                    # The transport is at-least-once: drop already-applied
+                    # sequence numbers so redelivered batches are idempotent.
+                    events = [e for e in events if e.sequence_nr > highest_seq]
+
+                    if journal.kind == JournalKind.local and events:
                         await journal.persist(entity_id, events)
 
-                    highest_seq = entity_sequence_nrs.get(entity_id, 0)
                     for persisted in events:
                         state = on_event(state, persisted.event)
                         highest_seq = persisted.sequence_nr

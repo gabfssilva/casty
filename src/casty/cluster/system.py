@@ -687,16 +687,19 @@ class ClusteredActorSystem(ActorSystem):
         --------
         >>> await system.barrier("setup-done", n=3)
         """
-        from casty.distributed.barrier import BarrierArrive
+        from casty.distributed.barrier import BarrierArrive, BarrierMismatch
 
-        node_id = f"{self._host}:{self._port}"
-        await self.ask(
+        reply = await self.ask(
             self._barrier_proxy,
-            lambda r: ShardEnvelope(
-                name, BarrierArrive(node=node_id, expected=n, reply_to=r)
-            ),
+            lambda r: ShardEnvelope(name, BarrierArrive(expected=n, reply_to=r)),
             timeout=timeout,
         )
+        if isinstance(reply, BarrierMismatch):
+            msg = (
+                f"barrier {name!r} expects {reply.expected} arrivals, "
+                f"got barrier(n={n})"
+            )
+            raise ValueError(msg)
 
     @overload
     def lookup[M](

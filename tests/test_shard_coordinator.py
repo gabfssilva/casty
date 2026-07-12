@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import asyncio
 
-from casty import ActorSystem, Member, MemberStatus
+from casty import ActorSystem
+from casty.cluster.state import Member, MemberStatus
 from casty.cluster.state import NodeAddress
 from casty.cluster.coordinator import (
     GetShardLocation,

@@ -59,7 +59,9 @@ class LeastShardStrategy:
         for node in available_nodes:
             if node not in counts:
                 counts[node] = 0
-        return min(available_nodes, key=lambda n: counts.get(n, 0))
+        # (count, node) key: deterministic across processes regardless of
+        # frozenset iteration order (hash randomization).
+        return min(available_nodes, key=lambda n: (counts.get(n, 0), n))
 
 
 @dataclass(frozen=True)
@@ -92,7 +94,7 @@ def allocate_shard(
     for _ in range(min(num_replicas, len(remaining))):
         replica = min(
             remaining,
-            key=lambda n: sum(1 for a in allocations.values() if n in a.replicas),
+            key=lambda n: (sum(1 for a in allocations.values() if n in a.replicas), n),
         )
         replica_nodes_list.append(replica)
         remaining = remaining - {replica}
@@ -104,9 +106,11 @@ def handle_node_down(
     failed_node: NodeAddress,
     allocations: dict[int, ShardAllocation],
     nodes: frozenset[NodeAddress],
+    num_replicas: int = 0,
 ) -> tuple[dict[int, ShardAllocation], frozenset[NodeAddress]]:
     """Shared NodeDown handling used by leader mode."""
     new_allocations = dict(allocations)
+    new_nodes = nodes - {failed_node}
     for shard_id, alloc in list(allocations.items()):
         if alloc.primary == failed_node:
             if alloc.replicas:
@@ -123,7 +127,24 @@ def handle_node_down(
                 new_allocations[shard_id] = ShardAllocation(
                     primary=alloc.primary, replicas=new_replicas
                 )
-    new_nodes = nodes - {failed_node}
+
+    for shard_id, alloc in list(new_allocations.items()):
+        candidates = new_nodes - {alloc.primary} - set(alloc.replicas)
+        replicas = list(alloc.replicas)
+        while len(replicas) < num_replicas and candidates:
+            replica = min(
+                candidates,
+                key=lambda n: (
+                    sum(1 for a in new_allocations.values() if n in a.replicas),
+                    n,
+                ),
+            )
+            replicas.append(replica)
+            candidates = candidates - {replica}
+        if len(replicas) != len(alloc.replicas):
+            new_allocations[shard_id] = ShardAllocation(
+                primary=alloc.primary, replicas=tuple(replicas)
+            )
     return new_allocations, new_nodes
 
 
@@ -307,20 +328,25 @@ def leader_behavior(
                 current_allocs = allocations
                 current_nodes = nodes
                 current_epoch = epoch
-                for unreachable_node in snapshot.unreachable:
+                # Nodes that are unreachable, plus nodes that left the
+                # cluster gracefully (no longer up, never flagged
+                # unreachable) — both must vacate their shards.
+                gone_nodes = frozenset(snapshot.unreachable) | (nodes - up_nodes)
+                for gone_node in gone_nodes:
                     if any(
-                        a.primary == unreachable_node or unreachable_node in a.replicas
+                        a.primary == gone_node or gone_node in a.replicas
                         for a in current_allocs.values()
                     ):
                         cfg.logger.warning(
                             "NodeDown %s:%d (shards affected)",
-                            unreachable_node.host,
-                            unreachable_node.port,
+                            gone_node.host,
+                            gone_node.port,
                         )
                         current_allocs, current_nodes = handle_node_down(
-                            unreachable_node,
+                            gone_node,
                             current_allocs,
                             current_nodes,
+                            cfg.num_replicas,
                         )
                         current_epoch += 1
                         publish(current_allocs, current_epoch)

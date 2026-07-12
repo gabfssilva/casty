@@ -44,6 +44,8 @@ def event_stream_actor() -> Behavior[EventStreamMsg]:
             match msg:
                 case Subscribe(event_type=et, handler=h):
                     current = subscribers.get(et, ())
+                    if h in current:
+                        return Behaviors.same()
                     return active({**subscribers, et: (*current, h)})
 
                 case Unsubscribe(event_type=et, handler=h):

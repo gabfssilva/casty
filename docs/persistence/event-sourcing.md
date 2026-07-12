@@ -17,7 +17,7 @@ Event sourcing introduces three distinct concepts:
 A regular Casty actor holds state in a closure — but closures cannot be replayed. Event sourcing requires a different behavior shape with two explicit functions:
 
 - `on_event(state, event) -> state` — A pure, synchronous function that applies one event to the current state. Used both for live processing and for recovery (replay).
-- `on_command(ctx, state, command) -> Behavior` — An async function that receives the current state and a command, decides what events to persist, and returns `Behaviors.persisted(events=[...])`.
+- `on_command(ctx, state, command) -> Behavior` — An async function that receives the current state and a command, decides what events to persist, and returns `Behaviors.persisted(events=[...])`. To acknowledge a persisted command, pass `reply=...` — the callback runs only after the journal write succeeds, so a journal failure can never produce a phantom acknowledgement. Replies for read-only commands (no events) can be sent directly.
 
 ```python
 # --- State ---
@@ -73,8 +73,10 @@ async def on_command(ctx: Any, state: AccountState, cmd: AccountCommand) -> Any:
         case Deposit(amount):
             return Behaviors.persisted(events=[Deposited(amount)])
         case Withdraw(amount, reply_to) if state.balance >= amount:
-            reply_to.tell("ok")
-            return Behaviors.persisted(events=[Withdrawn(amount)])
+            return Behaviors.persisted(
+                events=[Withdrawn(amount)],
+                reply=lambda: reply_to.tell("ok"),
+            )
         case Withdraw(_, reply_to):
             reply_to.tell(f"insufficient funds (balance={state.balance})")
             return Behaviors.same()

@@ -115,6 +115,30 @@ def make_message_frame(data: bytes) -> bytes:
     return struct.pack("!I", len(frame)) + frame
 
 
+DEFAULT_MAX_FRAME_SIZE = 16 * 1024 * 1024
+
+
+class FrameTooLargeError(Exception):
+    """A peer announced a frame larger than ``max_frame_size``."""
+
+    def __init__(self, announced: int, limit: int) -> None:
+        super().__init__(f"frame of {announced} bytes exceeds limit of {limit}")
+
+
+async def read_frame(reader: asyncio.StreamReader, max_frame_size: int) -> bytes:
+    """Read one length-prefixed frame, refusing oversized announcements.
+
+    The length prefix is attacker-controlled; validating it before
+    ``readexactly`` prevents a peer from forcing up to 4 GiB of buffering
+    per frame.
+    """
+    length_bytes = await reader.readexactly(4)
+    msg_len: int = struct.unpack("!I", length_bytes)[0]
+    if msg_len > max_frame_size:
+        raise FrameTooLargeError(msg_len, max_frame_size)
+    return await reader.readexactly(msg_len)
+
+
 def resolve_race(
     self_addr: NodeAddr, peer_addr: NodeAddr, new_initiator: NodeAddr
 ) -> bool:
@@ -158,6 +182,7 @@ def peer_connection(
     handler: InboundHandler,
     parent: ActorRef[Any],
     logger: logging.Logger,
+    max_frame_size: int = DEFAULT_MAX_FRAME_SIZE,
 ) -> Behavior[PeerMsg]:
     """Actor managing a single bidirectional TCP connection to a peer.
 
@@ -170,14 +195,15 @@ def peer_connection(
         async def read_loop() -> None:
             try:
                 while True:
-                    length_bytes = await reader.readexactly(4)
-                    msg_len = struct.unpack("!I", length_bytes)[0]
-                    frame_data = await reader.readexactly(msg_len)
+                    frame_data = await read_frame(reader, max_frame_size)
                     frame_type = frame_data[0]
                     if frame_type == FRAME_MESSAGE:
                         await handler.on_message(frame_data[1:])
             except asyncio.CancelledError:
                 return
+            except FrameTooLargeError as exc:
+                logger.warning("Dropping peer %s: %s", addr, exc)
+                ctx.self.tell(PeerDisconnected())
             except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
                 ctx.self.tell(PeerDisconnected())
 
@@ -306,6 +332,7 @@ class TcpTransportConfig:
     client_ssl: ssl.SSLContext | None = None
     connect_timeout: float = 2.0
     blacklist_duration: float = 5.0
+    max_frame_size: int = DEFAULT_MAX_FRAME_SIZE
     address_map: AddressMap = field(default_factory=lambda: _identity_address)
 
 
@@ -408,12 +435,10 @@ def tcp_transport(
 
         canonical = peer_addr
         try:
-            length_bytes = await asyncio.wait_for(
-                reader.readexactly(4),
+            frame_data = await asyncio.wait_for(
+                read_frame(reader, cfg.max_frame_size),
                 timeout=cfg.connect_timeout,
             )
-            msg_len = struct.unpack("!I", length_bytes)[0]
-            frame_data = await reader.readexactly(msg_len)
             frame_type = frame_data[0]
             if frame_type == FRAME_HANDSHAKE:
                 hs: HandshakePayload = json.loads(frame_data[1:].decode("utf-8"))
@@ -429,6 +454,7 @@ def tcp_transport(
             json.JSONDecodeError,
             KeyError,
             TimeoutError,
+            FrameTooLargeError,
         ):
             log.warning(
                 "Failed to read handshake reply from %s:%d", peer_addr[0], peer_addr[1]
@@ -449,9 +475,7 @@ def tcp_transport(
                 set_nodelay(writer)
                 peer_addr: NodeAddr | None = None
                 try:
-                    length_bytes = await reader.readexactly(4)
-                    msg_len = struct.unpack("!I", length_bytes)[0]
-                    frame_data = await reader.readexactly(msg_len)
+                    frame_data = await read_frame(reader, config.max_frame_size)
                     frame_type = frame_data[0]
                     if frame_type != FRAME_HANDSHAKE:
                         log.warning("Expected handshake, got frame_type=%d", frame_type)
@@ -466,6 +490,7 @@ def tcp_transport(
                     asyncio.CancelledError,
                     json.JSONDecodeError,
                     KeyError,
+                    FrameTooLargeError,
                 ):
                     log.warning("Handshake failed from inbound connection")
                     writer.close()
@@ -539,7 +564,16 @@ def tcp_transport(
             task = drainer_tasks.pop(peer_addr, None)
             if task is not None:
                 task.cancel()
-            outbound_queues.pop(peer_addr, None)
+            queue = outbound_queues.pop(peer_addr, None)
+            # Delivery is at-most-once: frames still queued for a peer that
+            # went down are dropped. Surface the loss rather than hiding it.
+            if queue is not None and not queue.empty():
+                log.warning(
+                    "Dropping %d undelivered frame(s) for %s:%d (peer down)",
+                    queue.qsize(),
+                    peer_addr[0],
+                    peer_addr[1],
+                )
 
         def active(
             srv: asyncio.Server | None,
@@ -626,6 +660,7 @@ def tcp_transport(
                                 handler=handler,
                                 parent=ctx.self,
                                 logger=log,
+                                max_frame_size=config.max_frame_size,
                             ),
                             f"peer-{server_canonical[0]}-{server_canonical[1]}-{next_id}",
                         )
@@ -672,6 +707,7 @@ def tcp_transport(
                                 handler=handler,
                                 parent=ctx.self,
                                 logger=log,
+                                max_frame_size=config.max_frame_size,
                             ),
                             f"peer-{pa[0]}-{pa[1]}-{next_id}",
                         )

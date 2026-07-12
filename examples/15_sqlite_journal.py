@@ -92,8 +92,10 @@ async def on_command(ctx: Any, state: AccountState, cmd: AccountCommand) -> Any:
 
         case Withdraw(amount, reply_to) if state.balance >= amount:
             print(f"  [account] withdraw -{amount}")
-            reply_to.tell("ok")
-            return Behaviors.persisted(events=[Withdrawn(amount)])
+            return Behaviors.persisted(
+                events=[Withdrawn(amount)],
+                reply=lambda: reply_to.tell("ok"),
+            )
 
         case Withdraw(amount, reply_to):
             print(f"  [account] insufficient funds for -{amount} (balance={state.balance})")

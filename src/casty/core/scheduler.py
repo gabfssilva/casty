@@ -90,7 +90,16 @@ def scheduler() -> Behavior[SchedulerMsg]:
                         except asyncio.CancelledError:
                             pass
 
-                    running[key] = asyncio.get_running_loop().create_task(once())
+                    task = asyncio.get_running_loop().create_task(once())
+                    running[key] = task
+
+                    def discard(
+                        _: asyncio.Task[None], k: str = key, t: asyncio.Task[None] = task
+                    ) -> None:
+                        if running.get(k) is t:
+                            del running[k]
+
+                    task.add_done_callback(discard)
                     return Behaviors.same()
 
                 case CancelSchedule(key=key):

@@ -15,16 +15,8 @@ demonstrating one-shot timers with ``ScheduleOnce`` / ``CancelSchedule``.
 import asyncio
 from dataclasses import dataclass
 
-from casty import (
-    ActorContext,
-    ActorRef,
-    ActorSystem,
-    Behavior,
-    Behaviors,
-    CancelSchedule,
-    ScheduleOnce,
-    scheduler,
-)
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors, CancelSchedule, ScheduleOnce
+from casty.core.scheduler import scheduler
 
 
 # ── Messages ─────────────────────────────────────────────────────────

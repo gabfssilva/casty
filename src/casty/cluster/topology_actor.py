@@ -188,6 +188,26 @@ def notify_waiters(
     return tuple(remaining)
 
 
+def _allocations_key(
+    allocations: dict[str, dict[int, ShardAllocation]],
+) -> tuple[Any, ...]:
+    """Deterministic, direction-independent ordering key for a shard map."""
+    return tuple(
+        (
+            shard_type,
+            tuple(
+                (
+                    shard_id,
+                    (alloc.primary.host, alloc.primary.port),
+                    tuple((r.host, r.port) for r in alloc.replicas),
+                )
+                for shard_id, alloc in sorted(by_shard.items())
+            ),
+        )
+        for shard_type, by_shard in sorted(allocations.items())
+    )
+
+
 def merge_gossip(
     state: ClusterState,
     remote_state: ClusterState,
@@ -225,9 +245,20 @@ def merge_gossip(
     if remote_state.allocation_epoch > state.allocation_epoch:
         merged_allocs = remote_state.shard_allocations
         merged_epoch = remote_state.allocation_epoch
-    else:
+    elif remote_state.allocation_epoch < state.allocation_epoch:
         merged_allocs = state.shard_allocations
         merged_epoch = state.allocation_epoch
+    else:
+        # Same epoch: without a tie-breaker two leaders that reached the
+        # same epoch with divergent allocations would disagree forever.
+        # Pick deterministically so both sides converge on the same choice
+        # regardless of merge direction.
+        merged_epoch = state.allocation_epoch
+        merged_allocs = min(
+            state.shard_allocations,
+            remote_state.shard_allocations,
+            key=_allocations_key,
+        )
 
     down_nodes = frozenset(
         m.address
@@ -244,14 +275,19 @@ def merge_gossip(
     else:
         merged_seen = state.seen | remote_state.seen | {self_node, from_node}
 
+    present_addresses = frozenset(m.address for m in merged_members)
     alive_addresses = frozenset(
         m.address
         for m in merged_members
         if m.status in (MemberStatus.joining, MemberStatus.up, MemberStatus.leaving)
     )
-    merged_unreachable = (
-        state.unreachable | remote_state.unreachable
-    ) - alive_addresses
+    # This node's own unreachable detections are a local-only view; a remote
+    # gossip that still believes the node is alive must not erase them (that
+    # races local detection against the DownMember self-tell). Entries that
+    # arrived only via remote gossip still clear once the node is seen alive.
+    # Both are dropped once the node leaves the membership entirely.
+    propagated_unreachable = (remote_state.unreachable - state.unreachable) - alive_addresses
+    merged_unreachable = (state.unreachable | propagated_unreachable) & present_addresses
 
     return ClusterState(
         members=frozenset(merged_members),
@@ -488,9 +524,15 @@ def topology_actor(
                     return Behaviors.same()
 
                 case HeartbeatResponse(from_node=from_node):
-                    detector.heartbeat(
-                        f"{from_node.host}:{from_node.port}",
+                    tracked = any(
+                        m.address == from_node
+                        and m.status in (MemberStatus.up, MemberStatus.joining)
+                        for m in state.members
                     )
+                    if tracked:
+                        detector.heartbeat(
+                            f"{from_node.host}:{from_node.port}",
+                        )
                     return Behaviors.same()
 
                 case HeartbeatTick(members=tick_members):

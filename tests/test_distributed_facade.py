@@ -4,6 +4,8 @@ import asyncio
 
 from casty.distributed import Distributed
 from casty.distributed.lock import Lock
+from casty.distributed.queue import QueueEmpty
+import pytest
 from casty.cluster.system import ClusteredActorSystem
 
 
@@ -79,8 +81,8 @@ async def test_distributed_queue_bracket_syntax() -> None:
         second = await jobs.dequeue()
         assert second == "task-2"
 
-        empty = await jobs.dequeue()
-        assert empty is None
+        with pytest.raises(QueueEmpty):
+            await jobs.dequeue()
 
 
 async def test_distributed_lock_acquire_release() -> None:
@@ -260,7 +262,8 @@ async def test_destroy_stops_entity_and_allows_respawn() -> None:
         assert await jobs.destroy() is True
         await asyncio.sleep(0.05)
 
-        assert await jobs.dequeue() is None
+        with pytest.raises(QueueEmpty):
+            await jobs.dequeue()
 
         lock = d.lock("ephemeral-lock", shards=10)
         await lock.acquire()

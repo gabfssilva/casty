@@ -106,6 +106,8 @@ def event_sourced_wrapper[M, E, S](
                     ack_queue=ack_queue,
                     logger=logger,
                 )
+                if persisted.reply is not None:
+                    persisted.reply()
                 if persisted.then.signal is Signal.stopped:
                     return Behaviors.stopped()
                 return active(new_state, new_seq, new_snap_count, ack_queue)
@@ -193,17 +195,19 @@ async def _persist_and_apply[S, E](
         match replication:
             case _RC(min_acks=min_acks, ack_timeout=ack_timeout) if min_acks > 0:
                 acks_needed = min(min_acks, len(replica_refs))
+                # Count only acks for this command's events. A late ack from
+                # a previous command carries a smaller sequence_nr and must
+                # not satisfy this one's quorum.
                 ack_count = 0
                 deadline = _time.monotonic() + ack_timeout
 
                 while ack_count < acks_needed and _time.monotonic() < deadline:
                     try:
                         remaining_time = max(0.001, deadline - _time.monotonic())
-                        await asyncio.wait_for(
+                        ack = await asyncio.wait_for(
                             ack_queue.get(),
                             timeout=remaining_time,
                         )
-                        ack_count += 1
                     except asyncio.TimeoutError:
                         logger.warning(
                             "Replication ack timeout for %s: got %d/%d acks",
@@ -212,6 +216,8 @@ async def _persist_and_apply[S, E](
                             acks_needed,
                         )
                         break
+                    if ack.sequence_nr >= new_seq:
+                        ack_count += 1
             case _:
                 pass
 

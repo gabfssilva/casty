@@ -71,7 +71,7 @@ All structures accept `shards` (default `100`) for distribution granularity and 
 
 **Semaphore** generalizes Lock to bounded concurrency. `semaphore("name", permits=N)` allows up to N concurrent holders. The same owner can acquire multiple permits. When all permits are taken, `acquire()` blocks and `try_acquire()` returns `False`. Released permits are granted to waiters in FIFO order.
 
-**Barrier** provides a distributed rendezvous point. `arrive(expected=N)` blocks until N participants have reached the barrier, then releases all simultaneously. Barriers are reusable — the same name can be used for multiple rounds. The `node_id` defaults to the system's `host:port` but can be overridden for custom identification.
+**Barrier** provides a distributed rendezvous point. `arrive(expected=N)` blocks until N arrivals have reached the barrier, then releases all simultaneously — every call counts as one arrival, so two tasks on the same node are two participants. The first arrival of a round fixes `expected`; a later arrival with a different value raises `ValueError`. Barriers are reusable — the same name can be used for multiple rounds.
 
 To make data structures persistent, pass an `EventJournal` to the `distributed()` facade. Every mutation is persisted as an event and replayed on recovery:
 

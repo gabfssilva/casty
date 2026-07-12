@@ -3,17 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from casty import (
-    ActorContext,
-    ActorRef,
-    ActorSystem,
-    Behavior,
-    Behaviors,
-    Member,
-    MemberStatus,
-    NodeAddress,
-    ServiceEntry,
-)
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
+from casty.cluster.state import Member, MemberStatus, NodeAddress, ServiceEntry
 from casty.cluster.receptionist import (
     Find,
     Listing,

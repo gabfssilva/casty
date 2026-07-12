@@ -4,19 +4,13 @@ import asyncio
 import logging
 from typing import Any
 
-from casty import (
-    ActorContext,
-    ActorRef,
-    ActorSystem,
-    Behavior,
-    Behaviors,
-    NodeAddress,
-)
+from casty import ActorContext, ActorRef, ActorSystem, Behavior, Behaviors
+from casty.cluster.state import NodeAddress
 from casty.cluster.topology import SubscribeTopology, TopologySnapshot
 from casty.cluster.topology_actor import TopologyMsg
 from casty.cluster.singleton import singleton_manager_actor
 
-from casty import Member, MemberStatus
+from casty.cluster.state import Member, MemberStatus
 
 
 SELF_NODE = NodeAddress(host="127.0.0.1", port=2551)
@@ -212,8 +206,56 @@ async def test_singleton_transitions_active_to_standby() -> None:
         mgr_ref.tell(snapshot2)
         await asyncio.sleep(0.1)
 
-        # Re-promote — should spawn a new child
-        snapshot3 = make_snapshot(leader=SELF_NODE)
+        # Re-promote with the previous leader unreachable — spawns a new
+        # child without waiting for a handover.
+        snapshot3 = make_snapshot(
+            leader=SELF_NODE, unreachable=frozenset({OTHER_NODE})
+        )
         mgr_ref.tell(snapshot3)
         await asyncio.sleep(0.1)
         assert len(spawned) == 2
+
+
+async def test_singleton_promotion_waits_for_live_previous_leader() -> None:
+    """Promotion while the previous leader is still alive waits for handover."""
+    async with ActorSystem(name="test") as system:
+        spawned: list[str] = []
+
+        def tracked_behavior() -> Behavior[Any]:
+            async def receive(ctx: ActorContext[Any], msg: Any) -> Behavior[Any]:
+                return Behaviors.same()
+
+            spawned.append("spawned")
+            return Behaviors.receive(receive)
+
+        topo_ref = system.spawn(fake_topology_actor(), "_topology")
+
+        mgr_ref = system.spawn(
+            singleton_manager_actor(
+                factory=tracked_behavior,
+                name="test-singleton",
+                remote_transport=None,
+                system_name="test",
+                logger=logging.getLogger("test"),
+                topology_ref=topo_ref,  # type: ignore[arg-type]
+                self_node=SELF_NODE,
+            ),
+            "_singleton-test-singleton",
+        )
+        await asyncio.sleep(0.1)
+
+        # Standby: OTHER_NODE leads and presumably owns the singleton.
+        mgr_ref.tell(make_snapshot(leader=OTHER_NODE))
+        await asyncio.sleep(0.1)
+
+        # Promotion while OTHER_NODE is still up: no spawn yet.
+        mgr_ref.tell(make_snapshot(leader=SELF_NODE))
+        await asyncio.sleep(0.1)
+        assert len(spawned) == 0
+
+        # HandoverDone from the old leader releases the spawn.
+        from casty.cluster.singleton import HandoverDone
+
+        mgr_ref.tell(HandoverDone())
+        await asyncio.sleep(0.1)
+        assert len(spawned) == 1

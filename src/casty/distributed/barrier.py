@@ -1,7 +1,7 @@
 """Distributed barrier backed by a sharded actor entity.
 
-Blocks callers until a specified number of nodes have arrived, then releases
-all waiters simultaneously.
+Blocks callers until a specified number of arrivals, then releases all
+waiters simultaneously.
 """
 
 from __future__ import annotations
@@ -19,14 +19,20 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class BarrierArrive:
-    node: str
     expected: int
-    reply_to: ActorRef[BarrierReleased]
+    reply_to: ActorRef[BarrierReleased | BarrierMismatch]
 
 
 @dataclass(frozen=True)
 class BarrierReleased:
     pass
+
+
+@dataclass(frozen=True)
+class BarrierMismatch:
+    """The barrier was opened with a different ``expected`` value."""
+
+    expected: int
 
 
 @dataclass(frozen=True)
@@ -38,21 +44,29 @@ type BarrierMsg = BarrierArrive | DestroyBarrier
 
 
 def barrier_entity(entity_id: str) -> Behavior[BarrierMsg]:
-    return barrier_waiting(waiters={})
+    return barrier_waiting(expected=None, waiters=())
 
 
 def barrier_waiting(
-    waiters: dict[str, ActorRef[BarrierReleased]],
+    expected: int | None,
+    waiters: tuple[ActorRef[BarrierReleased | BarrierMismatch], ...],
 ) -> Behavior[BarrierMsg]:
     async def receive(_ctx: Any, msg: BarrierMsg) -> Behavior[BarrierMsg]:
         match msg:
-            case BarrierArrive(node=node, expected=expected, reply_to=reply_to):
-                new_waiters = {**waiters, node: reply_to}
-                if len(new_waiters) >= expected:
-                    for ref in new_waiters.values():
+            case BarrierArrive(expected=arrived_expected, reply_to=reply_to):
+                # The first arrival fixes ``expected`` for this round;
+                # disagreeing arrivals are rejected instead of silently
+                # shrinking or growing the barrier.
+                if expected is not None and arrived_expected != expected:
+                    reply_to.tell(BarrierMismatch(expected=expected))
+                    return Behaviors.same()
+                required = expected if expected is not None else arrived_expected
+                new_waiters = (*waiters, reply_to)
+                if len(new_waiters) >= required:
+                    for ref in new_waiters:
                         ref.tell(BarrierReleased())
-                    return barrier_waiting({})
-                return barrier_waiting(new_waiters)
+                    return barrier_waiting(expected=None, waiters=())
+                return barrier_waiting(expected=required, waiters=new_waiters)
             case DestroyBarrier(reply_to=reply_to):
                 reply_to.tell(True)
                 return Behaviors.stopped()
@@ -63,8 +77,9 @@ def barrier_waiting(
 class Barrier:
     """Client for a distributed barrier backed by a sharded actor.
 
-    Multiple nodes call ``arrive(expected)`` and all block until *expected*
-    nodes have arrived.
+    Multiple callers invoke ``arrive(expected)`` and all block until
+    *expected* arrivals have been counted.  Every arrival counts — two
+    tasks on the same node are two arrivals.
 
     Parameters
     ----------
@@ -74,8 +89,6 @@ class Barrier:
         Reference to the shard proxy / region.
     name : str
         Barrier name (used as entity ID).
-    node_id : str
-        Identifier for this node (typically ``host:port``).
     timeout : float
         Default timeout for the barrier wait.
 
@@ -91,13 +104,11 @@ class Barrier:
         gateway: EntityGateway,
         region_ref: ActorRef[ShardEnvelope[BarrierMsg]],
         name: str,
-        node_id: str,
         timeout: float = 60.0,
     ) -> None:
         self._gateway = gateway
         self._region_ref = region_ref
         self._name = name
-        self._node_id = node_id
         self._timeout = timeout
 
     async def destroy(self) -> bool:
@@ -118,22 +129,34 @@ class Barrier:
         )
 
     async def arrive(self, expected: int) -> None:
-        """Block until *expected* nodes have reached this barrier.
+        """Block until *expected* arrivals have reached this barrier.
 
         Parameters
         ----------
         expected : int
-            Number of nodes that must arrive before all are released.
+            Number of arrivals required before all are released.  Must
+            match the value given by the first arrival of the round.
+
+        Raises
+        ------
+        ValueError
+            If the barrier is already open with a different ``expected``.
 
         Examples
         --------
         >>> await barrier.arrive(expected=3)
         """
-        await self._gateway.entity_ask(
+        reply = await self._gateway.entity_ask(
             self._region_ref,
             lambda reply_to: ShardEnvelope(
                 self._name,
-                BarrierArrive(node=self._node_id, expected=expected, reply_to=reply_to),
+                BarrierArrive(expected=expected, reply_to=reply_to),
             ),
             timeout=self._timeout,
         )
+        if isinstance(reply, BarrierMismatch):
+            msg = (
+                f"barrier {self._name!r} expects {reply.expected} arrivals, "
+                f"got arrive(expected={expected})"
+            )
+            raise ValueError(msg)

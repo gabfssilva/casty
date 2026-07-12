@@ -176,12 +176,21 @@ class Behaviors:
     def persisted[M, E](
         events: Sequence[E],
         then: Behavior[M] | None = None,
+        *,
+        reply: Callable[[], None] | None = None,
     ) -> Any:
+        """Persist *events*, then optionally deliver a reply.
+
+        ``reply`` runs only after the journal write succeeds (and the
+        replication ack quorum is met, when configured) — send replies to
+        callers through it, never directly inside ``on_command``.
+        """
         from casty.actor import PersistedBehavior
 
         return PersistedBehavior(
             events=tuple(events),
             then=then if then is not None else Behavior.same(),
+            reply=reply,
         )
 
     @staticmethod

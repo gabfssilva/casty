@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from casty import ActorSystem
 from casty.cluster.coordinator import (
     shard_coordinator_actor,
@@ -10,7 +12,7 @@ from casty.cluster.coordinator import (
 from casty.cluster.region import shard_region_actor
 from casty.cluster.state import NodeAddress
 from casty.distributed import Queue
-from casty.distributed.queue import queue_entity
+from casty.distributed.queue import QueueEmpty, queue_entity
 
 
 async def test_queue_enqueue_dequeue() -> None:
@@ -44,8 +46,10 @@ async def test_queue_enqueue_dequeue() -> None:
 
         # Empty queue checks
         assert await q.size() == 0
-        assert await q.dequeue() is None
-        assert await q.peek() is None
+        with pytest.raises(QueueEmpty):
+            await q.dequeue()
+        with pytest.raises(QueueEmpty):
+            await q.peek()
 
         # Enqueue 3 items
         await q.enqueue("a")
@@ -65,5 +69,6 @@ async def test_queue_enqueue_dequeue() -> None:
         assert await q.dequeue() == "c"
 
         # Empty again
-        assert await q.dequeue() is None
+        with pytest.raises(QueueEmpty):
+            await q.dequeue()
         assert await q.size() == 0
