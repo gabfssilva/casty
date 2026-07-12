@@ -1,0 +1,48 @@
+name: casty-chaos
+
+networks:
+  default:
+    name: casty-chaos
+
+services:
+  seed:
+    build:
+      context: ../..
+      dockerfile: tests/chaos/Dockerfile
+    image: casty-chaos
+    cpu_period: ${NODE_CPU_PERIOD:-100000}
+    cpu_quota: ${NODE_CPU_QUOTA:-0}
+    labels:
+      casty.chaos.node: "1"
+      casty.chaos.seed: "1"
+    cap_add: [NET_ADMIN]
+    stop_grace_period: 1s
+
+  node:
+    image: casty-chaos
+    cpu_period: ${NODE_CPU_PERIOD:-100000}
+    cpu_quota: ${NODE_CPU_QUOTA:-0}
+    depends_on: [seed]
+    environment:
+      CASTY_SEEDS: seed:9000
+    labels:
+      casty.chaos.node: "1"
+    cap_add: [NET_ADMIN]
+    stop_grace_period: 1s
+
+  driver:
+    image: casty-chaos
+    profiles: [driver]
+    depends_on: [seed]
+    entrypoint: ["pytest"]
+    command: ["tests/chaos", "-v", "-s"]
+    environment:
+      CASTY_CHAOS: "1"
+      CHAOS_WRITERS: ${CHAOS_WRITERS:-20}
+      CHAOS_RATE: ${CHAOS_RATE:-0}
+      CHAOS_ACTORS: ${CHAOS_ACTORS:-50}
+      CHAOS_DURATION: ${CHAOS_DURATION:-15}
+      CHAOS_NETEM: ${CHAOS_NETEM:-delay 50ms 10ms}
+      CHAOS_NETEM_SLOW: ${CHAOS_NETEM_SLOW:-delay 400ms 100ms loss 10%}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

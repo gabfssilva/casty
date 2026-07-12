@@ -1,12 +1,11 @@
 .DS_Store
 .venv/
 .idea/
-.pytest_cache/
+.claude/
 __pycache__/
 *.pyc
-src/casty/_version.py
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
 .ruff_cache/
-.claude/
-docs/plans/
-docs/beautiful-code.md
-site/
+dist/
