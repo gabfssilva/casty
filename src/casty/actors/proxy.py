@@ -10,11 +10,11 @@ from casty.actors.registry import ActorInfo, MethodInfo
 class Caller(typing.Protocol):
     """Implemented by Node and Client: route one actor call to its owner."""
 
-    async def call_actor(
+    async def _call_actor(
         self, info: ActorInfo, key: str, method: MethodInfo, args: list[object], chain: list[str]
     ) -> object: ...
 
-    def stream_out(
+    def _stream_out(
         self,
         info: ActorInfo,
         key: str,
@@ -24,7 +24,7 @@ class Caller(typing.Protocol):
         chain: list[str],
     ) -> AsyncIterator[object]: ...
 
-    async def stream_in(
+    async def _stream_in(
         self,
         info: ActorInfo,
         key: str,
@@ -57,7 +57,7 @@ class ActorProxy:
         if method.stream_out is not None:
             def call_stream_out(*args: object, **kwargs: object) -> AsyncIterator[object]:
                 unary, in_iter = _split_stream_args(self._info, method, args, kwargs)
-                return self._caller.stream_out(
+                return self._caller._stream_out(
                     self._info, self._key, method, unary, in_iter, _chain()
                 )
 
@@ -66,7 +66,7 @@ class ActorProxy:
         if method.stream_in is not None:
             async def call_stream_in(*args: object, **kwargs: object) -> object:
                 unary, in_iter = _split_stream_args(self._info, method, args, kwargs)
-                return await self._caller.stream_in(
+                return await self._caller._stream_in(
                     self._info, self._key, method, unary, in_iter, _chain()
                 )
 
@@ -74,7 +74,7 @@ class ActorProxy:
 
         async def call(*args: object, **kwargs: object) -> object:
             ordered = _order_args(self._info, method, args, kwargs)
-            return await self._caller.call_actor(
+            return await self._caller._call_actor(
                 self._info, self._key, method, ordered, _chain()
             )
 

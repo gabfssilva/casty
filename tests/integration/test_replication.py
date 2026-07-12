@@ -34,13 +34,13 @@ class RCounter:
 
 
 async def test_state_survives_owner_death() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     try:
         key = "durable"
-        assert await nodes[0].actor(RCounter, key).add(41) == 41
-        assert await nodes[0].actor(RCounter, key).add(1) == 42
-        owner = owner_of(nodes, "itest.RCounter", key)
-        survivors = [n for n in nodes if n is not owner]
+        assert await systems[0].actor(RCounter, key).add(41) == 41
+        assert await systems[0].actor(RCounter, key).add(1) == 42
+        owner = owner_of(systems, "itest.RCounter", key)
+        survivors = [n for n in systems if n is not owner]
         await kill_node(owner)
         await wait_view(survivors, 2)
         deadline = asyncio.get_running_loop().time() + 5.0
@@ -53,17 +53,17 @@ async def test_state_survives_owner_death() -> None:
                     raise
                 await asyncio.sleep(0.1)
     finally:
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_minority_write_fenced_majority_continues() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     heal: Callable[[], None] | None = None
     try:
         key = "fenced"
-        assert await nodes[0].actor(RCounter, key).add(10) == 10
-        owner = owner_of(nodes, "itest.RCounter", key)
-        majority = [n for n in nodes if n is not owner]
+        assert await systems[0].actor(RCounter, key).add(10) == 10
+        owner = owner_of(systems, "itest.RCounter", key)
+        majority = [n for n in systems if n is not owner]
 
         heal = await partition([owner], majority)
         await wait_view(majority, 2)  # majority saw the owner die
@@ -79,17 +79,17 @@ async def test_minority_write_fenced_majority_continues() -> None:
     finally:
         if heal is not None:
             heal()
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_stale_owner_recovers_after_heal_without_lost_updates() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     heal: Callable[[], None] | None = None
     try:
         key = "healed"
-        assert await nodes[0].actor(RCounter, key).add(10) == 10
-        owner = owner_of(nodes, "itest.RCounter", key)
-        majority = [n for n in nodes if n is not owner]
+        assert await systems[0].actor(RCounter, key).add(10) == 10
+        owner = owner_of(systems, "itest.RCounter", key)
+        majority = [n for n in systems if n is not owner]
 
         heal = await partition([owner], majority)
         await wait_view(majority, 2)
@@ -97,7 +97,7 @@ async def test_stale_owner_recovers_after_heal_without_lost_updates() -> None:
 
         heal()
         heal = None
-        await wait_view(nodes, 3, timeout=15.0)  # minority rejoins and refutes
+        await wait_view(systems, 3, timeout=15.0)  # minority rejoins and refutes
 
         # post-heal the ring is the original one: the stale old owner gets the
         # key back. Its first write must land on the *committed* state (17),
@@ -115,18 +115,18 @@ async def test_stale_owner_recovers_after_heal_without_lost_updates() -> None:
     finally:
         if heal is not None:
             heal()
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_rolling_restart_loses_nothing() -> None:
-    nodes = await start_nodes(5)
+    systems = await start_nodes(5)
     replaced: list[casty.Node] = []
     try:
         keys = [f"key-{i}" for i in range(20)]
         for i, key in enumerate(keys):
-            assert await nodes[0].actor(RCounter, key).add(i + 1) == i + 1
+            assert await systems[0].actor(RCounter, key).add(i + 1) == i + 1
 
-        current = list(nodes)
+        current = list(systems)
         for _ in range(5):
             leaving = current[0]
             rest = current[1:]
@@ -152,13 +152,13 @@ async def test_rolling_restart_loses_nothing() -> None:
                         raise
                     await asyncio.sleep(0.1)
     finally:
-        await stop_all([*nodes, *replaced])
+        await stop_all([*systems, *replaced])
 
 
 async def test_activation_without_quorum_fails() -> None:
-    nodes = await start_nodes(1)
+    systems = await start_nodes(1)
     try:
         with pytest.raises(QuorumUnavailableError):
-            await nodes[0].actor(RCounter, "lonely").add(1)
+            await systems[0].actor(RCounter, "lonely").add(1)
     finally:
-        await stop_all(nodes)
+        await stop_all(systems)

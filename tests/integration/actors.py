@@ -132,46 +132,46 @@ async def start_nodes(
         f"127.0.0.1:{free_port()}", config=config, supervisor=supervisor
     )
     seeds = [first.member.addr]
-    nodes = [first]
+    systems = [first]
     for _ in range(n - 1):
-        nodes.append(
+        systems.append(
             await casty.start(
                 f"127.0.0.1:{free_port()}", seeds=seeds, config=config, supervisor=supervisor
             )
         )
-    await wait_view(nodes, n)
-    return nodes
+    await wait_view(systems, n)
+    return systems
 
 
-async def wait_view(nodes: list[casty.Node], expected: int, timeout: float = 10.0) -> None:
+async def wait_view(systems: list[casty.Node], expected: int, timeout: float = 10.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
-        if all(len(node.membership.alive_members()) == expected for node in nodes):
+        if all(len(system.membership.alive_members()) == expected for system in systems):
             return
         await asyncio.sleep(0.05)
-    sizes = [len(node.membership.alive_members()) for node in nodes]
+    sizes = [len(system.membership.alive_members()) for system in systems]
     raise AssertionError(f"views did not reach {expected} members: {sizes}")
 
 
-async def stop_all(nodes: list[casty.Node]) -> None:
-    await asyncio.gather(*(node.close() for node in nodes), return_exceptions=True)
+async def stop_all(systems: list[casty.Node]) -> None:
+    await asyncio.gather(*(system.close() for system in systems), return_exceptions=True)
 
 
-async def kill_node(node: casty.Node) -> None:
+async def kill_node(system: casty.Node) -> None:
     """Abrupt death: no drain, no leave broadcast."""
-    await node.membership.stop()
-    server = node._server
+    await system.membership.stop()
+    server = system._server
     assert server is not None
     server.stop_accepting()
-    await node._pool.close()
+    await system._pool.close()
     await server.close()
 
 
-def owner_of(nodes: list[casty.Node], wire: str, key: str) -> casty.Node:
-    ring = nodes[0]._ring
+def owner_of(systems: list[casty.Node], wire: str, key: str) -> casty.Node:
+    ring = systems[0]._ring
     assert ring is not None
     owner_id = ring.owner(f"{wire}/{key}")
-    return next(n for n in nodes if n.node_id == owner_id)
+    return next(n for n in systems if n.node_id == owner_id)
 
 
 async def partition(
@@ -181,8 +181,8 @@ async def partition(
     connections drop. Returns the heal function."""
     restores: list[Callable[[], None]] = []
 
-    def block(node: casty.Node, blocked: set[str]) -> None:
-        pool = node._pool
+    def block(system: casty.Node, blocked: set[str]) -> None:
+        pool = system._pool
         original = pool.get
 
         async def blocked_get(addr: str, *, max_attempts: int = 1) -> object:
@@ -195,17 +195,17 @@ async def partition(
 
     addrs_a = {n.member.addr for n in group_a}
     addrs_b = {n.member.addr for n in group_b}
-    for node in group_a:
-        block(node, addrs_b)
-    for node in group_b:
-        block(node, addrs_a)
+    for system in group_a:
+        block(system, addrs_b)
+    for system in group_b:
+        block(system, addrs_a)
 
-    for node in group_a:
+    for system in group_a:
         for other in group_b:
-            conn = node._pool.by_node(other.node_id)
+            conn = system._pool.by_node(other.node_id)
             if conn is not None:
                 await conn.close()
-            back = other._pool.by_node(node.node_id)
+            back = other._pool.by_node(system.node_id)
             if back is not None:
                 await back.close()
 

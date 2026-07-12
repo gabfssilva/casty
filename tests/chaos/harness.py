@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 import casty
 
 WRITERS = int(os.environ.get("CHAOS_WRITERS", "20"))
-RATE = float(os.environ.get("CHAOS_RATE", "0"))  # ops/s total; 0 = sem teto
+RATE = float(os.environ.get("CHAOS_RATE", "0"))  # total ops/s; 0 = no cap
 
 CHAOS_CONFIG = casty.Config(
     transport=casty.TransportConfig(
@@ -76,9 +76,9 @@ async def wait_views(addrs: list[str], expected: int, *, timeout: float = 180.0)
 
 
 class Workload:
-    """Writers concorrentes incrementando counters replicados, com contagem de
-    acked/attempted por chave. `rate` limita o total de ops/s via pacing por
-    writer (aproximado: não desconta o tempo da própria op)."""
+    """Concurrent writers incrementing replicated counters, with acked/attempted
+    counts per key. `rate` caps the total ops/s via per-writer pacing
+    (approximate: it does not subtract the time of the op itself)."""
 
     def __init__(
         self,
@@ -107,8 +107,8 @@ class Workload:
         self._tasks = [asyncio.create_task(self._run()) for _ in range(self._writers)]
 
     def mark(self, label: str) -> None:
-        """Fecha a fase atual e abre uma nova chamada `label`; o report mostra
-        ops/s por fase em vez de uma média global."""
+        """Close the current phase and open a new one named `label`; the report shows
+        ops/s per phase instead of a global average."""
         self._marks.append((label, asyncio.get_running_loop().time(), self.total_acked))
 
     async def stop(self) -> None:
@@ -119,7 +119,7 @@ class Workload:
         self._marks.append(("", now, self.total_acked))
 
     def report(self) -> str:
-        parts = [f"{self.total_acked} acks, {self.ops_per_sec:.0f} ops/s no total"]
+        parts = [f"{self.total_acked} acks, {self.ops_per_sec:.0f} ops/s overall"]
         for (label, t0, a0), (_, t1, a1) in zip(self._marks, self._marks[1:], strict=False):
             if t1 - t0 > 0:
                 parts.append(f"{label}: {(a1 - a0) / (t1 - t0):.0f} ops/s")
@@ -150,14 +150,14 @@ class Workload:
 async def verify_counters(
     client: casty.Client, workload: Workload, *, timeout: float = 60.0
 ) -> None:
-    """Com a carga parada: nenhum ack perdido (valor >= acked) e nenhum write
-    fantasma além das tentativas (valor <= attempted)."""
+    """With the load stopped: no lost ack (value >= acked) and no phantom write
+    beyond the attempts (value <= attempted)."""
     for key, lo in workload.acked.items():
         hi = workload.attempted[key]
 
         async def check(k: str = key, lo: int = lo, hi: int = hi) -> None:
             value = await client.actor(Counter, k).read()
-            assert lo <= value <= hi, f"{k}: {value} fora de [{lo}, {hi}]"
+            assert lo <= value <= hi, f"{k}: {value} outside [{lo}, {hi}]"
 
         await eventually(check, timeout=timeout)
 

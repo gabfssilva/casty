@@ -42,7 +42,7 @@ def service(
     name: str | None = None,
     concurrency: int | None = None,
 ) -> type | Callable[[type], type]:
-    """Declare a stateless service: concurrent RPC on top of an actor (spec 08).
+    """Declare a stateless service: concurrent RPC on top of an actor.
 
     Public async methods become the proxy interface, exactly as on an actor. The
     difference is the handler: it starts the method as a detached task and
@@ -57,6 +57,20 @@ def service(
     concurrency : int | None
         Concurrent calls allowed per activation. None is unbounded; a value
         applies backpressure at the mailbox once the limit is reached.
+
+    Raises
+    ------
+    SerializationSchemaError
+        At import time: annotated fields (a service is stateless), lifecycle
+        hooks, streaming or non-async methods, or an unserializable
+        annotation.
+
+    Examples
+    --------
+    >>> @casty.service
+    ... class Notifier:
+    ...     async def send(self, email: str, body: str) -> bool:
+    ...         ...
     """
     if cls is None:
 

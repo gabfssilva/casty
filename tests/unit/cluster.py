@@ -73,7 +73,9 @@ class Node:
     def fresh_host(self) -> ActorHost:
         """A host with no activations, over the same replica store: what this node would
         come back as after a deactivation."""
-        self.host = ActorHost(router=self, replication=self.replication)
+        self.host = ActorHost(
+            router=self, replication=self.replication, reactivation_retry=0.05
+        )
         return self.host
 
     async def call(self, info: ActorInfo, key: str, method: str, *args: object) -> object:

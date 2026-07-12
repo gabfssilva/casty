@@ -4,20 +4,24 @@ import asyncio
 import contextlib
 import logging
 import typing
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
-from casty.actors import paging
-from casty.actors.context import ActorContext, reset_context, set_context
+from casty.actors import inspection, paging
+from casty.actors.context import ActorContext, Schedule, reset_context, set_context
+from casty.actors.reactivation import ACTIVE_DATA, ACTIVE_PAGE
 from casty.actors.registry import (
     ActorInfo,
     Directive,
     FailureContext,
     MethodInfo,
+    Paged,
     Supervisor,
     default_supervisor,
 )
-from casty.actors.replication import Hlc, Replication, StaleActivationError
+from casty.actors.replication import Hlc, Page, Replication, StaleActivationError
 from casty.actors.streaming import StreamSink
 from casty.errors import (
     ActorFailedError,
@@ -28,6 +32,7 @@ from casty.errors import (
     ReentrancyError,
     SerializationError,
 )
+from casty.serde import codec
 
 logger = logging.getLogger("casty.actors")
 
@@ -45,6 +50,10 @@ class _CallItem:
     args: list[object]
     chain: list[str]
     future: asyncio.Future[object]
+    kwargs: dict[str, object] = field(default_factory=dict)
+    # a schedule tick (spec 04 §10): dropped, not re-dispatched, if the
+    # activation closes before it runs — a tick never creates an activation
+    tick: bool = False
 
 
 @dataclass(slots=True)
@@ -60,11 +69,17 @@ class _StreamItem:
     sink: StreamSink
     chain: list[str]
     done: asyncio.Future[None]
+    unary_args: list[object] = field(default_factory=list)  # for spy payloads (spec 11)
     aborted: bool = False  # consumer abandoned the stream; body cancel is not a worker fault
     body: asyncio.Task[None] | None = None
 
 
 _Item = _CallItem | _StreamItem
+
+# why the activation is closing: decides what happens to the durable mark
+type CloseReason = typing.Literal[
+    "idle", "deactivate", "stop", "reset", "moved", "drain", "stale", "activation-failed"
+]
 
 
 @dataclass(slots=True)
@@ -75,6 +90,8 @@ class _Activation:
     queue: asyncio.Queue[_Item | None] = field(default_factory=asyncio.Queue)
     worker: asyncio.Task[None] | None = None
     closing: bool = False
+    close_reason: CloseReason | None = None  # stamped where closing is decided
+    seq: int = 0  # last spy event sequence number (spec 11 §1)
     run_deactivate_hook: bool = True
     draining: bool = False
     failures: int = 0
@@ -88,26 +105,40 @@ class _Activation:
     # replies detached by handlers (spec 08) and not yet resolved. Idle
     # deactivation waits for zero: the work runs outside the mailbox.
     inflight: int = 0
+    # live schedules by name (spec 04 §10); cancelled in _finalize
+    schedules: dict[str, asyncio.Task[None]] = field(default_factory=dict)
 
     @property
     def identity(self) -> str:
         return f"{self.info.wire_name}/{self.key}"
 
+    def close(self, reason: CloseReason) -> None:
+        """Mark closing; the first reason wins."""
+        self.closing = True
+        if self.close_reason is None:
+            self.close_reason = reason
+
 
 @dataclass(slots=True)
 class Reply:
-    """The caller's pending result, handed to a handler by `ctx.detach()`. Fires
-    once; the activation's in-flight count drops on the first `set`/`fail`."""
+    """The caller's pending result, handed to a handler by `ctx.detach()`.
+
+    Fires once: the first `set`/`fail` resolves the caller and drops the
+    activation's in-flight count; later calls are ignored. An activation with
+    a pending Reply does not idle-deactivate.
+    """
 
     _future: asyncio.Future[object]
     _activation: _Activation
     _fired: bool = False
 
     def set(self, value: object) -> None:
+        """Resolve the caller with `value`. No-op if already fired."""
         if self._release() and not self._future.done():
             self._future.set_result(value)
 
     def fail(self, exc: BaseException) -> None:
+        """Resolve the caller with an exception. No-op if already fired."""
         if self._release() and not self._future.done():
             self._future.set_exception(exc)
 
@@ -133,13 +164,23 @@ class ActorHost:
         replication: Replication | None,
         supervisor: Supervisor | None = None,
         default_idle_timeout: float = 300.0,
+        reactivation_retry: float = 5.0,
+        hub: inspection.Hub | None = None,
+        interceptor: inspection.Interceptor | None = None,
     ) -> None:
         self.router = router
         self.replication = replication  # None: this host runs actors single-copy
+        self.hub = hub if hub is not None else inspection.Hub(node=uuid.uuid4())
+        self._interceptor = interceptor
         self._supervisor = supervisor or default_supervisor
         self._default_idle_timeout = default_idle_timeout
+        self._reactivation_retry = reactivation_retry
         self._activations: dict[tuple[str, str], _Activation] = {}
         self._draining = False
+        # STOP clears that did not land: retried in the background, suppressing
+        # this node's own poke so it does not resurrect what it is burying.
+        self.pending_clears: set[tuple[str, str]] = set()
+        self._clear_tasks: set[asyncio.Task[None]] = set()
 
     def _replication_for(self, info: ActorInfo) -> Replication | None:
         """The replicator for this actor, or None when it runs single-copy —
@@ -153,6 +194,34 @@ class ActorHost:
 
     def is_active(self, wire_name: str, key: str) -> bool:
         return (wire_name, key) in self._activations
+
+    def placed_activations(self) -> list[tuple[str, str]]:
+        """Live placed activations (services are unplaced and excluded)."""
+        return [
+            (a.info.wire_name, a.key)
+            for a in self._activations.values()
+            if a.info.kind == "actor"
+        ]
+
+    def ensure_active(self, info: ActorInfo, key: str) -> None:
+        """Activation without a message: no-op if the activation exists,
+        otherwise the normal startup sequence runs and the worker waits on its
+        empty mailbox."""
+        if self._draining or (info.wire_name, key) in self._activations:
+            return
+        self._create(info, key)
+
+    def discard(self, wire_name: str, key: str) -> None:
+        """The ring moved this key away: drain the mailbox and close as
+        `moved`. The mark is untouched — the new owner's poke resurrects the
+        activity."""
+        activation = self._activations.get((wire_name, key))
+        if activation is None or activation.closing:
+            return
+        if activation.close_reason is None:
+            activation.close_reason = "moved"
+        activation.draining = True
+        activation.queue.put_nowait(None)
 
     async def dispatch(
         self, info: ActorInfo, key: str, method_name: str, args: list[object], chain: list[str]
@@ -206,7 +275,13 @@ class ActorHost:
                 call_kwargs[method.stream_in[0]] = in_iter
             done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
             stream_item = _StreamItem(
-                method.name, call_kwargs, method.stream_out is not None, sink, chain, done
+                method.name,
+                call_kwargs,
+                method.stream_out is not None,
+                sink,
+                chain,
+                done,
+                unary_args=[kwargs[name] for name, _ in method.params],
             )
             activation.queue.put_nowait(stream_item)
             try:
@@ -236,6 +311,218 @@ class ActorHost:
                 activation.worker.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await activation.worker
+        for task in list(self._clear_tasks):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    def emit(
+        self,
+        activation: _Activation,
+        method_name: str,
+        args: list[object],
+        kwargs: dict[str, object],
+    ) -> None:
+        """Fire-and-forget self-message (spec 04 §10): enqueue now, no reply.
+        Failures were already routed through the supervisor; the future is
+        observed only so the exception does not die unretrieved."""
+        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+        future.add_done_callback(
+            lambda f: None if f.cancelled() else f.exception()
+        )
+        activation.queue.put_nowait(
+            _CallItem(
+                method_name,
+                args,
+                chain=[activation.identity],
+                future=future,
+                kwargs=kwargs,
+                tick=True,
+            )
+        )
+
+    def start_schedule(
+        self,
+        activation: _Activation,
+        name: str,
+        method_name: str,
+        args: list[object],
+        kwargs: dict[str, object],
+        *,
+        after: float,
+        every: float | None,
+    ) -> Schedule:
+        """Arm a schedule on this activation (spec 04 §10). Re-using a name
+        cancels and replaces the previous schedule."""
+        existing = activation.schedules.pop(name, None)
+        if existing is not None:
+            existing.cancel()
+        task = asyncio.create_task(
+            self._schedule_loop(activation, name, method_name, args, kwargs, after, every)
+        )
+        activation.schedules[name] = task
+        return Schedule(name, task)
+
+    async def _schedule_loop(
+        self,
+        activation: _Activation,
+        name: str,
+        method_name: str,
+        args: list[object],
+        kwargs: dict[str, object],
+        after: float,
+        every: float | None,
+    ) -> None:
+        """Fixed-delay: the next tick arms only after the previous handler
+        completed, so a congested mailbox never accumulates ticks."""
+        try:
+            delay = after if after > 0 else (every if every is not None else 0.0)
+            while True:
+                await asyncio.sleep(delay)
+                if activation.closing:
+                    return
+                future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+                activation.queue.put_nowait(
+                    _CallItem(
+                        method_name,
+                        args,
+                        chain=[activation.identity],
+                        future=future,
+                        kwargs=kwargs,
+                        tick=True,
+                    )
+                )
+                # tick failures were already routed through the supervisor
+                with contextlib.suppress(Exception):
+                    await future
+                if every is None:
+                    return
+                delay = every
+        finally:
+            if activation.schedules.get(name) is asyncio.current_task():
+                del activation.schedules[name]
+
+    def state_values(self, wire_name: str, key: str) -> dict[str, object] | None:
+        """Live state values of an activation (spec 11 §8), or None when
+        `(wire_name, key)` is not active here. `transient()` and `paged()`
+        fields are excluded — the serializable surface, same as replication."""
+        activation = self._activations.get((wire_name, key))
+        if activation is None:
+            return None
+        info = activation.info
+        return {
+            name: value
+            for name, value in info.state_of(activation.instance).items()
+            if not isinstance(info.regimes[name], Paged)
+        }
+
+    # --- inspection (spec 11 §5): events are born here, the only place handlers run --
+
+    def _observed(self) -> bool:
+        return self._interceptor is not None or self.hub.active
+
+    def _publish(self, event: inspection.SpyEvent) -> None:
+        if self._interceptor is not None:
+            try:
+                self._interceptor(event)
+            except Exception:
+                logger.exception("interceptor raised on %s", type(event).__name__)
+        self.hub.publish(event)
+
+    def _stamp(self, activation: _Activation) -> tuple[int, datetime]:
+        activation.seq += 1
+        return activation.seq, datetime.now(UTC)
+
+    def _encode_payloads(self, values: list[object]) -> list[bytes] | None:
+        # best-effort: emit args (e.g. of a tick) may not be serializable
+        try:
+            return [codec.encode_raw(value) for value in values]
+        except Exception:
+            return None
+
+    def _spy_activated(self, activation: _Activation) -> None:
+        if not self._observed():
+            return
+        seq, ts = self._stamp(activation)
+        self._publish(
+            inspection.Activated(
+                actor=activation.info.wire_name, key=activation.key,
+                node=self.hub.node, seq=seq, ts=ts,
+            )
+        )
+
+    def _spy_received(
+        self,
+        activation: _Activation,
+        method_name: str,
+        streaming: bool,
+        chain: list[str],
+        args: list[object],
+    ) -> None:
+        seq, ts = self._stamp(activation)
+        self._publish(
+            inspection.Received(
+                actor=activation.info.wire_name, key=activation.key,
+                node=self.hub.node, seq=seq, ts=ts,
+                method=method_name, streaming=streaming, chain=list(chain),
+                args=self._encode_payloads(args) if self.hub.payloads_armed else None,
+            )
+        )
+
+    def _spy_completed(
+        self,
+        activation: _Activation,
+        method_name: str,
+        streaming: bool,
+        started: float,
+        changed: list[str] | None,
+        result: object,
+        commit_error: CastyError | None,
+    ) -> None:
+        if not self._observed():
+            return
+        result_bytes: bytes | None = None
+        if self.hub.payloads_armed and not streaming:
+            encoded = self._encode_payloads([result])
+            result_bytes = encoded[0] if encoded is not None else None
+        duration = asyncio.get_running_loop().time() - started if started else 0.0
+        seq, ts = self._stamp(activation)
+        self._publish(
+            inspection.Completed(
+                actor=activation.info.wire_name, key=activation.key,
+                node=self.hub.node, seq=seq, ts=ts,
+                method=method_name, streaming=streaming, duration=duration,
+                changed=changed, result=result_bytes,
+                commit_error=str(commit_error) if commit_error is not None else None,
+            )
+        )
+
+    def _spy_failed(
+        self, activation: _Activation, method_name: str, exc: Exception, directive: Directive
+    ) -> None:
+        if not self._observed():
+            return
+        seq, ts = self._stamp(activation)
+        self._publish(
+            inspection.Failed(
+                actor=activation.info.wire_name, key=activation.key,
+                node=self.hub.node, seq=seq, ts=ts,
+                method=method_name, error=f"{type(exc).__name__}: {exc}",
+                directive=directive.name.lower(),
+            )
+        )
+
+    def _spy_deactivated(self, activation: _Activation) -> None:
+        if not self._observed():
+            return
+        seq, ts = self._stamp(activation)
+        self._publish(
+            inspection.Deactivated(
+                actor=activation.info.wire_name, key=activation.key,
+                node=self.hub.node, seq=seq, ts=ts,
+                reason=activation.close_reason or "drain",
+            )
+        )
 
     # --- internals ------------------------------------------------------------------
 
@@ -253,22 +540,26 @@ class ActorHost:
         try:
             if not await self._startup(activation):
                 return
+            self._spy_activated(activation)
             while True:
                 try:
                     # under load the queue is rarely empty; get_nowait skips the
                     # idle timer that wait_for would arm and cancel per message
                     item = activation.queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    try:
-                        item = await asyncio.wait_for(activation.queue.get(), idle_timeout)
-                    except TimeoutError:
-                        if activation.queue.empty() and activation.inflight == 0:
-                            activation.closing = True
-                            break
-                        continue
+                    if idle_timeout == float("inf"):  # a real untimed wait, not a timer
+                        item = await activation.queue.get()
+                    else:
+                        try:
+                            item = await asyncio.wait_for(activation.queue.get(), idle_timeout)
+                        except TimeoutError:
+                            if activation.queue.empty() and activation.inflight == 0:
+                                activation.close("idle")
+                                break
+                            continue
                 if item is None:  # drain wake-up
                     if activation.draining and activation.queue.empty():
-                        activation.closing = True
+                        activation.close("drain")
                         break
                     continue
                 if isinstance(item, _StreamItem):
@@ -278,10 +569,10 @@ class ActorHost:
                 if activation.closing:
                     break
                 if activation.draining and activation.queue.empty():
-                    activation.closing = True
+                    activation.close("drain")
                     break
         except asyncio.CancelledError:
-            activation.closing = True
+            activation.close("drain")
             raise
         finally:
             await self._finalize(activation)
@@ -304,21 +595,38 @@ class ActorHost:
                 # built from, so a field the hook mutates still looks dirty to the next
                 # commit and rides along on it (spec 09 §9)
                 activation.last_values = info.state_of(activation.instance)
+                if info.durable_activity:
+                    # the mark doubles as the activation fence: committing it advances
+                    # the key's HLC chain, so a superseded activation's later commit or
+                    # clear arrives on a stale basis and is refused
+                    activation.hlc = await replication.commit(
+                        info,
+                        activation.key,
+                        activation.hlc,
+                        [Page(key=ACTIVE_PAGE, data=ACTIVE_DATA)],
+                        [],
+                    )
+                    activation.state.pages[ACTIVE_PAGE] = ACTIVE_DATA
             if info.activate_hook is not None:
                 await self._run_hook(activation, info.activate_hook)
             return True
         except Exception as exc:
-            activation.closing = True
+            stale = isinstance(exc, StaleActivationError)
+            activation.close("stale" if stale else "activation-failed")
             activation.run_deactivate_hook = False
-            error: CastyError = (
-                exc
-                if isinstance(exc, CastyError)
-                else ActorFailedError(
+            error: CastyError
+            if stale:
+                error = RangeMovingError(
+                    f"{activation.identity}: stale activation discarded ({exc}); retry"
+                )
+            elif isinstance(exc, CastyError):
+                error = exc
+            else:
+                error = ActorFailedError(
                     info.wire_name,
                     activation.key,
                     f"activation failed: {type(exc).__name__}: {exc}",
                 )
-            )
             while not activation.queue.empty():
                 item = activation.queue.get_nowait()
                 if item is not None:
@@ -330,15 +638,20 @@ class ActorHost:
         reply = Reply(item.future, activation)
         ctx = ActorContext(
             self,
+            activation,
             info.cls,
             activation.key,
             chain=[*item.chain, activation.identity],
             reply=reply,
         )
         token = set_context(ctx)
+        started = 0.0
+        if self._observed():
+            started = asyncio.get_running_loop().time()
+            self._spy_received(activation, item.method_name, False, item.chain, item.args)
         try:
             method = getattr(activation.instance, item.method_name)
-            result = await method(*item.args)
+            result = await method(*item.args, **item.kwargs)
         except asyncio.CancelledError:
             if not item.future.done():
                 item.future.set_exception(
@@ -348,6 +661,7 @@ class ActorHost:
         except Exception as exc:
             activation.failures += 1
             directive = self._decide(info, activation, exc)
+            self._spy_failed(activation, item.method_name, exc, directive)
             if not item.future.done():
                 item.future.set_exception(
                     ActorFailedError(
@@ -360,13 +674,16 @@ class ActorHost:
                 # resolved above; fire-once leaves it untouched)
                 reply.fail(exc)
             if directive is Directive.RESET:
-                activation.closing = True
+                activation.close("reset")
                 activation.run_deactivate_hook = False
             elif directive is Directive.STOP:
-                activation.closing = True
+                activation.close("stop")
         else:
             activation.failures = 0
-            commit_error = await self._commit_if_mutated(activation)
+            commit_error, changed = await self._commit_if_mutated(activation)
+            self._spy_completed(
+                activation, item.method_name, False, started, changed, result, commit_error
+            )
             if ctx.detached:
                 pass  # the Reply resolves the caller out of band
             elif not item.future.done():
@@ -375,7 +692,7 @@ class ActorHost:
                 else:
                     item.future.set_exception(commit_error)
             if ctx.deactivation_requested:
-                activation.closing = True
+                activation.close("deactivate")
         finally:
             reset_context(token)
 
@@ -400,9 +717,13 @@ class ActorHost:
     async def _stream_body(self, activation: _Activation, item: _StreamItem) -> None:
         info = activation.info
         ctx = ActorContext(
-            self, info.cls, activation.key, chain=[*item.chain, activation.identity]
+            self, activation, info.cls, activation.key, chain=[*item.chain, activation.identity]
         )
         token = set_context(ctx)
+        started = 0.0
+        if self._observed():
+            started = asyncio.get_running_loop().time()
+            self._spy_received(activation, item.method_name, True, item.chain, item.unary_args)
         try:
             method = getattr(activation.instance, item.method_name)
             if item.stream_out:
@@ -415,40 +736,47 @@ class ActorHost:
         except Exception as exc:
             activation.failures += 1
             directive = self._decide(info, activation, exc)
+            self._spy_failed(activation, item.method_name, exc, directive)
             error = ActorFailedError(
                 info.wire_name, activation.key, f"{type(exc).__name__}: {exc}"
             )
             with contextlib.suppress(Exception):
                 await item.sink.fail(error)
             if directive is Directive.RESET:
-                activation.closing = True
+                activation.close("reset")
                 activation.run_deactivate_hook = False
             elif directive is Directive.STOP:
-                activation.closing = True
+                activation.close("stop")
         else:
             activation.failures = 0
-            commit_error = await self._commit_if_mutated(activation)
+            commit_error, changed = await self._commit_if_mutated(activation)
+            self._spy_completed(
+                activation, item.method_name, True, started, changed, None, commit_error
+            )
             with contextlib.suppress(Exception):
                 if commit_error is None:
                     await item.sink.close()
                 else:
                     await item.sink.fail(commit_error)
             if ctx.deactivation_requested:
-                activation.closing = True
+                activation.close("deactivate")
         finally:
             reset_context(token)
 
-    async def _commit_if_mutated(self, activation: _Activation) -> CastyError | None:
+    async def _commit_if_mutated(
+        self, activation: _Activation
+    ) -> tuple[CastyError | None, list[str] | None]:
         """Replicate the pages this handler changed. On failure the in-memory state
         rolls back to the last committed one — a fenced minority owner never
-        advances."""
+        advances. Also returns the committed page keys (None when the actor runs
+        single-copy), so a spy `Completed` has `changed` for free (spec 11 §3)."""
         info = activation.info
         replication = self._replication_for(info)
         if replication is None:
-            return None
+            return None, None
         values = info.state_of(activation.instance)
         if info.immutable_state and values == activation.last_values:
-            return None
+            return None, []
         try:
             delta = paging.diff(
                 info, activation.instance, values, activation.last_values, activation.state
@@ -457,11 +785,11 @@ class ActorHost:
             # the encode itself failed, part-way through: no field is trustworthy
             paging.reset(info, activation.state, activation.instance)
             activation.last_values = None
-            return exc
+            return exc, None
         if delta.empty:
             paging.commit(activation.state, delta)
             activation.last_values = values
-            return None
+            return None, []
         try:
             activation.hlc = await replication.commit(
                 info, activation.key, activation.hlc, delta.pages, delta.dropped
@@ -470,17 +798,17 @@ class ActorHost:
             # nothing was committed anywhere: undo the pages this handler touched
             paging.rollback(info, activation.instance, activation.state, delta)
             activation.last_values = None
-            return exc
+            return exc, None
         except StaleActivationError as exc:
             # another owner committed newer history; this activation is stale
-            activation.closing = True
+            activation.close("stale")
             activation.run_deactivate_hook = False
             return RangeMovingError(
                 f"{activation.identity}: stale activation discarded ({exc}); retry"
-            )
+            ), None
         paging.commit(activation.state, delta)
         activation.last_values = values
-        return None
+        return None, [page.key for page in delta.pages] + list(delta.dropped)
 
     def _decide(self, info: ActorInfo, activation: _Activation, exc: Exception) -> Directive:
         supervisor = info.supervisor or self._supervisor
@@ -496,7 +824,7 @@ class ActorHost:
         """Hooks run with a context (ctx.key, ctx.actor work), chained to the
         activation itself so a hook asking its own actor fails fast."""
         ctx = ActorContext(
-            self, activation.info.cls, activation.key, chain=[activation.identity]
+            self, activation, activation.info.cls, activation.key, chain=[activation.identity]
         )
         token = set_context(ctx)
         try:
@@ -505,16 +833,77 @@ class ActorHost:
             reset_context(token)
 
     async def _finalize(self, activation: _Activation) -> None:
-        if activation.run_deactivate_hook and activation.info.deactivate_hook is not None:
-            try:
-                await self._run_hook(activation, activation.info.deactivate_hook)
-            except Exception:
-                logger.exception("%s: deactivate hook raised", activation.identity)
-        current = self._activations.get((activation.info.wire_name, activation.key))
-        if current is activation:
-            del self._activations[(activation.info.wire_name, activation.key)]
-        activation.done.set()
-        self._requeue_leftovers(activation)
+        self._spy_deactivated(activation)
+        for schedule_task in list(activation.schedules.values()):
+            schedule_task.cancel()
+        try:
+            if activation.run_deactivate_hook and activation.info.deactivate_hook is not None:
+                try:
+                    await self._run_hook(activation, activation.info.deactivate_hook)
+                except Exception:
+                    logger.exception("%s: deactivate hook raised", activation.identity)
+            await self._settle_mark(activation)
+        finally:
+            current = self._activations.get((activation.info.wire_name, activation.key))
+            if current is activation:
+                del self._activations[(activation.info.wire_name, activation.key)]
+            activation.done.set()
+            self._requeue_leftovers(activation)
+
+    async def _settle_mark(self, activation: _Activation) -> None:
+        """A deliberate end clears the durable mark. `deactivate` gates on the
+        clear landing — a minority owner cannot deliberately die, since the
+        majority side would resurrect it. `stop` tries once, then retries in
+        the background: the supervisor demanded the end. Every other reason
+        leaves the mark, and the actor is resurrected elsewhere."""
+        info = activation.info
+        replication = self._replication_for(info)
+        if replication is None or not info.durable_activity:
+            return
+        match activation.close_reason:
+            case "deactivate":
+                while True:
+                    try:
+                        await replication.commit(
+                            info, activation.key, activation.hlc, [], [ACTIVE_PAGE]
+                        )
+                    except QuorumUnavailableError:
+                        await asyncio.sleep(self._reactivation_retry)
+                    except StaleActivationError:
+                        return  # another activation advanced the chain: not ours to clear
+                    else:
+                        return
+            case "stop":
+                try:
+                    await replication.commit(
+                        info, activation.key, activation.hlc, [], [ACTIVE_PAGE]
+                    )
+                except QuorumUnavailableError:
+                    self.pending_clears.add((info.wire_name, activation.key))
+                    self._spawn_clear(replication, info, activation.key, activation.hlc)
+                except StaleActivationError:
+                    pass
+            case _:
+                return
+
+    def _spawn_clear(
+        self, replication: Replication, info: ActorInfo, key: str, hlc: Hlc | None
+    ) -> None:
+        async def retry() -> None:
+            while True:
+                await asyncio.sleep(self._reactivation_retry)
+                try:
+                    await replication.commit(info, key, hlc, [], [ACTIVE_PAGE])
+                except QuorumUnavailableError:
+                    continue
+                except StaleActivationError:
+                    pass
+                self.pending_clears.discard((info.wire_name, key))
+                return
+
+        task = asyncio.create_task(retry())
+        self._clear_tasks.add(task)
+        task.add_done_callback(self._clear_tasks.discard)
 
     def _requeue_leftovers(self, activation: _Activation) -> None:
         """Items still in the mailbox after deactivation are re-dispatched to a
@@ -527,6 +916,10 @@ class ActorHost:
             if item is not None:
                 leftovers.append(item)
         for item in leftovers:
+            if isinstance(item, _CallItem) and item.tick:
+                if not item.future.done():  # never re-dispatched: a tick died with its activation
+                    item.future.set_result(None)
+                continue
             if isinstance(item, _StreamItem):
                 error = ActorUnavailableError(f"{activation.identity}: reopen stream")
                 task = asyncio.ensure_future(self._fail_item(item, error))

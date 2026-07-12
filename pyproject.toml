@@ -1,9 +1,27 @@
 [project]
 name = "casty"
-version = "2.0.0a0"
+dynamic = ["version"]
 description = "Typed, clustered actor framework for Python"
+readme = "README.md"
 requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [{name = "Gabriel Francisco"}]
+keywords = ["actor", "async", "actor-model", "asyncio", "concurrency", "cluster", "distributed"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries",
+    "Framework :: AsyncIO",
+    "Typing :: Typed",
+]
 dependencies = ["msgpack>=1.0"]
+
+[project.urls]
+Repository = "https://github.com/gabfssilva/casty"
 
 [project.optional-dependencies]
 lz4 = ["lz4>=4.0"]
@@ -25,8 +43,14 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/casty/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/casty"]

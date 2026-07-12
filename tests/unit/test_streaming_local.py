@@ -63,7 +63,7 @@ async def _source(items: list[bytes]) -> AsyncIterator[bytes]:
 
 
 async def _drive_ingest(sys_: ActorSystem, key: str, items: list[bytes]) -> int:
-    result = await sys_.stream_in(
+    result = await sys_._stream_in(
         _info(), key, _method("ingest"), {}, _source(items), []
     )
     assert isinstance(result, int)
@@ -75,7 +75,7 @@ async def test_server_streaming_yields_state() -> None:
         await _drive_ingest(sys_, "a", [b"x", b"y", b"z"])
         out = [
             e
-            async for e in sys_.stream_out(_info(), "a", _method("tail"), {"since": 1}, None, [])
+            async for e in sys_._stream_out(_info(), "a", _method("tail"), {"since": 1}, None, [])
         ]
         assert out == [b"y", b"z"]
 
@@ -93,7 +93,7 @@ async def test_duplex_streaming_transforms() -> None:
     async with casty.local() as sys_:
         out = [
             v
-            async for v in sys_.stream_out(
+            async for v in sys_._stream_out(
                 _info(), "c", _method("transform"), {}, _source([b"a", b"bb", b"ccc"]), []
             )
         ]
@@ -104,7 +104,7 @@ async def test_streaming_error_surfaces_on_consumer() -> None:
     async with casty.local() as sys_:
         received: list[int] = []
         with pytest.raises(ActorFailedError, match="kaboom"):
-            async for v in sys_.stream_out(_info(), "d", _method("boom"), {}, None, []):
+            async for v in sys_._stream_out(_info(), "d", _method("boom"), {}, None, []):
                 received.append(typing_cast_int(v))
         assert received == [1]
 
@@ -112,7 +112,7 @@ async def test_streaming_error_surfaces_on_consumer() -> None:
 async def test_break_frees_the_worker() -> None:
     async with casty.local() as sys_:
         seen = 0
-        async for _v in sys_.stream_out(_info(), "e", _method("forever"), {}, None, []):
+        async for _v in sys_._stream_out(_info(), "e", _method("forever"), {}, None, []):
             seen += 1
             if seen >= 3:
                 break

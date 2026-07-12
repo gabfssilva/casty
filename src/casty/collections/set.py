@@ -1,7 +1,6 @@
 """casty.Set: a distributed set as sugar over shard actors (spec 06 §2.2).
-STUB — bodies to be implemented. Do not touch shared wiring: the prefix,
-factory registration, `shard_info` and the `Set` class name are the contract
-that system.py / collections.__init__ depend on."""
+The prefix, factory registration, `shard_info` and the `Set` class name are
+the contract that system.py / collections.__init__ depend on."""
 
 from __future__ import annotations
 
@@ -55,29 +54,35 @@ def shard_info(replicas: int, write: Consistency | int, read: Consistency | int)
 
 
 class Set[T](_sharded.ShardRouter):
-    """Typed distributed set. Single-item ops route to `hash(item)`; aggregates
-    and set algebra fan out to all shards."""
+    """Typed distributed set, from `ActorSystem.set`. Single-item ops route to
+    one shard; aggregates and set algebra fan out to all shards."""
 
     async def add(self, item: T) -> bool:
+        """Add `item`. True if it was not already present."""
         encoded = codec.encode_raw(item)
         return typing.cast(bool, await self._call(self._shard_of(encoded), "add", [encoded]))
 
     async def remove(self, item: T) -> bool:
+        """Remove `item`. True if it was present."""
         encoded = codec.encode_raw(item)
         return typing.cast(bool, await self._call(self._shard_of(encoded), "remove", [encoded]))
 
     async def contains(self, item: T) -> bool:
+        """Whether `item` is present."""
         encoded = codec.encode_raw(item)
         return typing.cast(bool, await self._call(self._shard_of(encoded), "contains", [encoded]))
 
     async def size(self) -> int:
+        """Total items, summed across all shards."""
         counts = await self._fanout("size")
         return sum(typing.cast(int, count) for count in counts)
 
     async def clear(self) -> None:
+        """Remove every item from every shard."""
         await self._fanout("clear")
 
     async def items(self) -> list[T]:
+        """Every item, pulled from every shard. Unordered; O(set size)."""
         dumps = await self._fanout("dump")
         result: list[T] = []
         for dump in dumps:
@@ -86,10 +91,13 @@ class Set[T](_sharded.ShardRouter):
         return result
 
     async def union(self, other: Set[T]) -> set[T]:
+        """Client-side union: pulls both sets whole."""
         return set(await self.items()) | set(await other.items())
 
     async def intersection(self, other: Set[T]) -> set[T]:
+        """Client-side intersection: pulls both sets whole."""
         return set(await self.items()) & set(await other.items())
 
     async def difference(self, other: Set[T]) -> set[T]:
+        """Client-side difference: pulls both sets whole."""
         return set(await self.items()) - set(await other.items())

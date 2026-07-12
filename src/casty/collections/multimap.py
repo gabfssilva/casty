@@ -1,7 +1,5 @@
 """casty.MultiMap: a distributed key -> set-of-values map (spec 06 §2.3). All
-values of a key are co-located (shard by key), so `get(key)` is one call. STUB —
-bodies to be implemented. Do not touch the prefix, factory registration,
-`shard_info` or the `MultiMap` class name."""
+values of a key are co-located (shard by key), so `get(key)` is one call."""
 
 from __future__ import annotations
 
@@ -63,9 +61,11 @@ def shard_info(replicas: int, write: Consistency | int, read: Consistency | int)
 
 
 class MultiMap[K, V](_sharded.ShardRouter):
-    """Typed distributed multimap: each key maps to a set of values."""
+    """Typed distributed multimap, from `ActorSystem.multimap`: each key maps
+    to a set of values, all co-located on the key's shard."""
 
     async def put(self, key: K, value: V) -> bool:
+        """Add `value` to `key`'s set. True if it was not already there."""
         encoded = codec.encode_raw(key)
         return typing.cast(
             bool,
@@ -73,6 +73,7 @@ class MultiMap[K, V](_sharded.ShardRouter):
         )
 
     async def remove(self, key: K, value: V) -> bool:
+        """Remove `value` from `key`'s set. True if it was there."""
         encoded = codec.encode_raw(key)
         return typing.cast(
             bool,
@@ -82,6 +83,7 @@ class MultiMap[K, V](_sharded.ShardRouter):
         )
 
     async def get(self, key: K) -> list[V]:
+        """Every value under `key`; empty list if the key is absent."""
         encoded = codec.encode_raw(key)
         raw = await self._call(self._shard_of(encoded), "get", [encoded])
         return [
@@ -90,12 +92,14 @@ class MultiMap[K, V](_sharded.ShardRouter):
         ]
 
     async def remove_key(self, key: K) -> int:
+        """Drop `key` and its whole set. Returns how many values it held."""
         encoded = codec.encode_raw(key)
         return typing.cast(
             int, await self._call(self._shard_of(encoded), "remove_key", [encoded])
         )
 
     async def contains(self, key: K, value: V) -> bool:
+        """Whether `value` is in `key`'s set."""
         encoded = codec.encode_raw(key)
         return typing.cast(
             bool,
@@ -105,8 +109,10 @@ class MultiMap[K, V](_sharded.ShardRouter):
         )
 
     async def size(self) -> int:
+        """Total values (not keys), summed across all shards."""
         counts = await self._fanout("size")
         return sum(typing.cast(int, count) for count in counts)
 
     async def clear(self) -> None:
+        """Remove every entry from every shard."""
         await self._fanout("clear")

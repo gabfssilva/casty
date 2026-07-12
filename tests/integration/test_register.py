@@ -19,17 +19,17 @@ class Sku:
 
 
 async def test_register_full_api_across_nodes_and_client() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     client: casty.Client | None = None
     try:
-        ref: casty.Register[Sku] = nodes[0].register("leader")
+        ref: casty.Register[Sku] = systems[0].register("leader")
         assert await ref.get() is None
 
         await ref.set(Sku(code="sku-1", price=1.0))
         assert await ref.get() == Sku(code="sku-1", price=1.0)
 
-        # same register seen from another node
-        ref_b: casty.Register[Sku] = nodes[1].register("leader")
+        # same register seen from another system
+        ref_b: casty.Register[Sku] = systems[1].register("leader")
         assert await ref_b.get() == Sku(code="sku-1", price=1.0)
 
         old = await ref_b.get_and_set(Sku(code="sku-2", price=2.0))
@@ -39,7 +39,7 @@ async def test_register_full_api_across_nodes_and_client() -> None:
         # and from a lite member
         from tests.integration.actors import FAST_CONFIG
 
-        client = await casty.connect([nodes[0].member.addr], config=FAST_CONFIG)
+        client = await casty.connect([systems[0].member.addr], config=FAST_CONFIG)
         ref_c: casty.Register[Sku] = client.register("leader")
         assert await ref_c.get() == Sku(code="sku-2", price=2.0)
         await ref_c.set(Sku(code="sku-3", price=3.0))
@@ -47,13 +47,13 @@ async def test_register_full_api_across_nodes_and_client() -> None:
     finally:
         if client is not None:
             await client.close()
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_register_compare_and_set() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     try:
-        ref: casty.Register[int] = nodes[0].register("cas")
+        ref: casty.Register[int] = systems[0].register("cas")
         assert await ref.get() is None
 
         # expected=None matches the initial empty value
@@ -68,13 +68,13 @@ async def test_register_compare_and_set() -> None:
         assert await ref.compare_and_set(1, 2)
         assert await ref.get() == 2
     finally:
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_register_compare_and_set_contention() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     try:
-        ref: casty.Register[int] = nodes[0].register("contended")
+        ref: casty.Register[int] = systems[0].register("contended")
         await ref.set(0)
 
         results = await asyncio.gather(
@@ -85,16 +85,16 @@ async def test_register_compare_and_set_contention() -> None:
         final = await ref.get()
         assert final is not None and 1 <= final <= 5
     finally:
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_register_survives_owner_death() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     try:
-        ref: casty.Register[int] = nodes[0].register("durable-register")
+        ref: casty.Register[int] = systems[0].register("durable-register")
         await ref.set(42)
-        victim = nodes[0]
-        survivors = nodes[1:]
+        victim = systems[0]
+        survivors = systems[1:]
         from tests.integration.actors import kill_node
 
         await kill_node(victim)
@@ -112,21 +112,21 @@ async def test_register_survives_owner_death() -> None:
                 await asyncio.sleep(0.1)
         assert recovered == 42
     finally:
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_register_set_fenced_in_minority() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     heal: Callable[[], None] | None = None
     try:
-        ref: casty.Register[int] = nodes[0].register("fenced-register")
+        ref: casty.Register[int] = systems[0].register("fenced-register")
         await ref.set(1)
-        info = nodes[0].register("fenced-register")._info
-        ring = nodes[0]._ring
+        info = systems[0].register("fenced-register")._info
+        ring = systems[0]._ring
         assert ring is not None
         owner_id = ring.owner(f"{info.wire_name}/fenced-register:0")
-        owner = next(n for n in nodes if n.node_id == owner_id)
-        majority = [n for n in nodes if n is not owner]
+        owner = next(n for n in systems if n.node_id == owner_id)
+        majority = [n for n in systems if n is not owner]
 
         heal = await partition([owner], majority)
         await wait_view(majority, 2)
@@ -141,4 +141,4 @@ async def test_register_set_fenced_in_minority() -> None:
     finally:
         if heal is not None:
             heal()
-        await stop_all(nodes)
+        await stop_all(systems)

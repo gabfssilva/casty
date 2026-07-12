@@ -64,10 +64,10 @@ class Held(NamedTuple):
     fresh_size: int
 
 
-def held(node: casty.Node) -> Held | None:
+def held(system: casty.Node) -> Held | None:
     """Peek at the node's replica store. Internal API on purpose: the point of the
     example is to show what the framework actually shipped, page by page."""
-    stored = node._replication.store.get(ACTOR, KEY)
+    stored = system._replication.store.get(ACTOR, KEY)
     if stored is None:
         return None
     fresh = [page for page in stored.pages.values() if page.hlc == stored.hlc]
@@ -79,10 +79,10 @@ def held(node: casty.Node) -> Held | None:
     )
 
 
-def rebuild(node: casty.Node) -> pd.DataFrame:
+def rebuild(system: casty.Node) -> pd.DataFrame:
     """The frame as this replica holds it — through the pager, the same way an
     activation on this node would rebuild it."""
-    stored = node._replication.store.get(ACTOR, KEY)
+    stored = system._replication.store.get(ACTOR, KEY)
     assert stored is not None
     return PandasPager().restore(
         {
@@ -94,17 +94,17 @@ def rebuild(node: casty.Node) -> pd.DataFrame:
 
 
 async def main() -> None:
-    nodes = [await casty.start("127.0.0.1:7141", config=CONFIG)]
+    systems = [await casty.start("127.0.0.1:7141", config=CONFIG)]
     for port in range(7142, 7146):
-        nodes.append(
+        systems.append(
             await casty.start(f"127.0.0.1:{port}", seeds=["127.0.0.1:7141"], config=CONFIG)
         )
-    while any(len(node.membership.alive_members()) < len(nodes) for node in nodes):
+    while any(len(s.membership.alive_members()) < len(systems) for s in systems):
         await asyncio.sleep(0.05)
-    print(f"cluster up: {len(nodes)} nodes\n")
+    print(f"cluster up: {len(systems)} nodes\n")
     print(casty.explain(Telemetry), "\n")
 
-    site = nodes[0].actor(Telemetry, KEY)
+    site = systems[0].actor(Telemetry, KEY)
 
     megabytes = ROWS * SENSORS * 8 / MIB
     print(f"seeding {ROWS:,} x {SENSORS} float64 ({megabytes:.0f} MiB)...")
@@ -112,11 +112,11 @@ async def main() -> None:
     await site.seed(ROWS, SENSORS)
     seeding = time.perf_counter() - clock
 
-    holders = [(node, page_set) for node in nodes if (page_set := held(node)) is not None]
+    holders = [(system, page_set) for system in systems if (page_set := held(system)) is not None]
     first = holders[0][1]
     print(
         f"  first commit: {first.size / MIB:>7.1f} MiB in {first.pages:>4} pages"
-        f"  -> {len(holders)} of {len(nodes)} nodes, {seeding:.1f}s\n"
+        f"  -> {len(holders)} of {len(systems)} nodes, {seeding:.1f}s\n"
     )
 
     row, sensor = ROWS // 2, "s0"
@@ -125,11 +125,11 @@ async def main() -> None:
     await site.correct(row, sensor, 42.0)
     editing = time.perf_counter() - clock
 
-    after = [page_set for node in nodes if (page_set := held(node)) is not None]
+    after = [page_set for system in systems if (page_set := held(system)) is not None]
     delta = after[0]
     print(
         f"  this commit:  {delta.fresh_size / MIB:>7.3f} MiB in {delta.fresh:>4} pages"
-        f"  -> {len(after)} of {len(nodes)} nodes, {editing:.3f}s\n"
+        f"  -> {len(after)} of {len(systems)} nodes, {editing:.3f}s\n"
     )
     print(
         f"  {first.size / delta.fresh_size:,.0f}x less data, {seeding / editing:,.0f}x"
@@ -140,10 +140,10 @@ async def main() -> None:
 
     # what a cold activation on another node pays: the pages are there, but the frame
     # still has to be rebuilt out of them
-    ring = nodes[0].ring
+    ring = systems[0].ring
     assert ring is not None
     owner = ring.owner(f"{ACTOR}/{KEY}")
-    replica = next(node for node, _ in holders if node.node_id != owner)
+    replica = next(system for system, _ in holders if system.node_id != owner)
     clock = time.perf_counter()
     restored = rebuild(replica)
     print(
@@ -155,8 +155,8 @@ async def main() -> None:
     # a graceful leave hands the pages off to the ring without this node, so shutting the
     # holders down pushes the frame around one more time — most of this example's wall clock
     print("\n  shutting down (each holder hands its pages off before it leaves)...")
-    for node in nodes:
-        await node.close()
+    for system in systems:
+        await system.close()
 
 
 if __name__ == "__main__":

@@ -49,6 +49,36 @@ def message[T](*, name: str) -> Callable[[type[T]], type[T]]: ...
 def message(
     cls: type | None = None, /, *, name: str | None = None
 ) -> type | Callable[[type], type]:
+    """Declare a wire message: a class whose instances cross the network.
+
+    The class is dataclass-ified (`slots=True, eq=True`, mutable) unless it
+    already is one, registered globally under its wire name, and every field
+    annotation is validated at decoration time. Serializable annotations:
+    primitives (int, float, bool, str, bytes), datetime, uuid, enums with
+    primitive values, other registered messages, and list / set / frozenset /
+    tuple / dict (str, int or bytes keys) / unions of those. Schema evolution
+    is tolerant both ways: new fields with defaults are accepted by old
+    receivers, unknown fields are ignored.
+
+    Parameters
+    ----------
+    name : str | None
+        Stable wire name. Defaults to `module.QualName` — set it explicitly
+        to move or rename the class later without breaking the cluster.
+
+    Raises
+    ------
+    SerializationSchemaError
+        At import time: an unserializable field annotation or a duplicate
+        wire name.
+
+    Examples
+    --------
+    >>> @casty.message
+    ... class Order:
+    ...     sku: str
+    ...     quantity: int = 1
+    """
     if cls is None:
 
         def apply(inner: type) -> type:

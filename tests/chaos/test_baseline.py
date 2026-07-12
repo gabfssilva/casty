@@ -16,12 +16,12 @@ DURATION = float(os.environ.get("CHAOS_DURATION", "15"))
 
 
 async def test_baseline_load_with_consistency_check() -> None:
-    """Carga pura, sem falha injetada, com os três eixos configuráveis:
-    CHAOS_WRITERS (concorrência), CHAOS_ACTORS (atores distintos) e
-    CHAOS_RATE (ops/s alvo; 0 = capacidade máxima), por CHAOS_DURATION segundos.
+    """Pure load, no injected failure, with the three configurable axes:
+    CHAOS_WRITERS (concurrency), CHAOS_ACTORS (distinct actors) and
+    CHAOS_RATE (target ops/s; 0 = maximum capacity), for CHAOS_DURATION seconds.
 
-    Consistência ao final: chave sem erro de escrita deve ter valor EXATAMENTE
-    igual aos acks; chave com erro fica no intervalo [acked, attempted]."""
+    Consistency at the end: a key with no write error must have a value EXACTLY
+    equal to the acks; a key with an error stays in the range [acked, attempted]."""
     dc = docker_ctl.client()
     all_members = docker_ctl.members(dc)
     addrs = [docker_ctl.addr_of(c) for c in all_members]
@@ -35,7 +35,7 @@ async def test_baseline_load_with_consistency_check() -> None:
     await workload.stop()
 
     write_errors = sum(workload.attempted[k] - workload.acked[k] for k in keys)
-    print(f"\nbaseline: {workload.report()} | {ACTORS} atores | {write_errors} erros de escrita")
+    print(f"\nbaseline: {workload.report()} | {ACTORS} actors | {write_errors} write errors")
 
     try:
         for key in keys:
@@ -43,10 +43,10 @@ async def test_baseline_load_with_consistency_check() -> None:
 
             async def check(k: str = key, lo: int = lo, hi: int = hi) -> None:
                 value = await client.actor(Counter, k).read()
-                if lo == hi:  # nenhum erro nesta chave: igualdade exata
+                if lo == hi:  # no error on this key: exact equality
                     assert value == lo, f"{k}: {value} != {lo} acks"
                 else:
-                    assert lo <= value <= hi, f"{k}: {value} fora de [{lo}, {hi}]"
+                    assert lo <= value <= hi, f"{k}: {value} outside [{lo}, {hi}]"
 
             await eventually(check)
     finally:

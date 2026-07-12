@@ -1,7 +1,7 @@
 """Distributed collections (spec 06). Importing this package registers every
-collection's shard factory; `ensure` materializes any of them from a wire name."""
+collection's shard factory; `_sharded.ensure` materializes any of them from a
+wire name."""
 
-from casty.collections._sharded import ensure
 from casty.collections.counter import Counter
 from casty.collections.map import Map
 from casty.collections.multimap import MultiMap
@@ -20,5 +20,4 @@ __all__ = [
     "Register",
     "Semaphore",
     "Set",
-    "ensure",
 ]

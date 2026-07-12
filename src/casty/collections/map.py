@@ -51,14 +51,17 @@ def shard_info(replicas: int, write: Consistency | int, read: Consistency | int)
 
 
 class Map[K, V](_sharded.ShardRouter):
-    """Typed distributed map. One shard-actor call per key operation;
-    aggregates fan out to all shards."""
+    """Typed distributed map, from `ActorSystem.map`. One shard-actor call per
+    key operation; aggregates (`size`, `clear`, `items`) fan out to every
+    shard."""
 
     async def put(self, key: K, value: V) -> None:
+        """Store `value` under `key`, replacing any previous value."""
         encoded = codec.encode_raw(key)
         await self._call(self._shard_of(encoded), "put", [encoded, codec.encode_raw(value)])
 
     async def get(self, key: K) -> V | None:
+        """The value under `key`, or None if absent."""
         encoded = codec.encode_raw(key)
         raw = await self._call(self._shard_of(encoded), "get", [encoded])
         if raw is None:
@@ -66,21 +69,26 @@ class Map[K, V](_sharded.ShardRouter):
         return typing.cast(V, codec.decode_any(typing.cast(bytes, raw)))
 
     async def remove(self, key: K) -> bool:
+        """Remove `key`. True if it was present."""
         encoded = codec.encode_raw(key)
         return typing.cast(bool, await self._call(self._shard_of(encoded), "remove", [encoded]))
 
     async def contains(self, key: K) -> bool:
+        """Whether `key` is present."""
         encoded = codec.encode_raw(key)
         return typing.cast(bool, await self._call(self._shard_of(encoded), "contains", [encoded]))
 
     async def size(self) -> int:
+        """Total entries, summed across all shards."""
         counts = await self._fanout("size")
         return sum(typing.cast(int, count) for count in counts)
 
     async def clear(self) -> None:
+        """Remove every entry from every shard."""
         await self._fanout("clear")
 
     async def items(self) -> list[tuple[K, V]]:
+        """Every entry, pulled from every shard. Unordered; O(map size)."""
         dumps = await self._fanout("dump")
         result: list[tuple[K, V]] = []
         for dump in dumps:

@@ -19,10 +19,10 @@ class Ticket:
 
 
 async def test_queue_full_api_across_nodes_and_client() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     client: casty.Client | None = None
     try:
-        jobs: casty.Queue[str] = nodes[0].queue("jobs")
+        jobs: casty.Queue[str] = systems[0].queue("jobs")
         assert await jobs.poll() is None
         assert await jobs.size() == 0
 
@@ -36,15 +36,15 @@ async def test_queue_full_api_across_nodes_and_client() -> None:
         assert await jobs.poll() == "job-1"
         assert await jobs.size() == 3
 
-        # same queue seen from another node
-        jobs_b: casty.Queue[str] = nodes[1].queue("jobs")
+        # same queue seen from another system
+        jobs_b: casty.Queue[str] = systems[1].queue("jobs")
         assert await jobs_b.peek() == "job-2"
         await jobs_b.offer("job-5")
 
         # and from a lite member
         from tests.integration.actors import FAST_CONFIG
 
-        client = await casty.connect([nodes[0].member.addr], config=FAST_CONFIG)
+        client = await casty.connect([systems[0].member.addr], config=FAST_CONFIG)
         jobs_c: casty.Queue[str] = client.queue("jobs")
         await jobs_c.offer("job-6")
         assert await jobs_c.size() == 5
@@ -65,28 +65,28 @@ async def test_queue_full_api_across_nodes_and_client() -> None:
     finally:
         if client is not None:
             await client.close()
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_queue_message_values_and_order() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     try:
-        tickets: casty.Queue[Ticket] = nodes[0].queue("tickets")
+        tickets: casty.Queue[Ticket] = systems[0].queue("tickets")
         for i in range(6):
             await tickets.offer(Ticket(code=f"t-{i}", priority=i))
         polled = [await tickets.poll() for _ in range(6)]
         assert polled == [Ticket(code=f"t-{i}", priority=i) for i in range(6)]
         assert await tickets.poll() is None
     finally:
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_queue_order_preserved_across_interleaved_offers_from_distinct_nodes() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     try:
-        q_a: casty.Queue[str] = nodes[0].queue("interleaved")
-        q_b: casty.Queue[str] = nodes[1].queue("interleaved")
-        q_c: casty.Queue[str] = nodes[2].queue("interleaved")
+        q_a: casty.Queue[str] = systems[0].queue("interleaved")
+        q_b: casty.Queue[str] = systems[1].queue("interleaved")
+        q_c: casty.Queue[str] = systems[2].queue("interleaved")
 
         expected: list[str] = []
         for i in range(9):
@@ -98,17 +98,17 @@ async def test_queue_order_preserved_across_interleaved_offers_from_distinct_nod
         polled = [await q_a.poll() for _ in range(9)]
         assert polled == expected
     finally:
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_queue_survives_owner_death() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     try:
-        jobs: casty.Queue[str] = nodes[0].queue("durable-queue")
+        jobs: casty.Queue[str] = systems[0].queue("durable-queue")
         for i in range(10):
             await jobs.offer(f"job-{i}")
-        victim = nodes[0]
-        survivors = nodes[1:]
+        victim = systems[0]
+        survivors = systems[1:]
         from tests.integration.actors import kill_node
 
         await kill_node(victim)
@@ -126,21 +126,21 @@ async def test_queue_survives_owner_death() -> None:
                 await asyncio.sleep(0.1)
         assert drained == [f"job-{i}" for i in range(10)]
     finally:
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_queue_offer_fenced_in_minority() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     heal: Callable[[], None] | None = None
     try:
-        jobs: casty.Queue[str] = nodes[0].queue("fenced-queue")
+        jobs: casty.Queue[str] = systems[0].queue("fenced-queue")
         await jobs.offer("k")
-        info = nodes[0].queue("fenced-queue")._info
-        ring = nodes[0]._ring
+        info = systems[0].queue("fenced-queue")._info
+        ring = systems[0]._ring
         assert ring is not None
         owner_id = ring.owner(f"{info.wire_name}/fenced-queue:0")
-        owner = next(n for n in nodes if n.node_id == owner_id)
-        majority = [n for n in nodes if n is not owner]
+        owner = next(n for n in systems if n.node_id == owner_id)
+        majority = [n for n in systems if n is not owner]
 
         heal = await partition([owner], majority)
         await wait_view(majority, 2)
@@ -155,4 +155,4 @@ async def test_queue_offer_fenced_in_minority() -> None:
     finally:
         if heal is not None:
             heal()
-        await stop_all(nodes)
+        await stop_all(systems)

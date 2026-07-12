@@ -20,6 +20,7 @@ import uuid
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
+from casty.actors.reactivation import ACTIVE_PAGE
 from casty.actors.registry import ActorInfo, info_by_name
 from casty.errors import (
     CastyError,
@@ -255,6 +256,9 @@ class Replication:
         self.clock = HlcClock(node_id)
         self.store = ReplicaStore()
         self._staging: dict[tuple[str, str], _Staged] = {}
+        # called when an applied commit leaves `@active` stored here; the node
+        # turns it into a reactivation poke if it owns the key
+        self.on_active: typing.Callable[[str, str], None] | None = None
 
     # --- replica side (any node) ---------------------------------------------------
 
@@ -312,11 +316,14 @@ class Replication:
     ) -> None:
         if full or stored is None:
             self.store.put(actor, key, Stored(hlc=hlc, pages=pages))
-            return
-        stored.pages.update(pages)
-        for page_key in dropped:
-            stored.pages.pop(page_key, None)
-        stored.hlc = hlc
+        else:
+            stored.pages.update(pages)
+            for page_key in dropped:
+                stored.pages.pop(page_key, None)
+            stored.hlc = hlc
+        entry = self.store.get(actor, key)
+        if self.on_active is not None and entry is not None and ACTIVE_PAGE in entry.pages:
+            self.on_active(actor, key)
 
     def handle_fetch(self, req: FetchState) -> StateReply:
         """The page index of this replica's copy, with the pages themselves inlined
@@ -668,6 +675,29 @@ class Replication:
             dropped=dropped, full=full, final=True, repair=repair,
         )
 
+    async def push_marked(self, info: ActorInfo, key: str) -> None:
+        """Park a marked identity's pages on its *current* replica set. Marks
+        are only re-placed by commits and graceful handoff, so after enough
+        ring drift a rarely-committing actor would otherwise strand its mark on
+        nodes the ring no longer consults."""
+        stored = self.store.get(info.wire_name, key)
+        if stored is None or ACTIVE_PAGE not in stored.pages:
+            return
+        targets = [n for n in self.replica_set(info, key) if n != self._node_id]
+        pages = list(stored.pages.items())
+        await asyncio.gather(
+            *(
+                self._push_quietly(
+                    node,
+                    self._messages(
+                        info.wire_name, key, prev_hlc=None, hlc=stored.hlc,
+                        pages=_wire(pages), dropped=[], full=True, repair=True,
+                    ),
+                )
+                for node in targets
+            )
+        )
+
     async def handoff(self) -> None:
         """Push every locally stored page set to its replica set in the ring without
         this node. Best-effort: commits already live on W replicas."""
@@ -678,7 +708,7 @@ class Replication:
         if not remaining:
             return
         next_ring = Ring.build(remaining)
-        from casty.collections import ensure  # local: avoids a hard layer cycle
+        from casty.collections._sharded import ensure  # local: avoids a hard layer cycle
 
         sends: list[typing.Coroutine[object, object, None]] = []
         for actor, key, stored in self.store.items():

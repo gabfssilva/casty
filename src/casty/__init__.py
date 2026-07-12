@@ -1,9 +1,23 @@
-from casty.actors.context import ActorContext
+"""Typed, clustered actor framework. Virtual actors (Orleans-style) are the
+single primitive: identity is `(class, key)`, activation happens on demand on
+the node that owns the key's token, deactivation happens on idle. Collections,
+services and streaming are sugar over that.
+
+Declare with `@actor` / `@service` / `@message`, run with `start` (cluster),
+`connect` (lite client) or `local` (in-process), reach actors through
+`ActorSystem.actor` and the collection factories.
+"""
+
+from casty import inspection
+from casty.actors.context import ActorContext, Schedule
 from casty.actors.context import current_context as context
+from casty.actors.host import Reply
 from casty.actors.registry import (
     Consistency,
     Directive,
     FailureContext,
+    Pager,
+    PageSet,
     Supervisor,
     activate,
     actor,
@@ -86,6 +100,8 @@ __all__ = [
     "MembershipConfig",
     "MultiMap",
     "Node",
+    "PageSet",
+    "Pager",
     "ProtocolError",
     "Queue",
     "QuorumUnavailableError",
@@ -93,6 +109,8 @@ __all__ = [
     "ReentrancyError",
     "Register",
     "RemoteError",
+    "Reply",
+    "Schedule",
     "Semaphore",
     "SerializationError",
     "SerializationSchemaError",
@@ -108,6 +126,7 @@ __all__ = [
     "context",
     "deactivate",
     "explain",
+    "inspection",
     "local",
     "message",
     "paged",

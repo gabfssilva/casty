@@ -25,7 +25,7 @@ jobs:
       run: uv sync --dev
     - name: Lint with ruff
       run: uv run ruff check src/ tests/
-    - name: Type check with pyright
-      run: uv run pyright src/casty/
+    - name: Type check with mypy
+      run: uv run mypy src
     - name: Test with pytest
-      run: uv run pytest -n auto
+      run: uv run pytest

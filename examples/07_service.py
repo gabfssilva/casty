@@ -1,12 +1,12 @@
-"""Services: RPC concorrente sobre atores (spec 08).
+"""Services: concurrent RPC over actors (spec 08).
 
-Um ator serializa: um handler por vez, e um `await` numa I/O lenta segura o
-worker por toda a espera. Um `@casty.service` é um ator gerado cujo handler não
-espera o trabalho — dispara o método como task e devolve a mailbox — então N
-chamadas progridem juntas. Ele não tem estado: quem guarda estado é o ator que
-o método chama, e chamadas do mesmo `(ator, key)` continuam serializadas lá.
+An actor serializes: one handler at a time, and an `await` on a slow I/O holds the
+worker for the whole wait. A `@casty.service` is a generated actor whose handler does
+not wait for the work — it fires the method as a task and returns the mailbox — so N
+calls progress together. It has no state: state is kept by the actor the method calls,
+and calls from the same `(actor, key)` stay serialized there.
 
-O service é a porta concorrente; o ator, o guardião serial.
+The service is the concurrent door; the actor, the serial guardian.
 
 Run: uv run python examples/07_service.py
 """
@@ -15,9 +15,7 @@ import asyncio
 import time
 
 import casty
-from pygments.lexers import factor
 
-from dataclasses import dataclass, field
 
 @casty.actor
 class Inventory:
@@ -26,7 +24,7 @@ class Inventory:
     async def reserve(self, qty: int) -> bool:
         if qty > self.stock:
             return False
-        self.stock -= qty  # serial por sku: nunca vende o que não tem
+        self.stock -= qty  # serial per sku: never sells what it does not have
         return True
 
     async def left(self) -> int:
@@ -38,22 +36,22 @@ class Checkout:
 
     async def buy(self, sku: str, qty: int) -> bool:
         context = casty.context()
-        await asyncio.sleep(0.2)  # I/O: gateway de pagamento
+        await asyncio.sleep(0.2)  # I/O: payment gateway
         return await context.actor(Inventory, sku).reserve(qty)
 
 
 async def main() -> None:
-    async with casty.local() as node:
-        checkout = node.service(Checkout)
+    async with casty.local() as system:
+        checkout = system.service(Checkout)
 
         started = time.perf_counter()
         results = await asyncio.gather(*[checkout.buy("sku-1", 1) for _ in range(12)])
         elapsed = time.perf_counter() - started
 
         sold = sum(results)
-        print(f"{len(results)} pedidos em {elapsed:.2f}s (serial seriam {0.2 * 12:.1f}s)")
-        print(f"vendidos: {sold}, recusados: {len(results) - sold}")
-        print(f"estoque: {await node.actor(Inventory, 'sku-1').left()}")
+        print(f"{len(results)} orders in {elapsed:.2f}s (serial would be {0.2 * 12:.1f}s)")
+        print(f"sold: {sold}, refused: {len(results) - sold}")
+        print(f"stock: {await system.actor(Inventory, 'sku-1').left()}")
 
 
 if __name__ == "__main__":

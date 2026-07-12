@@ -233,15 +233,15 @@ async def _int_src() -> AsyncIterator[int]:
     yield 0
 
 
-async def _static_typing_check(node: casty.Node) -> None:
+async def _static_typing_check(system: casty.Node) -> None:
     """Never executed; mypy checks that proxies and maps preserve user types."""
-    counter = node.actor(Counter, "k")
+    counter = system.actor(Counter, "k")
     typing.assert_type(counter, Counter)
     typing.assert_type(await counter.add(1), int)
-    stock: casty.Map[str, int] = node.map("stock")
+    stock: casty.Map[str, int] = system.map("stock")
     typing.assert_type(await stock.get("sku"), int | None)
 
-    stream = node.actor(TypedStream, "k")
+    stream = system.actor(TypedStream, "k")
     async for chunk in stream.tail(0):
         typing.assert_type(chunk, bytes)
     typing.assert_type(await stream.ingest(_bytes_src()), int)

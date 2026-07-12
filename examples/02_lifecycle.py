@@ -38,8 +38,8 @@ class Session:
 
 
 async def main() -> None:
-    async with casty.start("127.0.0.1:7102") as node:
-        alice = node.actor(Session, "alice")
+    async with casty.start("127.0.0.1:7102") as system:
+        alice = system.actor(Session, "alice")
         print(await alice.visit())
         print(await alice.visit())
 

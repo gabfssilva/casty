@@ -1,8 +1,7 @@
 """casty.Queue: a distributed FIFO queue (spec 06 §4.2). One owner actor keeps
 order; it does not scale within a single queue (all traffic hits one node) —
-scale by partitioning into many named queues. STUB — bodies to be implemented.
-Do not touch the prefix, factory registration, `shard_info` or the `Queue` class
-name. Single-owner: the facade always addresses shard 0."""
+scale by partitioning into many named queues. Single-owner: the facade always
+addresses shard 0."""
 
 from __future__ import annotations
 
@@ -56,27 +55,33 @@ def shard_info(replicas: int, write: Consistency | int, read: Consistency | int)
 
 
 class Queue[T](_sharded.ShardRouter):
-    """Typed distributed FIFO queue. Single owner (shard 0)."""
+    """Typed distributed FIFO queue, from `ActorSystem.queue`. A single owner
+    actor serializes every operation, which is what keeps the order total."""
 
     async def offer(self, item: T) -> None:
+        """Append `item` to the tail."""
         await self._call(0, "offer", [codec.encode_raw(item)])
 
     async def poll(self) -> T | None:
+        """Remove and return the head, or None if empty. Non-blocking."""
         raw = await self._call(0, "poll", [])
         if raw is None:
             return None
         return typing.cast(T, codec.decode_any(typing.cast(bytes, raw)))
 
     async def peek(self) -> T | None:
+        """The head without removing it, or None if empty."""
         raw = await self._call(0, "peek", [])
         if raw is None:
             return None
         return typing.cast(T, codec.decode_any(typing.cast(bytes, raw)))
 
     async def size(self) -> int:
+        """Items currently queued."""
         return typing.cast(int, await self._call(0, "size", []))
 
     async def drain(self, max_items: int) -> list[T]:
+        """Remove and return up to `max_items` from the head, in order."""
         raws = await self._call(0, "drain", [max_items])
         return [
             typing.cast(T, codec.decode_any(raw))
@@ -84,4 +89,5 @@ class Queue[T](_sharded.ShardRouter):
         ]
 
     async def clear(self) -> None:
+        """Discard every queued item."""
         await self._call(0, "clear", [])

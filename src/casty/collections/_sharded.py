@@ -104,7 +104,7 @@ class ShardRouter:
         method = self._info.methods[method_name]
         ctx = context_or_none()
         chain = ctx.chain if ctx is not None else []
-        return await self._caller.call_actor(
+        return await self._caller._call_actor(
             self._info, f"{self._name}:{shard}", method, args, chain
         )
 

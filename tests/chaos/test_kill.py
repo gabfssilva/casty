@@ -34,16 +34,16 @@ async def test_mass_kill_under_load_converges_and_serves() -> None:
         acked_before_kill = workload.total_acked
         for victim in victims:
             victim.kill()
-        workload.mark(f"kill de {len(victims)} nós")
+        workload.mark(f"kill of {len(victims)} nodes")
 
         survivor_addrs = [addr for cid, addr in addrs.items() if cid not in victim_ids]
         await wait_views(survivor_addrs, n - len(victims))
-        workload.mark("convergido")
+        workload.mark("converged")
     finally:
         await workload.stop()
 
     print(f"\nmass_kill: {workload.report()}")
-    assert workload.total_acked > acked_before_kill  # a carga sobreviveu ao kill
+    assert workload.total_acked > acked_before_kill  # the load survived the kill
     try:
         await verify_counters(client, workload)
     finally:

@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import json
 import sys
-from collections import defaultdict
+from pathlib import Path
 
 path = sys.argv[1] if len(sys.argv) > 1 else "sweep_results.jsonl"
-rows = [json.loads(line) for line in open(path) if line.strip()]
+rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 nodes = sorted({r["nodes"] for r in rows})
 writers = sorted({r["writers"] for r in rows})

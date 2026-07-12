@@ -22,12 +22,25 @@ _PAGER_KEY = "casty_pager"
 
 
 class Directive(Enum):
+    """What a supervisor does with an activation whose handler raised.
+
+    `KEEP` retains the in-memory state (the default), `RESET` reactivates
+    from the last committed state, `STOP` deactivates. In every case the
+    original error reaches the caller as `ActorFailedError`. Also exported
+    as `casty.KEEP` / `casty.RESET` / `casty.STOP`.
+    """
+
     KEEP = auto()
     RESET = auto()
     STOP = auto()
 
 
 class Consistency(Enum):
+    """Symbolic ack counts, resolved against an actor's `replicas`:
+    `ONE` = 1, `MAJORITY` = replicas // 2 + 1, `ALL` = replicas. Also exported
+    as `casty.ONE` / `casty.MAJORITY` / `casty.ALL`; a plain int works too.
+    """
+
     ONE = auto()
     MAJORITY = auto()
     ALL = auto()
@@ -52,10 +65,20 @@ def resolve_quorum(level: Consistency | int, replicas: int) -> int:
 
 @dataclass(frozen=True, slots=True)
 class FailureContext:
-    failures: int  # consecutive failures of this activation, this one included
+    """What a supervisor knows about the failure it is deciding on.
+
+    Attributes
+    ----------
+    failures : int
+        Consecutive failures of this activation, this one included.
+    """
+
+    failures: int
 
 
 type Supervisor = Callable[[type, str, Exception, FailureContext], Directive]
+"""Failure policy: `(actor_cls, key, exc, ctx) -> Directive`, called after a
+handler raises. Set globally on `start`/`local` or per class on `@actor`."""
 
 
 def default_supervisor(
@@ -104,16 +127,25 @@ class Tracked:
 
 @dataclass(frozen=True, slots=True)
 class PageSet:
-    """What a pager reports: the pages that changed since its last snapshot, and the
-    ones the value no longer has."""
+    """What a pager reports: the pages that changed since its last snapshot,
+    and the ones the value no longer has.
+
+    Attributes
+    ----------
+    changed : dict[str, bytes]
+        Page key -> new page bytes.
+    dropped : list[str]
+        Keys of pages the value no longer has.
+    """
 
     changed: dict[str, bytes]
     dropped: list[str] = dataclasses.field(default_factory=list)
 
 
 class Pager[T](typing.Protocol):
-    """How a field type pages itself (spec 09 §5), for values casty cannot encode on
-    its own — a DataFrame, an array.
+    """How a field type pages itself, for values casty cannot encode on
+    its own — a DataFrame, an array. Attach one to a state field with
+    `casty.paged(pager)`.
 
     The truth is `pages()` diffed against the previous snapshot, never write
     interception: a C extension walks straight past any Python-level hook. Reporting
@@ -125,21 +157,68 @@ class Pager[T](typing.Protocol):
     """
 
     def snapshot(self, value: object) -> object:
-        """A cheap handle on `value` as it stands, for the next diff to compare
-        against. Taken after every commit, so it must not copy the data."""
+        """A cheap handle on `value` as it stands, for the next diff.
+
+        Taken after every commit, so it must not copy the data.
+
+        Parameters
+        ----------
+        value : object
+            The field's current value.
+
+        Returns
+        -------
+        object
+            Whatever `pages` and `rollback` need to look back at this moment.
+        """
         ...
 
     def pages(self, value: object, previous: object) -> PageSet:
-        """What changed in `value` since the `previous` snapshot."""
+        """What changed in `value` since the `previous` snapshot.
+
+        Parameters
+        ----------
+        value : object
+            The field's value after the handler ran.
+        previous : object
+            The snapshot taken at the last commit.
+
+        Returns
+        -------
+        PageSet
+            Changed page bytes and dropped page keys.
+        """
         ...
 
     def restore(self, pages: Mapping[str, bytes]) -> T:
-        """Rebuild the value from its committed pages. An empty mapping is the
-        field's default value."""
+        """Rebuild the value from its committed pages.
+
+        Parameters
+        ----------
+        pages : Mapping[str, bytes]
+            Every committed page of the field; empty means the field was
+            never committed and must come back as its default value.
+
+        Returns
+        -------
+        T
+            The reconstructed value.
+        """
         ...
 
     def rollback(self, previous: object) -> T:
-        """The value as of `previous`: an uncommitted handler is being undone."""
+        """The value as of `previous`: an uncommitted handler is being undone.
+
+        Parameters
+        ----------
+        previous : object
+            The snapshot taken at the last commit.
+
+        Returns
+        -------
+        T
+            The value the handler started from.
+        """
         ...
 
 
@@ -189,6 +268,16 @@ class ActorInfo:
         return self.replicas > 1
 
     @property
+    def durable_activity(self) -> bool:
+        """Replicated + infinite idle: node death never ends the actor's
+        activity — the new owner reactivates it unprompted."""
+        return (
+            self.kind == "actor"
+            and self.replicas > 1
+            and self.idle_timeout == float("inf")
+        )
+
+    @property
     def write_quorum(self) -> int:
         return resolve_quorum(self.write, self.replicas)
 
@@ -209,8 +298,24 @@ def info_by_name(wire_name: str) -> ActorInfo | None:
 
 
 def transient(*, default: object = None, factory: Callable[[], object] | None = None) -> typing.Any:
-    """Field excluded from the actor state snapshot; reconstruct it in the
-    activate hook. Returns Any so the field annotation typechecks."""
+    """Declare a state field excluded from the actor's snapshot.
+
+    The field is neither serialized nor replicated; rebuild it in the
+    `@casty.activate` hook. Its type need not be serializable.
+
+    Parameters
+    ----------
+    default : object
+        Value the field starts with on activation.
+    factory : Callable[[], object] | None
+        Zero-argument factory, for mutable defaults. Wins over `default`.
+
+    Returns
+    -------
+    typing.Any
+        A `dataclasses.field`, typed `Any` so the field annotation
+        typechecks.
+    """
     metadata = {_TRANSIENT_KEY: True}
     if factory is not None:
         return dataclasses.field(default_factory=factory, metadata=metadata)
@@ -218,19 +323,38 @@ def transient(*, default: object = None, factory: Callable[[], object] | None = 
 
 
 def paged[T](pager: Pager[T]) -> T:
-    """Declare a state field that replicates through `pager` (spec 09 §5) instead of
-    being encoded whole. Its default is whatever the pager restores from no pages."""
+    """Declare a state field that replicates through `pager`
+    instead of being encoded whole.
+
+    Parameters
+    ----------
+    pager : Pager[T]
+        Decides what a page is and what changed; `casty.pagers` ships one
+        for pandas DataFrames.
+
+    Returns
+    -------
+    T
+        A `dataclasses.field` whose default is whatever the pager restores
+        from no pages.
+    """
     return dataclasses.field(
         default_factory=lambda: pager.restore({}), metadata={_PAGER_KEY: pager}
     )
 
 
 def activate[F: Callable[..., object]](func: F) -> F:
+    """Mark the async method run after an activation's state is restored and
+    before its first message; rebuild `transient()` fields here. At most one
+    per class, `self` only."""
     setattr(func, _ACTIVATE_MARK, True)
     return func
 
 
 def deactivate[F: Callable[..., object]](func: F) -> F:
+    """Mark the async method run before an activation is dropped — on idle
+    timeout, `ctx.deactivate()`, a STOP directive or node drain. At most one
+    per class, `self` only."""
     setattr(func, _DEACTIVATE_MARK, True)
     return func
 
@@ -262,7 +386,7 @@ def actor(
     write: Consistency | int = Consistency.MAJORITY,
     read: Consistency | int = Consistency.ONE,
 ) -> type | Callable[[type], type]:
-    """Declare a virtual actor class (spec 04).
+    """Declare a virtual actor class.
 
     Annotated fields become replicable state; public async methods become the
     proxy interface. Validation (serializability, defaults, hooks) happens at
@@ -275,15 +399,32 @@ def actor(
         class later without breaking the cluster.
     idle_timeout : float | None
         Seconds without messages before deactivation. None uses
-        `Config.default_idle_timeout`.
+        `Config.default_idle_timeout`; `float("inf")` never deactivates on
+        idle.
     supervisor : Supervisor | None
         Failure policy override for this class.
     replicas : int
         Physical nodes holding the state snapshot. 1 disables replication.
     write : Consistency | int
-        Acks required per mutation, resolved against `replicas` (spec 05).
+        Acks required per mutation, resolved against `replicas`.
     read : Consistency | int
         Reserved for per-method reads; the activation handshake uses `write`.
+
+    Raises
+    ------
+    SerializationSchemaError
+        At import time: unserializable state or method annotation, missing
+        field default, duplicate wire name, invalid hooks or quorum.
+
+    Examples
+    --------
+    >>> @casty.actor(replicas=3)
+    ... class Counter:
+    ...     value: int = 0
+    ...
+    ...     async def increment(self) -> int:
+    ...         self.value += 1
+    ...         return self.value
     """
     if cls is None:
 
@@ -387,8 +528,27 @@ def _register(
 
 
 def explain(cls: type) -> str:
-    """How each state field of an actor replicates (spec 09 §3). Two regimes chosen
-    by type hint cannot be invisible — this is where you look."""
+    """How each state field of an actor replicates.
+
+    Two of the three regimes are chosen silently by type hint — this is
+    where you look to see what was picked.
+
+    Parameters
+    ----------
+    cls : type
+        A `@casty.actor` class.
+
+    Returns
+    -------
+    str
+        One line per state field: name, annotation, regime (integral /
+        tracked / paged) and a note.
+
+    Raises
+    ------
+    ValueError
+        If `cls` is not a `@casty.actor`.
+    """
     info = info_of(cls)
     if info is None:
         raise ValueError(f"{cls.__qualname__} is not a @casty.actor")

@@ -46,8 +46,8 @@ async def _source(lines: list[str]) -> AsyncIterator[str]:
 
 
 async def main() -> None:
-    async with casty.local() as node:
-        log = node.actor(Log, "app:1")
+    async with casty.local() as system:
+        log = system.actor(Log, "app:1")
 
         # client-streaming: upload an iterator, get a scalar back
         added = await log.ingest(_source(["boot", "ready", "serving"]))

@@ -60,7 +60,6 @@ wheels = [
 
 [[package]]
 name = "casty"
-version = "2.0.0a0"
 source = { editable = "." }
 dependencies = [
     { name = "msgpack" },
@@ -102,7 +101,7 @@ requires-dist = [
     { name = "uvloop", marker = "extra == 'uvloop'", specifier = ">=0.21" },
     { name = "zstandard", marker = "extra == 'zstd'", specifier = ">=0.22" },
 ]
-provides-extras = ["lz4", "zstd", "uvloop", "pandas"]
+provides-extras = ["lz4", "pandas", "uvloop", "zstd"]
 
 [package.metadata.requires-dev]
 dev = [

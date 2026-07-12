@@ -1,0 +1,25 @@
+# Failover reactivation demo: see node.py for the walkthrough.
+name: casty-sentinel
+
+services:
+  seed:
+    build:
+      context: ../..
+      dockerfile: examples/sentinel/Dockerfile
+    image: casty-sentinel
+    restart: always
+    init: true  # lets `pkill -9 python` inside simulate a crash Docker will restart
+    environment:
+      CASTY_SEEDS: node:9000
+      CASTY_BOOTSTRAP: "1"
+    stop_grace_period: 1s
+
+  node:
+    image: casty-sentinel
+    depends_on: [seed]
+    scale: 2
+    restart: always
+    init: true
+    environment:
+      CASTY_SEEDS: seed:9000
+    stop_grace_period: 1s

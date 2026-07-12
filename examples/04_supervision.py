@@ -39,9 +39,9 @@ def three_strikes(
 
 
 async def main() -> None:
-    node = await casty.start("127.0.0.1:7121", supervisor=three_strikes)
+    system = await casty.start("127.0.0.1:7121", supervisor=three_strikes)
 
-    register = node.actor(Register, "drawer-1")
+    register = system.actor(Register, "drawer-1")
     print(f"total: {await register.add(10)}")
 
     for _ in range(2):
@@ -57,7 +57,7 @@ async def main() -> None:
             await register.add(-1)
     print(f"total after 3rd strike (RESET): {await register.add(1)}")  # 1: state gone
 
-    await node.close()
+    await system.close()
 
 
 if __name__ == "__main__":

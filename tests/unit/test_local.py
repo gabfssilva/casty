@@ -103,16 +103,16 @@ class Slow:
 
 
 async def test_same_key_same_activation_distinct_keys_distinct() -> None:
-    async with casty.local() as node:
-        assert await node.actor(Counter, "a").add(1) == 1
-        assert await node.actor(Counter, "a").add(1) == 2  # same activation accumulates
-        assert await node.actor(Counter, "b").add(1) == 1  # distinct key starts fresh
+    async with casty.local() as system:
+        assert await system.actor(Counter, "a").add(1) == 1
+        assert await system.actor(Counter, "a").add(1) == 2  # same activation accumulates
+        assert await system.actor(Counter, "b").add(1) == 1  # distinct key starts fresh
 
 
 async def test_lifecycle_hooks_and_idle_loses_state() -> None:
-    async with casty.local(default_idle_timeout=0.3) as node:
+    async with casty.local(default_idle_timeout=0.3) as system:
         events.clear()
-        actor = node.actor(Lifecycle, "idle")
+        actor = system.actor(Lifecycle, "idle")
         assert await actor.touch() == 1
         await asyncio.sleep(0.8)  # > idle_timeout
         assert "activate:idle" in events
@@ -120,7 +120,7 @@ async def test_lifecycle_hooks_and_idle_loses_state() -> None:
         assert await actor.touch() == 1  # fresh activation: single-copy, no restore
 
         events.clear()
-        other = node.actor(Lifecycle, "retire")
+        other = system.actor(Lifecycle, "retire")
         await other.touch()
         await other.retire()
         await asyncio.sleep(0.05)
@@ -135,22 +135,22 @@ async def test_supervisor_directives() -> None:
     ) -> casty.Directive:
         return decisions.pop(0) if decisions else casty.KEEP
 
-    async with casty.local(supervisor=supervisor) as node:
-        keep = node.actor(Flaky, "keep")
+    async with casty.local(supervisor=supervisor) as system:
+        keep = system.actor(Flaky, "keep")
         await keep.set(7)
         decisions.append(casty.KEEP)
         with pytest.raises(ActorFailedError, match="kaboom"):
             await keep.boom()
         assert await keep.get() == 7  # state survives
 
-        reset = node.actor(Flaky, "reset")
+        reset = system.actor(Flaky, "reset")
         await reset.set(7)
         decisions.append(casty.RESET)
         with pytest.raises(ActorFailedError):
             await reset.boom()
         assert await reset.get() == 0  # activation discarded, state starts over
 
-        stop = node.actor(Flaky, "stop")
+        stop = system.actor(Flaky, "stop")
         await stop.set(7)
         decisions.append(casty.STOP)
         with pytest.raises(ActorFailedError):
@@ -159,18 +159,18 @@ async def test_supervisor_directives() -> None:
 
 
 async def test_reentrancy_cycle_raises_and_plain_chain_works() -> None:
-    async with casty.local() as node:
-        assert await node.actor(ChainActor, "a").ping(["b", "c"]) == "c"
+    async with casty.local() as system:
+        assert await system.actor(ChainActor, "a").ping(["b", "c"]) == "c"
         with pytest.raises(ActorFailedError, match="ReentrancyError"):
-            await node.actor(ChainActor, "a").ping(["b", "a"])
+            await system.actor(ChainActor, "a").ping(["b", "a"])
         with pytest.raises(ActorFailedError, match="ReentrancyError"):
-            await node.actor(ChainActor, "a").ping(["a"])
+            await system.actor(ChainActor, "a").ping(["a"])
 
 
 async def test_replicated_actor_runs_single_copy_without_quorum() -> None:
-    async with casty.local() as node:
+    async with casty.local() as system:
         try:
-            rep = node.actor(Replicated, "k")
+            rep = system.actor(Replicated, "k")
             assert await rep.bump() == 1
             assert await rep.bump() == 2  # same activation keeps state, no quorum needed
         except QuorumUnavailableError:  # pragma: no cover - the bug this guards against
@@ -178,18 +178,18 @@ async def test_replicated_actor_runs_single_copy_without_quorum() -> None:
 
 
 async def test_close_drains_in_flight_and_rejects_after() -> None:
-    node = casty.local()
-    in_flight = asyncio.create_task(node.actor(Slow, "s").nap(0.3))
+    system = casty.local()
+    in_flight = asyncio.create_task(system.actor(Slow, "s").nap(0.3))
     await asyncio.sleep(0.05)  # let the handler start
-    await node.close()
+    await system.close()
     assert await in_flight == "done"  # drained, not dropped
     with pytest.raises(ActorUnavailableError):
-        await node.actor(Counter, "post-stop").add(1)
+        await system.actor(Counter, "post-stop").add(1)
 
 
 async def test_map_roundtrips_locally() -> None:
-    async with casty.local() as node:
-        m: casty.Map[str, int] = node.map("scores")
+    async with casty.local() as system:
+        m: casty.Map[str, int] = system.map("scores")
         await m.put("a", 1)
         await m.put("b", 2)
         assert await m.get("a") == 1

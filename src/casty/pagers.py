@@ -73,7 +73,8 @@ class _Manager(typing.Protocol):
 
 
 class PandasPager:
-    """Pages a DataFrame as one Arrow IPC page per column per row block.
+    """Pages a DataFrame as one Arrow IPC page per column per row block; use
+    with `casty.paged(PandasPager())`.
 
     A commit compares buffer addresses against the shadow (~30 µs for 2M x 5) and then,
     for each column that moved, compares row blocks by value. That second pass is what
@@ -83,6 +84,12 @@ class PandasPager:
 
     Limits, all loud rather than lossy: string column names, no MultiIndex, and any
     change to the row count re-pages the frame (the blocks no longer line up).
+
+    Raises
+    ------
+    SerializationSchemaError
+        On construction, if pandas is older than 3.0 — copy-on-write is the
+        diff, and before 3.0 it can be switched off.
     """
 
     def __init__(self) -> None:

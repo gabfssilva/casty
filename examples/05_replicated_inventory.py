@@ -44,21 +44,21 @@ class StockItem:
 
 
 async def main() -> None:
-    nodes = [await casty.start("127.0.0.1:7131")]
+    systems = [await casty.start("127.0.0.1:7131")]
     for port in (7132, 7133):
-        nodes.append(await casty.start(f"127.0.0.1:{port}", seeds=["127.0.0.1:7131"]))
-    while any(len(n.membership.alive_members()) < 3 for n in nodes):
+        systems.append(await casty.start(f"127.0.0.1:{port}", seeds=["127.0.0.1:7131"]))
+    while any(len(s.membership.alive_members()) < 3 for s in systems):
         await asyncio.sleep(0.05)
     print("cluster up: 3 members")
 
-    sku = nodes[0].actor(StockItem, "sku-1234")
+    sku = systems[0].actor(StockItem, "sku-1234")
     await sku.restock(100)
     assert await sku.reserve("order-1", 30)
     assert not await sku.reserve("order-2", 90)  # only 70 available
     print(f"available before failure: {await sku.available()}")
 
     # take a node down; its ranges hand off and replicas keep the state
-    leaving, *rest = nodes
+    leaving, *rest = systems
     await leaving.close()
     print("node 1 stopped (graceful: drain + handoff + leave)")
 
@@ -73,8 +73,8 @@ async def main() -> None:
     print(f"price of sku-1234: {await prices.get('sku-1234')}")
     print(f"catalog size: {await prices.size()}")
 
-    for node in rest:
-        await node.close()
+    for system in rest:
+        await system.close()
 
 
 if __name__ == "__main__":

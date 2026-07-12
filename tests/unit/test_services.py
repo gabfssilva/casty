@@ -81,8 +81,8 @@ def _reset() -> None:
 
 
 async def test_detached_reply_resolves_out_of_band() -> None:
-    async with casty.local() as node:
-        manual = node.actor(Manual, "m")
+    async with casty.local() as system:
+        manual = system.actor(Manual, "m")
         call = asyncio.create_task(manual.later(7))
         await asyncio.sleep(0.05)
         assert not call.done()  # handler returned; the caller still waits
@@ -94,21 +94,21 @@ async def test_detached_reply_resolves_out_of_band() -> None:
 
 
 async def test_detached_reply_holds_activation_open() -> None:
-    async with casty.local() as node:
-        manual = node.actor(Manual, "hold")
+    async with casty.local() as system:
+        manual = system.actor(Manual, "hold")
         call = asyncio.create_task(manual.later(1))
         await asyncio.sleep(0.4)  # well past idle_timeout=0.2
-        assert node._host.is_active("stest.Manual", "hold")  # type: ignore[attr-defined]
+        assert system._host.is_active("stest.Manual", "hold")  # type: ignore[attr-defined]
 
         _replies[0][0].set(9)  # type: ignore[attr-defined]
         assert await call == 9
         await asyncio.sleep(0.4)
-        assert not node._host.is_active("stest.Manual", "hold")  # type: ignore[attr-defined]
+        assert not system._host.is_active("stest.Manual", "hold")  # type: ignore[attr-defined]
 
 
 async def test_detached_reply_fail_propagates() -> None:
-    async with casty.local() as node:
-        call = asyncio.create_task(node.actor(Manual, "f").later(1))
+    async with casty.local() as system:
+        call = asyncio.create_task(system.actor(Manual, "f").later(1))
         await asyncio.sleep(0.05)
         _replies[0][0].fail(ValueError("nope"))  # type: ignore[attr-defined]
         with pytest.raises(ValueError, match="nope"):
@@ -116,19 +116,19 @@ async def test_detached_reply_fail_propagates() -> None:
 
 
 async def test_handler_raising_after_detach_releases_the_flight() -> None:
-    async with casty.local() as node:
+    async with casty.local() as system:
         with pytest.raises(ActorFailedError):
-            await node.actor(Manual, "b").boom()
+            await system.actor(Manual, "b").boom()
         await asyncio.sleep(0.4)  # idle must still fire: inflight went back to zero
-        assert not node._host.is_active("stest.Manual", "b")  # type: ignore[attr-defined]
+        assert not system._host.is_active("stest.Manual", "b")  # type: ignore[attr-defined]
 
 
 # --- builder (etapa 2) --------------------------------------------------------------
 
 
 async def test_calls_run_concurrently() -> None:
-    async with casty.local() as node:
-        fetcher = node.service(Fanout)
+    async with casty.local() as system:
+        fetcher = system.service(Fanout)
         calls = [asyncio.create_task(fetcher.slow(n)) for n in range(5)]
         await asyncio.sleep(0.05)
         assert not any(c.done() for c in calls)  # all five are inside the method
@@ -137,20 +137,20 @@ async def test_calls_run_concurrently() -> None:
 
 
 async def test_service_reaches_actors() -> None:
-    async with casty.local() as node:
-        svc = node.service(Fanout)
+    async with casty.local() as system:
+        svc = system.service(Fanout)
         assert await asyncio.gather(*[svc.tally(1) for _ in range(4)]) == [1, 2, 3, 4]
 
 
 async def test_service_failure_is_typed() -> None:
-    async with casty.local() as node:
+    async with casty.local() as system:
         with pytest.raises(ActorFailedError):
-            await node.service(Fanout).boom()
+            await system.service(Fanout).boom()
 
 
 async def test_concurrency_caps_in_flight_calls() -> None:
-    async with casty.local() as node:
-        svc = node.service(Bounded)
+    async with casty.local() as system:
+        svc = system.service(Bounded)
         calls = [asyncio.create_task(svc.hold(n)) for n in range(6)]
         await asyncio.sleep(0.05)
         assert _peak[0] == 2  # the mailbox holds the rest: backpressure
@@ -159,19 +159,19 @@ async def test_concurrency_caps_in_flight_calls() -> None:
 
 
 async def test_in_flight_calls_fail_on_stop() -> None:
-    node = casty.local()
-    svc = node.service(Fanout)
+    system = casty.local()
+    svc = system.service(Fanout)
     call = asyncio.create_task(svc.slow(1))
     await asyncio.sleep(0.05)
-    await node.close()
+    await system.close()
     with pytest.raises(ActorUnavailableError):
         await call
 
 
 async def test_service_proxy_rejects_actors() -> None:
-    async with casty.local() as node:
+    async with casty.local() as system:
         with pytest.raises(TypeError, match=re.escape("not a @casty.service")):
-            node.service(Tally)
+            system.service(Tally)
 
 
 def test_registered_as_a_service() -> None:

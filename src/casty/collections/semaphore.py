@@ -76,16 +76,28 @@ def shard_info(replicas: int, write: Consistency | int, read: Consistency | int)
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Lease:
-    """A held permit. `token` is a strictly increasing fencing token: pass it to
-    the protected resource so a stale holder (expired lease) is rejected. Async
-    context manager — releases on exit."""
+    """A held permit, returned by `Semaphore.acquire` / `Lock.acquire`. Async
+    context manager — releases on exit.
+
+    Attributes
+    ----------
+    token : int
+        Strictly increasing fencing token. Pass it to the protected resource
+        so a stale holder (expired lease) is rejected.
+    """
 
     token: int
     _owner: _SemaphoreBase
 
     async def renew(self, ttl: float = 30.0) -> bool:
-        """Extend the lease. False if it already expired (permit lost — the
-        caller must reacquire); the token then no longer holds a permit."""
+        """Extend the lease by `ttl` seconds from now.
+
+        Returns
+        -------
+        bool
+            False if the lease already expired — the permit is lost and the
+            caller must reacquire; the token no longer holds anything.
+        """
         return await self._owner._renew(self.token, ttl)
 
     async def release(self) -> bool:
@@ -137,25 +149,66 @@ class _SemaphoreBase(_sharded.ShardRouter):
 
 
 class Semaphore(_SemaphoreBase):
-    """Distributed counting semaphore. `capacity` permits; single owner (shard
-    0) serializes grants."""
+    """Distributed counting semaphore, from `ActorSystem.semaphore`. A single
+    owner actor serializes grants; every permit is a TTL lease carrying a
+    fencing token."""
 
     async def try_acquire(self, n: int = 1, *, ttl: float = 30.0) -> Lease | None:
+        """Acquire `n` permits without waiting.
+
+        Parameters
+        ----------
+        n : int
+            Permits to take in one lease.
+        ttl : float
+            Seconds until the lease expires unless renewed.
+
+        Returns
+        -------
+        Lease | None
+            None if fewer than `n` permits are free right now.
+        """
         return await self._try(n, ttl)
 
     async def acquire(
         self, n: int = 1, *, ttl: float = 30.0, timeout: float | None = None
     ) -> Lease:
+        """Acquire `n` permits, polling with backoff until granted.
+
+        Blocking is client-side: the owner actor never holds a waiter in its
+        mailbox (that would deadlock the release that frees it).
+
+        Parameters
+        ----------
+        n : int
+            Permits to take in one lease.
+        ttl : float
+            Seconds until the lease expires unless renewed.
+        timeout : float | None
+            Seconds to keep trying. None retries forever.
+
+        Returns
+        -------
+        Lease
+            The granted permits.
+
+        Raises
+        ------
+        CastyTimeoutError
+            If `timeout` elapses without a grant.
+        """
         return await self._acquire(n, ttl, timeout)
 
     async def available(self) -> int:
+        """Permits currently free (capacity minus unexpired leases)."""
         return await self._available()
 
 
 class Lock(_SemaphoreBase):
-    """Distributed mutual-exclusion lock — a Semaphore of capacity 1. Async
-    context manager: `async with node.lock(name):` acquires (blocking up to the
-    factory's `timeout`) and releases on exit."""
+    """Distributed mutual-exclusion lock, from `ActorSystem.lock` — a
+    semaphore of capacity 1. Async context manager: `async with node.lock(
+    name):` acquires (blocking up to the factory's `timeout`) and releases on
+    exit."""
 
     def __init__(
         self,
@@ -172,9 +225,35 @@ class Lock(_SemaphoreBase):
         self._held: Lease | None = None
 
     async def try_lock(self, *, ttl: float | None = None) -> Lease | None:
+        """Take the lock without waiting. None if it is held.
+
+        Parameters
+        ----------
+        ttl : float | None
+            Lease seconds; None uses the factory's `ttl`.
+        """
         return await self._try(1, ttl if ttl is not None else self._ttl)
 
     async def acquire(self, *, ttl: float | None = None, timeout: float | None = None) -> Lease:
+        """Take the lock, polling with backoff until free.
+
+        Parameters
+        ----------
+        ttl : float | None
+            Lease seconds; None uses the factory's `ttl`.
+        timeout : float | None
+            Seconds to keep trying; None uses the factory's `timeout`.
+
+        Returns
+        -------
+        Lease
+            The held lock; `release` it or exit the `async with` block.
+
+        Raises
+        ------
+        CastyTimeoutError
+            If the timeout elapses with the lock still held.
+        """
         return await self._acquire(
             1,
             ttl if ttl is not None else self._ttl,
@@ -182,6 +261,7 @@ class Lock(_SemaphoreBase):
         )
 
     async def locked(self) -> bool:
+        """Whether someone holds the lock right now."""
         return await self._available() == 0
 
     async def __aenter__(self) -> Lease:

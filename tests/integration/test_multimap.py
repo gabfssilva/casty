@@ -19,10 +19,10 @@ class Tag:
 
 
 async def test_multimap_full_api_across_nodes_and_client() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     client: casty.Client | None = None
     try:
-        groups: casty.MultiMap[str, int] = nodes[0].multimap("groups")
+        groups: casty.MultiMap[str, int] = systems[0].multimap("groups")
         assert await groups.put("evens", 2)
         assert await groups.put("evens", 4)
         assert await groups.put("odds", 1)
@@ -43,14 +43,14 @@ async def test_multimap_full_api_across_nodes_and_client() -> None:
         assert await groups.get("evens") == []
         assert await groups.size() == 1
 
-        # same multimap seen from another node
-        groups_b: casty.MultiMap[str, int] = nodes[1].multimap("groups")
+        # same multimap seen from another system
+        groups_b: casty.MultiMap[str, int] = systems[1].multimap("groups")
         assert await groups_b.get("odds") == [1]
 
         # and from a lite member
         from tests.integration.actors import FAST_CONFIG
 
-        client = await casty.connect([nodes[0].member.addr], config=FAST_CONFIG)
+        client = await casty.connect([systems[0].member.addr], config=FAST_CONFIG)
         groups_c: casty.MultiMap[str, int] = client.multimap("groups")
         assert await groups_c.put("odds", 3)
         assert sorted(await groups.get("odds")) == [1, 3]
@@ -60,50 +60,50 @@ async def test_multimap_full_api_across_nodes_and_client() -> None:
     finally:
         if client is not None:
             await client.close()
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_multimap_duplicate_put_does_not_inflate_size() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     try:
-        mm: casty.MultiMap[str, str] = nodes[0].multimap("dup")
+        mm: casty.MultiMap[str, str] = systems[0].multimap("dup")
         assert await mm.put("k", "v")
         assert not await mm.put("k", "v")
         assert not await mm.put("k", "v")
         assert await mm.size() == 1
     finally:
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_multimap_message_values_and_distribution() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     try:
-        catalog: casty.MultiMap[str, Tag] = nodes[0].multimap("catalog", shards=8)
+        catalog: casty.MultiMap[str, Tag] = systems[0].multimap("catalog", shards=8)
         for i in range(16):
             await catalog.put(f"item-{i}", Tag(label=f"tag-{i}", weight=float(i)))
             await catalog.put(f"item-{i}", Tag(label=f"tag-{i}-extra", weight=float(i) + 0.5))
         loaded = sorted(tag.label for tag in await catalog.get("item-3"))
         assert loaded == ["tag-3", "tag-3-extra"]
-        # shards spread over more than one node
+        # shards spread over more than one system
         hosting = [
-            sum(1 for (wire, _key) in node._host._activations if "MultiMapShard" in wire)
-            for node in nodes
+            sum(1 for (wire, _key) in system._host._activations if "MultiMapShard" in wire)
+            for system in systems
         ]
         assert sum(hosting) > 1
         assert sum(1 for count in hosting if count > 0) > 1, hosting
     finally:
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_multimap_survives_owner_death() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     try:
-        mm: casty.MultiMap[str, int] = nodes[0].multimap("durable-multimap", shards=4)
+        mm: casty.MultiMap[str, int] = systems[0].multimap("durable-multimap", shards=4)
         for i in range(12):
             await mm.put(f"k{i}", i)
             await mm.put(f"k{i}", i * 100 + 1000)
-        victim = nodes[0]
-        survivors = nodes[1:]
+        victim = systems[0]
+        survivors = systems[1:]
         from tests.integration.actors import kill_node
 
         await kill_node(victim)
@@ -121,21 +121,21 @@ async def test_multimap_survives_owner_death() -> None:
                 await asyncio.sleep(0.1)
         assert recovered == {f"k{i}": sorted([i, i * 100 + 1000]) for i in range(12)}
     finally:
-        await stop_all(nodes)
+        await stop_all(systems)
 
 
 async def test_multimap_put_fenced_in_minority() -> None:
-    nodes = await start_nodes(3)
+    systems = await start_nodes(3)
     heal: Callable[[], None] | None = None
     try:
-        mm: casty.MultiMap[str, int] = nodes[0].multimap("fenced-multimap", shards=1)
+        mm: casty.MultiMap[str, int] = systems[0].multimap("fenced-multimap", shards=1)
         await mm.put("k", 1)
-        info = nodes[0].multimap("fenced-multimap", shards=1)._info
-        ring = nodes[0]._ring
+        info = systems[0].multimap("fenced-multimap", shards=1)._info
+        ring = systems[0]._ring
         assert ring is not None
         owner_id = ring.owner(f"{info.wire_name}/fenced-multimap:0")
-        owner = next(n for n in nodes if n.node_id == owner_id)
-        majority = [n for n in nodes if n is not owner]
+        owner = next(n for n in systems if n.node_id == owner_id)
+        majority = [n for n in systems if n is not owner]
 
         heal = await partition([owner], majority)
         await wait_view(majority, 2)
@@ -150,4 +150,4 @@ async def test_multimap_put_fenced_in_minority() -> None:
     finally:
         if heal is not None:
             heal()
-        await stop_all(nodes)
+        await stop_all(systems)
