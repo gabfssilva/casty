@@ -2,6 +2,7 @@
 collection's shard factory; `_sharded.ensure` materializes any of them from a
 wire name."""
 
+from casty.collections.barrier import Barrier
 from casty.collections.counter import Counter
 from casty.collections.map import Map
 from casty.collections.multimap import MultiMap
@@ -11,6 +12,7 @@ from casty.collections.semaphore import Lease, Lock, Semaphore
 from casty.collections.set import Set
 
 __all__ = [
+    "Barrier",
     "Counter",
     "Lease",
     "Lock",

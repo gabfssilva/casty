@@ -5,7 +5,7 @@ import contextlib
 import logging
 import typing
 import uuid
-from collections.abc import AsyncIterator, Coroutine, Generator, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Generator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -14,6 +14,7 @@ from casty.actors import messages as actor_messages
 from casty.actors import registry as actor_registry
 from casty.actors import replication as actor_replication
 from casty.actors.host import ActorHost
+from casty.actors.proxy import Caller
 from casty.actors.registry import ActorInfo, MethodInfo, Supervisor
 from casty.actors.replication import Replication
 from casty.actors.streaming import local_stream_in, local_stream_out
@@ -105,6 +106,7 @@ class _Router(ActorSystem):
         self._config = config
         self._ring: Ring | None = None
         self._addrs: dict[uuid.UUID, str] = {}
+        self._members: frozenset[Member] = frozenset()
         self._stopping = False
         self._next_member = 0  # round-robin cursor for service calls
         self._spy_subs: set[_ClusterSubscription] = set()
@@ -116,8 +118,14 @@ class _Router(ActorSystem):
     def addr_of(self, node_id: uuid.UUID) -> str | None:
         return self._addrs.get(node_id)
 
+    def members(self) -> frozenset[Member]:
+        """The full members currently in this system's view. A `Member` is
+        what `service(cls, at=...)` pins a call to."""
+        return self._members
+
     def _rebuild_ring(self, members: frozenset[Member]) -> None:
         placed = [m for m in members if m.role == "member"]
+        self._members = frozenset(placed)
         self._addrs = {m.node_id: m.addr for m in placed}
         self._ring = Ring.build([m.node_id for m in placed]) if placed else None
         for sub in list(self._spy_subs):  # cluster spies follow the view (spec 11 §7)
@@ -275,7 +283,12 @@ class _Router(ActorSystem):
         return None  # Client: never local
 
     async def _call_service_at(
-        self, addr: str, info: ActorInfo, method: MethodInfo, args: list[object]
+        self,
+        addr: str,
+        info: ActorInfo,
+        method: MethodInfo,
+        args: list[object],
+        chain: list[str] | None = None,
     ) -> bytes:
         """Node-directed unary service call (spec 11 §6): explicit address, no
         ring, no WRONG_OWNER retry — the target serves its own unplaced
@@ -289,7 +302,7 @@ class _Router(ActorSystem):
             key=actor_registry.SERVICE_KEY,
             method=method.name,
             args=[codec.encode_raw(a) for a in args],
-            chain=[],
+            chain=chain or [],
         )
         try:
             return await conn.ask(
@@ -312,6 +325,59 @@ class _Router(ActorSystem):
                 yield raw
             completed = True
         finally:
+            if not completed:
+                with contextlib.suppress(Exception):
+                    await stream.reset()
+
+    # --- pinned service dispatch ------------------------------------------------------
+
+    def _service_caller(self, info: ActorInfo, at: Member) -> Caller:
+        return _Pinned(self, at)
+
+    def _service_local_host(self, node_id: uuid.UUID) -> ActorHost | None:
+        return None  # Client: never local
+
+    async def _service_stream_at(
+        self,
+        addr: str,
+        info: ActorInfo,
+        key: str,
+        method: MethodInfo,
+        kwargs: dict[str, object],
+        in_iter: AsyncIterator[object] | None,
+        chain: list[str],
+    ) -> AsyncIterator[bytes]:
+        """Member-directed actor stream with an input half: `_remote_stream`'s
+        loop body against an explicit address — a service is unplaced, so there
+        is no WRONG_OWNER to retry on."""
+        try:
+            conn = await self._pool.get(addr)
+        except (CastyError, OSError) as exc:
+            raise ActorUnavailableError(f"cannot reach member at {addr}: {exc}") from exc
+        descriptor = codec.encode(
+            actor_messages.StreamOpen(
+                actor=info.wire_name,
+                key=key,
+                method=method.name,
+                args=[codec.encode_raw(kwargs[name]) for name, _ in method.params],
+                chain=chain,
+            )
+        )
+        stream = await conn.open_actor_stream(descriptor)
+        uploader: asyncio.Task[None] | None = None
+        if in_iter is not None:
+            uploader = asyncio.ensure_future(_upload_stream(stream, in_iter))
+        else:
+            await stream.finish()  # no input half
+        completed = False
+        try:
+            async for raw in stream:
+                yield raw
+            completed = True
+        except RemoteError as exc:
+            raise _from_remote(exc, info.wire_name, key) from exc
+        finally:
+            await _cancel(uploader)
             if not completed:
                 with contextlib.suppress(Exception):
                     await stream.reset()
@@ -441,6 +507,80 @@ class _Router(ActorSystem):
 
 
 _MISSING = object()
+
+
+class _Pinned:
+    """`Caller` behind `service(cls, at=member)`: every call lands on the chosen
+    member instead of the default placement (Node: local; Client: round-robin).
+    A service receiver dispatches unconditionally — unplaced, no wrong owner —
+    so pinning is purely the caller's choice (spec 08 §5)."""
+
+    def __init__(self, router: _Router, member: Member) -> None:
+        self._router = router
+        self._member = member
+
+    async def _call_actor(
+        self, info: ActorInfo, key: str, method: MethodInfo, args: list[object], chain: list[str]
+    ) -> object:
+        host = self._router._service_local_host(self._member.node_id)
+        if host is not None:
+            return await host.dispatch(info, key, method.name, args, chain)
+        body = await self._router._call_service_at(
+            self._member.addr, info, method, args, chain
+        )
+        return codec.decode_raw(body, method.returns)
+
+    def _stream_out(
+        self,
+        info: ActorInfo,
+        key: str,
+        method: MethodInfo,
+        kwargs: dict[str, object],
+        in_iter: AsyncIterator[object] | None,
+        chain: list[str],
+    ) -> AsyncIterator[object]:
+        return self._route_stream(info, key, method, kwargs, in_iter, chain, method.stream_out)
+
+    async def _stream_in(
+        self,
+        info: ActorInfo,
+        key: str,
+        method: MethodInfo,
+        kwargs: dict[str, object],
+        in_iter: AsyncIterator[object] | None,
+        chain: list[str],
+    ) -> object:
+        result: object = _MISSING
+        async for elem in self._route_stream(
+            info, key, method, kwargs, in_iter, chain, method.returns
+        ):
+            result = elem
+        if result is _MISSING:
+            raise ActorUnavailableError(f"{info.wire_name}/{key}: stream produced no result")
+        return result
+
+    async def _route_stream(
+        self,
+        info: ActorInfo,
+        key: str,
+        method: MethodInfo,
+        kwargs: dict[str, object],
+        in_iter: AsyncIterator[object] | None,
+        chain: list[str],
+        decode_as: object,
+    ) -> AsyncIterator[object]:
+        host = self._router._service_local_host(self._member.node_id)
+        if host is not None:
+            if method.stream_out is not None:
+                async for elem in local_stream_out(host, info, key, method, kwargs, in_iter, chain):
+                    yield elem
+            else:
+                yield await local_stream_in(host, info, key, method, kwargs, in_iter, chain)
+            return
+        async for raw in self._router._service_stream_at(
+            self._member.addr, info, key, method, kwargs, in_iter, chain
+        ):
+            yield codec.decode_raw(raw, decode_as)
 
 
 async def _upload_stream(stream: ActorStream, in_iter: AsyncIterator[object]) -> None:
@@ -773,6 +913,9 @@ class Node(_Router):
         a task on this node, so there is nothing to gain from a hop."""
         return await self._host.dispatch(info, key, method.name, args, chain)
 
+    def _service_local_host(self, node_id: uuid.UUID) -> ActorHost | None:
+        return self._host if node_id == self.node_id else None
+
     async def _dispatch_local(
         self,
         owner: uuid.UUID,
@@ -1057,7 +1200,14 @@ class Client(_Router):
     seconds.
     """
 
-    def __init__(self, *, local: LocalNode, config: Config, tls: TLS | None) -> None:
+    def __init__(
+        self,
+        *,
+        local: LocalNode,
+        config: Config,
+        tls: TLS | None,
+        address_map: Callable[[str], str] | None = None,
+    ) -> None:
         super().__init__(config)
         self._local = local
         self._pool = Pool(
@@ -1065,6 +1215,7 @@ class Client(_Router):
             config=config.transport,
             tls=tls,
             on_control=self._on_control,
+            address_map=address_map,
         )
         self._seeds: list[str] = []
         self._synced = asyncio.Event()
@@ -1242,6 +1393,7 @@ def connect(
     tls: TLS | None = None,
     config: Config | None = None,
     cluster_name: str = "casty",
+    address_map: Callable[[str], str] | None = None,
 ) -> Managed[Client]:
     """Connect as a lite member: routes actor calls, hosts nothing.
 
@@ -1256,6 +1408,11 @@ def connect(
         Every protocol knob; defaults are production-oriented.
     cluster_name : str
         Handshake guard: must match the cluster's.
+    address_map : Callable[[str], str] | None
+        Rewrites every announced `host:port` into the address this client
+        actually dials — members behind an SSH tunnel or NAT announce their
+        private address, and the map turns it into the local tunnel endpoint.
+        Applies to every outbound dial, seeds included; identity when None.
 
     Returns
     -------
@@ -1269,7 +1426,7 @@ def connect(
         local = LocalNode(
             node_id=uuid.uuid4(), cluster_name=cluster_name, listen_addr=None, role="client"
         )
-        client = Client(local=local, config=cfg, tls=tls)
+        client = Client(local=local, config=cfg, tls=tls, address_map=address_map)
         await client._start(seeds)
         return client
 

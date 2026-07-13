@@ -66,6 +66,21 @@ async def test_backoff_between_attempts() -> None:
         await pool.close()
 
 
+async def test_address_map_rewrites_the_dialed_address() -> None:
+    server = await start_server()
+    real = f"127.0.0.1:{server.port}"
+    announced = "10.0.0.1:7001"
+    pool = Pool(local=make_local(), address_map=lambda addr: real if addr == announced else addr)
+    try:
+        conn = await pool.get(announced)
+        assert await conn.ask(0x40, b"tunneled") == b"tunneled"
+        # the connection stays keyed by the announced address
+        assert await pool.get(announced) is conn
+    finally:
+        await pool.close()
+        await server.close()
+
+
 async def test_duplicate_connections_resolved_by_node_id() -> None:
     local_a = make_local()
     local_b = make_local()

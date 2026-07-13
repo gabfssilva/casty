@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import uuid
+from collections.abc import Callable
 
 from casty.config import TLS, TransportConfig
 from casty.errors import CastyError, ConnectionLostError
@@ -23,7 +24,11 @@ class Pool:
 
     Duplicate connections to the same node (simultaneous dial from both sides)
     are resolved deterministically: the connection whose *initiator* has the
-    larger node_id is closed."""
+    larger node_id is closed.
+
+    `address_map` rewrites an announced address into the one actually dialed
+    (an SSH tunnel, a NAT hop). Connections stay keyed by the announced
+    address — the map applies only at the socket."""
 
     def __init__(
         self,
@@ -36,6 +41,7 @@ class Pool:
         on_bulk: BulkHandler | None = None,
         on_actor_stream: ActorStreamHandler | None = None,
         on_close: CloseHandler | None = None,
+        address_map: Callable[[str], str] | None = None,
     ) -> None:
         self._local = local
         self._config = config or TransportConfig()
@@ -45,6 +51,7 @@ class Pool:
         self._on_bulk = on_bulk
         self._on_actor_stream = on_actor_stream
         self._on_close = on_close
+        self._address_map = address_map
         self._by_addr: dict[str, Connection] = {}
         self._by_node: dict[uuid.UUID, Connection] = {}
         self._dial_locks: dict[str, asyncio.Lock] = {}
@@ -122,6 +129,8 @@ class Pool:
         return self._local.node_id if conn.initiator else conn.peer.node_id
 
     async def _dial(self, addr: str, max_attempts: int) -> Connection:
+        if self._address_map is not None:
+            addr = self._address_map(addr)
         host, _, port_raw = addr.rpartition(":")
         port = int(port_raw)
         ssl_context = self._tls.client_context() if self._tls is not None else None

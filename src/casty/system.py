@@ -7,8 +7,9 @@ from types import TracebackType
 
 from casty.actors import inspection
 from casty.actors import registry as actor_registry
-from casty.actors.proxy import ActorProxy
+from casty.actors.proxy import ActorProxy, Caller
 from casty.actors.registry import ActorInfo, MethodInfo
+from casty.collections import barrier as collections_barrier
 from casty.collections import counter as collections_counter
 from casty.collections import map as collections_map
 from casty.collections import multimap as collections_multimap
@@ -16,6 +17,7 @@ from casty.collections import queue as collections_queue
 from casty.collections import register as collections_register
 from casty.collections import semaphore as collections_semaphore
 from casty.collections import set as collections_set
+from casty.collections.barrier import Barrier
 from casty.collections.counter import Counter
 from casty.collections.map import Map
 from casty.collections.multimap import MultiMap
@@ -23,6 +25,7 @@ from casty.collections.queue import Queue
 from casty.collections.register import Register
 from casty.collections.semaphore import Lock, Semaphore
 from casty.collections.set import Set
+from casty.membership.table import Member
 
 
 class ActorSystem(abc.ABC):
@@ -65,16 +68,20 @@ class ActorSystem(abc.ABC):
             raise TypeError(f"{cls.__qualname__} is not a @casty.actor")
         return typing.cast(T, ActorProxy(self, info, key))
 
-    def service[T](self, cls: type[T]) -> T:
+    def service[T](self, cls: type[T], *, at: Member | None = None) -> T:
         """Typed proxy to a `@casty.service`.
 
         No key: a service is stateless, so any activation serves — a Node
-        dispatches to its own, a Client picks a member.
+        dispatches to its own, a Client picks a member. `at` overrides that
+        default and pins every call to one chosen member.
 
         Parameters
         ----------
         cls : type[T]
             A `@casty.service` class.
+        at : Member | None
+            A member from `members()` to pin the calls to; None keeps the
+            default placement.
 
         Returns
         -------
@@ -84,12 +91,17 @@ class ActorSystem(abc.ABC):
         Raises
         ------
         TypeError
-            If `cls` is not a `@casty.service`.
+            If `cls` is not a `@casty.service`, or `at` is given on a system
+            with no cluster members (`local()`).
         """
         info = actor_registry.info_of(cls)
         if info is None or info.kind != "service":
             raise TypeError(f"{cls.__qualname__} is not a @casty.service")
-        return typing.cast(T, ActorProxy(self, info, actor_registry.SERVICE_KEY))
+        caller: Caller = self if at is None else self._service_caller(info, at)
+        return typing.cast(T, ActorProxy(caller, info, actor_registry.SERVICE_KEY))
+
+    def _service_caller(self, info: ActorInfo, at: Member) -> Caller:
+        raise TypeError("service(at=...) needs a clustered system (start or connect)")
 
     def map[K, V](
         self,
@@ -282,6 +294,41 @@ class ActorSystem(abc.ABC):
         """
         info = collections_queue.shard_info(replicas, write, read)
         return Queue(self, name, info, 1)
+
+    def barrier(
+        self,
+        name: str,
+        *,
+        parties: int,
+        replicas: int = 3,
+        write: actor_registry.Consistency | int = actor_registry.Consistency.MAJORITY,
+        read: actor_registry.Consistency | int = actor_registry.Consistency.ONE,
+    ) -> Barrier:
+        """Distributed cyclic barrier. `wait()` blocks until `parties`
+        callers have arrived, then releases them all and resets for the next
+        round.
+
+        Parameters
+        ----------
+        name : str
+            Cluster-wide name of the barrier.
+        parties : int
+            Arrivals that release a generation. Callers of the same name must
+            agree on it — it is client-supplied, not stored.
+        replicas : int
+            Physical nodes holding the arrival count.
+        write : Consistency | int
+            Acks required per mutation, resolved against `replicas`.
+        read : Consistency | int
+            Reserved for read paths; part of the shard identity today.
+
+        Returns
+        -------
+        Barrier
+            The barrier facade.
+        """
+        info = collections_barrier.shard_info(replicas, write, read)
+        return Barrier(self, name, info, parties)
 
     def semaphore(
         self,

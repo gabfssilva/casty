@@ -27,6 +27,7 @@ from casty.actors.registry import (
     transient,
 )
 from casty.collections import (
+    Barrier,
     Counter,
     Lease,
     Lock,
@@ -57,6 +58,7 @@ from casty.errors import (
     UnknownActorTypeError,
 )
 from casty.local import local
+from casty.membership.table import Member
 from casty.node import Client, Config, Managed, Node, connect, start
 from casty.serde.registry import message
 from casty.services import service
@@ -82,6 +84,7 @@ __all__ = [
     "ActorFailedError",
     "ActorSystem",
     "ActorUnavailableError",
+    "Barrier",
     "CastyError",
     "CastyTimeoutError",
     "Client",
@@ -97,6 +100,7 @@ __all__ = [
     "Lock",
     "Managed",
     "Map",
+    "Member",
     "MembershipConfig",
     "MultiMap",
     "Node",
