@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import Callable
 
 import pytest
@@ -16,6 +17,12 @@ pytestmark = pytest.mark.asyncio
 class Sku:
     code: str
     price: float
+
+
+@dataclasses.dataclass
+class Parcel:  # bare @dataclass, no @casty.message — registered via map(value=...)
+    label: str
+    weight: float = 0.0
 
 
 async def test_map_full_api_across_nodes_and_client() -> None:
@@ -73,6 +80,21 @@ async def test_map_message_values_and_distribution() -> None:
         ]
         assert sum(hosting) > 1
         assert sum(1 for count in hosting if count > 0) > 1, hosting
+    finally:
+        await stop_all(systems)
+
+
+async def test_map_bare_dataclass_value_across_nodes() -> None:
+    systems = await start_nodes(3)
+    try:
+        # node 0 writes; value=Parcel registers the bare dataclass at this facade
+        boxes: casty.Map[str, Parcel] = systems[0].map("boxes", value=Parcel, shards=8)
+        for i in range(16):
+            await boxes.put(f"p-{i}", Parcel(label=f"p-{i}", weight=float(i)))
+        # node 1 reads; its own facade registers Parcel (idempotent) and decodes
+        boxes_b: casty.Map[str, Parcel] = systems[1].map("boxes", value=Parcel, shards=8)
+        assert await boxes_b.get("p-3") == Parcel(label="p-3", weight=3.0)
+        assert dict(await boxes_b.items())["p-10"] == Parcel(label="p-10", weight=10.0)
     finally:
         await stop_all(systems)
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import collections
+import dataclasses
 import datetime
 import enum
+import typing
 import uuid
 
 import pytest
@@ -184,3 +187,110 @@ def test_no_pickle_anywhere() -> None:
     import casty.serde.codec as codec_module
 
     assert "pickle" not in inspect.getsource(codec_module)
+
+
+@dataclasses.dataclass
+class PlainInner:
+    label: str
+    n: int = 0
+
+
+@casty.message(name="test.HasPlain")
+class HasPlain:
+    inner: PlainInner
+    inners: list[PlainInner] = dataclasses.field(default_factory=list)
+    maybe: PlainInner | None = None
+
+
+def test_plain_dataclass_field_auto_registers() -> None:
+    # a bare @dataclass used as a @message field is registered transitively at
+    # import time under module.QualName — no @casty.message needed on it.
+    assert registry.wire_name_of(PlainInner) is not None
+    original = HasPlain(
+        inner=PlainInner(label="a", n=3),
+        inners=[PlainInner(label="b"), PlainInner(label="c", n=9)],
+        maybe=PlainInner(label="d"),
+    )
+    assert roundtrip(original) == original
+
+
+@dataclasses.dataclass
+class PlainParam:
+    sku: str
+    qty: int = 1
+
+
+def test_plain_dataclass_actor_param_auto_registers() -> None:
+    @casty.actor(name="test.ActorPlainParam")
+    class ActorPlainParam:
+        seen: int = 0
+
+        async def take(self, item: PlainParam) -> int:
+            self.seen += item.qty
+            return self.seen
+
+    assert registry.wire_name_of(PlainParam) is not None
+    encoded = codec.encode_raw(PlainParam(sku="x", qty=2))
+    assert codec.decode_raw(encoded, PlainParam) == PlainParam(sku="x", qty=2)
+
+
+class Vec(typing.NamedTuple):
+    x: int
+    y: int
+    label: str = ""
+
+
+@casty.message(name="test.HasVec")
+class HasVec:
+    origin: Vec
+    path: list[Vec] = dataclasses.field(default_factory=list)
+    either: Vec | Point = Vec(x=0, y=0)
+
+
+def test_namedtuple_roundtrips_as_record() -> None:
+    # a typing.NamedTuple is a record with identity: it travels as
+    # [wire_name, {fields}], defaults fill in, and it disambiguates a union.
+    assert registry.wire_name_of(Vec) is not None
+    original = HasVec(
+        origin=Vec(x=1, y=2, label="o"),
+        path=[Vec(x=3, y=4), Vec(x=5, y=6, label="p")],
+        either=Vec(x=7, y=8),
+    )
+    decoded = roundtrip(original)
+    assert decoded == original
+    assert isinstance(decoded, HasVec)
+    assert isinstance(decoded.either, Vec)  # union resolved to the embedded wire name
+
+
+def test_namedtuple_default_is_applied_on_decode() -> None:
+    import msgpack
+
+    # 'label' omitted on the wire -> the NamedTuple default fills it
+    vec = ["tests.unit.test_serde.Vec", {"x": 1, "y": 2}]
+    raw = msgpack.packb(["test.HasVec", {"origin": vec}])
+    decoded = codec.decode(raw)
+    assert isinstance(decoded, HasVec)
+    assert decoded.origin == Vec(x=1, y=2, label="")
+
+
+UntypedNT = collections.namedtuple("UntypedNT", ["a", "b"])  # deliberately untyped
+
+
+def test_untyped_namedtuple_is_rejected() -> None:
+    with pytest.raises(SerializationSchemaError, match="not serializable"):
+
+        @casty.message(name="test.HasUntyped")
+        class HasUntyped:
+            thing: UntypedNT
+
+
+class OpaqueClass:  # not a dataclass, module scope so the annotation resolves
+    pass
+
+
+def test_non_dataclass_field_still_fails() -> None:
+    with pytest.raises(SerializationSchemaError, match="not serializable"):
+
+        @casty.message(name="test.StillBad")
+        class StillBad:
+            thing: OpaqueClass

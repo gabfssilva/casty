@@ -37,6 +37,53 @@ def fields_of(cls: type) -> dict[str, object]:
     return _hints[cls]
 
 
+class _NamedTupleType(typing.Protocol):
+    _fields: tuple[str, ...]
+    _field_defaults: dict[str, object]
+
+
+def _is_namedtuple(tp: object) -> bool:
+    """A typed `typing.NamedTuple` subclass. An untyped `collections.namedtuple`
+    (no field annotations) is rejected — there are no types to validate against."""
+    if not (isinstance(tp, type) and issubclass(tp, tuple) and hasattr(tp, "_fields")):
+        return False
+    nt = typing.cast(_NamedTupleType, tp)
+    annotations = typing.cast("dict[str, object]", tp.__annotations__)
+    return all(name in annotations for name in nt._fields)
+
+
+def class_fields(cls: type) -> tuple[tuple[str, object, bool], ...]:
+    """`(name, raw annotation, has_default)` per field, for the two record shapes
+    casty serializes structurally: a dataclass or a typing.NamedTuple."""
+    if dataclasses.is_dataclass(cls):
+        return tuple(
+            (
+                f.name,
+                f.type,
+                f.default is not dataclasses.MISSING
+                or f.default_factory is not dataclasses.MISSING,
+            )
+            for f in dataclasses.fields(cls)
+        )
+    nt = typing.cast(_NamedTupleType, cls)
+    annotations = typing.cast("dict[str, object]", cls.__annotations__)
+    return tuple((name, annotations[name], name in nt._field_defaults) for name in nt._fields)
+
+
+def ensure_registered(tp: object, role: str = "collection type") -> None:
+    """Idempotently register a type a collection facade uses structurally as a
+    key, value or item, so a bare `@dataclass` / `typing.NamedTuple` K/V needs
+    no `@casty.message`. A primitive, enum or already-registered message is a
+    no-op; anything unserializable raises. Validation runs the same path as a
+    message field, so nested types register transitively.
+
+    Registration is deferred to facade construction, not import: every node that
+    decodes a value also built the facade (decode is client-side), so it has
+    registered the type by the time bytes arrive.
+    """
+    _validate(tp, role)
+
+
 @typing.overload
 def message[T](cls: type[T], /) -> type[T]: ...
 
@@ -89,7 +136,7 @@ def message(
 
 
 def _register(cls: type, name: str | None) -> type:
-    if not dataclasses.is_dataclass(cls):
+    if not (dataclasses.is_dataclass(cls) or _is_namedtuple(cls)):
         cls = dataclasses.dataclass(slots=True, eq=True)(cls)
     wire_name = name or f"{cls.__module__}.{cls.__qualname__}"
     existing = _by_name.get(wire_name)
@@ -120,17 +167,26 @@ def _resolve_hints(cls: type, wire_name: str) -> dict[str, object]:
     module_ns = vars(module) if module is not None else {}
     local_ns = {cls.__name__: cls}
     hints: dict[str, object] = {}
-    for f in dataclasses.fields(cls):
-        annotation: object = f.type
-        if isinstance(annotation, str):
+    for name, raw, _ in class_fields(cls):
+        annotation: object = raw
+        # dataclass fields carry the annotation as a str under `from __future__`;
+        # typing.NamedTuple wraps it in a ForwardRef. Both eval the same way.
+        expr = (
+            raw
+            if isinstance(raw, str)
+            else raw.__forward_arg__
+            if isinstance(raw, typing.ForwardRef)
+            else None
+        )
+        if expr is not None:
             try:
-                annotation = eval(annotation, module_ns, local_ns)
+                annotation = eval(expr, module_ns, local_ns)
             except NameError as exc:
                 raise SerializationSchemaError(
-                    f"{wire_name}.{f.name}: cannot resolve annotation {f.type!r} ({exc}); "
+                    f"{wire_name}.{name}: cannot resolve annotation {raw!r} ({exc}); "
                     f"types must be importable or registered before use"
                 ) from exc
-        hints[f.name] = annotation
+        hints[name] = annotation
     return hints
 
 
@@ -152,9 +208,15 @@ def _validate(tp: object, path: str) -> None:
                 return
             if tp in _by_type:
                 return
+            if dataclasses.is_dataclass(tp) or _is_namedtuple(tp):
+                # a bare @dataclass / typing.NamedTuple registers itself transitively,
+                # so @casty.message is optional on nested/reachable types; its fields
+                # validate in turn.
+                _register(tp, None)
+                return
             raise SerializationSchemaError(
                 f"{path}: {tp!r} is not serializable (not a primitive, "
-                f"registered @casty.message, enum, datetime or uuid)"
+                f"@casty.message, @dataclass, enum, datetime or uuid)"
             )
         raise SerializationSchemaError(f"{path}: unsupported annotation {tp!r}")
     args = typing.get_args(tp)

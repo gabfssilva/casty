@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 import datetime
 import enum
 import types
@@ -97,24 +96,27 @@ def _encode_value(value: object) -> object:
             return value
         case datetime.datetime() | uuid.UUID():
             return value  # handled by _ext_default at pack time
+        case tuple() if hasattr(type(value), "_fields"):  # NamedTuple: a record, not a plain tuple
+            return _encode_record(value)
         case list() | tuple() | set() | frozenset():
             return [_encode_value(item) for item in value]
         case Mapping():  # dict, and the paged-state wrapper around one (spec 09 §4)
             return {key: _encode_value(item) for key, item in value.items()}
         case _:
-            cls = type(value)
-            plan = _encode_fields.get(cls)
-            if plan is None:
-                wire_name = registry.wire_name_of(cls)
-                if wire_name is None:
-                    raise SerializationError(f"cannot serialize value of type {cls!r}")
-                plan = (
-                    wire_name,
-                    tuple(f.name for f in dataclasses.fields(value)),  # type: ignore[arg-type]
-                )
-                _encode_fields[cls] = plan
-            name, field_names = plan
-            return [name, {f: _encode_value(getattr(value, f)) for f in field_names}]
+            return _encode_record(value)
+
+
+def _encode_record(value: object) -> object:
+    cls = type(value)
+    plan = _encode_fields.get(cls)
+    if plan is None:
+        wire_name = registry.wire_name_of(cls)
+        if wire_name is None:
+            raise SerializationError(f"cannot serialize value of type {cls!r}")
+        plan = (wire_name, tuple(name for name, _, _ in registry.class_fields(cls)))
+        _encode_fields[cls] = plan
+    name, field_names = plan
+    return [name, {f: _encode_value(getattr(value, f)) for f in field_names}]
 
 
 def _ext_default(value: object) -> msgpack.ExtType:
@@ -163,12 +165,8 @@ def _field_plan(cls: type, wire_name: str) -> tuple[tuple[str, _Coercer, bool], 
     if plan is None:
         hints = registry.fields_of(cls)
         plan = tuple(
-            (
-                f.name,
-                _compile(hints[f.name], f"{wire_name}.{f.name}"),
-                f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING,
-            )
-            for f in dataclasses.fields(cls)
+            (name, _compile(hints[name], f"{wire_name}.{name}"), not has_default)
+            for name, _, has_default in registry.class_fields(cls)
         )
         _field_plans[cls] = plan
     return plan

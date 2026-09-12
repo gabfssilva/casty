@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Typed, clustered actor framework for Python</strong>
+  <strong>A minimalist, type-safe actor framework for Python 3.12+ with built-in distributed clustering.</strong>
 </p>
 
 <p align="center">
@@ -15,10 +15,11 @@
 
 ---
 
-Casty allows you to create actors as plain classes: annotated fields are their state, async methods are their interface. It activates each actor on demand across a leaderless cluster, routes calls to it by key from any node, replicates its state, and survives node failure — while your code stays ordinary typed Python.
+An actor is a plain class: annotated fields are its state, async methods are its interface. Its identity is `(class, key)` — the cluster activates it on demand on the node that owns the key, routes every call for that key to it from any node, replicates its state, and reactivates it elsewhere when that node dies.
 
 ```python
 import asyncio
+
 import casty
 
 
@@ -54,31 +55,40 @@ async with casty.start("10.0.0.1:7001", seeds=["10.0.0.2:7001"]) as system:
 
 The proxy is statically typed: `greeter.greet` has the signature of `Greeter.greet`, and the whole API type-checks under mypy strict.
 
-## Installation
+## Contents
+
+[Install](#install) ·
+[Actors](#actors) ·
+[Schedules](#schedules) ·
+[Messages](#messages) ·
+[Failure](#failure) ·
+[Replication](#replication) ·
+[Services](#services) ·
+[Streaming](#streaming) ·
+[Collections](#collections) ·
+[Paged state](#paged-state) ·
+[Running a cluster](#running-a-cluster) ·
+[Inspection](#inspection) ·
+[How it works](#how-it-works) ·
+[Design](#design) ·
+[API at a glance](#api-at-a-glance) ·
+[Examples](#examples)
+
+## Install
 
 ```sh
 pip install casty
 ```
 
-Requires Python 3.12+. Runtime dependency: `msgpack`. Optional compression codecs beyond the built-in zlib:
+Python 3.12+. One runtime dependency: `msgpack`. Extras:
 
 ```sh
-pip install "casty[lz4]"    # or casty[zstd]
+pip install "casty[lz4]"     # or casty[zstd] — compression codecs beyond the built-in zlib
+pip install "casty[pandas]"  # the DataFrame pager
+pip install "casty[uvloop]"  # faster event loop
 ```
 
-## Three ways to run
-
-```python
-system = casty.local()                                   # in-process: no networking, no cluster
-system = await casty.start("0.0.0.0:7001", seeds=[...])  # full cluster member: hosts actors
-system = await casty.connect(["10.0.0.1:7001"])          # lite member: routes calls, hosts nothing
-```
-
-All three share the same API (`actor()`, `map()`, `close()`). The usual form is the async context manager — `async with casty.start(...) as system:` — which closes the system on exit. When the lifetime doesn't fit one block (an application object that owns the system, say), await the call instead, as above, and call `await system.close()` yourself.
-
-`casty.local()` is a complete in-process actor system — mailboxes, lifecycle, supervision — for single-process applications that want the actor model without the cluster. A lite member joins the membership and knows the ring, so it routes calls in one hop, but never owns keys.
-
-## Actors and state
+## Actors
 
 Annotated class fields are the actor's state — the source of truth for snapshots and replication. Fields that shouldn't be persisted (connections, caches) are marked `transient` and rebuilt on activation:
 
@@ -94,16 +104,38 @@ class Session:
 
     @casty.deactivate
     async def _close(self) -> None:
-        ...  # runs on idle timeout, ctx.deactivate(), or node shutdown
+        ...  # runs on idle timeout, ctx.deactivate(), a STOP directive, or node shutdown
 
     async def visit(self) -> int:
         self.visits += 1
         return self.visits
 ```
 
-`@casty.activate` runs on every activation, including reactivation after the actor migrates to another node (state already restored). Inside a handler, `casty.context()` exposes the actor's own key, `ctx.actor(Cls, key)` returns a proxy for actor-to-actor calls (propagating the call chain that reentrancy detection relies on), and `ctx.deactivate()` schedules deactivation after the current message.
+The decorator turns the class into a slotted dataclass, and activation constructs it with no arguments — so every state field needs a default (mutable ones through `dataclasses.field(default_factory=...)`). `@casty.activate` runs on every activation, including reactivation after the actor migrates to another node (state already restored); both hooks are async and take only `self`.
 
-Concurrency is the classic actor guarantee: one handler at a time per actor, FIFO mailbox. Reentrancy (an ask cycle A→B→A) is detected and raises `ReentrancyError` instead of deadlocking.
+**The identity is permanent, the activation is not.** `(class, key)` names the actor forever. The instance serving it appears on the first call, disappears after `idle_timeout` seconds without messages (`Config.default_idle_timeout`, 300 s, unless the class sets its own; `float("inf")` never), and reappears — possibly on another node — at the next call.
+
+**One handler at a time.** One activation per key, FIFO mailbox: nothing else touches the state while a handler runs, `await`s included. That is why a read-modify-write inside a handler needs no lock. Reentrancy (an ask cycle A→B→A) is detected and raises `ReentrancyError` instead of deadlocking.
+
+Inside a handler, `casty.context()` exposes:
+
+| | |
+|---|---|
+| `ctx.key` | the running activation's key |
+| `ctx.actor_class` | its class |
+| `ctx.chain` | the `"wire/key"` call chain that led here — what reentrancy detection reads |
+| `ctx.actor(Cls, key)` | typed proxy to another actor, propagating the chain |
+| `ctx.emit(fn, *args)` | fire-and-forget message to this actor's own mailbox |
+| `ctx.schedule(fn, ...)` | deferred or periodic self-call |
+| `ctx.deactivate()` | deactivate after the current handler returns |
+| `ctx.detach()` | take ownership of the caller's reply (the basis of services) |
+
+Actor-to-actor calls go through `ctx.actor(...)` rather than a system-level proxy, precisely so the chain propagates.
+
+Every non-transient state field, method parameter, return type and stream element must be serializable. It is validated at import time, not at send time.
+
+> [!WARNING]
+> Handlers run on the node's event loop. A CPU-bound handler — or a blocking sync call — stalls every actor on that node, not just its own. Hand that work to a thread or process pool.
 
 ## Schedules
 
@@ -127,13 +159,15 @@ class Monitor:
 
 `ctx.emit(self._check)` is the immediate form — the "send to self" of the classic actor model: it enqueues on the actor's own mailbox and returns at once, no reply; the message runs as the next handler. `self._check()` is part of the *current* handler (same commit, same failure); `emit` is the next message, with its own.
 
-A tick is not a callback: it is delivered to the actor's own mailbox and runs like any handler — one at a time, state committed if it mutated, supervised if it raised. Periodic schedules are fixed-delay (the next tick arms only after the previous one finished, so a slow handler never piles ticks up), and `Schedule.cancel()` stops one early.
+A tick is not a callback: it is delivered to the actor's own mailbox and runs like any handler — one at a time, state committed if it mutated, supervised if it raised. Periodic schedules are fixed-delay (the next tick arms only after the previous one finished, so a slow handler never piles ticks up), re-using a name replaces the previous schedule, and `Schedule.cancel()` stops one early.
 
 Schedules are bound to the activation: they die on deactivation — whatever the reason — and never keep an actor alive or reactivate one. An actor that must keep ticking across node failure combines this with replication and infinite idle (`replicas=3, idle_timeout=float("inf")`): the cluster reactivates such an actor on the new owner unprompted, its activate hook runs again, and the canonical idiom re-arms the schedule from replicated state — the decision is a state field, the schedule its transient effect.
 
+Give `emit` and `schedule` targets a `_` prefix: delivery is local, and a public method would also be remotely callable.
+
 ## Messages
 
-Arguments and return values must be serializable. Built-ins (numbers, strings, lists, dicts, ...) work as-is; your own types are declared with `@casty.message`:
+Arguments and return values must be serializable. Built-ins work as-is; your own types are declared with `@casty.message`:
 
 ```python
 @casty.message
@@ -142,36 +176,66 @@ class Reservation:
     qty: int
 ```
 
-`@casty.message` turns the class into a slotted dataclass and registers it under a stable wire name (default `module.QualName`, overridable with `name=...`). Serializability is validated recursively at import time, not at send time. Schema evolution is tolerant in both directions: new fields with defaults are accepted by old receivers, unknown fields are ignored.
+`@casty.message` turns the class into a slotted dataclass and registers it under a stable wire name (default `module.QualName`, overridable with `name=...` — set it explicitly to move or rename the class later without breaking the cluster). Serializability is validated recursively at import time. Schema evolution is tolerant in both directions: new fields with defaults are accepted by old receivers, unknown fields are ignored.
 
-## Clustering
+A plain `@dataclass` or `typing.NamedTuple` reached from a registered type — as a field, parameter or return — registers itself transitively, so `@casty.message` is optional on nested types. Spell it out only to pin an explicit wire `name`; a bare class always takes `module.QualName`.
 
-Nodes are homogeneous — there is no leader. Start one node, point the others at it:
+| category | types |
+|---|---|
+| primitives | `int`, `float`, `bool`, `str`, `bytes`, `None` |
+| extended | `datetime`, `uuid.UUID` |
+| enums | any `Enum` whose values are primitives |
+| containers | `list[T]`, `set[T]`, `frozenset[T]`, `tuple[...]`, `dict[K, V]` with `K` in `str \| int \| bytes` |
+| unions | `A \| B` of any of the above |
+| your types | any registered `@casty.message` |
+
+Encoding is msgpack over these schemas; pickle appears nowhere, on any path. Union members are disambiguated by embedded wire name first, then by trial coercion in declaration order, so structurally identical variants resolve to the first that matches.
+
+> [!NOTE]
+> A PEP 695 `type` alias cannot annotate a `@message` field: `type AB = A | B` used as a field type raises `SerializationSchemaError`. Spell the union out longhand.
+
+## Failure
+
+Two failure domains, kept apart.
+
+**Infrastructure failures** surface as typed exceptions on the *caller*:
+
+| exception | when |
+|---|---|
+| `CastyTimeoutError` | a configured deadline elapsed (call, handshake, lock acquisition, ...) |
+| `ActorUnavailableError` | no members known, owner unreachable, node draining or stopped |
+| `QuorumUnavailableError` | fewer than `write` replicas acknowledged; the mutation was rolled back |
+| `RangeMovingError` | the key's token range is mid-handoff; retry after the move |
+| `UnknownActorTypeError` | the owner does not have this actor class registered |
+| `ReentrancyError` | an ask cycle A→B→A |
+| `SerializationError` | a value did not match its declared type |
+
+All derive from `CastyError`. Retries happen automatically only where provably safe — re-routing after a view change, where the call demonstrably never executed. Everything else propagates: a call that times out has an unknown fate, so make the handler idempotent if that matters.
+
+**Actor failures** — an exception inside a handler — are decided by the *supervisor*, a plain function. It is not an Erlang supervision tree: virtual actors have no parent that created them. It is a policy for the fate of the activation:
 
 ```python
-system_a = await casty.start("10.0.0.1:7001")
-system_b = await casty.start("10.0.0.2:7001", seeds=["10.0.0.1:7001"])
-system_c = await casty.start("10.0.0.3:7001", seeds=["10.0.0.1:7001"])
-```
+def three_strikes(
+    cls: type, key: str, exc: Exception, ctx: casty.FailureContext
+) -> casty.Directive:
+    return casty.KEEP if ctx.failures < 3 else casty.RESET
 
-Every key is owned by exactly one node, determined by a token ring that every member computes locally — placement needs no coordinator and no extra hops. Calls route directly to the owner regardless of which node dispatches them.
 
-When a node joins or leaves, only the affected key ranges move. `system.close()` is graceful: it drains in-flight handlers, hands its ranges off to the new owners, and announces a clean leave — a rolling restart doesn't stampede the cluster.
-
-TLS (including mTLS) is one argument away:
-
-```python
-async with casty.start(
-    "0.0.0.0:7001",
-    seeds=[...],
-    tls=casty.TLS(cert="node.pem", key="node.key", ca="ca.pem"),
-) as system:
+async with casty.start("0.0.0.0:7001", supervisor=three_strikes) as system:
     ...
 ```
 
-Every timeout, view size and protocol interval is a knob with a documented default: `casty.start(..., config=casty.Config(...))`.
+| directive | effect |
+|---|---|
+| `KEEP` (default) | state survives; the caller gets `ActorFailedError` wrapping the original exception |
+| `RESET` | the activation is discarded; the next call starts from the last replicated snapshot (or fresh) |
+| `STOP` | graceful deactivation, deactivate hook included; the next call reactivates |
 
-## Replication and consistency
+`ctx.failures` counts consecutive failures of this activation, this one included. The global supervisor is overridable per class: `@casty.actor(supervisor=...)`.
+
+A handler that *raises* does not roll back its state mutations — the supervisor decides. A handler that fails to *commit* does; see below.
+
+## Replication
 
 By default an actor lives in a single copy: fast, and its state dies with its node. Classes that need durability declare replication:
 
@@ -185,67 +249,78 @@ class StockItem:
         return self.on_hand
 ```
 
-After every handler that mutates state, the owner snapshots the annotated fields, stamps them with a hybrid logical clock, and pushes to the backup replicas; the caller gets its answer once `write` replicas have acknowledged. `write` and `read` take `casty.ONE`, `casty.MAJORITY`, `casty.ALL`, or an integer. In v1 a read is served from the owner's in-memory state, kept correct by fencing and by the activation handshake — which does read from a quorum and repairs stale replicas along the way; per-method quorum reads are deferred.
+The R nodes are the owner plus the next R−1 distinct nodes on the ring; only the owner runs handlers. After every handler that mutates state, the owner snapshots the annotated fields, stamps them with a hybrid logical clock, and pushes them to the backups; the caller gets its answer once `write` replicas — the owner counts as one — have acknowledged.
 
-If the owning node dies, the next call activates the actor elsewhere from the newest committed snapshot. Split-brain is handled by fencing: an owner that cannot reach a write quorum rejects writes with `QuorumUnavailableError` rather than diverging.
+`write` and `read` take `casty.ONE`, `casty.MAJORITY`, `casty.ALL`, or an integer, resolved against `replicas`:
 
-## Failure handling
+| level | acks |
+|---|---|
+| `ONE` | 1 |
+| `MAJORITY` (default for `write`) | `replicas // 2 + 1` |
+| `ALL` | `replicas` |
+| `3` | exactly 3 |
 
-Two failure domains, kept apart:
+Quorums are counted against the *configured* `replicas`, never against however many nodes the owner currently sees — an owner isolated in a minority cannot decide its view shrank and keep committing. Reads are served from the owner's in-memory state, kept correct by fencing and by the activation handshake, which does read from a quorum and repairs stale replicas along the way; per-method quorum reads are deferred, and `read` is accepted today only as part of a shard's identity.
 
-**Infrastructure failures** — timeout, unreachable owner, no quorum, a range mid-migration — surface as typed exceptions on the *caller*: `CastyTimeoutError`, `ActorUnavailableError`, `QuorumUnavailableError`, `RangeMovingError`, `UnknownActorTypeError`. Retries happen automatically only where provably safe (re-routing after a view change); everything else propagates.
+**Commit is per handler.** After a handler that mutated state, the owner diffs and replicates. On `QuorumUnavailableError` or `SerializationError` the in-memory state is rolled back to the last committed basis and the error reaches the caller — a fenced minority owner never advances. A handler that changed nothing costs nothing: the would-be snapshot is compared against the last committed one and replication is skipped entirely.
 
-**Actor failures** — an exception inside a handler — are decided by the *supervisor*, a plain function. It is not an Erlang supervision tree — virtual actors have no parent that created them; it is a policy for the fate of the activation:
+If the owning node dies, the next call activates the actor elsewhere from the newest committed snapshot. Split-brain is handled by fencing: an owner that cannot reach a write quorum rejects writes rather than diverging. Under a partition the minority gives up availability so the majority can continue.
 
-```python
-def three_strikes(
-    cls: type, key: str, exc: Exception, ctx: casty.FailureContext
-) -> casty.Directive:
-    return casty.KEEP if ctx.failures < 3 else casty.RESET
+Deactivation behaves differently with and without replicas:
 
+- `replicas=1` (the default): state is memory only, and idle deactivation drops it.
+- `replicas > 1`: deactivation is safe — the committed state stays on the replicas and the next call restores it.
+- `replicas > 1` **and** `idle_timeout=float("inf")`: the actor is durably active. The cluster reactivates it on the new owner after a node dies, without waiting for a call, and only `ctx.deactivate()` or a `STOP` directive ends it ([example 09](examples/09_reactivation.py)).
 
-async with casty.start("0.0.0.0:7001", supervisor=three_strikes) as system:
-    ...
-```
+> [!IMPORTANT]
+> `replicas=R` means R copies in RAM on R nodes. Nothing is written to disk: a cluster that loses all R replicas of a key at once — a full restart, say — loses that state. Write through from your handlers to whatever must outlive the cluster.
 
-- `KEEP` (default): state survives; the caller gets `ActorFailedError` wrapping the original exception.
-- `RESET`: the activation is discarded; the next call starts from the last replicated snapshot (or fresh).
-- `STOP`: graceful deactivation; the next call reactivates.
+## Services
 
-The global supervisor can be overridden per class: `@casty.actor(supervisor=...)`.
-
-## Collections
-
-Distributed collections are sugar over the same machinery — each one is a set of shard actors, placed and replicated like any other actor, behind a typed facade. There is no new mechanism: placement, replication, quorum and fencing are exactly those of the actor layer, and every factory takes the same `(replicas, write, read)` triple.
+An actor serializes: one handler at a time, so a handler awaiting slow I/O holds the mailbox for the whole wait. That is the actor's state guarantee — and its concurrency ceiling. A **service** removes the ceiling without taking the actor out of the path: `@casty.service` generates an actor whose handler fires the method as a task and returns immediately, so N calls to the same service progress together:
 
 ```python
-prices: casty.Map[str, float] = system.map("prices", replicas=3, write=casty.MAJORITY)
+@casty.actor
+class Inventory:
+    stock: int = 10
 
-await prices.put("sku-1234", 49.90)
-print(await prices.get("sku-1234"))
-print(await prices.size())
+    async def reserve(self, qty: int) -> bool:
+        if qty > self.stock:
+            return False
+        self.stock -= qty  # serial per sku: never sells what it does not have
+        return True
+
+
+@casty.service(concurrency=32)
+class Checkout:
+    async def buy(self, sku: str, qty: int) -> bool:
+        await charge_card(sku, qty)  # slow I/O, runs concurrently
+        return await casty.context().actor(Inventory, sku).reserve(qty)
+
+
+checkout = system.service(Checkout)  # no key — proxy typed as Checkout
+results = await asyncio.gather(*[checkout.buy("sku-1", 1) for _ in range(12)])
 ```
 
-Three families:
+A service is stateless by construction — a state field on the class is an import-time error — and unplaced: no key, no ring position. State lives in the actors the method calls, and calls with the same `(actor, key)` stay serialized there: the service is the concurrent door; the actor, the serial guardian.
 
-- **Sharded by item** — `map()`, `set()`, `multimap()`. Single-item operations route by item hash to one of `shards` shard actors (default 32); aggregations (`size()`, `items()`) fan out to every shard in parallel. They scale with the number of shards and nodes.
-- **Striped** — `counter()`. A single logical value split into stripes so writes don't hotspot one owner: `add` lands on a rotating stripe, `get` sums the fan-out.
-- **Single-owner** — `register()` (atomic ref with compare-and-set), `queue()` (FIFO), `semaphore()` and `lock()`. Ordering and unique identity require serialization on a single owner, so these don't scale within one instance — scaling is many named instances. The single writer is also why CAS on the register is correct for free.
+Underneath, the generated handler does three O(1) things: registers the caller's pending reply (`ctx.detach()`), fires the method as a task, and hands the mailbox back. The reply resolves when the task finishes, and an activation with work in flight refuses to idle out, so a pending reply is never dropped by deactivation. `concurrency=` bounds in-flight tasks per activation with real backpressure — above the limit, requests wait in the mailbox. On shutdown the tasks are cancelled and every pending caller gets `ActorUnavailableError`: in-flight work doesn't survive, consistent with a service holding no state.
 
-`Semaphore` permits are leases: `acquire` returns a `Lease` carrying a TTL and a monotonically increasing fencing token; the holder renews before expiry or the permit is reclaimed. Replication covers the owner node dying; the TTL and the fencing token cover the *client* holding the lease dying. `Lock` is `Semaphore(capacity=1)` with an async context manager:
+`node.service(Cls)` dispatches to a local activation with zero hops; a lite member load-balances across members. `at=` pins every call of a proxy to one chosen member — the node behind a specific tunnel, the one with the GPU:
 
 ```python
-async with system.lock("migrations", timeout=30.0):
-    ...  # held cluster-wide; released on exit
+member = next(m for m in node.members() if m.addr == "10.0.0.3:7001")
+pinned = node.service(Checkout, at=member)
 ```
 
-Under the hood a collection introduces nothing: its shards are ordinary actors whose wire name encodes the replication triple (`casty.MapShard[r3,wmajority,rdone]`), so any node that receives a call can materialize the shard class on the spot — the factory doesn't need to have run everywhere. Shards store encoded bytes and the typed facade does the encoding, which is why keys, values and elements never need registering as messages, and why `casty.Map[str, float]` still type-checks `put`/`get` statically. Lite members get the same facades and route like any actor call.
+`casty.local()` rejects `at=`: there are no members to pin to. Streaming methods are rejected on a service — a streaming handler holds the mailbox for the stream's lifetime, so a fixed-key service would serialize concurrent streams.
 
 ## Streaming
 
 Actor methods can take and return `AsyncIterator[T]`. Elements cross the network lazily over the transport's flow-controlled streams, so backpressure is end to end — a slow consumer throttles the producer, with no intermediate buffer:
 
 ```python
+import dataclasses
 from collections.abc import AsyncIterator
 
 
@@ -283,36 +358,53 @@ A streaming method is an ordinary handler: it holds its actor for the stream's l
 
 On the wire a streaming call opens a dedicated stream toward the key's owner: the scalar arguments travel once at open, each element is one frame, and each side half-closes when its iterator is exhausted. Failures arrive in-band as the same typed exceptions as a normal call; if the ring moved, the open is retried once — safe, since no element was processed yet — but after the first element the stream is stateful and any interruption is terminal. Killing the owner mid-stream raises in the caller's `async for`; a caller that `break`s cancels the handler on the owner. There is no resume — reopen from scratch if you want to.
 
-## Services
+## Collections
 
-An actor serializes: one handler at a time, so a handler awaiting slow I/O holds the mailbox for the whole wait. That is the actor's state guarantee — and its concurrency ceiling. A **service** removes the ceiling without taking the actor out of the path: `@casty.service` generates an actor whose handler fires the method as a task and returns immediately, so N calls to the same service progress together:
+Distributed collections are sugar over the same machinery — each one is a set of shard actors, placed and replicated like any other actor, behind a typed facade. There is no new mechanism: placement, replication, quorum and fencing are exactly those of the actor layer, and every factory takes the same `(replicas, write, read)` triple.
 
 ```python
-@casty.actor
-class Inventory:
-    stock: int = 10
+prices: casty.Map[str, float] = system.map("prices", replicas=3, write=casty.MAJORITY)
 
-    async def reserve(self, qty: int) -> bool:
-        if qty > self.stock:
-            return False
-        self.stock -= qty  # serial per sku: never sells what it does not have
-        return True
-
-
-@casty.service(concurrency=32)
-class Checkout:
-    async def buy(self, sku: str, qty: int) -> bool:
-        await charge_card(sku, qty)  # slow I/O, runs concurrently
-        return await casty.context().actor(Inventory, sku).reserve(qty)
-
-
-checkout = system.service(Checkout)  # no key — proxy typed as Checkout
-results = await asyncio.gather(*[checkout.buy("sku-1", 1) for _ in range(12)])
+await prices.put("sku-1234", 49.90)
+print(await prices.get("sku-1234"))
+print(await prices.size())
 ```
 
-A service is stateless by construction — a state field on the class is an import-time error — and unplaced: no key, no ring position. `node.service(Cls)` dispatches to a local activation with zero hops; a lite member load-balances across members. State lives in the actors the method calls, and calls with the same `(actor, key)` stay serialized there: the service is the concurrent door; the actor, the serial guardian.
+Three families:
 
-Underneath, the generated handler does three O(1) things: registers the caller's pending reply, fires the method as a task, and hands the mailbox back. The reply resolves when the task finishes, and an activation with work in flight refuses to idle out, so a pending reply is never dropped by deactivation. `concurrency=` bounds in-flight tasks per activation with real backpressure — above the limit, requests wait in the mailbox. On shutdown the tasks are cancelled and every pending caller gets `ActorUnavailableError`: in-flight work doesn't survive, consistent with a service holding no state.
+- **Sharded by item** — `map()`, `set()`, `multimap()`. Single-item operations route by item hash to one of `shards` shard actors (default 32); aggregations (`size()`, `items()`) fan out to every shard in parallel. They scale with the number of shards and nodes.
+- **Striped** — `counter()`. A single logical value split into stripes so writes don't hotspot one owner: `add` lands on a rotating stripe, `get` sums the fan-out.
+- **Single-owner** — `register()` (atomic ref with compare-and-set), `queue()` (FIFO), `semaphore()`, `lock()` and `barrier()`. Ordering and unique identity require serialization on a single owner, so these don't scale within one instance — scaling is many named instances. The single writer is also why CAS on the register is correct for free.
+
+| factory | operations |
+|---|---|
+| `map(name, shards=32)` | `put`, `get`, `remove`, `contains`, `size`, `items`, `clear` |
+| `set(name, shards=32)` | `add`, `remove`, `contains`, `size`, `items`, `clear`, `union`, `intersection`, `difference` |
+| `multimap(name, shards=32)` | `put`, `get`, `remove`, `remove_key`, `contains`, `size`, `clear` |
+| `counter(name, stripes=32)` | `add`, `get`, `reset` |
+| `register(name)` | `get`, `set`, `compare_and_set`, `get_and_set` |
+| `queue(name)` | `offer`, `poll`, `peek`, `drain`, `size`, `clear` |
+| `semaphore(name, capacity=N)` | `acquire`, `try_acquire`, `available` |
+| `lock(name, ttl=30.0, timeout=None)` | `acquire`, `try_lock`, `locked`, `async with` |
+| `barrier(name, parties=N)` | `wait`, `waiting` |
+
+All default to `replicas=3, write=MAJORITY, read=ONE`.
+
+> [!WARNING]
+> The `(replicas, write, read)` triple is part of a shard's wire identity: two callers using the same name with different settings address *different* shard actors. Keep the settings next to the name.
+
+`Semaphore` permits are leases: `acquire` returns a `Lease` carrying a TTL and a monotonically increasing fencing token; the holder renews before expiry or the permit is reclaimed. Replication covers the owner node dying; the TTL and the fencing token cover the *client* holding the lease dying. `Lock` is `Semaphore(capacity=1)` with an async context manager:
+
+```python
+async with system.lock("migrations", timeout=30.0):
+    ...  # held cluster-wide; released on exit
+```
+
+`Barrier` is cyclic: `wait()` blocks until `parties` callers have arrived, releases them all, and resets for the next round. Arrivals are quorum-replicated, so they survive owner failover; a timed-out waiter withdraws its arrival, so the barrier is never left one party short. Like a semaphore's `capacity`, `parties` is client-supplied — callers of the same name must agree on it.
+
+Blocking on a semaphore, lock or barrier is client-side by necessity: the owner's mailbox is serial, so a waiter parked inside the handler would deadlock the release that frees it. Those calls arrive once and then poll with backoff.
+
+Under the hood a collection introduces nothing: its shards are ordinary actors whose wire name encodes the replication triple (`casty.MapShard[r3,wmajority,rdone]`), so any node that receives a call can materialize the shard class on the spot — the factory doesn't need to have run everywhere. Shards store encoded bytes and the typed facade does the encoding, so primitive and `@casty.message` keys, values and elements need no wiring; a bare `@dataclass` / `typing.NamedTuple` is registered by naming it at the factory (`system.map(name, value=Order)`, `system.set(name, item=Point)`). Either way `casty.Map[str, float]` still type-checks `put`/`get` statically. Lite members get the same facades and route like any actor call.
 
 ## Paged state
 
@@ -344,14 +436,98 @@ class Telemetry:
 | state | commit | wire (2 replicas) | integral would be |
 |---|---|---|---|
 | 100k entries (`dict[str, int]`, 360 KB) | mutates 1 entry | **514 B** | ~740 KB |
-| 2.5M x 5 float64 (96 MB) | edits 1 cell | **258 KB** | 192 MB |
+| 2.5M × 5 float64 (96 MB) | edits 1 cell | **258 KB** | 192 MB |
 | 65 KB (3 fields) | mutates 1 `int` field | **504 B** | ~131 KB |
 
-`casty.explain(Actor)` prints the regime of every field, so two regimes chosen by type hint are never invisible. How the pages stay consistent across replicas — deltas, catch-up, atomicity — is under *How it works* below.
+Two regimes are chosen by type hint, silently. `print(casty.explain(Telemetry))` shows what was picked:
+
+```
+app.Telemetry  replicas=3 write=2
+  readings  DataFrame  paged     PandasPager
+  revision  int        integral  immutable: compared, not re-encoded
+```
+
+How the pages stay consistent across replicas — deltas, catch-up, atomicity — is under [Paged replication](#paged-replication).
+
+## Running a cluster
+
+```python
+system = casty.local()                                   # in-process: no networking, no cluster
+system = await casty.start("0.0.0.0:7001", seeds=[...])  # full member: hosts actors
+system = await casty.connect(["10.0.0.1:7001"])          # lite member: routes, hosts nothing
+```
+
+All three share the same API (`actor()`, `service()`, the collection factories, `spy()`, `close()`). The usual form is the async context manager — `async with casty.start(...) as system:` — which closes the system on exit. When the lifetime doesn't fit one block (an application object that owns the system, say), await the call as above and call `await system.close()` yourself.
+
+`casty.local()` is a complete in-process actor system — mailboxes, lifecycle, supervision — for single-process applications that want the actor model without the cluster. It is not a one-node cluster: under it `replicas > 1` degrades to a single copy, where a real cluster of one would fence replicated writes with `QuorumUnavailableError`. A lite member joins the membership and knows the ring, so it routes calls in one hop, but never owns keys and is invisible to placement.
+
+Nodes are homogeneous — there is no leader. Start one node, point the others at it:
+
+```python
+node_a = await casty.start("10.0.0.1:7001")
+node_b = await casty.start("10.0.0.2:7001", seeds=["10.0.0.1:7001"])
+node_c = await casty.start("10.0.0.3:7001", seeds=["10.0.0.1:7001"])
+```
+
+Seeds are only an entry point: the join random-walks into the overlay, and from then on membership is gossip. Every key is owned by exactly one node, determined by a token ring that every member computes locally — placement needs no coordinator and no extra hops. When a node joins or leaves, only the affected key ranges move.
+
+| `start` parameter | |
+|---|---|
+| `listen` | `host:port` to bind |
+| `advertise` | the address other nodes dial; required when listening on `0.0.0.0` |
+| `seeds` | existing members to join through; empty starts a new cluster |
+| `cluster_name` | handshake guard — nodes with different names refuse each other |
+| `tls` | cluster-wide TLS material |
+| `config` | every protocol knob |
+| `supervisor` | global failure policy |
+| `interceptor` | inline hook for every actor event on this node |
+
+`node.members()` returns the current view as `Member(node_id, addr, role)` values — what `service(cls, at=member)` pins to.
+
+`system.close()` is graceful: it drains in-flight handlers, runs deactivate hooks, hands its ranges off to the new owners, and announces a clean leave. Peers mark it LEFT with no suspicion window, so a rolling restart doesn't stampede the cluster.
+
+**TLS**, including mTLS, is one argument away. With `ca` set, peers are verified in both roles; hostname checking is off, since nodes are addressed by IP and authenticated by the CA:
+
+```python
+async with casty.start(
+    "0.0.0.0:7001",
+    seeds=[...],
+    tls=casty.TLS(cert="node.pem", key="node.key", ca="ca.pem"),
+) as system:
+    ...
+```
+
+**Clients behind a tunnel.** A member announces the address its peers should dial, which is not always the address a client can reach. `address_map` rewrites it at the socket — connections stay keyed by the announced address — and applies to every outbound dial, seeds included:
+
+```python
+tunnels = {"10.0.0.1:7001": "127.0.0.1:17001", "10.0.0.2:7001": "127.0.0.1:17002"}
+client = await casty.connect(
+    ["10.0.0.1:7001"],
+    address_map=lambda announced: tunnels.get(announced, announced),
+)
+```
+
+**Configuration.** Every timeout, view size and protocol interval is a knob with a documented default: `casty.start(..., config=casty.Config(...))`. The ones worth knowing:
+
+| knob | default | |
+|---|---|---|
+| `call_timeout` | 10 s | how long a remote call waits for its reply |
+| `default_idle_timeout` | 300 s | idle deactivation, for classes that don't set their own |
+| `drain_timeout` | 10 s | how long `close()` waits for in-flight handlers |
+| `replication_timeout` | 5 s | how long the owner waits for replica acks |
+| `handoff_timeout` | 10 s | how long a leaving node spends handing ranges off |
+| `membership.active_view_size` | 5 | overlay connections per node |
+| `membership.suspicion_timeout` | 5 s | grace a suspected node has to refute |
+| `transport.max_message_bytes` | 4 MiB | largest single message; above this it is a bulk transfer |
+| `transport.initial_window_bytes` | 256 KiB | per-stream flow-control credit |
+| `transport.compression.min_bytes` | 4096 | payloads below this are sent uncompressed |
+
+> [!IMPORTANT]
+> Every member runs the same application code. Casty never ships code across the cluster: a call for a class the destination doesn't know fails with `UnknownActorTypeError` at the caller. Deploy a new actor type to every node before its first use.
 
 ## Inspection
 
-Every handler execution emits lifecycle events — `Activated`, `Received`, `Completed`, `Failed`, `Deactivated` — born on the node that runs the handler, with an exact per-activation sequence number. Two consumers, opposite trade-offs:
+Every handler execution emits lifecycle events — `Activated`, `Received`, `Completed`, `Failed`, `Deactivated` — born on the node that runs the handler, with an exact per-activation sequence number. Two consumers, opposite trade-offs.
 
 **Interceptor** — a sync callable passed to `start`/`local`, like `supervisor`. It runs inline in the actor's worker, so delivery is guaranteed and ordered — and its cost is the actor's cost. The contract is "return fast, never block, never raise" (a raise is logged, never fails the handler). This is the hook for metrics:
 
@@ -436,7 +612,7 @@ The ring is a pure function of the member list: same members in, same ring out. 
 
 Two details are protocol, not implementation. The hash is truncated blake2b — a fixed function of node id and vnode index for tokens, of the key string for lookups — because every node must compute the identical ring across processes, platforms and versions (Python's builtin `hash()` is salted per process and can never appear here), and the vnode count is a cluster-wide constant for the same reason. And the unit everything else moves is the **token range** — the arc between two adjacent tokens: handoff and replication deal in ranges, not individual keys, and the minimal-movement property holds by construction — adding a node moves keys only *to* it, removing a node moves only the keys that were *its*.
 
-### Replication
+### Replicated state
 
 Replication is **primary-based** — a single writer per key — with **quorum-acknowledged writes** and versions ordered by a **hybrid logical clock (HLC)**. There is no consensus protocol (no Raft, no Paxos); safety comes from quorum intersection and fencing.
 
@@ -523,7 +699,84 @@ One premise is explicit: every member runs the same application code. Casty neve
 
 `casty.local()` is a complete in-process actor system — mailboxes, lifecycle, supervision — but it is not a one-node cluster, and the two are kept distinct on purpose. Under local mode, `replicas > 1` runs as a single copy: no quorum, no durability. A real one-node cluster would instead fence replicated writes with `QuorumUnavailableError` whenever the configured quorum needs more nodes than exist. Local mode is for applications that want the actor model without the cluster, not for simulating one.
 
-The operational surface is deliberately small. Shutdown is a drain — stop accepting work, finish in-flight handlers, hand ranges off to the new owners, announce a clean leave — because a deploy must not look like a failure or set off a reactivation storm; node, client and local mode all close the same way, and all are async context managers. Observability is structured logging plus a pluggable metrics protocol, no-op by default: no dashboard, no bundled dependency. The single runtime dependency is msgpack — compression codecs beyond zlib and the pandas pager are optional extras — and the toolchain is uv, mypy strict, ruff and pytest.
+Durability means R copies in memory on R nodes. There is no disk store: a dead node's state comes back from the other replicas, never from a log, which is why the replica count — not a filesystem — is the durability knob, and why losing every replica of a key at once loses it.
+
+The operational surface is deliberately small. Shutdown is a drain — stop accepting work, finish in-flight handlers, hand ranges off to the new owners, announce a clean leave — because a deploy must not look like a failure or set off a reactivation storm; node, client and local mode all close the same way, and all are async context managers. Observability is structured logging plus the inspection API, no-op by default: no dashboard, no bundled dependency. The single runtime dependency is msgpack — compression codecs beyond zlib and the pandas pager are optional extras — and the toolchain is uv, mypy strict, ruff and pytest.
+
+## API at a glance
+
+**Declaring**
+
+```python
+@casty.actor(name=…, idle_timeout=…, supervisor=…, replicas=1, write=MAJORITY, read=ONE)
+@casty.service(name=…, concurrency=None)
+@casty.message(name=…)
+
+@casty.activate     # async, self only — after state is restored, before the first message
+@casty.deactivate   # async, self only — before the instance is dropped
+
+field: T = casty.transient(default=…, factory=…)   # not serialized, not replicated
+field: T = casty.paged(pager)                      # replicated by pages
+casty.explain(Cls)                                 # -> str: the regime of every state field
+```
+
+**Running**
+
+```python
+casty.local(supervisor=…, default_idle_timeout=…, drain_timeout=…, interceptor=…)  -> ActorSystem
+casty.start(listen, seeds=…, tls=…, config=…, supervisor=…, interceptor=…,
+            cluster_name=…, advertise=…)                                           -> Managed[Node]
+casty.connect(seeds, tls=…, config=…, cluster_name=…, address_map=…)               -> Managed[Client]
+```
+
+`Managed` is awaitable *and* an async context manager.
+
+**Addressing**
+
+```python
+system.actor(Cls, key)          # -> proxy typed as Cls
+system.service(Cls, at=None)    # -> proxy typed as Cls; at= pins the calls to a Member
+node.members()                  # -> frozenset[Member]
+```
+
+**Collections** — all take `(replicas=3, write=MAJORITY, read=ONE)`
+
+```python
+system.map(name, shards=32)         system.set(name, shards=32)
+system.multimap(name, shards=32)    system.counter(name, stripes=32)
+system.register(name)               system.queue(name)
+system.semaphore(name, capacity=N)  system.lock(name, ttl=30.0, timeout=None)
+system.barrier(name, parties=N)
+```
+
+`map`/`multimap` also take `key=`/`value=`, `set`/`queue` take `item=`, `register` takes `value=` — name a bare `@dataclass` / `typing.NamedTuple` there to use it as K/V without `@casty.message`.
+
+**Inside a handler**
+
+```python
+ctx = casty.context()
+ctx.key, ctx.actor_class, ctx.chain
+ctx.actor(Cls, key)                                              # typed proxy, chain propagated
+ctx.emit(self._fn, *args)                                        # self-message, next handler
+ctx.schedule(self._fn, *args, after=0.0, every=None, name=None)  # -> Schedule
+ctx.deactivate()                                                 # after this handler returns
+ctx.detach()                                                     # -> Reply
+```
+
+**Inspecting**
+
+```python
+system.spy(Cls | "glob" | None, key="*", scope="local"|"cluster", payloads=False)
+system.state_of(Cls, key)      # -> dict | None
+inspection.decode(event)       # payload bytes -> values
+```
+
+**Constants**
+
+```python
+casty.ONE / casty.MAJORITY / casty.ALL   # consistency
+casty.KEEP / casty.RESET / casty.STOP    # supervisor directives
+```
 
 ## Examples
 

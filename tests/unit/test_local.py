@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import socket
 import typing
 
@@ -200,3 +201,42 @@ async def test_map_roundtrips_locally() -> None:
         assert dict(await m.items()) == {"b": 2}
         await m.clear()
         assert await m.size() == 0
+
+
+@dataclasses.dataclass
+class Order:  # bare @dataclass, no @casty.message
+    sku: str
+    qty: int = 1
+
+
+class Vec(typing.NamedTuple):  # bare typing.NamedTuple, no @casty.message
+    x: int
+    y: int
+
+
+async def test_map_of_bare_dataclass_value() -> None:
+    # value=Order registers the bare dataclass at facade construction; K/V then
+    # encode/decode like any registered message. No @casty.message on Order.
+    async with casty.local() as system:
+        orders: casty.Map[str, Order] = system.map("orders", value=Order)
+        await orders.put("a", Order(sku="x", qty=2))
+        await orders.put("b", Order(sku="y"))
+        assert await orders.get("a") == Order(sku="x", qty=2)
+        assert dict(await orders.items()) == {"a": Order(sku="x", qty=2), "b": Order(sku="y")}
+
+
+async def test_set_of_bare_namedtuple_item() -> None:
+    async with casty.local() as system:
+        points: casty.Set[Vec] = system.set("points", item=Vec)
+        assert await points.add(Vec(x=1, y=2)) is True
+        assert await points.add(Vec(x=1, y=2)) is False
+        assert await points.contains(Vec(x=1, y=2)) is True
+        assert set(await points.items()) == {Vec(x=1, y=2)}
+
+
+async def test_register_of_bare_dataclass_value() -> None:
+    async with casty.local() as system:
+        ref: casty.Register[Order] = system.register("current", value=Order)
+        assert await ref.get() is None
+        await ref.set(Order(sku="z"))
+        assert await ref.get() == Order(sku="z")

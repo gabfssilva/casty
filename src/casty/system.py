@@ -26,6 +26,7 @@ from casty.collections.register import Register
 from casty.collections.semaphore import Lock, Semaphore
 from casty.collections.set import Set
 from casty.membership.table import Member
+from casty.serde.registry import ensure_registered
 
 
 class ActorSystem(abc.ABC):
@@ -107,6 +108,8 @@ class ActorSystem(abc.ABC):
         self,
         name: str,
         *,
+        key: type[K] | None = None,
+        value: type[V] | None = None,
         replicas: int = 3,
         write: actor_registry.Consistency | int = actor_registry.Consistency.MAJORITY,
         read: actor_registry.Consistency | int = actor_registry.Consistency.ONE,
@@ -118,6 +121,9 @@ class ActorSystem(abc.ABC):
         ----------
         name : str
             Cluster-wide name of the map.
+        key, value : type | None
+            K and V. A registered `@casty.message` or primitive needs neither;
+            pass a bare `@dataclass` / `typing.NamedTuple` here to register it.
         replicas : int
             Physical nodes holding each shard's state.
         write : Consistency | int
@@ -130,9 +136,12 @@ class ActorSystem(abc.ABC):
         Returns
         -------
         Map[K, V]
-            Typed facade; K and V need no registration, they are encoded
-            per operation.
+            Typed facade; K and V encode per operation.
         """
+        if key is not None:
+            ensure_registered(key, "map key")
+        if value is not None:
+            ensure_registered(value, "map value")
         info = collections_map.shard_info(replicas, write, read)
         return Map(self, name, info, shards)
 
@@ -140,6 +149,7 @@ class ActorSystem(abc.ABC):
         self,
         name: str,
         *,
+        item: type[T] | None = None,
         replicas: int = 3,
         write: actor_registry.Consistency | int = actor_registry.Consistency.MAJORITY,
         read: actor_registry.Consistency | int = actor_registry.Consistency.ONE,
@@ -151,6 +161,9 @@ class ActorSystem(abc.ABC):
         ----------
         name : str
             Cluster-wide name of the set.
+        item : type | None
+            T. A registered `@casty.message` or primitive needs none; pass a
+            bare `@dataclass` / `typing.NamedTuple` here to register it.
         replicas : int
             Physical nodes holding each shard's state.
         write : Consistency | int
@@ -163,8 +176,10 @@ class ActorSystem(abc.ABC):
         Returns
         -------
         Set[T]
-            Typed facade; T needs no registration.
+            Typed facade; T encodes per operation.
         """
+        if item is not None:
+            ensure_registered(item, "set item")
         info = collections_set.shard_info(replicas, write, read)
         return Set(self, name, info, shards)
 
@@ -172,6 +187,8 @@ class ActorSystem(abc.ABC):
         self,
         name: str,
         *,
+        key: type[K] | None = None,
+        value: type[V] | None = None,
         replicas: int = 3,
         write: actor_registry.Consistency | int = actor_registry.Consistency.MAJORITY,
         read: actor_registry.Consistency | int = actor_registry.Consistency.ONE,
@@ -184,6 +201,9 @@ class ActorSystem(abc.ABC):
         ----------
         name : str
             Cluster-wide name of the multimap.
+        key, value : type | None
+            K and V. A registered `@casty.message` or primitive needs neither;
+            pass a bare `@dataclass` / `typing.NamedTuple` here to register it.
         replicas : int
             Physical nodes holding each shard's state.
         write : Consistency | int
@@ -196,8 +216,12 @@ class ActorSystem(abc.ABC):
         Returns
         -------
         MultiMap[K, V]
-            Typed facade; K and V need no registration.
+            Typed facade; K and V encode per operation.
         """
+        if key is not None:
+            ensure_registered(key, "multimap key")
+        if value is not None:
+            ensure_registered(value, "multimap value")
         info = collections_multimap.shard_info(replicas, write, read)
         return MultiMap(self, name, info, shards)
 
@@ -238,6 +262,7 @@ class ActorSystem(abc.ABC):
         self,
         name: str,
         *,
+        value: type[T] | None = None,
         replicas: int = 3,
         write: actor_registry.Consistency | int = actor_registry.Consistency.MAJORITY,
         read: actor_registry.Consistency | int = actor_registry.Consistency.ONE,
@@ -249,6 +274,9 @@ class ActorSystem(abc.ABC):
         ----------
         name : str
             Cluster-wide name of the register.
+        value : type | None
+            T. A registered `@casty.message` or primitive needs none; pass a
+            bare `@dataclass` / `typing.NamedTuple` here to register it.
         replicas : int
             Physical nodes holding the value.
         write : Consistency | int
@@ -259,8 +287,10 @@ class ActorSystem(abc.ABC):
         Returns
         -------
         Register[T]
-            Typed facade; T needs no registration.
+            Typed facade; T encodes per operation.
         """
+        if value is not None:
+            ensure_registered(value, "register value")
         info = collections_register.shard_info(replicas, write, read)
         return Register(self, name, info, 1)
 
@@ -268,6 +298,7 @@ class ActorSystem(abc.ABC):
         self,
         name: str,
         *,
+        item: type[T] | None = None,
         replicas: int = 3,
         write: actor_registry.Consistency | int = actor_registry.Consistency.MAJORITY,
         read: actor_registry.Consistency | int = actor_registry.Consistency.ONE,
@@ -280,6 +311,9 @@ class ActorSystem(abc.ABC):
         ----------
         name : str
             Cluster-wide name of the queue.
+        item : type | None
+            T. A registered `@casty.message` or primitive needs none; pass a
+            bare `@dataclass` / `typing.NamedTuple` here to register it.
         replicas : int
             Physical nodes holding the queue's state.
         write : Consistency | int
@@ -290,8 +324,10 @@ class ActorSystem(abc.ABC):
         Returns
         -------
         Queue[T]
-            Typed facade; T needs no registration.
+            Typed facade; T encodes per operation.
         """
+        if item is not None:
+            ensure_registered(item, "queue item")
         info = collections_queue.shard_info(replicas, write, read)
         return Queue(self, name, info, 1)
 
