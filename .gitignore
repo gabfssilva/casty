@@ -1,12 +1,25 @@
-.DS_Store
-.venv/
-.idea/
-.claude/
+# Python-generated files
 __pycache__/
-*.pyc
-*.egg-info/
-src/casty/_version.py
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+/benchmarks/results/
+
+# Rust
+/target/
+src/casty/_casty*.so
+src/casty/_casty*.pyd
+
+# Tooling
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
-dist/
+.idea/
+.claude/
+.DS_Store

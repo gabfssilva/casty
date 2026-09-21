@@ -1,0 +1,24 @@
+[package]
+name = "casty-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+casty-core = { path = "../casty-core" }
+flate2 = "1.1"
+lz4_flex = { version = "0.14", default-features = false, features = ["frame"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rustls-pemfile = "2.2"
+tokio = { version = "1.53", features = ["net", "io-util", "rt", "rt-multi-thread", "sync", "time", "macros"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+zstd = "0.14"
+
+[dev-dependencies]
+casty-core = { path = "../casty-core" }
+rcgen = "0.14"
+tokio = { version = "1.53", features = ["process", "test-util"] }
+
+[lints]
+workspace = true

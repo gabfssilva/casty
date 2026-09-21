@@ -1,0 +1,468 @@
+//! Connections to other nodes, one per pair, opened by the first side that sends.
+//!
+//! An envelope for a `NodeId` reaches only that incarnation: it is dropped when another incarnation answers at the
+//! node's address, and a node without an address is reachable only through a connection it opened. An envelope for a
+//! seed reaches whichever incarnation answers. Dial failures drop the queued envelopes, and the next dial to the same
+//! address waits with exponential backoff and jitter.
+//!
+//! When two nodes dial each other at once, both keep the connection opened by the smaller incarnation: that node
+//! rejects the other hello as duplicate, and the other node hands the queue of its dial to the connection it accepts.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use casty_core::node::NodeId;
+use tokio::net::TcpStream;
+use tokio::sync::{Notify, mpsc};
+
+use crate::compress::Name;
+use crate::connection::{Broken, Connection, Greeting, Incoming, Socket};
+use crate::handshake::{Hello, Message, Reject, Rejection, answer};
+use crate::limits::Limits;
+use crate::tls::Identity;
+
+/// Where an envelope goes: a node of a known incarnation, or whichever one answers at an address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Node(NodeId),
+    Seed(String),
+}
+
+impl Target {
+    #[must_use]
+    pub fn address(&self) -> Option<&str> {
+        match self {
+            Self::Node(node) => node.address.as_deref(),
+            Self::Seed(address) => Some(address),
+        }
+    }
+}
+
+type Queued = (Target, String, Vec<u8>);
+
+/// What turns an advertised address into the one that is dialed: a tunnel, a NAT, or a proxy of a test.
+pub type AddressMap = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
+/// How a peer is reached, and which side opened it.
+#[derive(Debug)]
+struct Link {
+    connection: Arc<Connection>,
+    initiated: bool,
+}
+
+#[derive(Debug)]
+struct Dial {
+    queue: Vec<Queued>,
+    cancel: Arc<Notify>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Backoff {
+    delay: Duration,
+    retry_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    links: HashMap<NodeId, Link>,
+    addresses: HashMap<String, Arc<Connection>>,
+    dials: HashMap<String, Dial>,
+    backoff: HashMap<String, Backoff>,
+    closed: bool,
+}
+
+/// What the pool needs to open a connection and to answer one.
+#[derive(Clone)]
+pub struct Settings {
+    pub local: Hello,
+    pub ours: Vec<Name>,
+    pub limits: Limits,
+    pub min_compressed: usize,
+    pub tls: Option<Identity>,
+    pub address_map: Option<AddressMap>,
+}
+
+impl core::fmt::Debug for Settings {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Settings")
+            .field("local", &self.local)
+            .field("ours", &self.ours)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+pub struct Pool {
+    settings: Settings,
+    inbound: mpsc::UnboundedSender<Incoming>,
+    state: Mutex<State>,
+    /// Woken when the pool closes, which is what ends a handshake that is still in the air.
+    closing: Arc<Notify>,
+}
+
+impl Pool {
+    #[must_use]
+    pub fn new(settings: Settings, inbound: mpsc::UnboundedSender<Incoming>) -> Arc<Self> {
+        Arc::new(Self {
+            settings,
+            inbound,
+            state: Mutex::new(State::default()),
+            closing: Arc::new(Notify::new()),
+        })
+    }
+
+    /// Queue an envelope for `target`, opening the connection it needs when there is none.
+    ///
+    /// Looking a peer up and queueing for it happen under one lock: between them, a dial that has just finished
+    /// would take the queue with it and leave this envelope on a connection that is about to be dropped.
+    pub fn send(self: &Arc<Self>, target: &Target, name: &str, payload: &[u8]) {
+        enum Next {
+            Send(Arc<Connection>),
+            Dial(String, Arc<Notify>),
+            Queued,
+            Drop,
+        }
+        let next = {
+            let mut state = self.held();
+            let held = match target {
+                Target::Node(node) => match state.links.get(node) {
+                    Some(link) => Some(Arc::clone(&link.connection)),
+                    // Another incarnation answers at that address, so this envelope has nowhere to go.
+                    None if node
+                        .address
+                        .as_ref()
+                        .is_some_and(|address| state.addresses.contains_key(address)) =>
+                    {
+                        return;
+                    }
+                    None => None,
+                },
+                Target::Seed(address) => state.addresses.get(address).map(Arc::clone),
+            };
+            match (held, target.address()) {
+                (Some(connection), _) => Next::Send(connection),
+                (None, None) => Next::Drop,
+                (None, Some(address)) if state.closed => {
+                    let _ = address;
+                    Next::Drop
+                }
+                (None, Some(address)) => {
+                    let queued = (target.clone(), name.to_owned(), payload.to_vec());
+                    if let Some(dial) = state.dials.get_mut(address) {
+                        dial.queue.push(queued);
+                        Next::Queued
+                    } else {
+                        let cancel = Arc::new(Notify::new());
+                        state.dials.insert(
+                            address.to_owned(),
+                            Dial {
+                                queue: vec![queued],
+                                cancel: Arc::clone(&cancel),
+                            },
+                        );
+                        Next::Dial(address.to_owned(), cancel)
+                    }
+                }
+            }
+        };
+        match next {
+            Next::Send(connection) => connection.send(name, payload),
+            Next::Dial(address, cancel) => self.start(address, cancel),
+            Next::Queued | Next::Drop => {}
+        }
+    }
+
+    fn start(self: &Arc<Self>, address: String, cancel: Arc<Notify>) {
+        let pool = Arc::clone(self);
+        let closing = Arc::clone(&self.closing);
+        tokio::spawn(async move {
+            tokio::select! {
+                () = pool.dial(address) => {}
+                () = cancel.notified() => {}
+                () = closing.notified() => {}
+            }
+        });
+    }
+
+    /// Take a connection the listener accepted, and answer its hello.
+    pub fn accept<S: Socket>(self: &Arc<Self>, socket: S) {
+        if self.held().closed {
+            return;
+        }
+        let pool = Arc::clone(self);
+        let closing = Arc::clone(&self.closing);
+        tokio::spawn(async move {
+            let greeting =
+                Greeting::new(socket, pool.settings.limits, pool.settings.min_compressed);
+            tokio::select! {
+                () = pool.greet(greeting) => {}
+                () = closing.notified() => {}
+            }
+        });
+    }
+
+    /// Stop dialing and accepting. Connections write what they can before going away, unless `abort`.
+    pub fn close(&self, abort: bool) {
+        let links = {
+            let mut state = self.held();
+            state.closed = true;
+            state.dials.clear();
+            state
+                .links
+                .values()
+                .map(|link| Arc::clone(&link.connection))
+                .collect::<Vec<_>>()
+        };
+        self.closing.notify_waiters();
+        for connection in links {
+            if abort {
+                connection.abort();
+            } else {
+                connection.close();
+            }
+        }
+    }
+
+    /// Whether anything is still on its way out, which an orderly shutdown waits for.
+    #[must_use]
+    pub fn idle(&self) -> bool {
+        let state = self.held();
+        state.dials.is_empty() && state.links.values().all(|link| !link.connection.alive())
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().expect("the pool lock is never poisoned")
+    }
+
+    async fn greet<S: Socket>(self: Arc<Self>, mut greeting: Greeting<S>) {
+        let heard = tokio::time::timeout(self.settings.limits.handshake, greeting.hear()).await;
+        let Ok(Ok(Message::Hello(hello))) = heard else {
+            return;
+        };
+        let reply = match answer(&hello, &self.settings.local, &self.settings.ours) {
+            Err(reject) => Err(reject),
+            Ok(_) if self.keeps_own(&hello.node) => Err(Reject {
+                code: Rejection::Duplicate as i64,
+                reason: "the connection this node is opening is kept".to_owned(),
+            }),
+            Ok(ack) => Ok(ack),
+        };
+        match reply {
+            Err(reject) => greeting.reject(&Message::Reject(reject)).await,
+            Ok(ack) => {
+                let compression = ack.compression;
+                if greeting.say(&Message::Ack(ack)).await.is_err() {
+                    return;
+                }
+                greeting.compress(compression);
+                let connection = greeting.run(self.inbound.clone());
+                self.register(&connection, &hello.node, false, None);
+            }
+        }
+    }
+
+    async fn dial(self: Arc<Self>, address: String) {
+        let wait = self
+            .held()
+            .backoff
+            .get(&address)
+            .map(|backoff| backoff.retry_at.saturating_duration_since(Instant::now()));
+        if let Some(wait) = wait
+            && !wait.is_zero()
+        {
+            tokio::time::sleep(wait).await;
+        }
+        let Ok((mut greeting, message)) = self.initiate(&address).await else {
+            return self.fail(&address);
+        };
+        match message {
+            Message::Ack(ack) => {
+                let peer = ack.node.clone();
+                greeting.compress(ack.compression);
+                let connection = greeting.run(self.inbound.clone());
+                self.register(&connection, &peer, true, Some(&address));
+            }
+            Message::Reject(reject) if reject.code == Rejection::Duplicate as i64 => {
+                // The peer keeps the connection it is opening to this node, and accepting it supersedes this dial.
+                tokio::time::sleep(self.settings.limits.handshake).await;
+                self.fail(&address);
+            }
+            Message::Reject(reject) => {
+                let seeded = self.held().dials.get(&address).is_some_and(|dial| {
+                    dial.queue
+                        .iter()
+                        .any(|(target, _, _)| matches!(target, Target::Seed(_)))
+                });
+                if seeded {
+                    let _ = self.inbound.send(Incoming::Refused(format!(
+                        "{address} refused the connection: {}",
+                        reject.reason
+                    )));
+                }
+                self.fail(&address);
+            }
+            Message::Hello(_) => self.fail(&address),
+        }
+    }
+
+    async fn initiate(
+        &self,
+        address: &str,
+    ) -> Result<(Greeting<Box<dyn Socket>>, Message), Broken> {
+        let dialed = match &self.settings.address_map {
+            None => address.to_owned(),
+            Some(map) => map(address),
+        };
+        let socket = tokio::time::timeout(self.settings.limits.dial, TcpStream::connect(&dialed))
+            .await
+            .map_err(|_| Broken::Timeout)??;
+        socket.set_nodelay(true).ok();
+        let socket: Box<dyn Socket> = match &self.settings.tls {
+            None => Box::new(socket),
+            Some(identity) => {
+                let name = rustls::pki_types::ServerName::try_from("casty")
+                    .expect("a fixed name is always valid")
+                    .to_owned();
+                let connector = tokio_rustls::TlsConnector::from(Arc::clone(&identity.client));
+                let stream = tokio::time::timeout(
+                    self.settings.limits.handshake,
+                    connector.connect(name, socket),
+                )
+                .await
+                .map_err(|_| Broken::Timeout)??;
+                Box::new(stream)
+            }
+        };
+        let mut greeting =
+            Greeting::new(socket, self.settings.limits, self.settings.min_compressed);
+        let said = async {
+            greeting
+                .say(&Message::Hello(self.settings.local.clone()))
+                .await?;
+            greeting.hear().await
+        };
+        let heard = tokio::time::timeout(self.settings.limits.handshake, said)
+            .await
+            .map_err(|_| Broken::Timeout)??;
+        Ok((greeting, heard))
+    }
+
+    /// Whether a connection this node opened, or is opening, to `peer` wins over the one `peer` opened.
+    fn keeps_own(&self, peer: &NodeId) -> bool {
+        if self.settings.local.node.incarnation >= peer.incarnation {
+            return false;
+        }
+        let state = self.held();
+        if let Some(link) = state.links.get(peer) {
+            return link.initiated;
+        }
+        let Some(address) = &peer.address else {
+            return false;
+        };
+        if !state.dials.contains_key(address) {
+            return false;
+        }
+        state
+            .backoff
+            .get(address)
+            .is_none_or(|backoff| backoff.retry_at <= Instant::now())
+    }
+
+    /// Put `connection` in the place of whatever reached `peer` until now, and hand it what was queued for it.
+    ///
+    /// The dial this connection finishes, and the one it supersedes, are taken in the same lock that registers it,
+    /// so that nothing queues for a dial that is already over.
+    fn register(
+        self: &Arc<Self>,
+        connection: &Arc<Connection>,
+        peer: &NodeId,
+        initiated: bool,
+        dialed: Option<&str>,
+    ) {
+        let previous = {
+            let mut state = self.held();
+            if state.closed {
+                connection.abort();
+                return;
+            }
+            let mut queue = Vec::new();
+            for address in [peer.address.as_deref(), dialed].into_iter().flatten() {
+                if let Some(dial) = state.dials.remove(address) {
+                    dial.cancel.notify_waiters();
+                    queue.extend(dial.queue);
+                }
+                state.backoff.remove(address);
+                state
+                    .addresses
+                    .insert(address.to_owned(), Arc::clone(connection));
+            }
+            let previous = state.links.insert(
+                peer.clone(),
+                Link {
+                    connection: Arc::clone(connection),
+                    initiated,
+                },
+            );
+            // Queued under the same lock that made the connection reachable: a send that arrives in between would
+            // otherwise go out ahead of what was waiting for the dial to finish.
+            for (target, name, payload) in queue {
+                if matches!(&target, Target::Seed(_)) || target == Target::Node(peer.clone()) {
+                    connection.send(&name, &payload);
+                }
+            }
+            previous
+        };
+        if let Some(previous) = previous {
+            previous.connection.abort();
+        }
+        let pool = Arc::clone(self);
+        let watched = Arc::clone(connection);
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            watched.over().await;
+            pool.forget(&peer, &watched);
+        });
+    }
+
+    fn forget(&self, peer: &NodeId, connection: &Arc<Connection>) {
+        let mut state = self.held();
+        if state
+            .links
+            .get(peer)
+            .is_some_and(|link| Arc::ptr_eq(&link.connection, connection))
+        {
+            state.links.remove(peer);
+        }
+        state
+            .addresses
+            .retain(|_, held| !Arc::ptr_eq(held, connection));
+    }
+
+    fn fail(&self, address: &str) {
+        let mut state = self.held();
+        state.dials.remove(address);
+        let previous = state.backoff.get(address).copied();
+        let first = self.settings.limits.backoff_first;
+        let limit = self.settings.limits.backoff_limit;
+        let delay = previous.map_or(first, |backoff| (backoff.delay * 2).min(limit));
+        let jitter = 0.75 + spread() * 0.5;
+        state.backoff.insert(
+            address.to_owned(),
+            Backoff {
+                delay,
+                retry_at: Instant::now() + delay.mul_f64(jitter),
+            },
+        );
+    }
+}
+
+/// A number in `[0, 1)`, which is all the jitter of a retry needs.
+fn spread() -> f64 {
+    use std::hash::{BuildHasher, RandomState};
+    #[allow(clippy::cast_precision_loss)]
+    {
+        (RandomState::new().hash_one(0_u8) >> 11) as f64 / (1_u64 << 53) as f64
+    }
+}

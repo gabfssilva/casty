@@ -1,0 +1,158 @@
+//! The bodies of the collection types, which run in Rust instead of on the event loop.
+//!
+//! A collection is an actor like any other: the same messages on the wire, the same state in pages, the same writes
+//! to the replicas. What is different is that its body never enters an interpreter, so a message it takes costs no
+//! coroutine, no task and no turn of the loop.
+
+pub mod barrier;
+pub mod counter;
+pub mod entry;
+pub mod queue;
+pub mod register;
+pub mod semaphore;
+pub mod table;
+
+use std::sync::Arc;
+
+use casty_core::node::Target;
+use casty_core::store::Pages;
+
+/// What a native body was given to work on.
+#[derive(Debug)]
+pub enum Given<'a> {
+    /// A message from the mailbox, as it travelled.
+    Message(&'a [u8]),
+    /// The deadline the last turn asked for has passed, and no message came in the meantime.
+    Alarm,
+    /// The answer to what the last turn asked for, with the message that is still being worked on.
+    Answered { message: &'a [u8], answer: &'a [u8] },
+}
+
+/// What one message does: what it writes, what it answers, and what it waits for.
+///
+/// `ask` is the one thing that suspends a body: the rest of the message takes effect only once the answer arrives,
+/// and the body sees the same message again with it.
+#[derive(Debug, Default)]
+pub struct Turn {
+    pub save: Option<Pages>,
+    pub replies: Vec<(Target, Vec<u8>)>,
+    /// When to run again with no message, for a body that has deadlines of its own.
+    pub alarm: Option<f64>,
+    pub ask: Option<Asking>,
+}
+
+/// A message written around the target its answer comes back to, which only the activation can mint.
+pub type Addressed = Box<dyn Fn(&Target) -> Vec<u8> + Send + Sync>;
+
+pub struct Asking {
+    pub to: Target,
+    pub message: Addressed,
+}
+
+impl core::fmt::Debug for Asking {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Asking")
+            .field("to", &self.to)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A body that runs in Rust.
+pub trait Native: Send + Sync + core::fmt::Debug + 'static {
+    /// The pages a key of this type starts from.
+    fn initial(&self) -> Pages;
+
+    /// One message, the alarm going off, or the answer the last message was waiting for.
+    ///
+    /// `at` is the wall clock in seconds, which only a body with deadlines reads.
+    fn step(&self, held: &Pages, given: &Given<'_>, at: f64) -> Turn;
+
+    /// Whether this body ever asks for a deadline. One that does not is never woken without a message.
+    fn timed(&self) -> bool {
+        false
+    }
+}
+
+/// The body of `name`, when this process has a native one for it.
+///
+/// Only the types of the collections have one, and a name is a type only where it lives: an actor of another module
+/// that happens to be called `counter` is a type of its own, with the body its author wrote.
+#[must_use]
+pub fn native(name: &str) -> Option<Arc<dyn Native>> {
+    let kind = collection(name)?;
+    match kind {
+        "counter" => Some(Arc::new(counter::Counter)),
+        "register" => Some(Arc::new(register::Register)),
+        "entry" => Some(Arc::new(entry::Entry)),
+        "table" => Some(Arc::new(table::Table)),
+        "queue" => Some(Arc::new(queue::Queue)),
+        "barrier" => Some(Arc::new(barrier::Barrier)),
+        "semaphore" => Some(Arc::new(semaphore::Semaphore)),
+        _ => None,
+    }
+}
+
+/// The kind of collection `name` is a type of, as it is declared or as a configuration of it.
+///
+/// A collection is configured by replicas and write level, and each configuration is a type of its own named
+/// `kind_replicas_level`. The body is the same for all of them.
+fn collection(name: &str) -> Option<&str> {
+    let (module, qualname) = name.split_once(':')?;
+    if module != "casty.collections" {
+        return None;
+    }
+    // The type as it is declared, which is the body of the namespace the kind is grouped under.
+    if let Some(kind) = qualname.strip_suffix(".actor") {
+        return Some(kind);
+    }
+    // A configuration of it, which is a type of its own so that two settings never share a key.
+    let (held, level) = qualname.rsplit_once('_')?;
+    if !matches!(level, "one" | "majority" | "all") {
+        return None;
+    }
+    let (kind, replicas) = held.rsplit_once('_')?;
+    if replicas.is_empty() || !replicas.chars().all(|digit| digit.is_ascii_digit()) {
+        return None;
+    }
+    Some(kind)
+}
+
+/// The name of a message within its type, which is the last part of the qualname it travels under.
+#[must_use]
+pub fn named(tag: &str) -> &str {
+    tag.rsplit('.').next().unwrap_or(tag)
+}
+
+/// The single page a state that is not a dataclass lives in.
+pub const WHOLE: &str = ".";
+
+#[cfg(test)]
+mod tests {
+    use super::collection;
+
+    #[test]
+    fn a_collection_is_one_where_it_is_declared_and_under_every_configuration_of_it() {
+        assert_eq!(
+            collection("casty.collections:counter.actor"),
+            Some("counter")
+        );
+        assert_eq!(
+            collection("casty.collections:counter_3_majority"),
+            Some("counter")
+        );
+        assert_eq!(
+            collection("casty.collections:semaphore_1_one"),
+            Some("semaphore")
+        );
+    }
+
+    #[test]
+    fn a_type_of_another_module_is_not_one_however_it_is_named() {
+        assert_eq!(collection("benchmarks.actors:counter"), None);
+        assert_eq!(collection("tests.app:queue"), None);
+        assert_eq!(collection("casty.collections:counter_3_some"), None);
+        assert_eq!(collection("casty.collections:counter_x_all"), None);
+        assert_eq!(collection("counter"), None);
+    }
+}

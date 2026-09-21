@@ -1,0 +1,45 @@
+# A cluster of 3 seeds and 30 nodes, plus a client that drives it.
+#
+#   docker compose up -d --build          # the whole cluster
+#   docker compose run --rm client        # traffic and a report per round
+#   docker compose up -d --scale node=45  # grow it while the client runs
+#   docker compose down
+
+x-casty: &casty
+  build:
+    context: ../..
+    dockerfile: examples/09-docker-cluster/Dockerfile
+  image: casty-example-docker-cluster
+  # Above the `leave_timeout` of 30 seconds, so that a node being stopped finishes handing its keys over.
+  stop_grace_period: 40s
+
+x-seeds: &seeds "seed-1:7400,seed-2:7400,seed-3:7400"
+
+services:
+  # A seed is a node like any other, only with an address the others know beforehand. A seed ignores its own address
+  # in the list, which is why it advertises the very name it is listed by.
+  seed-1:
+    <<: *casty
+    hostname: seed-1
+    environment: { SEEDS: *seeds, ADVERTISE: "seed-1:7400" }
+  seed-2:
+    <<: *casty
+    hostname: seed-2
+    environment: { SEEDS: *seeds, ADVERTISE: "seed-2:7400" }
+  seed-3:
+    <<: *casty
+    hostname: seed-3
+    environment: { SEEDS: *seeds, ADVERTISE: "seed-3:7400" }
+
+  node:
+    <<: *casty
+    environment: { SEEDS: *seeds }
+    depends_on: [seed-1, seed-2, seed-3]
+    deploy:
+      replicas: 30
+
+  client:
+    <<: *casty
+    command: ["client.py"]
+    environment: { SEEDS: *seeds }
+    profiles: [client]

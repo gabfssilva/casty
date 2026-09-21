@@ -1,0 +1,36 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[options]
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer-span = "P7D"
+
+[[package]]
+name = "casty"
+version = "0.1.0"
+source = { editable = "../../" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=2.3.1" },
+    { name = "pyright", specifier = ">=1.1.414" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-asyncio", specifier = ">=1.4.0" },
+    { name = "pytest-describe", specifier = ">=3.2.0" },
+    { name = "ruff", specifier = ">=0.16.6" },
+    { name = "trustme", specifier = ">=1.2.1" },
+]
+
+[[package]]
+name = "casty-example-state-machine"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "casty" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "casty", editable = "../../" }]

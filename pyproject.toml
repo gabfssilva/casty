@@ -1,79 +1,77 @@
 [project]
 name = "casty"
-dynamic = ["version"]
-description = "Typed, clustered actor framework for Python"
+version = "0.1.0"
+description = "Typed, replicated virtual actors for Python"
 readme = "README.md"
-requires-python = ">=3.12"
-license = {text = "MIT"}
-authors = [{name = "Gabriel Francisco"}]
-keywords = ["actor", "async", "actor-model", "asyncio", "concurrency", "cluster", "distributed"]
+requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Gabriel Francisco" }]
+keywords = ["actor", "actor-model", "virtual-actors", "asyncio", "concurrency", "cluster", "distributed"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    "Topic :: Software Development :: Libraries",
+    "Programming Language :: Rust",
     "Framework :: AsyncIO",
+    "Topic :: Software Development :: Libraries",
     "Typing :: Typed",
 ]
-dependencies = ["msgpack>=1.0"]
+dependencies = []
 
 [project.urls]
 Repository = "https://github.com/gabfssilva/casty"
 
-[project.optional-dependencies]
-lz4 = ["lz4>=4.0"]
-zstd = ["zstandard>=0.22"]
-uvloop = ["uvloop>=0.21"]
-# copy-on-write is the whole diff, and it is only guaranteed from pandas 3.0
-pandas = ["pandas>=3.0", "pyarrow>=17"]
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "crates/casty-py/Cargo.toml"
+python-source = "src"
+module-name = "casty._casty"
+features = ["pyo3/extension-module"]
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
-    "mypy>=1.11",
-    "ruff>=0.6",
-    "msgpack-types>=0.3",
-    "pandas>=3.0",
-    "pandas-stubs>=2.2",
-    "pyarrow>=17",
+    "mypy>=2.3.1",
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-describe>=3.2.0",
+    "ruff>=0.16.6",
+    "trustme>=1.2.1",
 ]
 
-[build-system]
-requires = ["hatchling", "hatch-vcs"]
-build-backend = "hatchling.build"
-
-[tool.hatch.version]
-source = "vcs"
-
-[tool.hatch.build.hooks.vcs]
-version-file = "src/casty/_version.py"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/casty"]
+[tool.pyright]
+include = ["src", "tests"]
+# `tests/typing` is what `test_typing` runs the checkers against, one file at a time.
+exclude = ["tests/typing"]
+typeCheckingMode = "strict"
+pythonVersion = "3.13"
+# pytest-describe collects the nested test functions from locals, which pyright sees as never accessed.
+executionEnvironments = [
+    { root = "src" },
+    { root = ".", reportUnusedFunction = false },
+]
 
 [tool.mypy]
 strict = true
-python_version = "3.12"
+python_version = "3.13"
 mypy_path = "src"
-
-[[tool.mypy.overrides]]
-module = ["lz4.*", "zstandard.*", "docker.*"]
-ignore_missing_imports = true
-
-[tool.ruff]
-line-length = 100
-target-version = "py312"
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+files = ["src", "tests"]
+exclude = ["^tests/typing/"]
+enable_error_code = ["exhaustive-match"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+describe_prefixes = ["describe", "when"]
 testpaths = ["tests"]
 
-[tool.uv]
-package = true
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC"]

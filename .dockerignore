@@ -1,7 +1,13 @@
 .git
+.github
+.idea
 **/.venv
 **/__pycache__
 **/*.pyc
+.mypy_cache
 .pytest_cache
 .ruff_cache
-docs/
+target
+benchmarks
+tests
+docs
