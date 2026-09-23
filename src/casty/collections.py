@@ -455,7 +455,7 @@ class barrier:
         """The body runs in the core."""
 
 
-def configured[S, M](definition: DefaultedActor[S, M], replicas: int, write: Write) -> DefaultedActor[S, M]:
+def configured[D: ActorDefinition](definition: D, replicas: int, write: Write) -> D:
     """The same type under the name its configuration gives it, so that two settings never share a key."""
     kind = definition.name.rsplit(":", 1)[1].split(".", 1)[0]
     return definition.configured(f"casty.collections:{kind}_{replicas}_{write}", replicas, write)
@@ -489,7 +489,7 @@ def __getattr__(name: str) -> ActorDefinition:
             write = level
         case _:
             raise AttributeError(name)
-    return _KINDS[kind].configured(f"casty.collections:{kind}_{replicas}_{write}", int(replicas), write)
+    return configured(_KINDS[kind], int(replicas), write)
 
 
 class Value[T]:
