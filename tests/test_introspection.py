@@ -1,54 +1,14 @@
 import asyncio
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from casty import ActorSystem, Context, Placement, Ref, actor
-from tests.app import Balance, Deposit, Gate, Locate, Where, account
+from casty import ActorSystem, Context, Placement, actor
+from tests.app import LATCHES, Balance, Bump, Deposit, Gate, Latch, Locate, Touch, Where, account, gated, touched
 from tests.cluster import Harness, Node
 from tests.support import eventually
 
 WITHIN = timedelta(seconds=10)
-
-
-@dataclass(frozen=True)
-class Idle:
-    pass
-
-
-@dataclass(frozen=True)
-class Touch:
-    reply_to: Ref[bool]
-
-
-@dataclass(frozen=True)
-class Tally:
-    count: int = 0
-
-
-@dataclass(frozen=True)
-class Bump:
-    reply_to: Ref[int]
-
-
-GATES: dict[str, asyncio.Event] = {}
-"""What the body of `bumped` waits on before each message, by key, for a test to open."""
-
-
-@actor(initial=Idle())
-async def touched(ctx: Context[Idle, Touch]) -> None:
-    async for msg in ctx.inbox:
-        msg.reply_to.tell(True)
-
-
-@actor(initial=Tally())
-async def bumped(ctx: Context[Tally, Bump]) -> None:
-    """Counts its messages in its state, each one once the gate of its key is open, and answers the count."""
-    async for msg in ctx.inbox:
-        await GATES[ctx.key].wait()
-        await ctx.state.set(Tally(ctx.state.value.count + 1))
-        msg.reply_to.tell(ctx.state.value.count)
 
 
 @actor(pinned=True, initial=Gate())
@@ -74,19 +34,19 @@ def describe_introspection() -> None:
                 await eventually(idled_out)
 
         async def it_shows_what_waits_in_each_mailbox_by_key() -> None:
-            gate = GATES["b-1"] = GATES["b-2"] = asyncio.Event()
+            latch = LATCHES["b-1"] = LATCHES["b-2"] = Latch()
 
             async with ActorSystem() as system:
-                asking = [asyncio.create_task(system.ref(bumped, "b-2").ask(Bump)) for _ in range(3)]
-                asking += [asyncio.create_task(system.ref(bumped, "b-1").ask(Bump)) for _ in range(2)]
+                asking = [asyncio.create_task(system.ref(gated, "b-2").ask(Bump)) for _ in range(3)]
+                asking += [asyncio.create_task(system.ref(gated, "b-1").ask(Bump)) for _ in range(2)]
 
                 # Each body holds the message it took, and the others wait in its mailbox.
                 async def the_mailboxes_hold_the_rest() -> None:
                     listed = [(row.actor, row.key, row.queued) for row in system.activations()]
-                    assert listed == [(bumped.name, "b-1", 1), (bumped.name, "b-2", 2)]
+                    assert listed == [(gated.name, "b-1", 1), (gated.name, "b-2", 2)]
 
                 await eventually(the_mailboxes_hold_the_rest)
-                gate.set()
+                latch.released.set()
                 assert sorted(await asyncio.gather(*asking)) == [1, 1, 2, 2, 3]
 
     def when_it_runs_alone() -> None:
@@ -151,10 +111,10 @@ def describe_introspection() -> None:
                 assert not await system.release(account, "a-1")
 
         async def it_lets_the_body_finish_its_message_and_hands_the_queue_on_in_order() -> None:
-            gate = GATES["r-1"] = asyncio.Event()
+            latch = LATCHES["r-1"] = Latch()
 
             async with ActorSystem() as system:
-                entry = system.ref(bumped, "r-1")
+                entry = system.ref(gated, "r-1")
                 asking = [asyncio.create_task(entry.ask(Bump)) for _ in range(3)]
 
                 async def one_held_two_queued() -> None:
@@ -162,13 +122,13 @@ def describe_introspection() -> None:
 
                 await eventually(one_held_two_queued)
                 [first] = system.activations()
-                releasing = asyncio.create_task(system.release(bumped, "r-1"))
+                releasing = asyncio.create_task(system.release(gated, "r-1"))
                 await asyncio.sleep(0.1)
                 # The body is still on the message it took, and nothing was answered or dropped meanwhile.
                 assert not releasing.done()
                 assert not any(task.done() for task in asking)
 
-                gate.set()
+                latch.released.set()
                 assert await releasing
                 # Each message is answered once, in the order it came: the first by the body that was on it, the two
                 # queued behind it by the activation they started again, from the state the first one wrote.

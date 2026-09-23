@@ -1,6 +1,4 @@
-import asyncio
 import logging
-from dataclasses import dataclass
 from datetime import timedelta
 from uuid import UUID
 
@@ -13,7 +11,6 @@ from casty import (
     ActivationStarted,
     ActorSystem,
     ConnectionLost,
-    Context,
     Event,
     HandoffEnded,
     HandoffStarted,
@@ -22,8 +19,8 @@ from casty import (
     MessageDropped,
     NodeId,
     WriteFailed,
-    actor,
 )
+from tests.app import Nap, sleepy
 from tests.cluster import Harness
 from tests.support import eventually
 
@@ -66,22 +63,7 @@ LOGGED: list[tuple[Event, int, str]] = [
     ),
 ]
 """Every kind of event, the level it is logged at and the line it makes."""
-
-
-@dataclass(frozen=True)
-class Idle:
-    pass
-
-
-@dataclass(frozen=True)
-class Nap:
-    pass
-
-
-@actor(initial=Idle(), mailbox=1)
-async def sleepy(ctx: Context[Idle, Nap]) -> None:
-    async for _ in ctx.inbox:
-        await asyncio.sleep(0.2)
+NAP = Nap(timedelta(milliseconds=200))
 
 
 def heard_by_default(monkeypatch: pytest.MonkeyPatch) -> list[Event]:
@@ -126,7 +108,7 @@ def describe_logging_observer() -> None:
             async with ActorSystem() as system:
                 # One message runs or waits, and a mailbox of one holds the next: the third has nowhere to go.
                 for _ in range(3):
-                    system.ref(sleepy, "s-1").tell(Nap())
+                    system.ref(sleepy, "s-1").tell(NAP)
 
                 line = f"dropped a message to {sleepy.name}/s-1: the mailbox is full"
 
@@ -144,7 +126,7 @@ def describe_logging_observer() -> None:
 
             async with ActorSystem(idle_after=timedelta(milliseconds=100)) as system:
                 for _ in range(3):
-                    system.ref(sleepy, "s-1").tell(Nap())
+                    system.ref(sleepy, "s-1").tell(NAP)
 
                 async def the_drop_was_heard_and_the_key_idled_out() -> None:
                     assert any(isinstance(event, MessageDropped) for event in heard)
@@ -161,7 +143,7 @@ def describe_logging_observer() -> None:
             heard = heard_by_default(monkeypatch)
 
             async with ActorSystem(idle_after=timedelta(milliseconds=100)) as system:
-                system.ref(sleepy, "s-1").tell(Nap())
+                system.ref(sleepy, "s-1").tell(NAP)
 
                 async def it_started_and_ended() -> None:
                     assert activations(heard) == [ActivationStarted, ActivationEnded]
@@ -196,7 +178,7 @@ def describe_logging_observer() -> None:
 
             async with ActorSystem(observer=events.append) as system:
                 for _ in range(3):
-                    system.ref(sleepy, "s-1").tell(Nap())
+                    system.ref(sleepy, "s-1").tell(NAP)
 
                 async def the_drop_was_reported() -> None:
                     assert any(isinstance(event, MessageDropped) for event in events)

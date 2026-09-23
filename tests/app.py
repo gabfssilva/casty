@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Never, assert_never
 
@@ -257,3 +257,59 @@ async def gate(ctx: Context[Gate, GateMsg]) -> None:
                 await asyncio.Event().wait()
             case _:
                 assert_never(msg)
+
+
+@dataclass(frozen=True)
+class Idle:
+    pass
+
+
+@dataclass(frozen=True)
+class Nap:
+    length: timedelta
+
+
+@actor(initial=Idle(), mailbox=1)
+async def sleepy(ctx: Context[Idle, Nap]) -> None:
+    """Sleeps as long as each message says, with room for one message behind the one it sleeps on."""
+    async for msg in ctx.inbox:
+        await asyncio.sleep(msg.length.total_seconds())
+
+
+@dataclass(frozen=True)
+class Touch:
+    reply_to: Ref[bool]
+
+
+@actor(initial=Idle())
+async def touched(ctx: Context[Idle, Touch]) -> None:
+    async for msg in ctx.inbox:
+        msg.reply_to.tell(True)
+
+
+@dataclass(frozen=True)
+class Latch:
+    """What a body of `gated` holds each message on: `held` once it took one, and it goes on once `released`."""
+
+    held: asyncio.Event = field(default_factory=asyncio.Event)
+    released: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+LATCHES: dict[str, Latch] = {}
+"""The latch of each key of `gated`, which a test puts in place before it sends to the key."""
+
+
+@dataclass(frozen=True)
+class Bump:
+    reply_to: Ref[int]
+
+
+@actor(initial=0)
+async def gated(ctx: Context[int, Bump]) -> None:
+    """Counts its messages in its state, each one once the latch of its key is released, and answers the count."""
+    async for msg in ctx.inbox:
+        latch = LATCHES[ctx.key]
+        latch.held.set()
+        await latch.released.wait()
+        await ctx.state.set(ctx.state.value + 1)
+        msg.reply_to.tell(ctx.state.value)

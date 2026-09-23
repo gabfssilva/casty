@@ -1,40 +1,12 @@
 import asyncio
-from dataclasses import dataclass
 from datetime import timedelta
 
 import pytest
 
-from casty import ActorStats, ActorSystem, Context, Ref, actor
-from tests.app import Deposit, account
+from casty import ActorStats, ActorSystem
+from tests.app import LATCHES, Bump, Deposit, Latch, Touch, account, gated, touched
 from tests.cluster import Harness
 from tests.support import eventually
-
-
-@dataclass(frozen=True)
-class Idle:
-    pass
-
-
-@dataclass(frozen=True)
-class Touch:
-    reply_to: Ref[bool]
-
-
-GATES: dict[str, asyncio.Event] = {}
-"""What the body of `gated` waits on before it answers, by key, for a test to open."""
-
-
-@actor(initial=Idle())
-async def touched(ctx: Context[Idle, Touch]) -> None:
-    async for msg in ctx.inbox:
-        msg.reply_to.tell(True)
-
-
-@actor(initial=Idle())
-async def gated(ctx: Context[Idle, Touch]) -> None:
-    async for msg in ctx.inbox:
-        await GATES[ctx.key].wait()
-        msg.reply_to.tell(True)
 
 
 def describe_stats() -> None:
@@ -52,11 +24,11 @@ def describe_stats() -> None:
 
     def when_a_body_is_busy() -> None:
         async def it_shows_the_messages_waiting_behind_it_and_the_asks_waiting_for_them() -> None:
-            gate = GATES["g-1"] = GATES["g-2"] = asyncio.Event()
+            latch = LATCHES["g-1"] = LATCHES["g-2"] = Latch()
 
             async with ActorSystem() as system:
-                asking = [asyncio.create_task(system.ref(gated, "g-1").ask(Touch)) for _ in range(4)]
-                asking += [asyncio.create_task(system.ref(gated, "g-2").ask(Touch)) for _ in range(2)]
+                asking = [asyncio.create_task(system.ref(gated, "g-1").ask(Bump)) for _ in range(4)]
+                asking += [asyncio.create_task(system.ref(gated, "g-2").ask(Bump)) for _ in range(2)]
 
                 # Each body holds the message it took, and the others wait in its mailbox.
                 async def the_mailboxes_hold_the_rest() -> None:
@@ -65,8 +37,8 @@ def describe_stats() -> None:
                     assert stats.asks_in_flight == 6
 
                 await eventually(the_mailboxes_hold_the_rest)
-                gate.set()
-                assert all(await asyncio.gather(*asking))
+                latch.released.set()
+                assert sorted(await asyncio.gather(*asking)) == [1, 1, 2, 2, 3, 4]
 
                 stats = system.stats()
                 assert (stats.actors[gated.name].queued, stats.asks_in_flight) == (0, 0)

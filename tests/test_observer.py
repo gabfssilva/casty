@@ -1,4 +1,3 @@
-import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -18,7 +17,7 @@ from casty import (
     Unavailable,
     actor,
 )
-from tests.app import Append, Deposit, Entries, account, ledger
+from tests.app import Append, Deposit, Entries, Idle, Nap, account, ledger, sleepy
 from tests.cluster import FAST, Harness, Node
 from tests.support import eventually
 
@@ -26,6 +25,7 @@ EVERY: frozenset[type[object]] = frozenset(get_args(Event.__value__))
 """Every kind of event the API documents."""
 QUICK = replace(FAST, idle_after=timedelta(milliseconds=300))
 """Keys idle out while the test goes on, and a node that died is removed a second after it is buried."""
+NAP = Nap(timedelta(seconds=1))
 
 
 class Recorder:
@@ -46,30 +46,14 @@ class Choosy(Recorder):
 
 
 @dataclass(frozen=True)
-class Idle:
-    pass
-
-
-@dataclass(frozen=True)
 class Crash:
     reply_to: Ref[bool]
-
-
-@dataclass(frozen=True)
-class Nap:
-    pass
 
 
 @actor(initial=Idle())
 async def brittle(ctx: Context[Idle, Crash]) -> None:
     async for _ in ctx.inbox:
         raise RuntimeError("the body broke")
-
-
-@actor(initial=Idle(), mailbox=1)
-async def sleepy(ctx: Context[Idle, Nap]) -> None:
-    async for _ in ctx.inbox:
-        await asyncio.sleep(1)
 
 
 def describe_observer() -> None:
@@ -84,7 +68,7 @@ def describe_observer() -> None:
                     await a.system.ref(brittle, "b-1").ask(Crash)
                 # One message runs or waits, and a mailbox of one holds the next: the third has nowhere to go.
                 for _ in range(3):
-                    a.system.ref(sleepy, "s-1").tell(Nap())
+                    a.system.ref(sleepy, "s-1").tell(NAP)
 
                 harness.partition({a}, {b, c, d})
                 with pytest.raises(Unavailable):
@@ -143,7 +127,7 @@ def describe_observer() -> None:
             async with ActorSystem(observer=choosy, idle_after=timedelta(milliseconds=100)) as system:
                 # One message runs or waits, and a mailbox of one holds the next: the third has nowhere to go.
                 for _ in range(3):
-                    system.ref(sleepy, "s-1").tell(Nap())
+                    system.ref(sleepy, "s-1").tell(NAP)
 
                 async def the_drop_was_given_and_the_key_idled_out() -> None:
                     assert choosy.events

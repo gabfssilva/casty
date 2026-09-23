@@ -1,14 +1,14 @@
 import asyncio
 import math
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
 
-from casty import ActorSystem, Backoff, Client, Cluster, Context, NodeId, Overlay, Ref, Unavailable, actor
+from casty import ActorSystem, Backoff, Client, Cluster, Context, NodeId, Overlay, Unavailable, actor
 from tests import deploy
-from tests.app import Note, account, notes
+from tests.app import LATCHES, Bump, Latch, Note, account, gated, notes
 from tests.cluster import FAST, Harness, Node
 from tests.support import eventually
 from tests.traffic import Traffic
@@ -59,42 +59,6 @@ REFUSED_ON_JOIN: list[tuple[Cluster, str]] = [
 ]
 
 
-class Latch:
-    """A lock a body waits on while it processes a message, which is what holds a shutdown open."""
-
-    def __init__(self) -> None:
-        self.held = asyncio.Event()
-        self._open = asyncio.Event()
-
-    def reset(self) -> None:
-        self.held = asyncio.Event()
-        self._open = asyncio.Event()
-
-    def release(self) -> None:
-        self._open.set()
-
-    async def wait(self) -> None:
-        self.held.set()
-        await self._open.wait()
-
-
-LATCH = Latch()
-
-
-@dataclass(frozen=True)
-class Hold:
-    reply_to: Ref[bool]
-
-
-@actor(initial=0)
-async def latched(ctx: Context[int, Hold]) -> None:
-    """Answers only after the latch is released, so a test can put a shutdown and a message in progress together."""
-    async for msg in ctx.inbox:
-        await LATCH.wait()
-        await ctx.state.set(ctx.state.value + 1)
-        msg.reply_to.tell(True)
-
-
 def describe_shutdown() -> None:
     def when_a_node_leaves_during_traffic() -> None:
         async def it_hands_off_its_keys_without_failed_asks() -> None:
@@ -118,49 +82,49 @@ def describe_shutdown() -> None:
 
     def when_a_local_system_exits_while_a_message_is_in_progress() -> None:
         async def it_finishes_the_message_before_exiting() -> None:
-            LATCH.reset()
+            latch = LATCHES["key"] = Latch()
             system = ActorSystem(leave_timeout=timedelta(seconds=30))
             exited = asyncio.Event()
             stop = asyncio.Event()
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(_run(system, stop, exited))
                 await eventually(_started(system))
-                kept, noted = system.ref(latched, "key"), system.ref(notes, "key")
-                answer = asyncio.ensure_future(kept.ask(Hold))
-                await LATCH.held.wait()
+                kept, noted = system.ref(gated, "key"), system.ref(notes, "key")
+                answer = asyncio.ensure_future(kept.ask(Bump))
+                await latch.held.wait()
                 stop.set()
                 await asyncio.sleep(0.1)
                 assert not exited.is_set(), "the system exited while a message was still being processed"
-                LATCH.release()
+                latch.released.set()
                 # Bounded, and far below the `leave_timeout` above it: what ends the exit has to be the message
                 # finishing, not the deadline running out.
                 async with asyncio.timeout(timedelta(seconds=5).total_seconds()):
                     await exited.wait()
-            assert await answer is True
+            assert await answer == 1
             with pytest.raises(RuntimeError):
-                system.ref(latched, "key")
+                system.ref(gated, "key")
             # A ref taken before the exit says so too, instead of dropping the message or waiting out `ask_timeout`.
             with pytest.raises(RuntimeError):
                 noted.tell(Note(1))
             with pytest.raises(RuntimeError):
-                await kept.ask(Hold)
+                await kept.ask(Bump)
 
         async def it_exits_after_leave_timeout_if_the_body_is_stuck() -> None:
-            LATCH.reset()
+            latch = LATCHES["key"] = Latch()
             system = ActorSystem(leave_timeout=timedelta(milliseconds=200))
             exited = asyncio.Event()
             stop = asyncio.Event()
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(_run(system, stop, exited))
                 await eventually(_started(system))
-                answer = asyncio.ensure_future(system.ref(latched, "key").ask(Hold))
-                await LATCH.held.wait()
+                answer = asyncio.ensure_future(system.ref(gated, "key").ask(Bump))
+                await latch.held.wait()
                 stop.set()
                 async with asyncio.timeout(timedelta(seconds=5).total_seconds()):
                     await exited.wait()
                 with pytest.raises(Unavailable):
                     await answer
-            LATCH.release()
+            latch.released.set()
 
 
 def describe_rolling_deploy() -> None:
