@@ -8,10 +8,30 @@ import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
-from casty import ActorSystem
+from casty import ActorSystem, Collections, Ref
+from casty import collections as kinds
+from casty.collections import (
+    MISSING,
+    Binding,
+    ConfigurationError,
+    Counter,
+    Queue,
+    _after,  # pyright: ignore[reportPrivateUsage]
+    _place,  # pyright: ignore[reportPrivateUsage]
+    barrier,
+    configured,
+    counter,
+    queue_segment,
+    register,
+    semaphore,
+)
+from tests.cluster import Harness
+from tests.support import eventually
 
 
 @dataclass(frozen=True)
@@ -28,8 +48,6 @@ class Index:
 
 def describe_counter_actor() -> None:
     async def it_serializes_additions_and_resets_the_named_counter() -> None:
-        from casty.collections import counter
-
         async with ActorSystem() as system:
             ref = system.ref(counter.actor, "requests")
             assert await ref.ask(counter.Get) == 0
@@ -47,8 +65,6 @@ def describe_counter_actor() -> None:
 
 def describe_register_actor() -> None:
     async def it_allows_only_one_competing_compare_and_set() -> None:
-        from casty.collections import register
-
         async with ActorSystem() as system:
             ref = system.ref(register.actor, "leader")
             assert await ref.ask(register.Get) is None
@@ -94,9 +110,6 @@ print(system._encode(schema, values).hex())
         assert outputs[0] == outputs[1]
 
     async def it_exposes_named_counters_and_typed_registers() -> None:
-        from casty import Collections
-        from casty.collections import MISSING
-
         async with ActorSystem() as system:
             collections = Collections(system)
             counter = collections.counter("visits", stripes=4)
@@ -117,9 +130,6 @@ print(system._encode(schema, values).hex())
             assert await register.get() == User("four")
 
     async def it_rejects_incompatible_configuration_for_the_same_name() -> None:
-        from casty import Collections
-        from casty.collections import ConfigurationError
-
         async with ActorSystem() as system:
             collections = Collections(system)
             await collections.counter("visits", stripes=2).add()
@@ -132,8 +142,6 @@ print(system._encode(schema, values).hex())
                 await collections.register("user", value=str).get()
 
     async def it_answers_the_same_facade_for_equal_arguments() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             collections = Collections(system)
             entries = collections.dict("x", key=str, value=bytes)
@@ -146,12 +154,6 @@ print(system._encode(schema, values).hex())
     async def it_checks_the_configuration_with_the_cluster_once_for_many_operations(
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from types import SimpleNamespace
-
-        from casty import Collections, Ref
-        from casty import collections as kinds
-        from casty.collections import register
-
         compared = 0
 
         def compare_and_set(reply_to: Ref[bool], expected: bytes | None, value: bytes) -> register.CompareAndSet:
@@ -179,9 +181,6 @@ print(system._encode(schema, values).hex())
             assert compared == 3
 
     async def it_lets_go_of_the_facades_nobody_holds() -> None:
-        from casty import Collections
-        from casty.collections import Counter
-
         async with ActorSystem() as system:
             collections = Collections(system)
 
@@ -200,9 +199,6 @@ print(system._encode(schema, values).hex())
             assert await collections.counter("entity-1").get() == 1
 
     async def it_rejects_other_replicas_for_a_name_with_or_without_asking_the_cluster() -> None:
-        from casty import Collections
-        from casty.collections import ConfigurationError
-
         async with ActorSystem() as system:
             collections = Collections(system)
             entries = collections.dict("x", key=str, value=bytes)
@@ -220,13 +216,9 @@ print(system._encode(schema, values).hex())
             assert await collections.dict("x", key=str, value=bytes).get("one") == b"1"
 
     async def it_resolves_configured_actor_types_without_a_local_facade() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             counter = Collections(system).counter("visits", replicas=5, write="all")
             await counter.add()
-            from casty import collections as kinds
-
             actor = kinds.configured(kinds.counter.actor, 5, "all")
             # A node that never touched the type finds it by its name, with the configuration the name carries.
             resolved = ActorSystem()._resolve(actor.name)  # pyright: ignore[reportPrivateUsage]
@@ -234,9 +226,6 @@ print(system._encode(schema, values).hex())
             assert (resolved.name, resolved.replicas, resolved.write) == (actor.name, 5, "all")
 
     async def it_indexes_dictionary_entries_and_preserves_typed_values() -> None:
-        from casty import Collections
-        from casty.collections import MISSING
-
         async with ActorSystem() as system:
             collections = Collections(system)
             users = collections.dict("users", key=str, value=User, index_shards=4)
@@ -260,8 +249,6 @@ print(system._encode(schema, values).hex())
             assert await nullable.get("absent") == MISSING
 
     async def it_keeps_sets_unique_and_multimaps_unique_per_key() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             collections = Collections(system)
             left = collections.set("left", value=str, shards=3)
@@ -298,8 +285,6 @@ print(system._encode(schema, values).hex())
             assert set(await right.items()) == {"b", "c"}
 
     async def it_finds_set_members_through_splits_a_lagging_facade_has_not_seen() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             first = Collections(system).set("members", value=int, shards=1)
             late = Collections(system).set("members", value=int, shards=1)
@@ -315,8 +300,6 @@ print(system._encode(schema, values).hex())
             assert sorted(await late.items()) == [-1, *range(7), *range(8, 3_000)]
 
     async def it_counts_a_set_growing_through_splits_without_losing_or_repeating_a_member() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             members = Collections(system).set("growing", value=int, shards=1)
             added = 0
@@ -338,8 +321,6 @@ print(system._encode(schema, values).hex())
             assert sorted(await members.items()) == list(range(6_000))
 
     async def it_keeps_the_values_of_a_multimap_key_together_through_splits() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             multi = Collections(system).multimap("grouped", key=int, value=str, shards=1)
             for i in range(1_500):
@@ -354,8 +335,6 @@ print(system._encode(schema, values).hex())
             assert sorted(scanned) == [(i, value) for i in range(1_500) if i != 1_234 for value in ("a", "b")]
 
     def it_visits_every_segment_of_a_shard_once_from_the_cursor_of_a_scan() -> None:
-        from casty.collections import _after, _place  # pyright: ignore[reportPrivateUsage]
-
         for count in range(1, 300):
             level = 1 << (count.bit_length() - 1)
             visited: list[int] = []
@@ -368,8 +347,6 @@ print(system._encode(schema, values).hex())
             assert sorted(visited) == list(range(count))
 
     async def it_scans_a_set_page_by_page_through_splits_made_while_it_runs() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             writer = Collections(system).set("moving", value=int, shards=1)
             for i in range(600):
@@ -388,8 +365,6 @@ print(system._encode(schema, values).hex())
             assert len(seen) > 600
 
     async def it_ends_a_scan_of_a_set_written_meanwhile_without_repeating_a_member() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             members = Collections(system).set("written", value=int, shards=2)
             for i in range(1_000):
@@ -406,8 +381,6 @@ print(system._encode(schema, values).hex())
             assert set(range(1_000)) <= set(seen) <= set(range(8_000))
 
     async def it_builds_the_set_algebra_from_scans_over_many_segments() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             collections = Collections(system)
             left = collections.set("left", value=int, shards=1)
@@ -421,8 +394,6 @@ print(system._encode(schema, values).hex())
             assert await right.difference(left) == set(range(2_000, 3_000))
 
     async def it_writes_as_much_per_member_added_to_a_large_set_as_to_a_small_one() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             writes = system._writes()  # pyright: ignore[reportPrivateUsage]
             members = Collections(system).set("flat", value=int, shards=1)
@@ -441,9 +412,6 @@ print(system._encode(schema, values).hex())
             assert await written(range(30_000, 32_000)) < 2 * small
 
     async def it_delivers_queue_items_once_in_fifo_order_without_failures() -> None:
-        from casty import Collections
-        from casty.collections import MISSING
-
         async with ActorSystem() as system:
             queue = Collections(system).queue("jobs", value=int)
             assert await queue.poll() == MISSING
@@ -463,8 +431,6 @@ print(system._encode(schema, values).hex())
                 await queue.drain(-1)
 
     async def it_keeps_fifo_order_over_100k_items_writing_at_most_a_segment_per_operation() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             writes = system._writes()  # pyright: ignore[reportPrivateUsage]
             queue = Collections(system).queue("jobs", value=int)
@@ -485,8 +451,6 @@ print(system._encode(schema, values).hex())
             assert largest <= 64 * 1024
 
     async def it_writes_as_much_per_offer_to_a_long_queue_as_to_a_short_one() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             writes = system._writes()  # pyright: ignore[reportPrivateUsage]
             queue = Collections(system).queue("jobs", value=bytes)
@@ -505,9 +469,6 @@ print(system._encode(schema, values).hex())
             assert await written(2_000) < 2 * short
 
     async def it_keeps_order_across_segments_for_facades_that_lag_behind_the_index() -> None:
-        from casty import Collections
-        from casty.collections import MISSING
-
         async with ActorSystem() as system:
             first = Collections(system).queue("jobs", value=bytes)
             late = Collections(system).queue("jobs", value=bytes)
@@ -534,9 +495,6 @@ print(system._encode(schema, values).hex())
             assert await first.poll() == b"again"
 
     async def it_keeps_no_key_for_the_segments_it_drained() -> None:
-        from casty.collections import MISSING, Binding, Queue, configured, queue_segment
-        from tests.support import eventually
-
         async with ActorSystem(idle_after=timedelta(milliseconds=200)) as system:
 
             def facade() -> Queue[int]:
@@ -567,8 +525,6 @@ print(system._encode(schema, values).hex())
             await eventually(only_the_tail_is_kept, timedelta(seconds=10))
 
     async def it_canonicalizes_unordered_fields_used_as_keys_or_compared_values() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             collections = Collections(system)
             entries = collections.dict("indices", key=Index, value=str)
@@ -581,9 +537,6 @@ print(system._encode(schema, values).hex())
             assert await register.compare_and_set(same, Index({}))
 
     async def it_shares_all_data_collections_between_members_and_a_client() -> None:
-        from casty import Collections
-        from tests.cluster import Harness
-
         async with Harness.start(3) as harness:
             writer = Collections(harness.nodes[0].system)
             reader = Collections(await harness.client())
@@ -601,8 +554,6 @@ print(system._encode(schema, values).hex())
             assert await reader.queue("q", value=User).poll() == User("queued")
 
     async def it_grants_renews_and_expires_semaphore_leases() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             semaphore = Collections(system).semaphore("workers", capacity=2)
             first = await semaphore.acquire(2, ttl=0.1)
@@ -623,8 +574,6 @@ print(system._encode(schema, values).hex())
                 await semaphore.acquire(ttl=0)
 
     async def it_wakes_waiters_on_release_and_cleans_up_timeout_and_cancellation() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             semaphore = Collections(system).semaphore("workers", capacity=1)
             first = await semaphore.acquire()
@@ -647,8 +596,6 @@ print(system._encode(schema, values).hex())
             assert await semaphore.available() == 1
 
     async def it_serializes_lock_holders_even_when_the_facade_is_shared() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             lock = Collections(system).lock("resource")
             active = 0
@@ -674,8 +621,6 @@ print(system._encode(schema, values).hex())
             await first.release()
 
     async def it_reuses_barrier_generations_and_withdraws_timed_out_arrivals() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             barrier = Collections(system).barrier("round", parties=3)
             assert barrier.parties == 3
@@ -690,8 +635,6 @@ print(system._encode(schema, values).hex())
                 assert await barrier.waiting() == 0
 
     async def it_allows_a_child_task_to_wait_for_its_parents_lock() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             lock = Collections(system).lock("resource")
 
@@ -709,9 +652,6 @@ print(system._encode(schema, values).hex())
             assert pending.result() > first_token
 
     async def it_reattaches_timed_out_requests_without_duplicate_arrivals_or_grants() -> None:
-        from casty import Collections
-        from tests.support import eventually
-
         async with ActorSystem(ask_timeout=timedelta(milliseconds=20)) as system:
             collections = Collections(system)
             barrier = collections.barrier("round", parties=2)
@@ -740,9 +680,6 @@ print(system._encode(schema, values).hex())
             assert await semaphore.available() == 1
 
     async def it_withdraws_only_the_cancelled_barrier_participant() -> None:
-        from casty import Collections
-        from tests.support import eventually
-
         async with ActorSystem() as system:
             barrier = Collections(system).barrier("round", parties=3)
 
@@ -763,10 +700,6 @@ print(system._encode(schema, values).hex())
             assert await barrier.waiting() == 0
 
     async def it_expires_abandoned_requests_without_granting_or_counting_them() -> None:
-        from uuid import uuid4
-
-        from casty.collections import barrier, semaphore
-
         async with ActorSystem() as system:
             permits = system.ref(semaphore.actor, "raw")
             held = await permits.ask(semaphore.Request, uuid4(), 1, 30.0, 1, None)
@@ -784,9 +717,6 @@ print(system._encode(schema, values).hex())
             assert await round.ask(barrier.Waiting) == 0
 
     async def it_does_not_replay_queue_removals_after_a_local_timeout() -> None:
-        from casty import Collections
-        from casty.collections import MISSING
-
         async with ActorSystem() as system:
             queue = Collections(system).queue("jobs", value=str)
             await queue.offer("first")
@@ -802,8 +732,6 @@ print(system._encode(schema, values).hex())
             assert await queue.peek() == MISSING
 
     async def it_cleans_up_a_grant_racing_with_cancellation() -> None:
-        from casty import Collections
-
         async with ActorSystem() as system:
             semaphore = Collections(system).semaphore("permits", capacity=1)
             assert await semaphore.available() == 1
@@ -813,8 +741,6 @@ print(system._encode(schema, values).hex())
             assert await semaphore.available() == 1
 
     async def it_does_not_resubmit_a_wait_after_its_interest_expired(monkeypatch: pytest.MonkeyPatch) -> None:
-        from casty import collections
-
         now = 100.0
         monkeypatch.setattr(time, "time", lambda: now)
         attempts = 0
@@ -828,5 +754,5 @@ print(system._encode(schema, values).hex())
             return 123
 
         with pytest.raises(TimeoutError):
-            await collections._wait(stalled)  # pyright: ignore[reportPrivateUsage]
+            await kinds._wait(stalled)  # pyright: ignore[reportPrivateUsage]
         assert attempts == 1
