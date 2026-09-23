@@ -50,6 +50,23 @@ pub struct Settings {
     pub backoff: Backoff,
 }
 
+/// What a node does to the state of a key. The replicas carry it out in a cluster; alone, the store of the system does
+/// for a durable type, and the memory of the process for any other.
+#[derive(Debug)]
+pub enum Op {
+    /// Take the key over, which starts from `initial` when nothing holds it.
+    Activate { initial: Option<Pages> },
+    /// Write the state of the key. Without `active` the key lets go with it, which is the last write of its
+    /// activation.
+    Commit {
+        lease: u64,
+        pages: Pages,
+        active: bool,
+    },
+    /// Delete the state of the key. Without `active` the key lets go with it.
+    Delete { lease: u64, active: bool },
+}
+
 /// Everything a node owns. Nothing of it is global to the process: a second system is a second one of these.
 #[derive(Debug)]
 pub struct Node {
@@ -805,89 +822,53 @@ impl Node {
         }
     }
 
-    /// Take the key over, resolving the future it gives back with what the replicas hold.
+    /// Carry `op` out on the key, resolving the future it gives back once it is done: with what the replicas hold when
+    /// it takes the key over, with nothing once a write is written.
     ///
-    /// Alone, that is the local store and the answer is there at once; in a cluster it is an operation on the
-    /// replicas, and the future resolves when they have answered.
-    pub fn activate<'py>(
+    /// Alone, the memory of the process answers at once; the store of a durable type and the replicas of a cluster
+    /// answer when they have it.
+    pub fn persist<'py>(
         self: &Arc<Self>,
         py: Python<'py>,
         actor: &str,
         key: &str,
-        initial: Option<Pages>,
+        op: Op,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let taken = self.future(py)?;
+        if let Op::Commit { pages, .. } = &op {
+            let watching = self
+                .writes
+                .locked()
+                .as_ref()
+                .map(|writes| writes.clone_ref(py));
+            if let Some(watching) = watching {
+                watching.bind(py).get().saw(py, pages)?;
+            }
+        }
+        let answer = self.future(py)?;
         if let Some(cluster) = self.cluster() {
-            cluster.activate(py, actor, key, initial, taken.clone().unbind());
+            cluster.persist(py, actor, key, op, answer.clone().unbind());
         } else if let Some(durability) = self.durability(py, actor) {
-            self.take_stored(py, actor, key, initial, durability, &taken)?;
+            self.persist_stored(py, actor, key, op, durability, &answer)?;
         } else {
-            let held = self.store().activate(actor, key, initial);
-            taken.call_method1("set_result", (Bound::new(py, Taken::of(held))?,))?;
+            let landed = match op {
+                Op::Activate { initial } => {
+                    let held = self.store().activate(actor, key, initial);
+                    Bound::new(py, Taken::of(held))?.into_any()
+                }
+                Op::Commit { pages, active, .. } => {
+                    self.store().commit(actor, key, pages, active);
+                    self.saved.fetch_add(1, Ordering::Relaxed);
+                    py.None().into_bound(py)
+                }
+                Op::Delete { .. } => {
+                    self.store().delete(actor, key);
+                    self.saved.fetch_add(1, Ordering::Relaxed);
+                    py.None().into_bound(py)
+                }
+            };
+            answer.call_method1("set_result", (landed,))?;
         }
-        Ok(taken)
-    }
-
-    /// Write the state of the key, resolving the future it gives back once it is written.
-    pub fn commit<'py>(
-        self: &Arc<Self>,
-        py: Python<'py>,
-        actor: &str,
-        key: &str,
-        lease: u64,
-        pages: Pages,
-        active: bool,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let watching = self
-            .writes
-            .locked()
-            .as_ref()
-            .map(|writes| writes.clone_ref(py));
-        if let Some(watching) = watching {
-            watching.bind(py).get().saw(py, &pages)?;
-        }
-        let written = self.future(py)?;
-        if let Some(cluster) = self.cluster() {
-            cluster.commit(
-                py,
-                actor,
-                key,
-                lease,
-                pages,
-                active,
-                written.clone().unbind(),
-            );
-        } else if let Some(durability) = self.durability(py, actor) {
-            self.commit_stored(py, actor, key, pages, active, durability, &written)?;
-        } else {
-            self.store().commit(actor, key, pages, active);
-            self.saved.fetch_add(1, Ordering::Relaxed);
-            written.call_method1("set_result", (py.None(),))?;
-        }
-        Ok(written)
-    }
-
-    /// Delete the state of the key, resolving the future it gives back once the deletion is written. Without
-    /// `active` the key lets go with it, which is the last write of its activation.
-    pub fn delete<'py>(
-        self: &Arc<Self>,
-        py: Python<'py>,
-        actor: &str,
-        key: &str,
-        lease: u64,
-        active: bool,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let deleted = self.future(py)?;
-        if let Some(cluster) = self.cluster() {
-            cluster.delete(py, actor, key, lease, active, deleted.clone().unbind());
-        } else if let Some(durability) = self.durability(py, actor) {
-            self.delete_stored(py, actor, key, durability, &deleted)?;
-        } else {
-            self.store().delete(actor, key);
-            self.saved.fetch_add(1, Ordering::Relaxed);
-            deleted.call_method1("set_result", (py.None(),))?;
-        }
-        Ok(deleted)
+        Ok(answer)
     }
 
     /// Let go of a key whose activation ended without a last write, so that the cluster drops what its owner kept.

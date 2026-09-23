@@ -17,11 +17,11 @@ use pyo3::prelude::*;
 
 use crate::collections::{Given, Native, Turn};
 
-use super::Node;
 use super::callback;
 use super::cluster::{Fencing, Taken};
 use super::context::{Context, ended};
 use super::observe::Observed;
+use super::{Node, Op};
 use crate::actor::Behavior;
 use crate::awaited::Awaited;
 use crate::lock::Locked;
@@ -305,7 +305,10 @@ impl Activation {
         let entry = slf.get().entry.clone();
         let key = slf.get().key.clone();
         let initial = Self::initial(slf, py)?;
-        let taken = slf.get().node.activate(py, &entry, &key, initial)?;
+        let taken = slf
+            .get()
+            .node
+            .persist(py, &entry, &key, Op::Activate { initial })?;
         Self::then(slf, &taken, Self::held_by)
     }
 
@@ -746,13 +749,19 @@ impl Activation {
         }
         // A native key that holds nothing a new activation would miss goes instead of staying: a read of a key nothing
         // wrote leaves no key behind.
-        let released = if native.is_some_and(|native| native.disposable(&pages)) {
-            slf.get().node.delete(py, &entry, &key, lease, false)?
+        let last = if native.is_some_and(|native| native.disposable(&pages)) {
+            Op::Delete {
+                lease,
+                active: false,
+            }
         } else {
-            slf.get()
-                .node
-                .commit(py, &entry, &key, lease, pages, false)?
+            Op::Commit {
+                lease,
+                pages,
+                active: false,
+            }
         };
+        let released = slf.get().node.persist(py, &entry, &key, last)?;
         Self::then(slf, &released, Self::released)
     }
 
@@ -1625,10 +1634,12 @@ impl Activation {
         let key = slf.get().key.clone();
         let written = slf.get().node.future(py)?;
         let lease = slf.get().held().lease;
-        let commit = slf
-            .get()
-            .node
-            .commit(py, &entry, &key, lease, pages.clone(), true)?;
+        let op = Op::Commit {
+            lease,
+            pages: pages.clone(),
+            active: true,
+        };
+        let commit = slf.get().node.persist(py, &entry, &key, op)?;
         let wrote = Wrote {
             written: written.clone().unbind(),
             pages,
@@ -1668,7 +1679,15 @@ impl Activation {
         };
         let written = slf.get().node.future(py)?;
         let lease = slf.get().held().lease;
-        let deletion = slf.get().node.delete(py, &entry, &key, lease, true)?;
+        let deletion = slf.get().node.persist(
+            py,
+            &entry,
+            &key,
+            Op::Delete {
+                lease,
+                active: true,
+            },
+        )?;
         let wrote = Wrote {
             written: written.clone().unbind(),
             pages,
@@ -1869,13 +1888,19 @@ impl Activation {
         // The state changes when the write lands, not before: a body that went on from a write that did not happen
         // would be running on a state no replica has.
         let lease = slf.get().held().lease;
-        let landing = if deleting {
-            slf.get().node.delete(py, &entry, &key, lease, true)
+        let op = if deleting {
+            Op::Delete {
+                lease,
+                active: true,
+            }
         } else {
-            slf.get()
-                .node
-                .commit(py, &entry, &key, lease, pages.clone(), true)
+            Op::Commit {
+                lease,
+                pages: pages.clone(),
+                active: true,
+            }
         };
+        let landing = slf.get().node.persist(py, &entry, &key, op);
         let written = match landing {
             Ok(written) => written,
             // A write that is refused before it starts ends the message the same way one that fails does.

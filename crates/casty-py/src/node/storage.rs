@@ -23,10 +23,10 @@ use pyo3::exceptions::{PyTimeoutError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
 
-use super::Node;
 use super::callback;
 use super::cluster::Taken;
 use super::observe::Observed;
+use super::{Node, Op};
 
 /// What a durable type asks of the store of a system running alone: when it keeps the writes, and how long a call to
 /// it may take, in seconds.
@@ -245,8 +245,42 @@ impl Node {
         });
     }
 
+    /// Carry `op` out on a durable key alone. A write goes to the store as its type says, and a deletion keeps its
+    /// tombstone here until the store has forgotten it.
+    pub fn persist_stored(
+        self: &Arc<Self>,
+        py: Python<'_>,
+        actor: &str,
+        key: &str,
+        op: Op,
+        durability: Durability,
+        answer: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let (stored, now) = match op {
+            Op::Activate { initial } => {
+                return self.take_stored(py, actor, key, initial, durability, answer);
+            }
+            Op::Commit { pages, active, .. } => {
+                let stamp = self.store().commit(actor, key, pages.clone(), active);
+                self.saved.fetch_add(1, Ordering::Relaxed);
+                let stored = Stored {
+                    stamp,
+                    pages: Some(pages),
+                };
+                (stored, !active)
+            }
+            Op::Delete { .. } => {
+                let stamp = self.store().tombstone(actor, key);
+                self.saved.fetch_add(1, Ordering::Relaxed);
+                self.forgetting(py, actor, key, stamp.clone(), durability.within)?;
+                (Stored { stamp, pages: None }, true)
+            }
+        };
+        self.keep(py, actor, key, stored, durability, now, answer)
+    }
+
     /// Take a durable key over alone: from this process when it has the key, from the store when it does not.
-    pub fn take_stored(
+    fn take_stored(
         self: &Arc<Self>,
         py: Python<'_>,
         actor: &str,
@@ -282,43 +316,6 @@ impl Node {
             Ok(())
         });
         self.stow(py, actor, key, &Storage::Load, durability.within, then)
-    }
-
-    /// Write a durable key alone, and hand the write to the store as its type says.
-    #[allow(clippy::too_many_arguments)]
-    pub fn commit_stored(
-        self: &Arc<Self>,
-        py: Python<'_>,
-        actor: &str,
-        key: &str,
-        pages: Pages,
-        active: bool,
-        durability: Durability,
-        written: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        let stamp = self.store().commit(actor, key, pages.clone(), active);
-        self.saved.fetch_add(1, Ordering::Relaxed);
-        let stored = Stored {
-            stamp,
-            pages: Some(pages),
-        };
-        self.keep(py, actor, key, stored, durability, !active, written)
-    }
-
-    /// Delete a durable key alone. Its tombstone stays here until the store has forgotten the deletion.
-    pub fn delete_stored(
-        self: &Arc<Self>,
-        py: Python<'_>,
-        actor: &str,
-        key: &str,
-        durability: Durability,
-        deleted: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        let stamp = self.store().tombstone(actor, key);
-        self.saved.fetch_add(1, Ordering::Relaxed);
-        self.forgetting(py, actor, key, stamp.clone(), durability.within)?;
-        let stored = Stored { stamp, pages: None };
-        self.keep(py, actor, key, stored, durability, true, deleted)
     }
 
     /// Hand a write to the store as its type says. A type that saves every write has `written` resolved once the

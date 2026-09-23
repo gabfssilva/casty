@@ -14,7 +14,7 @@ use casty_core::mailbox::Command;
 use casty_core::membership::views::Overlay;
 use casty_core::node::{NodeId, Target};
 use casty_core::outcome::Outcome;
-use casty_core::store::{Held, Pages};
+use casty_core::store::Held;
 use casty_net::compress::Name;
 use casty_net::limits::Limits;
 use casty_net::pool::AddressMap;
@@ -27,9 +27,9 @@ use casty_node::replication::service::{Failure, Storing};
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use super::Node;
 use super::callback;
 use super::observe::{self, Observed};
+use super::{Node, Op};
 use crate::actor::period;
 use crate::lock::Locked;
 
@@ -219,53 +219,24 @@ impl Entered {
         self.joined.learn(py, members)
     }
 
-    /// Take the key over, resolving `answer` on the loop with what the replicas hold.
-    pub fn activate(
-        &self,
-        py: Python<'_>,
-        actor: &str,
-        key: &str,
-        initial: Option<Pages>,
-        answer: Py<PyAny>,
-    ) {
+    /// Carry `op` out on the replicas of the key, resolving `answer` on the loop once they have answered: with what
+    /// they hold when it takes the key over, with nothing once they confirmed a write.
+    pub fn persist(&self, py: Python<'_>, actor: &str, key: &str, op: Op, answer: Py<PyAny>) {
         let (node, actor, key) = (self.node.clone(), actor.to_owned(), key.to_owned());
         self.dispatch(py, answer, async move {
-            Landed::Taken(node.activate(&actor, &key, initial).await)
-        });
-    }
-
-    /// Write the state of the key, resolving `answer` on the loop once the replicas confirmed it.
-    #[allow(clippy::too_many_arguments)]
-    pub fn commit(
-        &self,
-        py: Python<'_>,
-        actor: &str,
-        key: &str,
-        lease: u64,
-        pages: Pages,
-        active: bool,
-        answer: Py<PyAny>,
-    ) {
-        let (node, actor, key) = (self.node.clone(), actor.to_owned(), key.to_owned());
-        self.dispatch(py, answer, async move {
-            Landed::Written(node.commit(&actor, &key, lease, pages, active).await)
-        });
-    }
-
-    /// Delete the state of the key, resolving `answer` on the loop once the replicas confirmed it. Without `active`
-    /// the key lets go with it.
-    pub fn delete(
-        &self,
-        py: Python<'_>,
-        actor: &str,
-        key: &str,
-        lease: u64,
-        active: bool,
-        answer: Py<PyAny>,
-    ) {
-        let (node, actor, key) = (self.node.clone(), actor.to_owned(), key.to_owned());
-        self.dispatch(py, answer, async move {
-            Landed::Written(node.delete(&actor, &key, lease, active).await)
+            match op {
+                Op::Activate { initial } => {
+                    Landed::Taken(node.activate(&actor, &key, initial).await)
+                }
+                Op::Commit {
+                    lease,
+                    pages,
+                    active,
+                } => Landed::Written(node.commit(&actor, &key, lease, pages, active).await),
+                Op::Delete { lease, active } => {
+                    Landed::Written(node.delete(&actor, &key, lease, active).await)
+                }
+            }
         });
     }
 
