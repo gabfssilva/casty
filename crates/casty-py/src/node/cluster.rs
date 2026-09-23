@@ -57,7 +57,6 @@ pub struct Joined {
 }
 
 impl Joined {
-    /// Join the cluster and give back the node, or the reason a seed would not have it.
     /// Start joining the cluster. `entered` is resolved with `system` once the node is in, or with the refusal.
     ///
     /// Joining talks to the seeds and the loop is what answers them, in a test that puts a proxy in between and in
@@ -358,20 +357,20 @@ impl Landed {
             return Ok(());
         }
         match self {
-            Landed::Taken(Ok(held)) => {
+            Self::Taken(Ok(held)) => {
                 let taken = Bound::new(py, Taken::of(held))?;
                 answer.call_method1("set_result", (taken,))?;
             }
-            Landed::Written(Ok(())) => {
+            Self::Written(Ok(())) => {
                 answer.call_method1("set_result", (py.None(),))?;
             }
-            Landed::Stored(stored) => {
+            Self::Stored(stored) => {
                 answer.call_method1("set_result", (stored,))?;
             }
-            Landed::Placed(placed) => {
+            Self::Placed(placed) => {
                 answer.call_method1("set_result", (super::located(py, &placed)?,))?;
             }
-            Landed::Taken(Err(failure)) | Landed::Written(Err(failure)) => {
+            Self::Taken(Err(failure)) | Self::Written(Err(failure)) => {
                 answer.call_method1("set_exception", (raised(py, &failure),))?;
             }
         }
