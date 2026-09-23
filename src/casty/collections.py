@@ -621,6 +621,18 @@ async def _wait[T](request: Callable[[float], Awaitable[T]]) -> T:
                 raise
 
 
+async def _withdraw[T](cancel: Coroutine[object, object, T], unreached: T) -> T:
+    """What `cancel` answers within a second, or `unreached` when it does not reach the owner in time.
+
+    A wait that is never withdrawn expires on its own, `_INTEREST` after its last ask.
+    """
+    try:
+        async with asyncio.timeout(1.0):
+            return await cancel
+    except (TimeoutError, Unavailable):
+        return unreached
+
+
 class Counter:
     """Striped counter. Aggregate reads and resets are not atomic across stripes."""
 
@@ -1233,16 +1245,8 @@ class Semaphore:
                 raise TimeoutError("semaphore acquisition timed out")
             return Lease(token, self)
         except BaseException:
-            await self._cancel(id)
+            await _withdraw(self.ref.ask(semaphore.Cancel, id), None)
             raise
-
-    async def _cancel(self, id: UUID) -> None:
-        try:
-            async with asyncio.timeout(1.0):
-                await self.ref.ask(semaphore.Cancel, id)
-        except (TimeoutError, Unavailable):
-            # A replicated expiry bounds an abandoned request when cancellation cannot reach the owner.
-            pass
 
     async def available(self) -> int:
         await self._binding.ready()
@@ -1310,18 +1314,11 @@ class Barrier:
             if not released:
                 raise TimeoutError("barrier wait timed out")
         except TimeoutError:
-            if not await self._cancel(id):
+            if not await _withdraw(self._ref.ask(barrier.Cancel, id), False):
                 raise
         except BaseException:
-            await self._cancel(id)
+            await _withdraw(self._ref.ask(barrier.Cancel, id), False)
             raise
-
-    async def _cancel(self, id: UUID) -> bool:
-        try:
-            async with asyncio.timeout(1.0):
-                return await self._ref.ask(barrier.Cancel, id)
-        except (TimeoutError, Unavailable):
-            return False
 
     async def waiting(self) -> int:
         await self._binding.ready()
