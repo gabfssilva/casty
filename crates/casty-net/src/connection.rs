@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use casty_core::node::NodeId;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::compress::Name;
 use crate::frame::{Decoder, Frame, ProtocolError};
@@ -192,10 +192,8 @@ impl<S: Socket> Greeting<S> {
             peer,
             mux: Mutex::new(mux),
             writable: Notify::new(),
-            done: Notify::new(),
             closing: AtomicBool::new(false),
-            ended: AtomicBool::new(false),
-            over: tokio::sync::watch::channel(false).0,
+            over: watch::channel(false).0,
             bytes,
         });
         let (reader, writer) = tokio::io::split(socket);
@@ -219,10 +217,8 @@ pub struct Connection {
     peer: NodeId,
     mux: Mutex<Mux>,
     writable: Notify,
-    done: Notify,
     closing: AtomicBool,
-    ended: AtomicBool,
-    over: tokio::sync::watch::Sender<bool>,
+    over: watch::Sender<bool>,
     bytes: Arc<Bytes>,
 }
 
@@ -257,30 +253,19 @@ impl Connection {
     }
 
     /// End the connection now, losing what has not reached the socket.
-    pub fn abort(&self) {
-        self.end();
+    pub fn end(&self) {
+        // Stored even with nobody subscribed, which is what `alive` reads.
+        self.over.send_replace(true);
     }
 
     #[must_use]
     pub fn alive(&self) -> bool {
-        !self.ended.load(Ordering::SeqCst)
+        !*self.over.borrow()
     }
 
-    /// Return once the connection is over, however it ended.
+    /// Return once the connection is over, however it ended, at once if it already is.
     pub async fn over(&self) {
-        let mut watched = self.over.subscribe();
-        while !*watched.borrow_and_update() {
-            if watched.changed().await.is_err() {
-                return;
-            }
-        }
-    }
-
-    fn end(&self) {
-        self.ended.store(true, Ordering::SeqCst);
-        let _ = self.over.send(true);
-        self.done.notify_waiters();
-        self.writable.notify_one();
+        let _ = self.over.subscribe().wait_for(|over| *over).await;
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, Mux> {
@@ -291,7 +276,7 @@ impl Connection {
 
     async fn write(&self, mut writer: impl AsyncWrite + Unpin + Send) {
         loop {
-            if self.ended.load(Ordering::SeqCst) {
+            if !self.alive() {
                 return;
             }
             loop {
@@ -301,7 +286,7 @@ impl Connection {
                 }
                 let written = tokio::select! {
                     written = writer.write_all(&out) => written,
-                    () = self.done.notified() => return,
+                    () = self.over() => return,
                 };
                 if written.is_err() {
                     self.end();
@@ -316,7 +301,7 @@ impl Connection {
             }
             tokio::select! {
                 () = self.writable.notified() => {}
-                () = self.done.notified() => return,
+                () = self.over() => return,
             }
         }
     }
@@ -361,7 +346,7 @@ impl Connection {
             self.writable.notify_one();
             let read = tokio::select! {
                 read = self.receive(&mut reader, &mut buffer, limits) => read?,
-                () = self.done.notified() => return Ok(()),
+                () = self.over() => return Ok(()),
             };
             if read == 0 {
                 return Ok(());

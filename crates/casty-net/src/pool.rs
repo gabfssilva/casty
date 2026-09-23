@@ -267,7 +267,7 @@ impl Pool {
         self.closing.notify_waiters();
         for connection in links {
             if abort {
-                connection.abort();
+                connection.end();
             } else {
                 connection.close();
             }
@@ -437,7 +437,7 @@ impl Pool {
         let (previous, replaced) = {
             let mut state = self.held();
             if state.closed {
-                connection.abort();
+                connection.end();
                 return;
             }
             let mut queue = Vec::new();
@@ -470,7 +470,7 @@ impl Pool {
             (previous, replaced)
         };
         if let Some(previous) = previous {
-            previous.connection.abort();
+            previous.connection.end();
         }
         for node in unique(replaced) {
             self.tell(Peer::Unreached(node));
