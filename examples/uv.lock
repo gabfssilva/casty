@@ -9,12 +9,16 @@ exclude-newer-span = "P7D"
 [[package]]
 name = "casty"
 version = "0.30.0"
-source = { editable = "../../" }
+source = { editable = "../" }
 
 [package.metadata]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "griffelib", specifier = ">=2.3.0" },
+    { name = "mkdocs", specifier = ">=1.6.1,<2" },
+    { name = "mkdocs-material", specifier = ">=9.7.7" },
+    { name = "mkdocstrings", extras = ["python"], specifier = ">=1.0.6" },
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pyright", specifier = ">=1.1.414" },
     { name = "pytest", specifier = ">=9.1.1" },
@@ -25,7 +29,7 @@ dev = [
 ]
 
 [[package]]
-name = "casty-example-replication"
+name = "casty-examples"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
@@ -33,4 +37,4 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "casty", editable = "../../" }]
+requires-dist = [{ name = "casty", editable = "../" }]
