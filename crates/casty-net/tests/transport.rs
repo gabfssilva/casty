@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use casty_core::schema::msgpack::Reader;
 use casty_net::compress::Name;
 use casty_net::endpoint::{Config, Endpoint, Received};
 use casty_net::frame::Frame;
@@ -227,58 +226,6 @@ async fn it_reports_a_seed_whose_limits_differ() {
     })
     .await;
     assert!(reason.contains("8388608"), "{reason}");
-}
-
-/// The hello names the cluster, the node, the compressors and the limits, and no payload format: there is
-/// only one.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_hello_names_no_payload_format() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap().to_string();
-    let limits = Limits::default();
-    let heard = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut frames = casty_net::frame::Decoder::new(limits.frame);
-        let mut mux = casty_net::mux::Mux::new(limits, 1 << 30);
-        let mut buffer = vec![0_u8; 8 * 1024];
-        loop {
-            let read = socket.read(&mut buffer).await.unwrap();
-            assert!(read > 0, "the connection ended before the hello");
-            frames.feed(&buffer[..read]);
-            while let Some(frame) = frames.frame().unwrap() {
-                let records = mux.receive(frame).unwrap();
-                if let Some(hello) = records.into_iter().find(|record| record.name == "hello") {
-                    return hello.payload;
-                }
-            }
-        }
-    });
-    let talker = node().await;
-    talker
-        .send(&Target::Seed(address), "actors", b"anyone there")
-        .unwrap();
-
-    let payload = tokio::time::timeout(WITHIN, heard).await.unwrap().unwrap();
-    let mut reader = Reader::new(&payload);
-    let mut names = Vec::new();
-    for _ in 0..reader.read_map_len().unwrap() {
-        names.push(reader.read_str().unwrap().to_owned());
-        reader.skip().unwrap();
-    }
-    names.sort();
-    assert_eq!(
-        names,
-        [
-            "address",
-            "cluster",
-            "compression",
-            "frame",
-            "incarnation",
-            "message",
-            "window",
-        ]
-    );
-    talker.close(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

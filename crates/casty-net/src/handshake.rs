@@ -3,8 +3,8 @@
 //! No protocol version is negotiated: the version is in every frame header, and a peer of another one is refused at
 //! its first frame.
 //!
-//! The messages travel on the control stream as msgpack maps of named fields. They name no payload format: there is
-//! one, msgpack.
+//! Each message is a msgpack array of its fields in the order they are declared, on the control stream under the
+//! name of the message.
 
 use casty_core::node::NodeId;
 use casty_core::schema::msgpack::{self, Int, Kind, Reader};
@@ -68,203 +68,104 @@ pub fn answer(hello: &Hello, local: &Hello) -> Result<Ack, String> {
 #[must_use]
 pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
     let mut out = Vec::new();
-    match message {
+    let name = match message {
         Message::Hello(hello) => {
-            msgpack::write_map_len(&mut out, 7);
-            key(&mut out, "cluster");
+            msgpack::write_array_len(&mut out, 7);
             msgpack::write_str(&mut out, &hello.cluster);
-            key(&mut out, "address");
-            address(&mut out, &hello.node);
-            key(&mut out, "incarnation");
-            msgpack::write_bin(&mut out, &hello.node.incarnation);
-            key(&mut out, "compression");
+            write_node(&mut out, &hello.node);
             msgpack::write_array_len(&mut out, hello.compression.len());
             for name in &hello.compression {
                 msgpack::write_str(&mut out, name.name());
             }
-            for (name, size) in ["frame", "message", "window"].into_iter().zip(hello.sizes) {
-                key(&mut out, name);
+            for size in hello.sizes {
                 msgpack::write_int(&mut out, Int::Unsigned(size as u64));
             }
-            ("hello", out)
+            "hello"
         }
         Message::Ack(ack) => {
-            msgpack::write_map_len(&mut out, 3);
-            key(&mut out, "address");
-            address(&mut out, &ack.node);
-            key(&mut out, "incarnation");
-            msgpack::write_bin(&mut out, &ack.node.incarnation);
-            key(&mut out, "compression");
-            match ack.compression {
-                None => msgpack::write_nil(&mut out),
-                Some(name) => msgpack::write_str(&mut out, name.name()),
-            }
-            ("hello-ack", out)
+            msgpack::write_array_len(&mut out, 3);
+            write_node(&mut out, &ack.node);
+            write_optional(&mut out, ack.compression.map(Name::name));
+            "hello-ack"
         }
         Message::Reject(reason) => {
-            msgpack::write_map_len(&mut out, 1);
-            key(&mut out, "reason");
+            msgpack::write_array_len(&mut out, 1);
             msgpack::write_str(&mut out, reason);
-            ("hello-reject", out)
+            "hello-reject"
         }
         Message::Duplicate => {
-            msgpack::write_map_len(&mut out, 0);
-            ("hello-duplicate", out)
+            msgpack::write_array_len(&mut out, 0);
+            "hello-duplicate"
         }
-    }
+    };
+    (name, out)
 }
 
 pub fn decode(name: &str, payload: &[u8]) -> Result<Message, ProtocolError> {
-    let malformed = || ProtocolError::new(format!("malformed handshake message {name:?}"));
-    let mut fields = Fields::read(payload).ok_or_else(malformed)?;
-    match name {
-        "hello" => Ok(Message::Hello(Hello {
-            cluster: fields.text("cluster").ok_or_else(malformed)?,
-            node: fields.node().ok_or_else(malformed)?,
-            // A compressor this build does not have is one it cannot choose.
-            compression: fields
-                .texts("compression")
-                .ok_or_else(malformed)?
-                .iter()
-                .filter_map(|name| Name::of(name))
-                .collect(),
-            sizes: [
-                fields.size("frame").ok_or_else(malformed)?,
-                fields.size("message").ok_or_else(malformed)?,
-                fields.size("window").ok_or_else(malformed)?,
-            ],
-        })),
-        "hello-ack" => {
-            let compression = match fields.take("compression") {
-                Some(Value::Nil) => None,
-                Some(Value::Text(name)) => Some(Name::of(&name).ok_or_else(malformed)?),
-                _ => return Err(malformed()),
-            };
-            Ok(Message::Ack(Ack {
-                node: fields.node().ok_or_else(malformed)?,
-                compression,
-            }))
-        }
-        "hello-reject" => Ok(Message::Reject(
-            fields.text("reason").ok_or_else(malformed)?,
-        )),
-        "hello-duplicate" => Ok(Message::Duplicate),
-        _ => Err(malformed()),
-    }
+    read(name, &mut Reader::new(payload))
+        .ok_or_else(|| ProtocolError::new(format!("malformed handshake message {name:?}")))
 }
 
-fn key(out: &mut Vec<u8>, name: &str) {
-    msgpack::write_str(out, name);
-}
-
-fn address(out: &mut Vec<u8>, node: &NodeId) {
-    match &node.address {
-        None => msgpack::write_nil(out),
-        Some(address) => msgpack::write_str(out, address),
-    }
-}
-
-/// A handshake message read as named values, which is all these maps hold.
-#[derive(Debug)]
-struct Fields(Vec<(String, Value)>);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Value {
-    Nil,
-    Int(i64),
-    Text(String),
-    Bin(Vec<u8>),
-    List(Vec<Value>),
-}
-
-impl Fields {
-    fn read(payload: &[u8]) -> Option<Self> {
-        let mut reader = Reader::new(payload);
-        let len = reader.read_map_len().ok()?;
-        let mut found = Vec::with_capacity(len);
-        for _ in 0..len {
-            let name = reader.read_str().ok()?.to_owned();
-            found.push((name, value(&mut reader)?));
-        }
-        Some(Self(found))
-    }
-
-    fn take(&mut self, name: &str) -> Option<Value> {
-        let at = self.0.iter().position(|(held, _)| held == name)?;
-        Some(self.0.remove(at).1)
-    }
-
-    fn integer(&mut self, name: &str) -> Option<i64> {
-        match self.take(name)? {
-            Value::Int(value) => Some(value),
-            _ => None,
-        }
-    }
-
-    fn size(&mut self, name: &str) -> Option<usize> {
-        usize::try_from(self.integer(name)?).ok()
-    }
-
-    fn text(&mut self, name: &str) -> Option<String> {
-        match self.take(name)? {
-            Value::Text(value) => Some(value),
-            _ => None,
-        }
-    }
-
-    fn texts(&mut self, name: &str) -> Option<Vec<String>> {
-        match self.take(name)? {
-            Value::List(items) => Some(
-                items
-                    .into_iter()
-                    .filter_map(|item| match item {
-                        Value::Text(value) => Some(value),
-                        _ => None,
-                    })
-                    .collect(),
-            ),
-            _ => None,
-        }
-    }
-
-    fn node(&mut self) -> Option<NodeId> {
-        let address = match self.take("address")? {
-            Value::Nil => None,
-            Value::Text(address) => Some(address),
-            _ => return None,
-        };
-        let Value::Bin(raw) = self.take("incarnation")? else {
-            return None;
-        };
-        Some(NodeId {
-            address,
-            incarnation: raw.try_into().ok()?,
-        })
-    }
-}
-
-fn value(reader: &mut Reader<'_>) -> Option<Value> {
-    Some(match reader.kind().ok()? {
-        Kind::None => {
-            reader.read_nil().ok()?;
-            Value::Nil
-        }
-        Kind::Int => match reader.read_int().ok()? {
-            Int::Signed(held) => Value::Int(held),
-            Int::Unsigned(held) => Value::Int(i64::try_from(held).ok()?),
-        },
-        Kind::Str => Value::Text(reader.read_str().ok()?.to_owned()),
-        Kind::Bytes => Value::Bin(reader.read_bin().ok()?.to_vec()),
-        Kind::List => {
-            let len = reader.read_array_len().ok()?;
-            let mut items = Vec::with_capacity(len);
-            for _ in 0..len {
-                items.push(value(reader)?);
-            }
-            Value::List(items)
-        }
+fn read(name: &str, reader: &mut Reader<'_>) -> Option<Message> {
+    Some(match (name, reader.read_array_len().ok()?) {
+        ("hello", 7) => Message::Hello(Hello {
+            cluster: reader.read_str().ok()?.to_owned(),
+            node: read_node(reader)?,
+            compression: {
+                let mut names = Vec::new();
+                for _ in 0..reader.read_array_len().ok()? {
+                    // A compressor this build does not have is one it cannot choose.
+                    names.extend(Name::of(reader.read_str().ok()?));
+                }
+                names
+            },
+            sizes: [size(reader)?, size(reader)?, size(reader)?],
+        }),
+        ("hello-ack", 3) => Message::Ack(Ack {
+            node: read_node(reader)?,
+            compression: match read_optional(reader).ok()? {
+                None => None,
+                Some(written) => Some(Name::of(written)?),
+            },
+        }),
+        ("hello-reject", 1) => Message::Reject(reader.read_str().ok()?.to_owned()),
+        ("hello-duplicate", 0) => Message::Duplicate,
         _ => return None,
     })
+}
+
+/// A node takes two fields: its address or nil, and its incarnation.
+fn write_node(out: &mut Vec<u8>, node: &NodeId) {
+    write_optional(out, node.address.as_deref());
+    msgpack::write_bin(out, &node.incarnation);
+}
+
+fn read_node(reader: &mut Reader<'_>) -> Option<NodeId> {
+    Some(NodeId {
+        address: read_optional(reader).ok()?.map(str::to_owned),
+        incarnation: reader.read_bin().ok()?.try_into().ok()?,
+    })
+}
+
+fn write_optional(out: &mut Vec<u8>, text: Option<&str>) {
+    match text {
+        None => msgpack::write_nil(out),
+        Some(text) => msgpack::write_str(out, text),
+    }
+}
+
+fn read_optional<'a>(reader: &mut Reader<'a>) -> msgpack::Result<Option<&'a str>> {
+    if reader.kind()? == Kind::None {
+        return reader.read_nil().map(|()| None);
+    }
+    reader.read_str().map(Some)
+}
+
+fn size(reader: &mut Reader<'_>) -> Option<usize> {
+    match reader.read_int().ok()? {
+        Int::Unsigned(size) => usize::try_from(size).ok(),
+        Int::Signed(_) => None,
+    }
 }
 
 #[cfg(test)]
