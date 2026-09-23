@@ -207,7 +207,7 @@ async def document(ctx: Context[str, Read]) -> None: ...
 
 readme = system.ref(document, "readme", initial="# casty")
 system.ref(document, "readme", initial="other")  # the key exists: its state is unchanged
-system.ref(document, "readme")  # TypeError, and an error in pyright and mypy
+system.ref(document, "readme")  # TypeError, and an error in pyright
 ```
 
 `initial` only matters for a key that does not exist. When two callers pass different values, the first to reach the
@@ -1030,7 +1030,7 @@ view can lag by `sync_every`, which costs one retry for a key that moved.
 uv sync                     # builds the extension and installs the dev tools
 uv run pytest -q
 cargo test --workspace
-uv run ruff check . && uv run mypy && uv run pyright
+uv run ruff check . && uv run pyright
 cargo fmt --all --check && cargo clippy --workspace --all-targets
 ```
 

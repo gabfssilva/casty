@@ -20,7 +20,6 @@ src/casty/_casty*.so
 src/casty/_casty*.pyd
 
 # Tooling
-.mypy_cache/
 .pytest_cache/
 .ruff_cache/
 .idea/

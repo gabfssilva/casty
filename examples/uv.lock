@@ -19,13 +19,11 @@ dev = [
     { name = "mkdocs", specifier = ">=1.6.1,<2" },
     { name = "mkdocs-material", specifier = ">=9.7.7" },
     { name = "mkdocstrings", extras = ["python"], specifier = ">=1.0.6" },
-    { name = "mypy", specifier = ">=2.3.1" },
     { name = "pyright", specifier = ">=1.1.414" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "pytest-describe", specifier = ">=3.2.0" },
     { name = "ruff", specifier = ">=0.16.6" },
-    { name = "trustme", specifier = ">=1.2.1" },
 ]
 
 [[package]]
