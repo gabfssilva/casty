@@ -690,13 +690,16 @@ impl Running {
             taking,
             entered,
         ));
+        // Held before the join is waited for: a join that is refused, or given up on, drops it, and the task and the
+        // transport end with it.
+        let running = Self {
+            node,
+            task,
+            handover: cluster.leave_timeout,
+            released,
+        };
         match joining.await {
-            Ok(Ok(())) => Ok(Self {
-                node,
-                task,
-                handover: cluster.leave_timeout,
-                released,
-            }),
+            Ok(Ok(())) => Ok(running),
             Ok(Err(refused)) => Err(io::Error::other(refused)),
             Err(_) => Err(io::Error::other("the node stopped before it joined")),
         }

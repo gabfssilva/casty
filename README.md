@@ -423,7 +423,8 @@ async with ActorSystem(cluster=cluster) as system:
 ```
 
 - Without seeds other than itself, a node starts a cluster alone. Otherwise `async with` returns once it sees another
-  member; bound the wait with `asyncio.timeout`.
+  member; bound the wait with `asyncio.timeout`. A join that is cancelled, or refused, lets go of the address, the
+  connections and the threads it took, and the system can be entered again.
 - Nodes do not list actor types. A type is named `module:qualname`, and a node imports it when the name arrives from
   the cluster. **All nodes of a cluster must run the same code.**
 - `system.ref(actor, key)` reaches the key from any node. `system.members` is the member table as this node sees it,

@@ -331,6 +331,34 @@ impl Node {
         )
     }
 
+    /// What `__aenter__` gives back to await: the entry, undone if its caller stops waiting for it or the cluster
+    /// refuses it, so that the system is as it was before, and its address, its connections and its threads are let go.
+    fn entry<'py>(
+        self: &Arc<Self>,
+        py: Python<'py>,
+        entered: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let node = Arc::clone(self);
+        callback::when_done(&entered, move |_, entered| {
+            if entered.call_method0("cancelled")?.is_truthy()?
+                || !entered.call_method0("exception")?.is_none()
+            {
+                node.withdraw();
+            }
+            Ok(())
+        })?;
+        Ok(Bound::new(py, Awaited::of(entered))?.into_any())
+    }
+
+    fn withdraw(&self) {
+        let joined = self.joined.locked().take();
+        if let Some(joined) = joined {
+            joined.shutdown();
+        }
+        *self.running.locked() = None;
+        *self.system.locked() = None;
+    }
+
     /// The node is in the cluster: take the identity it joined under and what it sees.
     pub fn entered(&self, cluster: &Entered) {
         *self.id.locked() = cluster.id().clone();
@@ -1233,7 +1261,7 @@ system_methods!(ActorSystem {
                 entered.call_method1("set_result", (slf.clone(),))?;
             }
         }
-        Ok(Bound::new(py, Awaited::of(entered))?.into_any())
+        node.entry(py, entered)
     }
 
     /// Leaving by an exception is the process going away: nothing is drained and the transport aborts.
@@ -1763,7 +1791,7 @@ system_methods!(Client {
             slf.as_any(),
             false,
         )?;
-        Ok(Bound::new(py, Awaited::of(entered))?.into_any())
+        node.entry(py, entered)
     }
 
     #[pyo3(signature = (*_exc))]

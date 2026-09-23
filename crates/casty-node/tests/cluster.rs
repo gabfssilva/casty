@@ -229,3 +229,58 @@ async fn a_node_that_ends_frees_its_address_and_leaves_no_task_on_its_threads() 
     }
     common::crash(nodes).await;
 }
+
+/// A free address on loopback, which nothing listens on once this returns.
+async fn unused() -> String {
+    let probe = TcpListener::bind("127.0.0.1:0").await.expect("a free port");
+    probe.local_addr().expect("a bound address").to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_join_given_up_on_frees_its_address_and_leaves_no_task_on_its_threads() {
+    // Nothing answers at the seed, so the join waits for it until it is given up on.
+    let address = unused().await;
+    let joining = Cluster {
+        bind: address.clone(),
+        ..cluster(&[unused().await])
+    };
+    let threads = apart();
+    let join = threads.spawn(start(joining));
+    // Dialed rather than bound, so that the probe never takes the address from the node.
+    let listening = tokio::time::timeout(WITHIN, async {
+        while tokio::net::TcpStream::connect(&address).await.is_err() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        listening.is_ok(),
+        "the joining node never listened on {address}"
+    );
+
+    join.abort();
+    assert!(join.await.is_err_and(|ended| ended.is_cancelled()));
+
+    let freed = tokio::time::timeout(WITHIN, async {
+        while TcpListener::bind(&address).await.is_err() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        freed.is_ok(),
+        "{address} stayed bound after the join was given up on"
+    );
+    let quiet = tokio::time::timeout(WITHIN, async {
+        while threads.metrics().num_alive_tasks() > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        quiet.is_ok(),
+        "{} tasks outlived a join that was given up on",
+        threads.metrics().num_alive_tasks()
+    );
+    threads.shutdown_background();
+}

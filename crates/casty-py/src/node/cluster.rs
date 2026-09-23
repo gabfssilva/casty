@@ -49,6 +49,9 @@ pub struct Joined {
     /// How work is put on those threads, which outlives letting the runtime go.
     threads: tokio::runtime::Handle,
     running: Mutex<Option<Running>>,
+    /// The join while it runs: letting the cluster go ends it, and with it what the join started, on a runtime that
+    /// goes on for other systems too.
+    joining: Mutex<Option<tokio::task::AbortHandle>>,
     /// The node of the cluster, from the moment it has joined one.
     node: OnceLock<Cluster>,
     /// The loop the bodies run on, which is the only thread that touches an interpreter.
@@ -92,13 +95,14 @@ impl Joined {
         let joined = Arc::new(Self {
             node: OnceLock::new(),
             running: Mutex::new(None),
+            joining: Mutex::new(None),
             threads: runtime.handle().clone(),
             runtime: Mutex::new(Some(runtime)),
             running_loop: running_loop.clone_ref(py),
         });
         let held = Arc::clone(&joined);
         let node = Arc::clone(node);
-        joined.threads.spawn(async move {
+        let join = joined.threads.spawn(async move {
             let started = if member {
                 Running::start(settings, host, types).await
             } else {
@@ -108,6 +112,7 @@ impl Joined {
                 entering(&held, &node, started, entered.bind(py), system.bind(py))
             });
         });
+        *joined.joining.locked() = Some(join.abort_handle());
         Ok(joined)
     }
 
@@ -120,12 +125,15 @@ impl Joined {
         })
     }
 
-    /// Let the threads of the transport go: a runtime of its own ends here, without waiting for them, and a shared one
-    /// goes on for the systems that still hold it.
+    /// End the join if it still runs, and let the threads of the transport go: a runtime of its own ends here, without
+    /// waiting for them, and a shared one goes on for the systems that still hold it.
     ///
     /// They are given up rather than joined: a dial of theirs may be waiting for the loop, and this runs on the loop,
     /// so waiting here is waiting for something that is waiting for this.
     pub fn shutdown(&self) {
+        if let Some(joining) = self.joining.locked().take() {
+            joining.abort();
+        }
         drop(self.runtime.locked().take());
     }
 
