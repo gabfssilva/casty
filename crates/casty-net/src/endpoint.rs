@@ -78,10 +78,8 @@ pub struct TooLarge(pub String);
 
 #[derive(Debug)]
 pub struct Endpoint {
-    node: NodeId,
-    pool: Arc<Pool>,
+    sender: Sender,
     inbound: mpsc::UnboundedReceiver<Incoming>,
-    loopback: mpsc::UnboundedSender<Incoming>,
     listening: Option<JoinHandle<()>>,
     limits: Limits,
 }
@@ -153,10 +151,13 @@ impl Endpoint {
         // The version of the frame header is what the handshake negotiates, and there is one so far.
         debug_assert_eq!(VERSION, 1);
         Ok(Self {
-            node,
-            pool,
+            sender: Sender {
+                node,
+                pool,
+                loopback: inbound,
+                message: config.limits.message,
+            },
             inbound: receiver,
-            loopback: inbound,
             listening,
             limits: config.limits,
         })
@@ -164,31 +165,26 @@ impl Endpoint {
 
     #[must_use]
     pub fn node(&self) -> &NodeId {
-        &self.node
+        &self.sender.node
     }
 
     /// A handle that only reads what the transport holds and carried, from any thread.
     #[must_use]
     pub fn meter(&self) -> Meter {
         Meter {
-            pool: Arc::clone(&self.pool),
+            pool: Arc::clone(&self.sender.pool),
         }
     }
 
     /// A handle that only sends, which is what every thread but the one reading holds.
     #[must_use]
     pub fn sender(&self) -> Sender {
-        Sender {
-            node: self.node.clone(),
-            pool: Arc::clone(&self.pool),
-            loopback: self.loopback.clone(),
-            message: self.limits.message,
-        }
+        self.sender.clone()
     }
 
     /// Queue an envelope. It never waits, and it is lost if the connection it needs never opens.
     pub fn send(&self, to: &Target, name: &str, payload: &[u8]) -> Result<(), TooLarge> {
-        self.sender().send(to, name, payload)
+        self.sender.send(to, name, payload)
     }
 
     /// The next envelope for this node, or the refusal of a seed that would not have it.
@@ -218,13 +214,13 @@ impl Endpoint {
             // Waited for, not just asked: the port is free only once the task that owns the listener has dropped it.
             let _ = listening.await;
         }
-        self.pool.close(abort);
+        self.sender.pool.close(abort);
         if abort {
             return;
         }
         // What the peers' credit allows goes out first, up to the deadline of the shutdown.
         let deadline = tokio::time::Instant::now() + self.limits.handshake;
-        while !self.pool.idle() && tokio::time::Instant::now() < deadline {
+        while !self.sender.pool.idle() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(core::time::Duration::from_millis(5)).await;
         }
     }
