@@ -20,8 +20,13 @@ pub fn gained(previous: &Ring, current: &Ring, node: &NodeId, count: usize) -> V
 /// Whether a token falls in both.
 #[must_use]
 pub fn overlap(held: &[Range], others: &[Range]) -> bool {
-    let mine = arcs(held);
-    mine != without(&mine, &arcs(others))
+    // Two ranges share a token exactly when one holds the end of the other: walking the circle on from a token of
+    // both, the first of the two ends met is in both.
+    held.iter().any(|mine| {
+        others
+            .iter()
+            .any(|other| mine.holds(other.end) || other.holds(mine.end))
+    })
 }
 
 /// The ranges one step of a ring gave this node, and the replicas of the previous ring that answer for them.
