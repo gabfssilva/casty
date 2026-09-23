@@ -1,5 +1,8 @@
 //! What two nodes tell each other before the first envelope crosses.
 //!
+//! No protocol version is negotiated: the version is in every frame header, and a peer of another one is refused at
+//! its first frame.
+//!
 //! The messages travel on the control stream as msgpack maps of named fields. They name no payload format: there is
 //! one, msgpack.
 
@@ -8,9 +11,6 @@ use casty_core::schema::msgpack::{self, Int, Kind, Reader};
 
 use crate::compress::Name;
 use crate::frame::ProtocolError;
-
-/// The versions of the wire protocol this build speaks.
-pub const VERSIONS: [i64; 1] = [1];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -41,7 +41,6 @@ impl Role {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
     Cluster = 1,
-    Version = 3,
     Itself = 4,
     Duplicate = 5,
     Limits = 6,
@@ -49,7 +48,6 @@ pub enum Rejection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
-    pub versions: Vec<i64>,
     pub cluster: String,
     pub node: NodeId,
     pub role: Role,
@@ -62,7 +60,6 @@ pub struct Hello {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ack {
-    pub version: i64,
     pub node: NodeId,
     pub role: Role,
     pub compression: Option<Name>,
@@ -98,17 +95,6 @@ pub fn answer(hello: &Hello, local: &Hello) -> Result<Ack, Reject> {
             ),
         });
     }
-    let common = hello
-        .versions
-        .iter()
-        .filter(|version| local.versions.contains(version))
-        .max();
-    let Some(version) = common else {
-        return Err(Reject {
-            code: Rejection::Version as i64,
-            reason: format!("no protocol version in common with {:?}", hello.versions),
-        });
-    };
     if hello.node == local.node {
         return Err(Reject {
             code: Rejection::Itself as i64,
@@ -116,7 +102,6 @@ pub fn answer(hello: &Hello, local: &Hello) -> Result<Ack, Reject> {
         });
     }
     Ok(Ack {
-        version: *version,
         node: local.node.clone(),
         role: local.role,
         compression: crate::compress::chosen(&hello.compression, &local.compression),
@@ -129,12 +114,7 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
     let mut out = Vec::new();
     match message {
         Message::Hello(hello) => {
-            msgpack::write_map_len(&mut out, 9);
-            key(&mut out, "versions");
-            msgpack::write_array_len(&mut out, hello.versions.len());
-            for version in &hello.versions {
-                msgpack::write_int(&mut out, Int::Signed(*version));
-            }
+            msgpack::write_map_len(&mut out, 8);
             key(&mut out, "cluster");
             msgpack::write_str(&mut out, &hello.cluster);
             key(&mut out, "address");
@@ -155,9 +135,7 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
             ("hello", out)
         }
         Message::Ack(ack) => {
-            msgpack::write_map_len(&mut out, 5);
-            key(&mut out, "version");
-            msgpack::write_int(&mut out, Int::Signed(ack.version));
+            msgpack::write_map_len(&mut out, 4);
             key(&mut out, "address");
             address(&mut out, &ack.node);
             key(&mut out, "incarnation");
@@ -187,7 +165,6 @@ pub fn decode(name: &str, payload: &[u8]) -> Result<Message, ProtocolError> {
     let mut fields = Fields::read(payload).ok_or_else(malformed)?;
     match name {
         "hello" => Ok(Message::Hello(Hello {
-            versions: fields.integers("versions").ok_or_else(malformed)?,
             cluster: fields.text("cluster").ok_or_else(malformed)?,
             node: fields.node().ok_or_else(malformed)?,
             role: Role::of(&fields.text("role").ok_or_else(malformed)?).ok_or_else(malformed)?,
@@ -211,7 +188,6 @@ pub fn decode(name: &str, payload: &[u8]) -> Result<Message, ProtocolError> {
                 _ => return Err(malformed()),
             };
             Ok(Message::Ack(Ack {
-                version: fields.integer("version").ok_or_else(malformed)?,
                 node: fields.node().ok_or_else(malformed)?,
                 role: Role::of(&fields.text("role").ok_or_else(malformed)?)
                     .ok_or_else(malformed)?,
@@ -285,21 +261,6 @@ impl Fields {
         }
     }
 
-    fn integers(&mut self, name: &str) -> Option<Vec<i64>> {
-        match self.take(name)? {
-            Value::List(items) => Some(
-                items
-                    .into_iter()
-                    .filter_map(|item| match item {
-                        Value::Int(value) => Some(value),
-                        _ => None,
-                    })
-                    .collect(),
-            ),
-            _ => None,
-        }
-    }
-
     fn texts(&mut self, name: &str) -> Option<Vec<String>> {
         match self.take(name)? {
             Value::List(items) => Some(
@@ -359,7 +320,7 @@ fn value(reader: &mut Reader<'_>) -> Option<Value> {
 mod tests {
     use casty_core::node::NodeId;
 
-    use super::{Ack, Hello, Message, Reject, Rejection, Role, VERSIONS, answer, decode, encode};
+    use super::{Ack, Hello, Message, Reject, Rejection, Role, answer, decode, encode};
     use crate::compress::{Name, PREFERENCE};
     use crate::limits::Limits;
 
@@ -373,7 +334,6 @@ mod tests {
     fn hello(cluster: &str, node: NodeId) -> Hello {
         let limits = Limits::default();
         Hello {
-            versions: VERSIONS.to_vec(),
             cluster: cluster.to_owned(),
             node,
             role: Role::Member,
@@ -388,13 +348,11 @@ mod tests {
             Message::Hello(hello("casty", node(Some("127.0.0.1:7400"), 1))),
             Message::Hello(hello("casty", node(None, 2))),
             Message::Ack(Ack {
-                version: 1,
                 node: node(Some("10.0.0.1:1"), 3),
                 role: Role::Client,
                 compression: Some(Name::Lz4),
             }),
             Message::Ack(Ack {
-                version: 1,
                 node: node(None, 4),
                 role: Role::Member,
                 compression: None,
@@ -415,7 +373,6 @@ mod tests {
         let local = hello("casty", node(Some("a:1"), 1));
         let ack = answer(&hello("casty", node(Some("b:1"), 2)), &local).unwrap();
 
-        assert_eq!(ack.version, 1);
         assert_eq!(ack.node, local.node);
         assert_eq!(ack.compression, Some(Name::Zstd));
     }
@@ -429,10 +386,7 @@ mod tests {
         assert_eq!(refused(other.clone()), Rejection::Cluster as i64);
         other = hello("casty", node(Some("b:1"), 2));
         other.sizes[1] *= 8;
-        assert_eq!(refused(other.clone()), Rejection::Limits as i64);
-        other = hello("casty", node(Some("b:1"), 2));
-        other.versions = vec![99];
-        assert_eq!(refused(other), Rejection::Version as i64);
+        assert_eq!(refused(other), Rejection::Limits as i64);
         assert_eq!(
             refused(hello("casty", node(Some("a:1"), 1))),
             Rejection::Itself as i64

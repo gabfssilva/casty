@@ -8,7 +8,7 @@ use std::time::Duration;
 use casty_core::schema::msgpack::Reader;
 use casty_net::compress::Name;
 use casty_net::endpoint::{Config, Endpoint, Received};
-use casty_net::frame::{Frame, VERSION};
+use casty_net::frame::Frame;
 use casty_net::limits::Limits;
 use casty_net::pool::{Heard, Peer, Target, Traffic};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -276,7 +276,6 @@ async fn a_hello_names_no_payload_format() {
             "incarnation",
             "message",
             "role",
-            "versions",
             "window",
         ]
     );
@@ -378,7 +377,6 @@ async fn a_frame_larger_than_the_limit_is_refused_before_it_is_read() {
     let mut answer = Vec::new();
     let read = tokio::time::timeout(WITHIN, socket.read_to_end(&mut answer)).await;
     assert!(read.is_ok(), "the node waited for a frame past its limit");
-    assert_eq!(VERSION, 1);
     node.close(true).await;
 }
 
@@ -500,7 +498,6 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
             }
             if let Some(casty_net::handshake::Message::Hello(_)) = said {
                 let ack = casty_net::handshake::Message::Ack(casty_net::handshake::Ack {
-                    version: 1,
                     node: casty_core::node::NodeId::fresh(Some(listening.clone())),
                     role: casty_net::handshake::Role::Member,
                     compression: None,

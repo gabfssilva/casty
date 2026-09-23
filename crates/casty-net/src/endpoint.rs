@@ -13,8 +13,7 @@ use tokio::task::JoinHandle;
 
 use crate::compress::{Name, PREFERENCE};
 use crate::connection::Incoming;
-use crate::frame::VERSION;
-use crate::handshake::{Hello, Role, VERSIONS};
+use crate::handshake::{Hello, Role};
 use crate::limits::Limits;
 use crate::pool::{AddressMap, Heard, Pool, Settings, Target, Traffic};
 use crate::tls::Tls;
@@ -108,7 +107,6 @@ impl Endpoint {
             }
         };
         let local = Hello {
-            versions: VERSIONS.to_vec(),
             cluster: config.cluster.clone(),
             node: node.clone(),
             role: if node.address.is_none() {
@@ -148,8 +146,6 @@ impl Endpoint {
                 }
             })
         });
-        // The version of the frame header is what the handshake negotiates, and there is one so far.
-        debug_assert_eq!(VERSION, 1);
         Ok(Self {
             sender: Sender {
                 node,
