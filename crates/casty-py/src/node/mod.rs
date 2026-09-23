@@ -356,12 +356,7 @@ impl Node {
     ///
     /// A node shutting down moved every key it runs, and ends each one after the message it is on instead.
     pub fn relinquish(self: &Arc<Self>, py: Python<'_>, actor: &str, key: &str) -> PyResult<()> {
-        let held = self
-            .activations
-            .locked()
-            .get(&(actor.to_owned(), key.to_owned()))
-            .map(|activation| activation.clone_ref(py));
-        match held {
+        match self.activation(py, actor, key) {
             Some(activation) if self.draining() => Activation::drain(activation.bind(py), py),
             Some(activation) => Activation::release(activation.bind(py), py),
             None => Ok(()),
@@ -587,12 +582,7 @@ impl Node {
         key: &str,
         request: &Target,
     ) -> PyResult<()> {
-        let held = self
-            .activations
-            .locked()
-            .get(&(actor.to_owned(), key.to_owned()))
-            .map(|activation| activation.clone_ref(py));
-        let found = match held {
+        let found = match self.activation(py, actor, key) {
             Some(activation) => Activation::cancelled(activation.bind(py), py, request)?,
             None => false,
         };
@@ -663,6 +653,14 @@ impl Node {
             );
         };
         Activation::put(activation.bind(py), py, command)
+    }
+
+    /// The activation of `key` here, if it has one.
+    fn activation(&self, py: Python<'_>, actor: &str, key: &str) -> Option<Py<Activation>> {
+        self.activations
+            .locked()
+            .get(&(actor.to_owned(), key.to_owned()))
+            .map(|activation| activation.clone_ref(py))
     }
 
     /// Whether `key` has an activation here.
@@ -750,12 +748,7 @@ impl Node {
         key: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let over = self.future(py)?;
-        let held = self
-            .activations
-            .locked()
-            .get(&(actor.to_owned(), key.to_owned()))
-            .map(|activation| activation.clone_ref(py));
-        match held {
+        match self.activation(py, actor, key) {
             Some(activation) => Activation::retire(activation.bind(py), py, &over)?,
             None => {
                 over.call_method1("set_result", (false,))?;
@@ -978,15 +971,7 @@ impl Node {
     /// Take no more: a ref of this node raises from here on, and no activation goes further.
     fn stop(self: &Arc<Self>, py: Python<'_>) {
         self.stop_taking();
-        let running: Vec<Py<Activation>> = self
-            .activations
-            .locked()
-            .values()
-            .map(|activation| activation.clone_ref(py))
-            .collect();
-        for activation in running {
-            let _ = Activation::release(activation.bind(py), py);
-        }
+        self.abandon(py);
     }
 
     /// End every activation after the message it is on: this node is shutting down.
@@ -995,12 +980,7 @@ impl Node {
         // its `ask` goes out before the system closes.
         self.draining.store(true, Ordering::SeqCst);
         let waiting = self.future(py)?;
-        let running: Vec<Py<Activation>> = self
-            .activations
-            .locked()
-            .values()
-            .map(|activation| activation.clone_ref(py))
-            .collect();
+        let running = self.census(py);
         if running.is_empty() {
             waiting.call_method1("set_result", (py.None(),))?;
             return Ok(waiting);
@@ -1026,13 +1006,7 @@ impl Node {
 
     /// Give up on what `drain` did not finish: every activation left gives its key up where it is.
     pub fn abandon(self: &Arc<Self>, py: Python<'_>) {
-        let running: Vec<Py<Activation>> = self
-            .activations
-            .locked()
-            .values()
-            .map(|activation| activation.clone_ref(py))
-            .collect();
-        for activation in running {
+        for activation in self.census(py) {
             let _ = Activation::release(activation.bind(py), py);
         }
     }
@@ -1367,16 +1341,8 @@ system_methods!(ActorSystem {
         actor: &Bound<'_, PyAny>,
         key: &str,
     ) -> PyResult<Option<usize>> {
-        let at = (
-            Behavior::of(actor)?.definition().name.clone(),
-            key.to_owned(),
-        );
-        let held = self
-            .node
-            .activations
-            .locked()
-            .get(&at)
-            .map(|activation| activation.clone_ref(py));
+        let behavior = Behavior::of(actor)?;
+        let held = self.node.activation(py, &behavior.definition().name, key);
         Ok(held.map(|activation| activation.bind(py).get().queued()))
     }
 
