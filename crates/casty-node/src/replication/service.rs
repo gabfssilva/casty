@@ -204,8 +204,9 @@ impl Waiting {
                     "{actor}/{key}: too few replicas confirmed the write"
                 ))))
             }
-            // A fenced activation starts again in `apply` and never ends here; an activation cannot end in a plain
-            // save, and a write cannot end in an activation.
+            // A fenced activation starts again in `apply`; nobody is told about the attempt that lost.
+            (Self::Activate { .. }, Outcome::Fenced) => None,
+            // An activation cannot end in a plain save, and a write cannot end in an activation.
             (waiting, outcome) => {
                 unreachable!("{actor}/{key}: {outcome:?} is not an outcome of {waiting:?}")
             }
