@@ -7,7 +7,7 @@ use super::parts::{append, cost, cut, plan, sizes, split};
 use crate::node::NodeId;
 use crate::store::Pages;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Staged {
     stamp: Stamp,
     full: bool,
@@ -27,21 +27,6 @@ impl Staged {
         }
         grown.retain(|name, _| !self.dropped.contains(name));
         grown
-    }
-}
-
-impl Default for Stamp {
-    fn default() -> Self {
-        Self {
-            epoch: Epoch {
-                round: 0,
-                node: NodeId {
-                    address: None,
-                    incarnation: [0; 16],
-                },
-            },
-            version: 0,
-        }
     }
 }
 
@@ -227,13 +212,10 @@ impl Replica {
     /// `receiving` tells that this node has not yet received the range of the key, so its replies do not count for
     /// quorums.
     pub fn receive(&mut self, request: Request, receiving: bool) -> Option<Reply> {
-        // A burial is the one request that must not leave an entry behind: a key with nothing here stays that way.
-        if !matches!(request, Request::Bury { .. }) {
-            let at = (request.actor().to_owned(), request.key().to_owned());
-            self.entries.entry(at).or_default();
-        }
         match request {
-            Request::Prepare { actor, key, epoch } => self.prepare(actor, key, epoch, receiving),
+            Request::Prepare { actor, key, epoch } => {
+                Some(self.prepare(actor, key, epoch, receiving))
+            }
             Request::Accept {
                 actor,
                 key,
@@ -260,7 +242,7 @@ impl Replica {
                 epoch,
                 names,
                 part,
-            } => self.fetch(actor, key, epoch, &names, part),
+            } => Some(self.fetch(actor, key, epoch, &names, part)),
             Request::Bury {
                 actor, key, stamp, ..
             } => Some(self.bury(actor, key, stamp, receiving)),
@@ -274,6 +256,7 @@ impl Replica {
     /// than the deletion any more, which is what the one asking waits to hear from every replica before it forgets
     /// its tombstone.
     fn bury(&mut self, actor: String, key: String, stamp: Stamp, receiving: bool) -> Reply {
+        // The one request that must not leave an entry behind: a key with nothing here stays that way.
         if let Some(entry) = self.entries.get_mut(&(actor.clone(), key.clone()))
             && entry
                 .accepted
@@ -302,28 +285,25 @@ impl Replica {
     }
 
     /// Promise a term, unless a later one was already promised. The answer carries what this replica holds.
-    fn prepare(
-        &mut self,
-        actor: String,
-        key: String,
-        epoch: Epoch,
-        receiving: bool,
-    ) -> Option<Reply> {
-        let entry = self.entries.get_mut(&(actor.clone(), key.clone()))?;
+    fn prepare(&mut self, actor: String, key: String, epoch: Epoch, receiving: bool) -> Reply {
+        let entry = self
+            .entries
+            .entry((actor.clone(), key.clone()))
+            .or_default();
         if let Some(promised) = &entry.promised
             && !promised.before(&epoch)
         {
-            return Some(Reply::Rejected {
+            return Reply::Rejected {
                 actor,
                 key,
                 replica: self.node.clone(),
                 promised: promised.clone(),
-            });
+            };
         }
         entry.promised = Some(epoch.clone());
         let indexed = sizes(&entry.pages);
         let held: usize = indexed.iter().map(|(name, size)| cost(name, *size)).sum();
-        Some(Reply::Promise {
+        Reply::Promise {
             actor,
             key,
             epoch,
@@ -336,7 +316,7 @@ impl Replica {
                 Pages::new()
             },
             receiving,
-        })
+        }
     }
 
     /// Take one part of a write. Only the last part of a whole and ordered write is published.
@@ -353,7 +333,10 @@ impl Replica {
         dropped: Vec<String>,
         receiving: bool,
     ) -> Option<Reply> {
-        let entry = self.entries.get_mut(&(actor.clone(), key.clone()))?;
+        let entry = self
+            .entries
+            .entry((actor.clone(), key.clone()))
+            .or_default();
         if let Some(promised) = &entry.promised
             && stamp.epoch.before(promised)
         {
@@ -378,7 +361,9 @@ impl Replica {
             entry.staged = Some(Staged {
                 stamp: stamp.clone(),
                 full: base.is_none(),
-                ..Staged::default()
+                parts: 0,
+                pages: Pages::new(),
+                dropped: Vec::new(),
             });
         }
         let staged = entry.staged.as_mut()?;
@@ -410,21 +395,24 @@ impl Replica {
     /// Part `part` of the pages `names`, cut the same way on every call, so that the parts add up to the pages for as
     /// long as the accepted write they come from stays the same.
     fn fetch(
-        &self,
+        &mut self,
         actor: String,
         key: String,
         epoch: Epoch,
         names: &[String],
         part: u32,
-    ) -> Option<Reply> {
-        let entry = self.entries.get(&(actor.clone(), key.clone()))?;
+    ) -> Reply {
+        let entry = self
+            .entries
+            .entry((actor.clone(), key.clone()))
+            .or_default();
         let wanted: Vec<(String, usize)> = names
             .iter()
             .filter_map(|name| entry.pages.get(name).map(|data| (name.clone(), data.len())))
             .collect();
         let parts = plan(&wanted, self.limit);
         let at = usize::try_from(part).unwrap_or(usize::MAX);
-        Some(Reply::Pages {
+        Reply::Pages {
             actor,
             key,
             epoch,
@@ -434,7 +422,7 @@ impl Replica {
             pages: parts
                 .get(at)
                 .map_or_else(Pages::new, |pieces| cut(&entry.pages, pieces)),
-        })
+        }
     }
 }
 
