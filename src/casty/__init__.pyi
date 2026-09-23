@@ -538,7 +538,8 @@ class Client:
     compression
         Compression offered on each connection: `Compression()` when not given.
     address_map
-        Replaces an advertised address by the one to dial, for tunnels and NAT.
+        Replaces an advertised address by the one to dial, for tunnels and NAT. It is called on the event loop at
+        every dial, so what it answers may change from one dial to the next.
     limits
         Sizes of what crosses a connection, those of the cluster: `Limits()` when not given.
     ask_timeout

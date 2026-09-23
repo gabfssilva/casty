@@ -547,7 +547,9 @@ Cluster(
 With `ca`, both sides verify the peer certificate against it, and `require_client_cert=True` (the default) makes it
 mutual TLS. Host names are not verified: nodes are authenticated by the CA. Compression is negotiated per connection
 among `zstd`, `lz4` and `zlib`, and a frame shorter than `min_bytes` (4096) goes uncompressed. `address_map` maps an
-advertised address to the one to dial, for NAT and tunnels. `Client` takes the same three parameters.
+advertised address to the one to dial, for NAT and tunnels. It is called on the event loop at every dial, which is when
+a connection opens or opens again, so a tunnel that comes back on another port is followed. `Client` takes the same
+three parameters.
 
 ### Limits
 

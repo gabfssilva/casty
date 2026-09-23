@@ -5,7 +5,6 @@
 //! for the other side: a call from the node task hands the work over and returns, because the loop is what would
 //! answer it, and a call from the loop leaves a request on the channel.
 
-use std::collections::HashMap;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
@@ -54,7 +53,6 @@ pub struct Joined {
     node: OnceLock<Cluster>,
     /// The loop the bodies run on, which is the only thread that touches an interpreter.
     running_loop: Py<PyAny>,
-    addresses: Option<Arc<Mapping>>,
 }
 
 impl Joined {
@@ -86,25 +84,17 @@ impl Joined {
             observer: node.observer(py),
             store: node.storage(py),
         });
-        let addresses = match map {
-            None => None,
-            Some(map) => {
-                let mapping = Arc::new(Mapping::new(py, map, &running_loop));
-                // The seeds are the first thing dialed, and they are asked for here, where the interpreter is.
-                mapping.learn(py, &settings.seeds)?;
-                let held = Arc::clone(&mapping);
-                let dialing: AddressMap = Arc::new(move |address: &str| held.dialed(address));
-                settings.address_map = Some(dialing);
-                Some(mapping)
-            }
-        };
+        if let Some(map) = map {
+            let mapping = Arc::new(Mapping::new(py, map, &running_loop));
+            let dialing: AddressMap = Arc::new(move |address: &str| mapping.dialed(address));
+            settings.address_map = Some(dialing);
+        }
         let joined = Arc::new(Self {
             node: OnceLock::new(),
             running: Mutex::new(None),
             threads: runtime.handle().clone(),
             runtime: Mutex::new(Some(runtime)),
             running_loop: running_loop.clone_ref(py),
-            addresses,
         });
         let held = Arc::clone(&joined);
         let node = Arc::clone(node);
@@ -115,7 +105,7 @@ impl Joined {
                 Running::client(settings, host, types).await
             };
             callback::on_loop(&running_loop, move |py| {
-                entering(py, &held, &node, started, entered.bind(py), system.bind(py))
+                entering(&held, &node, started, entered.bind(py), system.bind(py))
             });
         });
         Ok(joined)
@@ -137,18 +127,6 @@ impl Joined {
     /// so waiting here is waiting for something that is waiting for this.
     pub fn shutdown(&self) {
         drop(self.runtime.locked().take());
-    }
-
-    /// Ask for the address of every member here, on the loop, so that a dial finds it without waiting.
-    pub fn learn(&self, py: Python<'_>, members: &[Member]) -> PyResult<()> {
-        let Some(addresses) = &self.addresses else {
-            return Ok(());
-        };
-        let seen: Vec<String> = members
-            .iter()
-            .filter_map(|member| member.node.address.clone())
-            .collect();
-        addresses.learn(py, &seen)
     }
 
     /// Say goodbye, give away what this node keeps, and stop the transport. `gone` is resolved once it is over.
@@ -212,11 +190,6 @@ impl Entered {
         self.node.members()
     }
 
-    /// Ask for the address of every member here, on the loop, so that a dial finds it without waiting.
-    pub fn learn(&self, py: Python<'_>, members: &[Member]) -> PyResult<()> {
-        self.joined.learn(py, members)
-    }
-
     /// Carry `op` out on the replicas of the key, resolving `answer` on the loop once they have answered: with what
     /// they hold when it takes the key over, with nothing once they confirmed a write.
     pub fn persist(&self, py: Python<'_>, actor: &str, key: &str, op: Op, answer: Py<PyAny>) {
@@ -276,7 +249,6 @@ impl Entered {
 
 /// The end of a join, on the loop: `entered` is resolved with `system` once the node is in, or with the refusal.
 fn entering(
-    py: Python<'_>,
     joined: &Arc<Joined>,
     node: &Arc<Node>,
     started: std::io::Result<Running>,
@@ -300,7 +272,7 @@ fn entering(
     };
     let _ = joined.node.set(running.node.clone());
     *joined.running.locked() = Some(running);
-    node.entered(py, &cluster);
+    node.entered(&cluster);
     entered.call_method1("set_result", (system,))?;
     Ok(())
 }
@@ -541,7 +513,7 @@ impl Arriving {
             Self::Hand(command) => node.take(py, command),
             Self::Settle { id, outcome } => node.settle(py, id, &outcome),
             Self::Members(members) => {
-                node.seen(py, members);
+                node.seen(members);
                 Ok(())
             }
             Self::Meet(actor) => {
@@ -562,15 +534,15 @@ impl Arriving {
     }
 }
 
-/// Turns an advertised address into the one to dial, asking the loop when it has not seen it before.
+/// Turns an advertised address into the one to dial, asking the loop at every dial.
 ///
-/// The map is a Python callable, so it runs where the interpreter is: the loop. A dial that does not know an address
-/// yet waits for the loop to answer, which it can, because the node the dial belongs to is not what would answer it.
+/// The map is a Python callable, so it runs where the interpreter is: the loop. Nothing it answered is kept: a tunnel
+/// that comes back on another port, or an address the map learns only after a first dial, is dialed where the map says
+/// now. Dials happen only when a connection opens or opens again, so the loop is asked that often and no more.
 #[derive(Debug)]
 struct Mapping {
     map: Py<PyAny>,
     running_loop: Py<PyAny>,
-    known: Mutex<HashMap<String, String>>,
 }
 
 impl Mapping {
@@ -578,39 +550,17 @@ impl Mapping {
         Self {
             map: map.clone().unbind(),
             running_loop: running_loop.clone_ref(py),
-            known: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Ask for these addresses here, which is where the interpreter already is.
-    fn learn(&self, py: Python<'_>, addresses: &[String]) -> PyResult<()> {
-        for address in addresses {
-            if self.held(address).is_some() {
-                continue;
-            }
-            let dialed: String = self.map.bind(py).call1((address.clone(),))?.extract()?;
-            self.took(address, dialed);
-        }
-        Ok(())
-    }
-
-    fn held(&self, address: &str) -> Option<String> {
-        self.known.locked().get(address).cloned()
-    }
-
-    fn took(&self, address: &str, dialed: String) {
-        self.known.locked().insert(address.to_owned(), dialed);
-    }
-
-    /// The address to dial, asked of the loop when this is the first time it comes up.
+    /// The address to dial, asked of the loop.
     ///
     /// Waiting here does not hold anything of the node up: a dial has a task of its own, and the worker it runs on
-    /// is given back to the runtime while it waits. An answer that never comes leaves the address as it was, which
-    /// is a node dialed directly instead of through whatever the map would have put in between.
+    /// is given back to the runtime while it waits, which it can, because the node the dial belongs to is not what
+    /// would answer it. A map that raises, or an answer that does not come within `ASKING`, leaves the address as it
+    /// was for this dial only: the node is dialed directly instead of through whatever the map would have put in
+    /// between, and the next dial asks again.
     fn dialed(self: &Arc<Self>, address: &str) -> String {
-        if let Some(found) = self.held(address) {
-            return found;
-        }
         let (answer, answered) = channel();
         let (mapping, asked) = (Arc::clone(self), address.to_owned());
         let handed = callback::on_loop(&self.running_loop, move |py| {
@@ -626,10 +576,8 @@ impl Mapping {
         if !handed {
             return address.to_owned();
         }
-        let dialed = tokio::task::block_in_place(|| answered.recv_timeout(ASKING))
-            .unwrap_or_else(|_| address.to_owned());
-        self.took(address, dialed.clone());
-        dialed
+        tokio::task::block_in_place(|| answered.recv_timeout(ASKING))
+            .unwrap_or_else(|_| address.to_owned())
     }
 }
 

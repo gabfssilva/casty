@@ -225,12 +225,7 @@ impl Node {
     }
 
     /// Take the members the cluster reports, which is what `system.members` reads.
-    ///
-    /// Their addresses are asked of the map here, where the interpreter is, so that a dial does not have to wait.
-    pub fn seen(&self, py: Python<'_>, members: Vec<casty_node::membership::service::Member>) {
-        if let Some(cluster) = self.cluster() {
-            let _ = cluster.learn(py, &members);
-        }
+    pub fn seen(&self, members: Vec<casty_node::membership::service::Member>) {
         *self.members.locked() = members;
     }
 
@@ -337,11 +332,9 @@ impl Node {
     }
 
     /// The node is in the cluster: take the identity it joined under and what it sees.
-    pub fn entered(&self, py: Python<'_>, cluster: &Entered) {
+    pub fn entered(&self, cluster: &Entered) {
         *self.id.locked() = cluster.id().clone();
-        let members = cluster.members();
-        let _ = cluster.learn(py, &members);
-        *self.members.locked() = members;
+        *self.members.locked() = cluster.members();
     }
 
     /// Say goodbye to the cluster and stop the transport, resolving `gone` once it is over.

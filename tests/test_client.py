@@ -1,15 +1,62 @@
 import asyncio
+import socket
 from collections import Counter
+from collections.abc import Coroutine
 from contextlib import suppress
 from datetime import timedelta
 
 import pytest
 
 from casty import Client, NodeId, Refused, Unavailable
-from tests.app import Entries, Hold, Locate, Note, Notes, Pay, Pending, Where, account, gate, ledger, notes, order
-from tests.cluster import Harness, Node
+from tests.app import (
+    Balance,
+    Deposit,
+    Entries,
+    Hold,
+    Locate,
+    Note,
+    Notes,
+    Pay,
+    Pending,
+    Where,
+    account,
+    gate,
+    ledger,
+    notes,
+    order,
+)
+from tests.cluster import FAST, WITHIN, Harness, Node, Proxy
 from tests.support import eventually
 from tests.traffic import Traffic
+
+
+class _Tunnel:
+    """A proxy to `target` on a port of its own, which a test takes down as a tunnel that drops."""
+
+    def __init__(self, target: str) -> None:
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._proxy = Proxy(self._spawn, target)
+        self.address = self._proxy.address
+        self._spawn(self._proxy.serve())
+
+    def _spawn(self, work: Coroutine[None, None, None], /) -> None:
+        task = asyncio.get_running_loop().create_task(work)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def close(self) -> None:
+        await self._proxy.close()
+        running = tuple(self._tasks)
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
+
+
+def _refusing() -> str:
+    """An address nothing listens on."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return f"127.0.0.1:{probe.getsockname()[1]}"
 
 
 def describe_client() -> None:
@@ -109,6 +156,56 @@ def describe_client() -> None:
             async with Harness.start(1) as harness:
                 with pytest.raises(Refused):
                     await harness.client(name="another")
+
+    def when_its_address_map_answers_something_else_later() -> None:
+        async def it_asks_the_map_again_after_a_dial_that_failed() -> None:
+            async with Harness.start(1) as harness:
+                target = harness.nodes[0].address
+                routes = {target: _refusing()}
+
+                async def _mend() -> None:
+                    await asyncio.sleep(0.3)
+                    routes[target] = target
+
+                async with asyncio.TaskGroup() as mending:
+                    mending.create_task(_mend())
+                    async with (
+                        asyncio.timeout(WITHIN.total_seconds()),
+                        Client(
+                            seeds=(target,),
+                            address_map=lambda advertised: routes[advertised],
+                            sync_every=FAST.sync_every,
+                        ) as client,
+                    ):
+                        assert await client.ref(account, "mended").ask(Balance) == 0
+
+        async def it_follows_a_tunnel_that_comes_back_on_another_port() -> None:
+            async with Harness.start(1) as harness:
+                target = harness.nodes[0].address
+                first = _Tunnel(target)
+                second: _Tunnel | None = None
+                routes = {target: first.address}
+                try:
+                    async with Client(
+                        seeds=(target,),
+                        address_map=lambda advertised: routes[advertised],
+                        ask_timeout=timedelta(seconds=1),
+                        sync_every=FAST.sync_every,
+                    ) as client:
+                        ref = client.ref(account, "tunnelled")
+                        await ref.ask(Deposit, 1)
+                        await first.close()
+                        second = _Tunnel(target)
+                        routes[target] = second.address
+
+                        async def _reached() -> None:
+                            assert await ref.ask(Balance) == 1
+
+                        await eventually(_reached, WITHIN)
+                finally:
+                    await first.close()
+                    if second is not None:
+                        await second.close()
 
 
 async def _everyone_sees(harness: Harness, count: int, /) -> None:

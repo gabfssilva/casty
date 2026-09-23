@@ -210,7 +210,8 @@ class Cluster:
     compression
         Compression offered on each connection.
     address_map
-        The address to dial for an advertised one.
+        The address to dial for an advertised one. It is called on the event loop at every dial, so what it answers
+        may change from one dial to the next.
     limits
         Sizes of what crosses a connection.
     heartbeat
