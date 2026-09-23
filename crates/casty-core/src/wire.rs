@@ -119,7 +119,6 @@ impl Writer {
         self.bytes(&node.incarnation);
     }
 
-    /// `NodeId` as an alternative of a union, which carries its tag.
     /// A ref, as the schema writes one: where it points and how to reach it.
     pub fn target(&mut self, target: &Target) {
         match target {
@@ -137,14 +136,6 @@ impl Writer {
                 self.int(*id);
             }
         }
-    }
-
-    pub fn tagged_node(&mut self, node: &NodeId) {
-        self.tagged("NodeId", 2);
-        self.name("address");
-        self.address(node.address.as_deref());
-        self.name("incarnation");
-        self.bytes(&node.incarnation);
     }
 
     /// A mapping as the schema writes it: a list of pairs, so that keys are not limited to strings.

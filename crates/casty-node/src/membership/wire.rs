@@ -61,8 +61,14 @@ pub fn encode(message: &Message) -> Vec<u8> {
     writer.tagged("Message", 2);
     writer.name("sender");
     match &message.sender {
-        Sender::Member(record) => tagged_record(&mut writer, record),
-        Sender::Client(node) => writer.tagged_node(node),
+        Sender::Member(held) => {
+            writer.tag("Record");
+            record(&mut writer, held);
+        }
+        Sender::Client(node) => {
+            writer.tag("NodeId");
+            writer.node(node);
+        }
     }
     writer.name("body");
     body(&mut writer, &message.body);
@@ -90,17 +96,8 @@ pub fn decode(payload: &[u8]) -> Result<Message> {
     })
 }
 
-fn tagged_record(writer: &mut Writer, record: &Record) {
-    writer.tagged("Record", 4);
-    record_fields(writer, record);
-}
-
 fn record(writer: &mut Writer, held: &Record) {
     writer.fields(4);
-    record_fields(writer, held);
-}
-
-fn record_fields(writer: &mut Writer, held: &Record) {
     writer.name("node");
     writer.node(&held.node);
     writer.name("incarnation");
@@ -136,7 +133,6 @@ fn nodes(writer: &mut Writer, held: &[NodeId]) {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn body(writer: &mut Writer, held: &Body) {
     match held {
         Body::View(View::Join) => writer.tagged("Join", 0),
@@ -210,20 +206,15 @@ fn body(writer: &mut Writer, held: &Body) {
 }
 
 fn read_sender(reading: &mut Reading<'_>) -> Result<Sender> {
-    let (tag, fields) = reading.tagged()?;
-    match tag.as_str() {
-        "Record" => Ok(Sender::Member(read_record_fields(reading, fields)?)),
-        "NodeId" => Ok(Sender::Client(read_node_fields(reading, fields)?)),
+    match reading.tag()? {
+        "Record" => Ok(Sender::Member(read_record(reading)?)),
+        "NodeId" => Ok(Sender::Client(reading.node()?)),
         _ => Err(Malformed::Marker(0)),
     }
 }
 
 fn read_record(reading: &mut Reading<'_>) -> Result<Record> {
     let fields = reading.fields()?;
-    read_record_fields(reading, fields)
-}
-
-fn read_record_fields(reading: &mut Reading<'_>, fields: usize) -> Result<Record> {
     let mut node = None;
     let mut incarnation = None;
     let mut status = None;
@@ -247,25 +238,6 @@ fn read_record_fields(reading: &mut Reading<'_>, fields: usize) -> Result<Record
         incarnation: incarnation.ok_or(Malformed::Truncated)?,
         status: status.ok_or(Malformed::Truncated)?,
         types,
-    })
-}
-
-fn read_node_fields(reading: &mut Reading<'_>, fields: usize) -> Result<NodeId> {
-    let mut address = None;
-    let mut incarnation: Option<Vec<u8>> = None;
-    for _ in 0..fields {
-        match reading.name()? {
-            "address" => address = reading.address()?,
-            "incarnation" => incarnation = Some(reading.bytes()?),
-            _ => reading.skip()?,
-        }
-    }
-    Ok(NodeId {
-        address,
-        incarnation: incarnation
-            .ok_or(Malformed::Truncated)?
-            .try_into()
-            .map_err(|_| Malformed::Truncated)?,
     })
 }
 
@@ -296,7 +268,6 @@ fn read_records(reading: &mut Reading<'_>) -> Result<Vec<Record>> {
     (0..count).map(|_| read_record(reading)).collect()
 }
 
-#[allow(clippy::too_many_lines)]
 fn read_body(reading: &mut Reading<'_>) -> Result<Body> {
     let (tag, fields) = reading.tagged()?;
     let mut node = None;
