@@ -13,11 +13,9 @@ import pytest
 from casty import ActorSystem, Context, Ref, Store, Unavailable, actor
 from casty.sqlite import SQLiteStore
 from tests.app import Append, Entries, durable_ledger, ledger
-from tests.cluster import Harness
+from tests.cluster import WITHIN, Harness
 from tests.support import eventually
 from tests.traffic import kept
-
-WITHIN = timedelta(seconds=10)
 
 
 class Records:

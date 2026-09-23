@@ -5,10 +5,8 @@ import pytest
 
 from casty import ActorSystem, Context, Placement, actor
 from tests.app import LATCHES, Balance, Bump, Deposit, Gate, Latch, Locate, Touch, Where, account, gated, touched
-from tests.cluster import Harness, Node
+from tests.cluster import WITHIN, Harness, Node
 from tests.support import eventually
-
-WITHIN = timedelta(seconds=10)
 
 
 @actor(pinned=True, initial=Gate())

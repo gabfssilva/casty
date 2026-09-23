@@ -7,15 +7,12 @@ from typing import assert_never
 
 import pytest
 
-from casty import Context, DefaultedActor, Limits, NodeId, Ref, Unavailable, actor
+from casty import Context, DefaultedActor, NodeId, Ref, Unavailable, actor
 from tests.app import Append, Entries, Ledger, LedgerMsg, Pay, Pending, ledger, loose, order
-from tests.cluster import FAST, Harness, Node
+from tests.cluster import FAST, NARROW, WITHIN, Harness, Node
 from tests.support import eventually
 
-WITHIN = timedelta(seconds=10)
 STUBBORN = replace(FAST, remove_after=None)
-# The smallest messages a node takes, which leave 64 KiB of each for the state it carries.
-NARROW = Limits(frame=64 * 1024, message=128 * 1024, window=64 * 1024)
 
 
 @dataclass(frozen=True)

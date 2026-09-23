@@ -7,10 +7,9 @@ from datetime import timedelta
 import pytest
 
 from casty import Event, MemberChanged, NodeId, Observer, Overlay, Refused
-from tests.cluster import FAST, Harness, Node
+from tests.cluster import FAST, WITHIN, Harness, Node
 from tests.support import eventually
 
-WITHIN = timedelta(seconds=10)
 QUIET = timedelta(milliseconds=500)
 """Ten heartbeats of `FAST`: long enough for a transition reported twice to arrive after the one it repeats."""
 

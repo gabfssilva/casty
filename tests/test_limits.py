@@ -6,7 +6,7 @@ import pytest
 
 from casty import Client, Compression, Context, Limits, MessageTooLarge, Ref, Refused, actor
 from tests.app import Locate
-from tests.cluster import Harness, Node
+from tests.cluster import NARROW, Harness, Node
 
 MIB = 1024 * 1024
 OVER = 4 * MIB + 1
@@ -50,8 +50,6 @@ async def echo(ctx: Context[bytes, EchoMsg]) -> None:
                 assert_never(msg)
 
 
-NARROW = Limits(frame=64 * 1024, message=128 * 1024, window=64 * 1024)
-"""The smallest `Limits.message` there is, which leaves 64 KiB of a message to the state."""
 WIDE = "f" * (64 * 1024)
 """A field name that leaves no room for its data in a message of `NARROW`."""
 

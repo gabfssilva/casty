@@ -33,20 +33,23 @@ class Timing:
 FAST = Timing()
 OVERLAY = Overlay()
 LIMITS = Limits()
+NARROW = Limits(frame=64 * 1024, message=128 * 1024, window=64 * 1024)
+"""The smallest `Limits.message` there is, which leaves 64 KiB of each message to the state it carries."""
 COMPRESSION = Compression()
+WITHIN = timedelta(seconds=10)
+"""How long a test waits for the cluster to come to what it asserts."""
 
 
+# Equal only to itself, as a running node is: a test collects nodes in sets and finds them by identity.
+@dataclass(frozen=True, eq=False)
 class Node:
     """A node of the harness: its system, the address it advertises and the task that keeps it running."""
 
-    def __init__(
-        self, system: ActorSystem, address: str, id: int, task: asyncio.Task[None], stop: asyncio.Event, /
-    ) -> None:
-        self.system = system
-        self.address = address
-        self.id = id
-        self.task = task
-        self.stop = stop
+    system: ActorSystem
+    address: str
+    id: int
+    task: asyncio.Task[None]
+    stop: asyncio.Event
 
 
 class Harness:

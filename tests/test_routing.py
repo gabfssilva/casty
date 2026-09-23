@@ -8,10 +8,8 @@ import pytest
 
 from casty import ActorSystem, Context, NodeId, Unavailable, UnknownActor, actor
 from tests.app import Deposit, Entries, Gate, Hold, Locate, Note, Notes, Where, account, gate, ledger, notes
-from tests.cluster import FAST, Harness, Node
+from tests.cluster import FAST, WITHIN, Harness, Node
 from tests.support import eventually
-
-WITHIN = timedelta(seconds=10)
 
 _STARTED: list[tuple[str, NodeId]] = []
 """Every activation of `station`, as `(key, node)`, on whichever node of this process it happened."""
