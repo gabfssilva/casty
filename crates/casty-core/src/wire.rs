@@ -24,16 +24,46 @@ impl Writer {
         self.0
     }
 
-    /// A dataclass under its tag, which is how it travels at the top of a value or inside a union.
-    pub fn tagged(&mut self, qualname: &str, fields: usize) {
+    /// The tag a dataclass travels under at the top of a value or inside a union, ahead of the map of its fields.
+    pub fn tag(&mut self, qualname: &str) {
         msgpack::write_array_len(&mut self.0, 2);
         msgpack::write_str(&mut self.0, qualname);
-        msgpack::write_map_len(&mut self.0, fields);
+    }
+
+    /// A dataclass under its tag, which is how it travels at the top of a value or inside a union.
+    pub fn tagged(&mut self, qualname: &str, fields: usize) {
+        self.tag(qualname);
+        self.fields(fields);
+    }
+
+    /// A dataclass under its tag whose first two fields, of the `fields` it has, name the entity it concerns.
+    pub fn entity(&mut self, qualname: &str, fields: usize, actor: &str, key: &str) {
+        self.tagged(qualname, fields);
+        self.name("actor");
+        self.text(actor);
+        self.name("key");
+        self.text(key);
     }
 
     /// A dataclass as a field of another one, which carries no tag.
     pub fn fields(&mut self, count: usize) {
         msgpack::write_map_len(&mut self.0, count);
+    }
+
+    /// `T | None`, where `write` writes the dataclass `T` as a field. A union, so the dataclass goes under its tag.
+    pub fn optional<T>(
+        &mut self,
+        qualname: &str,
+        value: Option<&T>,
+        write: impl FnOnce(&mut Self, &T),
+    ) {
+        match value {
+            Some(value) => {
+                self.tag(qualname);
+                write(self, value);
+            }
+            None => self.nil(),
+        }
     }
 
     pub fn name(&mut self, name: &str) {
@@ -137,13 +167,18 @@ impl<'a> Reading<'a> {
         Self(Reader::new(data))
     }
 
-    /// The tag of a dataclass and how many fields follow it.
-    pub fn tagged(&mut self) -> Result<(String, usize)> {
+    /// The tag of a dataclass, which the map of its fields follows.
+    pub fn tag(&mut self) -> Result<&'a str> {
         if self.0.read_array_len()? != 2 {
             return Err(Malformed::Marker(0));
         }
-        let name = self.0.read_str()?.to_owned();
-        Ok((name, self.0.read_map_len()?))
+        self.0.read_str()
+    }
+
+    /// The tag of a dataclass and how many fields follow it.
+    pub fn tagged(&mut self) -> Result<(String, usize)> {
+        let tag = self.tag()?.to_owned();
+        Ok((tag, self.fields()?))
     }
 
     pub fn fields(&mut self) -> Result<usize> {
@@ -195,6 +230,15 @@ impl<'a> Reading<'a> {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// `T | None`, where `read` reads the dataclass `T` as a field. The tag it travels under is stepped over.
+    pub fn optional<T>(&mut self, read: impl FnOnce(&mut Self) -> Result<T>) -> Result<Option<T>> {
+        if self.nil()? {
+            return Ok(None);
+        }
+        self.tag()?;
+        read(self).map(Some)
     }
 
     pub fn address(&mut self) -> Result<Option<String>> {

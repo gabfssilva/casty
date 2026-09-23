@@ -43,11 +43,7 @@ pub fn decode(payload: &[u8]) -> Result<Message> {
 fn request_of(writer: &mut Writer, request: &Request) {
     match request {
         Request::Prepare { actor, key, epoch } => {
-            writer.tagged("Prepare", 3);
-            writer.name("actor");
-            writer.text(actor);
-            writer.name("key");
-            writer.text(key);
+            writer.entity("Prepare", 3, actor, key);
             writer.name("epoch");
             epoch_of(writer, epoch);
         }
@@ -61,16 +57,11 @@ fn request_of(writer: &mut Writer, request: &Request) {
             pages,
             dropped,
         } => {
-            writer.tagged("Accept", 8);
-            writer.name("actor");
-            writer.text(actor);
-            writer.name("key");
-            writer.text(key);
+            writer.entity("Accept", 8, actor, key);
             writer.name("stamp");
             stamp_of(writer, stamp);
             writer.name("base");
-            // `Stamp | None` is a union, so the stamp travels under its tag.
-            optional_stamp(writer, base.as_ref());
+            writer.optional("Stamp", base.as_ref(), stamp_of);
             writer.name("part");
             writer.unsigned(u64::from(*part));
             writer.name("final");
@@ -87,11 +78,7 @@ fn request_of(writer: &mut Writer, request: &Request) {
             names,
             part,
         } => {
-            writer.tagged("FetchPages", 5);
-            writer.name("actor");
-            writer.text(actor);
-            writer.name("key");
-            writer.text(key);
+            writer.entity("FetchPages", 5, actor, key);
             writer.name("epoch");
             epoch_of(writer, epoch);
             writer.name("names");
@@ -105,11 +92,7 @@ fn request_of(writer: &mut Writer, request: &Request) {
             stamp,
             node,
         } => {
-            writer.tagged("Bury", 4);
-            writer.name("actor");
-            writer.text(actor);
-            writer.name("key");
-            writer.text(key);
+            writer.entity("Bury", 4, actor, key);
             writer.name("stamp");
             stamp_of(writer, stamp);
             writer.name("node");
@@ -131,24 +114,15 @@ fn reply_of(writer: &mut Writer, reply: &Reply) {
             pages,
             receiving,
         } => {
-            writer.tagged("Promise", 8);
-            writer.name("actor");
-            writer.text(actor);
-            writer.name("key");
-            writer.text(key);
+            writer.entity("Promise", 8, actor, key);
             writer.name("epoch");
             epoch_of(writer, epoch);
             writer.name("replica");
             writer.node(replica);
             writer.name("accepted");
-            optional_stamp(writer, accepted.as_ref());
+            writer.optional("Stamp", accepted.as_ref(), stamp_of);
             writer.name("sizes");
-            writer.pairs(sizes.len());
-            for (name, size) in sizes {
-                writer.pair();
-                writer.text(name);
-                writer.unsigned(*size as u64);
-            }
+            sizes_of(writer, sizes);
             writer.name("pages");
             pages_of(writer, pages);
             writer.name("receiving");
@@ -160,11 +134,7 @@ fn reply_of(writer: &mut Writer, reply: &Reply) {
             replica,
             promised,
         } => {
-            writer.tagged("Rejected", 4);
-            writer.name("actor");
-            writer.text(actor);
-            writer.name("key");
-            writer.text(key);
+            writer.entity("Rejected", 4, actor, key);
             writer.name("replica");
             writer.node(replica);
             writer.name("promised");
@@ -179,15 +149,11 @@ fn reply_of(writer: &mut Writer, reply: &Reply) {
             final_part,
             pages,
         } => {
-            writer.tagged("Pages", 7);
-            writer.name("actor");
-            writer.text(actor);
-            writer.name("key");
-            writer.text(key);
+            writer.entity("Pages", 7, actor, key);
             writer.name("epoch");
             epoch_of(writer, epoch);
             writer.name("accepted");
-            optional_stamp(writer, accepted.as_ref());
+            writer.optional("Stamp", accepted.as_ref(), stamp_of);
             writer.name("part");
             writer.unsigned(u64::from(*part));
             writer.name("final");
@@ -202,11 +168,7 @@ fn reply_of(writer: &mut Writer, reply: &Reply) {
             replica,
             receiving,
         } => {
-            writer.tagged("Accepted", 5);
-            writer.name("actor");
-            writer.text(actor);
-            writer.name("key");
-            writer.text(key);
+            writer.entity("Accepted", 5, actor, key);
             writer.name("stamp");
             stamp_of(writer, stamp);
             writer.name("replica");
@@ -220,11 +182,7 @@ fn reply_of(writer: &mut Writer, reply: &Reply) {
             stamp,
             replica,
         } => {
-            writer.tagged("NeedFull", 4);
-            writer.name("actor");
-            writer.text(actor);
-            writer.name("key");
-            writer.text(key);
+            writer.entity("NeedFull", 4, actor, key);
             writer.name("stamp");
             stamp_of(writer, stamp);
             writer.name("replica");
@@ -237,11 +195,7 @@ fn reply_of(writer: &mut Writer, reply: &Reply) {
             replica,
             receiving,
         } => {
-            writer.tagged("Buried", 5);
-            writer.name("actor");
-            writer.text(actor);
-            writer.name("key");
-            writer.text(key);
+            writer.entity("Buried", 5, actor, key);
             writer.name("stamp");
             stamp_of(writer, stamp);
             writer.name("replica");
@@ -345,10 +299,6 @@ fn pull_of(writer: &mut Writer, pull: &Pull) {
 
 fn epoch_of(writer: &mut Writer, epoch: &Epoch) {
     writer.fields(2);
-    epoch_fields(writer, epoch);
-}
-
-fn epoch_fields(writer: &mut Writer, epoch: &Epoch) {
     writer.name("round");
     writer.unsigned(epoch.round);
     writer.name("node");
@@ -357,30 +307,6 @@ fn epoch_fields(writer: &mut Writer, epoch: &Epoch) {
 
 fn stamp_of(writer: &mut Writer, stamp: &Stamp) {
     writer.fields(2);
-    stamp_fields(writer, stamp);
-}
-
-fn optional_stamp(writer: &mut Writer, stamp: Option<&Stamp>) {
-    match stamp {
-        Some(stamp) => {
-            writer.tagged("Stamp", 2);
-            stamp_fields(writer, stamp);
-        }
-        None => writer.nil(),
-    }
-}
-
-fn optional_epoch(writer: &mut Writer, epoch: Option<&Epoch>) {
-    match epoch {
-        Some(epoch) => {
-            writer.tagged("Epoch", 2);
-            epoch_fields(writer, epoch);
-        }
-        None => writer.nil(),
-    }
-}
-
-fn stamp_fields(writer: &mut Writer, stamp: &Stamp) {
     writer.name("epoch");
     epoch_of(writer, &stamp.epoch);
     writer.name("version");
@@ -394,15 +320,24 @@ fn copies_of(writer: &mut Writer, keys: &[Copy]) {
         writer.name("key");
         writer.text(&copy.key);
         writer.name("accepted");
-        optional_stamp(writer, copy.accepted.as_ref());
+        writer.optional("Stamp", copy.accepted.as_ref(), stamp_of);
         writer.name("promised");
-        optional_epoch(writer, copy.promised.as_ref());
+        writer.optional("Epoch", copy.promised.as_ref(), epoch_of);
         writer.name("pages");
         pages_of(writer, &copy.pages);
         writer.name("part");
         writer.unsigned(u64::from(copy.part));
         writer.name("final");
         writer.bool(copy.final_part);
+    }
+}
+
+fn sizes_of(writer: &mut Writer, sizes: &[(String, usize)]) {
+    writer.pairs(sizes.len());
+    for (name, size) in sizes {
+        writer.pair();
+        writer.text(name);
+        writer.unsigned(*size as u64);
     }
 }
 
@@ -455,8 +390,8 @@ impl Held {
             "epoch" => self.epoch = Some(read_epoch(reading)?),
             "promised" => self.promised = Some(read_epoch(reading)?),
             "stamp" => self.stamp = Some(read_stamp(reading)?),
-            "base" => self.base = read_tagged_stamp(reading)?,
-            "accepted" => self.accepted = read_tagged_stamp(reading)?,
+            "base" => self.base = reading.optional(read_stamp)?,
+            "accepted" => self.accepted = reading.optional(read_stamp)?,
             "replica" => self.replica = Some(reading.node()?),
             "node" => self.node = Some(reading.node()?),
             "sizes" => self.sizes = read_sizes(reading)?,
@@ -599,10 +534,6 @@ fn small(value: u64) -> Result<u32> {
 
 fn read_epoch(reading: &mut Reading<'_>) -> Result<Epoch> {
     let fields = reading.fields()?;
-    read_epoch_fields(reading, fields)
-}
-
-fn read_epoch_fields(reading: &mut Reading<'_>, fields: usize) -> Result<Epoch> {
     let mut round = None;
     let mut node = None;
     for _ in 0..fields {
@@ -620,26 +551,6 @@ fn read_epoch_fields(reading: &mut Reading<'_>, fields: usize) -> Result<Epoch> 
 
 fn read_stamp(reading: &mut Reading<'_>) -> Result<Stamp> {
     let fields = reading.fields()?;
-    read_stamp_fields(reading, fields)
-}
-
-fn read_tagged_stamp(reading: &mut Reading<'_>) -> Result<Option<Stamp>> {
-    if reading.nil()? {
-        return Ok(None);
-    }
-    let (_, fields) = reading.tagged()?;
-    Ok(Some(read_stamp_fields(reading, fields)?))
-}
-
-fn read_tagged_epoch(reading: &mut Reading<'_>) -> Result<Option<Epoch>> {
-    if reading.nil()? {
-        return Ok(None);
-    }
-    let (_, fields) = reading.tagged()?;
-    Ok(Some(read_epoch_fields(reading, fields)?))
-}
-
-fn read_stamp_fields(reading: &mut Reading<'_>, fields: usize) -> Result<Stamp> {
     let mut epoch = None;
     let mut version = None;
     for _ in 0..fields {
@@ -719,8 +630,8 @@ fn read_copies(reading: &mut Reading<'_>) -> Result<Vec<Copy>> {
         for _ in 0..fields {
             match reading.name()? {
                 "key" => key = reading.text()?,
-                "accepted" => accepted = read_tagged_stamp(reading)?,
-                "promised" => promised = read_tagged_epoch(reading)?,
+                "accepted" => accepted = reading.optional(read_stamp)?,
+                "promised" => promised = reading.optional(read_epoch)?,
                 "pages" => pages = read_pages(reading)?,
                 "part" => part = small(reading.unsigned()?)?,
                 "final" => final_part = reading.bool()?,
