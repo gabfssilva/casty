@@ -18,6 +18,7 @@ use pyo3::prelude::*;
 use crate::collections::{Given, Native, Turn};
 
 use super::Node;
+use super::callback;
 use super::cluster::{Fencing, Taken};
 use super::context::{Context, ended};
 use super::observe::Observed;
@@ -269,18 +270,34 @@ impl Activation {
 
     /// Take the key over on the next turn of the loop, after whatever brought it here has been queued.
     pub fn begin(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
-        let call = Bound::new(
-            py,
-            Step {
-                activation: slf.clone().unbind(),
-                step: Which::Begin,
-            },
-        )?;
+        let activation = slf.clone().unbind();
+        callback::soon(&slf.get().node.running(py)?, move |py| {
+            Self::taken(activation.bind(py), py)
+        })
+    }
+
+    /// Run `step` of this activation with `future`, once it is done.
+    fn then(
+        slf: &Bound<'_, Self>,
+        future: &Bound<'_, PyAny>,
+        step: impl FnOnce(&Bound<'_, Self>, Python<'_>, &Bound<'_, PyAny>) -> PyResult<()>
+        + Send
+        + 'static,
+    ) -> PyResult<()> {
+        let activation = slf.clone().unbind();
+        callback::when_done(future, move |py, done| step(activation.bind(py), py, done))
+    }
+
+    /// Run `step` of this activation `delay` seconds from now, giving back the timer that cancels it.
+    fn timer<'py>(
+        slf: &Bound<'py, Self>,
+        delay: f64,
+        step: impl FnOnce(&Bound<'_, Self>, Python<'_>) -> PyResult<()> + Send + 'static,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let activation = slf.clone().unbind();
         slf.get()
             .node
-            .running(py)?
-            .call_method1("call_soon", (call,))?;
-        Ok(())
+            .later(slf.py(), delay, move |py| step(activation.bind(py), py))
     }
 
     /// Ask the replicas for the key, and go on with what they hold.
@@ -289,15 +306,7 @@ impl Activation {
         let key = slf.get().key.clone();
         let initial = Self::initial(slf, py)?;
         let taken = slf.get().node.activate(py, &entry, &key, initial)?;
-        let then = Bound::new(
-            py,
-            Step {
-                activation: slf.clone().unbind(),
-                step: Which::Held,
-            },
-        )?;
-        taken.call_method1("add_done_callback", (then,))?;
-        Ok(())
+        Self::then(slf, &taken, Self::held_by)
     }
 
     /// What the replicas answered when this node asked for the key.
@@ -485,14 +494,9 @@ impl Activation {
             .node
             .running(py)?
             .call_method1("create_task", (body,))?;
-        let done = Bound::new(
-            py,
-            Step {
-                activation: slf.clone().unbind(),
-                step: Which::Done(id),
-            },
-        )?;
-        task.call_method1("add_done_callback", (done,))?;
+        Self::then(slf, &task, move |slf, py, task| {
+            Self::done(slf, py, id, task)
+        })?;
         let found = match slf.get().held().run(id) {
             Some(run) => {
                 run.task = Some(task.clone().unbind());
@@ -563,14 +567,7 @@ impl Activation {
             let delay = Self::failed(slf, py, id, failure.bind(py))?;
             // A key being let go does not start a body that failed again: it ends where it failed.
             if !slf.get().held().releasing {
-                let retry = Bound::new(
-                    py,
-                    Step {
-                        activation: slf.clone().unbind(),
-                        step: Which::Retry(id),
-                    },
-                )?;
-                slf.get().node.later(py, delay, retry.into_any())?;
+                Self::timer(slf, delay, move |slf, py| Self::retry(slf, py, id))?;
                 return Ok(());
             }
         }
@@ -756,15 +753,7 @@ impl Activation {
                 .node
                 .commit(py, &entry, &key, lease, pages, false)?
         };
-        let then = Bound::new(
-            py,
-            Step {
-                activation: slf.clone().unbind(),
-                step: Which::Released,
-            },
-        )?;
-        released.call_method1("add_done_callback", (then,))?;
-        Ok(())
+        Self::then(slf, &released, Self::released)
     }
 
     /// The release write landed, or did not: either way this activation is over.
@@ -1360,15 +1349,8 @@ impl Activation {
             return Self::merging(slf, py, id, source);
         }
         let answer = slf.get().node.future(py)?;
-        let idle = Bound::new(
-            py,
-            Step {
-                activation: slf.clone().unbind(),
-                step: Which::Idle(id),
-            },
-        )?;
         let idle_after = slf.get().settings().idle_after.as_secs_f64();
-        let timer = slf.get().node.later(py, idle_after, idle.into_any())?;
+        let timer = Self::timer(slf, idle_after, move |slf, py| Self::idle(slf, py, id))?;
         let deadline = slf.get().node.now(py)? + idle_after;
         // The timer of a read the body gave up on would end this one early.
         let replaced = slf.get().held().run(id).and_then(|run| {
@@ -1409,14 +1391,9 @@ impl Activation {
                 .node
                 .running(py)?
                 .call_method1("create_task", (coroutine,))?;
-            let ready = Bound::new(
-                py,
-                Step {
-                    activation: slf.clone().unbind(),
-                    step: Which::Item(id),
-                },
-            )?;
-            task.call_method1("add_done_callback", (ready,))?;
+            Self::then(slf, &task, move |slf, py, task| {
+                Self::item(slf, py, id, task)
+            })?;
             if let Some(run) = slf.get().held().run(id) {
                 run.item = Some(task.unbind());
             }
@@ -1535,22 +1512,53 @@ impl Activation {
             .import("asyncio")?
             .call_method1("ensure_future", (changed,))?;
         let updated = slf.get().node.future(py)?;
-        let then = Bound::new(
-            py,
-            Changed {
-                activation: slf.clone().unbind(),
-                updated: updated.clone().unbind(),
-            },
-        )?;
-        changing.call_method1("add_done_callback", (then,))?;
-        let abandoned = Bound::new(
-            py,
-            Abandoned {
-                changing: changing.unbind(),
-            },
-        )?;
-        updated.call_method1("add_done_callback", (abandoned,))?;
+        let waiting = updated.clone().unbind();
+        Self::then(slf, &changing, move |slf, py, changing| {
+            Self::changed(slf, py, changing, waiting.bind(py))
+        })?;
+        // The task computing the new state has nobody left to compute it for once the update is cancelled.
+        let computing = changing.unbind();
+        callback::when_done(&updated, move |py, updated| {
+            if updated.call_method0("cancelled")?.is_truthy()? {
+                computing.bind(py).call_method0("cancel")?;
+            }
+            Ok(())
+        })?;
         Ok(Bound::new(py, Awaited::of(updated))?.into_any())
+    }
+
+    /// The new state an `update` waited for, on its way to being written. `updated`, which the body waits on,
+    /// resolves to it once it is written.
+    fn changed<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        changing: &Bound<'py, PyAny>,
+        updated: &Bound<'py, PyAny>,
+    ) -> PyResult<()> {
+        if changing.call_method0("cancelled")?.is_truthy()? {
+            return relay(changing, updated);
+        }
+        // Nobody waits for the update: the run that asked for it was cancelled, and a write now would land under the
+        // run that took its place. Reading the outcome keeps asyncio from logging it as never retrieved.
+        if updated.call_method0("done")?.is_truthy()? {
+            let _ = changing.call_method0("exception");
+            return Ok(());
+        }
+        let stored = changing
+            .call_method0("result")
+            .and_then(|value| Self::stored(slf, py, &value, true));
+        match stored {
+            Ok(written) => {
+                let to = updated.clone().unbind();
+                callback::when_done(&written, move |py, written| relay(written, to.bind(py)))?;
+            }
+            Err(failure) => {
+                if !updated.call_method0("done")?.is_truthy()? {
+                    updated.call_method1("set_exception", (failure,))?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The future of the write of `value`, which resolves to it when `yields` and to nothing otherwise.
@@ -1621,19 +1629,17 @@ impl Activation {
             .get()
             .node
             .commit(py, &entry, &key, lease, pages.clone(), true)?;
-        let then = Bound::new(
-            py,
-            Wrote {
-                activation: slf.clone().unbind(),
-                written: written.clone().unbind(),
-                pages: Mutex::new(Some(pages)),
-                value: Mutex::new(value),
-                switching,
-                yields,
-                deleted: false,
-            },
-        )?;
-        commit.call_method1("add_done_callback", (then,))?;
+        let wrote = Wrote {
+            written: written.clone().unbind(),
+            pages,
+            value,
+            switching,
+            yields,
+            deleted: false,
+        };
+        Self::then(slf, &commit, move |slf, py, commit| {
+            wrote.landed(slf, py, commit)
+        })?;
         slf.get().held().writes += 1;
         Ok(written)
     }
@@ -1663,19 +1669,17 @@ impl Activation {
         let written = slf.get().node.future(py)?;
         let lease = slf.get().held().lease;
         let deletion = slf.get().node.delete(py, &entry, &key, lease, true)?;
-        let then = Bound::new(
-            py,
-            Wrote {
-                activation: slf.clone().unbind(),
-                written: written.clone().unbind(),
-                pages: Mutex::new(Some(pages)),
-                value: Mutex::new(value),
-                switching: false,
-                yields: false,
-                deleted: true,
-            },
-        )?;
-        deletion.call_method1("add_done_callback", (then,))?;
+        let wrote = Wrote {
+            written: written.clone().unbind(),
+            pages,
+            value,
+            switching: false,
+            yields: false,
+            deleted: true,
+        };
+        Self::then(slf, &deletion, move |slf, py, deletion| {
+            wrote.landed(slf, py, deletion)
+        })?;
         slf.get().held().writes += 1;
         Ok(Bound::new(py, Awaited::of(written))?.into_any())
     }
@@ -1696,60 +1700,13 @@ impl Activation {
     }
 }
 
-/// Which step of an activation a callback of the loop runs, and for which run of its body.
-#[derive(Debug, Clone, Copy)]
-enum Which {
-    Begin,
-    Held,
-    Released,
-    Done(u64),
-    Retry(u64),
-    Idle(u64),
-    Item(u64),
-    Stepped,
-    Answered,
-    Ring,
-    Sleeping,
-}
-
-/// One step of an activation, as something the event loop can call.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Step {
-    activation: Py<Activation>,
-    step: Which,
-}
-
-#[pymethods]
-impl Step {
-    #[pyo3(signature = (*args))]
-    fn __call__(&self, py: Python<'_>, args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<()> {
-        let activation = self.activation.bind(py);
-        match self.step {
-            Which::Begin => Activation::taken(activation, py),
-            Which::Held => Activation::held_by(activation, py, &args.get_item(0)?),
-            Which::Released => Activation::released(activation, py, &args.get_item(0)?),
-            Which::Done(run) => Activation::done(activation, py, run, &args.get_item(0)?),
-            Which::Retry(run) => Activation::retry(activation, py, run),
-            Which::Idle(run) => Activation::idle(activation, py, run),
-            Which::Item(run) => Activation::item(activation, py, run, &args.get_item(0)?),
-            Which::Stepped => Activation::stepped(activation, py, &args.get_item(0)?),
-            Which::Answered => Activation::answered(activation, py, &args.get_item(0)?),
-            Which::Ring => Activation::rang(activation, py),
-            Which::Sleeping => Activation::sleeping(activation, py),
-        }
-    }
-}
-
-/// A write on its way to the replicas, and what it changes here once they have it.
-#[pyclass(frozen, module = "casty._casty")]
+/// A write of the body on its way to the replicas, and what it changes here once they have it.
 #[derive(Debug)]
 struct Wrote {
-    activation: Py<Activation>,
     /// What the body is waiting on, which only the write landing resolves.
     written: Py<PyAny>,
-    pages: Mutex<Option<Pages>>,
-    value: Mutex<Option<Py<PyAny>>>,
+    pages: Pages,
+    value: Option<Py<PyAny>>,
     switching: bool,
     /// Whether the write resolves to the value it stored, which is what an `update` gives back.
     yields: bool,
@@ -1758,11 +1715,15 @@ struct Wrote {
     deleted: bool,
 }
 
-#[pymethods]
 impl Wrote {
-    fn __call__(&self, py: Python<'_>, commit: &Bound<'_, PyAny>) -> PyResult<()> {
-        let activation = self.activation.bind(py);
-        let landed = self.landed(py, activation, commit);
+    /// The write landed, or did not. Once no write of the body is in flight, the runs that ended meanwhile go on.
+    fn landed(
+        self,
+        activation: &Bound<'_, Activation>,
+        py: Python<'_>,
+        commit: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let landed = self.taken_in(activation, py, commit);
         let settled = {
             let mut state = activation.get().held();
             state.writes = state.writes.saturating_sub(1);
@@ -1773,14 +1734,12 @@ impl Wrote {
         }
         landed
     }
-}
 
-impl Wrote {
     /// Take in what the write did: the state it stored, or the failure whoever waits on it hears.
-    fn landed(
-        &self,
-        py: Python<'_>,
+    fn taken_in(
+        self,
         activation: &Bound<'_, Activation>,
+        py: Python<'_>,
         commit: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let written = self.written.bind(py);
@@ -1794,19 +1753,16 @@ impl Wrote {
             }
             return Ok(());
         }
-        let stored = self.value.locked().take();
-        let result = match (&stored, self.yields) {
+        let result = match (&self.value, self.yields) {
             (Some(value), true) => value.clone_ref(py),
             _ => py.None(),
         };
         {
             let mut state = activation.get().held();
-            if let Some(pages) = self.pages.locked().take() {
-                state.pages = pages;
-            }
+            state.pages = self.pages;
             if self.deleted {
-                state.value = stored;
-            } else if let Some(value) = stored {
+                state.value = self.value;
+            } else if let Some(value) = self.value {
                 state.value = Some(value);
             }
             state.deleted = self.deleted;
@@ -1833,82 +1789,6 @@ fn relay(from: &Bound<'_, PyAny>, to: &Bound<'_, PyAny>) -> PyResult<()> {
         Err(failure) => to.call_method1("set_exception", (failure,))?,
     };
     Ok(())
-}
-
-/// The new state an `update` waited for, on its way to being written.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Changed {
-    activation: Py<Activation>,
-    /// What the body is waiting on, which resolves to the state once it is written.
-    updated: Py<PyAny>,
-}
-
-#[pymethods]
-impl Changed {
-    fn __call__(&self, py: Python<'_>, changing: &Bound<'_, PyAny>) -> PyResult<()> {
-        let updated = self.updated.bind(py);
-        if changing.call_method0("cancelled")?.is_truthy()? {
-            return relay(changing, updated);
-        }
-        // Nobody waits for the update: the run that asked for it was cancelled, and a write now would land under the
-        // run that took its place. Reading the outcome keeps asyncio from logging it as never retrieved.
-        if updated.call_method0("done")?.is_truthy()? {
-            let _ = changing.call_method0("exception");
-            return Ok(());
-        }
-        let stored = changing
-            .call_method0("result")
-            .and_then(|value| Activation::stored(self.activation.bind(py), py, &value, true));
-        match stored {
-            Ok(written) => {
-                let then = Bound::new(
-                    py,
-                    Relayed {
-                        to: self.updated.clone_ref(py),
-                    },
-                )?;
-                written.call_method1("add_done_callback", (then,))?;
-            }
-            Err(failure) => {
-                if !updated.call_method0("done")?.is_truthy()? {
-                    updated.call_method1("set_exception", (failure,))?;
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// A write whose end is the end of the `update` that asked for it.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Relayed {
-    to: Py<PyAny>,
-}
-
-#[pymethods]
-impl Relayed {
-    fn __call__(&self, py: Python<'_>, written: &Bound<'_, PyAny>) -> PyResult<()> {
-        relay(written, self.to.bind(py))
-    }
-}
-
-/// The task computing a new state, which has nobody left to compute it for once the `update` is cancelled.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Abandoned {
-    changing: Py<PyAny>,
-}
-
-#[pymethods]
-impl Abandoned {
-    fn __call__(&self, py: Python<'_>, updated: &Bound<'_, PyAny>) -> PyResult<()> {
-        if updated.call_method0("cancelled")?.is_truthy()? {
-            self.changing.bind(py).call_method0("cancel")?;
-        }
-        Ok(())
-    }
 }
 
 /// The body of a collection, which runs here instead of on the loop.
@@ -2010,14 +1890,7 @@ impl Activation {
             state.writing = Some(pages);
             state.deleting = deleting;
         }
-        let then = Bound::new(
-            py,
-            Step {
-                activation: slf.clone().unbind(),
-                step: Which::Stepped,
-            },
-        )?;
-        written.call_method1("add_done_callback", (then,))?;
+        Self::then(slf, &written, Self::stepped)?;
         Ok(false)
     }
 
@@ -2096,14 +1969,7 @@ impl Activation {
             id,
         };
         super::armed(py, node, id, super::replies::timeout(py, node, &ask.to))?;
-        let then = Bound::new(
-            py,
-            Step {
-                activation: slf.clone().unbind(),
-                step: Which::Answered,
-            },
-        )?;
-        answer.call_method1("add_done_callback", (then,))?;
+        Self::then(slf, &answer, Self::answered)?;
         // The body holds its mailbox until the answer arrives, so it waits down the chain of the message it is on.
         let chain = {
             let mut state = slf.get().held();
@@ -2201,15 +2067,8 @@ impl Activation {
         if native.timed() && slf.get().held().alarm.is_some() {
             return Ok(());
         }
-        let idle = Bound::new(
-            py,
-            Step {
-                activation: slf.clone().unbind(),
-                step: Which::Sleeping,
-            },
-        )?;
         let idle_after = slf.get().settings().idle_after.as_secs_f64();
-        let timer = slf.get().node.later(py, idle_after, idle.into_any())?;
+        let timer = Self::timer(slf, idle_after, Self::sleeping)?;
         let mut state = slf.get().held();
         state.idle = Some(timer.unbind());
         state.deadline = Some(slf.get().node.now(py)? + idle_after);
@@ -2270,15 +2129,8 @@ impl Activation {
         let Some(at) = at else {
             return Ok(());
         };
-        let ring = Bound::new(
-            py,
-            Step {
-                activation: slf.clone().unbind(),
-                step: Which::Ring,
-            },
-        )?;
         let delay = (at - slf.get().node.clock(py)?).max(0.0);
-        let timer = slf.get().node.later(py, delay, ring.into_any())?;
+        let timer = Self::timer(slf, delay, Self::rang)?;
         slf.get().held().alarm = Some(timer.unbind());
         Ok(())
     }

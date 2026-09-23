@@ -6,7 +6,7 @@
 //! answer it, and a call from the loop leaves a request on the channel.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -28,6 +28,7 @@ use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use super::Node;
+use super::callback;
 use super::observe::{self, Observed};
 use crate::actor::period;
 use crate::lock::Locked;
@@ -114,26 +115,8 @@ impl Joined {
             } else {
                 Running::client(settings, host, types).await
             };
-            // An interpreter on its way out has no loop to hear of the join.
-            let _ = Python::try_attach(|py| {
-                let call = Bound::new(
-                    py,
-                    Entering {
-                        started: Mutex::new(Some(started)),
-                        joined: held,
-                        node,
-                        entered,
-                        system,
-                    },
-                );
-                match call {
-                    Ok(call) => {
-                        let _ = running_loop
-                            .bind(py)
-                            .call_method1("call_soon_threadsafe", (call,));
-                    }
-                    Err(failed) => failed.restore(py),
-                }
+            callback::on_loop(&running_loop, move |py| {
+                entering(py, &held, &node, started, entered.bind(py), system.bind(py))
             });
         });
         Ok(joined)
@@ -179,7 +162,7 @@ impl Joined {
     /// the transport and comes back when it is done.
     pub fn leave(joined: &Arc<Self>, py: Python<'_>, node: &Arc<Node>, abort: bool, then: Ending) {
         let Some(running) = joined.running.locked().take() else {
-            Departed::of(joined, node, then).settle(py);
+            left(py, joined, node, &then);
             return;
         };
         let running_loop = joined.running_loop.clone_ref(py);
@@ -192,16 +175,9 @@ impl Joined {
                 // What it went without, the node has already reported to the observer.
                 running.leave().await;
             }
-            let _ = Python::try_attach(|py| {
-                let call = Bound::new(py, Departed { joined, node, then });
-                match call {
-                    Ok(call) => {
-                        let _ = running_loop
-                            .bind(py)
-                            .call_method1("call_soon_threadsafe", (call,));
-                    }
-                    Err(failed) => failed.restore(py),
-                }
+            callback::on_loop(&running_loop, move |py| {
+                left(py, &joined, &node, &then);
+                Ok(())
             });
         });
     }
@@ -324,56 +300,35 @@ impl Entered {
     }
 }
 
-/// The end of a join, as something the event loop can call.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Entering {
-    started: Mutex<Option<std::io::Result<Running>>>,
-    joined: Arc<Joined>,
-    node: Arc<Node>,
-    entered: Py<PyAny>,
-    system: Py<PyAny>,
-}
-
-#[pymethods]
-impl Entering {
-    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(started) = self.started.locked().take() else {
-            return Ok(());
-        };
-        let entered = self.entered.bind(py);
-        if entered.call_method0("done")?.is_truthy()? {
+/// The end of a join, on the loop: `entered` is resolved with `system` once the node is in, or with the refusal.
+fn entering(
+    py: Python<'_>,
+    joined: &Arc<Joined>,
+    node: &Arc<Node>,
+    started: std::io::Result<Running>,
+    entered: &Bound<'_, PyAny>,
+    system: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    if entered.call_method0("done")?.is_truthy()? {
+        return Ok(());
+    }
+    let running = match started {
+        Ok(running) => running,
+        Err(refused) => {
+            let refusal = crate::errors::Refused::new_err(refused.to_string());
+            entered.call_method1("set_exception", (refusal,))?;
             return Ok(());
         }
-        let running = match started {
-            Ok(running) => running,
-            Err(refused) => {
-                let refusal = crate::errors::Refused::new_err(refused.to_string());
-                entered.call_method1("set_exception", (refusal,))?;
-                return Ok(());
-            }
-        };
-        let cluster = Entered {
-            joined: Arc::clone(&self.joined),
-            node: running.node.clone(),
-        };
-        let _ = self.joined.node.set(running.node.clone());
-        *self.joined.running.locked() = Some(running);
-        self.node.entered(py, &cluster);
-        entered.call_method1("set_result", (self.system.bind(py),))?;
-        Ok(())
-    }
-}
-
-/// The end of a leave, as something the event loop can call.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Departed {
-    /// The cluster this ends. An identity that was removed has already been replaced by another one here.
-    joined: Arc<Joined>,
-    node: Arc<Node>,
-    /// What happens once the transport of this identity is gone.
-    then: Ending,
+    };
+    let cluster = Entered {
+        joined: Arc::clone(joined),
+        node: running.node.clone(),
+    };
+    let _ = joined.node.set(running.node.clone());
+    *joined.running.locked() = Some(running);
+    node.entered(py, &cluster);
+    entered.call_method1("set_result", (system,))?;
+    Ok(())
 }
 
 /// What a node does after it has let a cluster go.
@@ -385,45 +340,29 @@ pub enum Ending {
     Again,
 }
 
-impl Departed {
-    fn of(joined: &Arc<Joined>, node: &Arc<Node>, then: Ending) -> Self {
-        Self {
-            joined: Arc::clone(joined),
-            node: Arc::clone(node),
-            then,
-        }
-    }
-
-    /// Let the transport go, and then do what the node was waiting for it to be gone to do.
-    ///
-    /// Joining again waits for exactly this: the listener of the identity that was removed holds the address until
-    /// its transport is gone, and the new identity binds the same one.
-    fn settle(&self, py: Python<'_>) {
-        self.joined.shutdown();
-        self.node.let_go(&self.joined);
-        match &self.then {
-            Ending::Again => {
-                if let Err(failed) = self.node.rejoin(py) {
-                    failed.restore(py);
-                }
-            }
-            Ending::Gone(gone) => {
-                self.node.stop_taking();
-                let gone = gone.bind(py);
-                if let Ok(done) = gone.call_method0("done")
-                    && !done.is_truthy().unwrap_or(true)
-                {
-                    let _ = gone.call_method1("set_result", (py.None(),));
-                }
+/// The end of a leave: let the transport of `joined` go, and then do what the node was waiting for it to be gone to do.
+///
+/// `joined` is the cluster this ends, which the node has already replaced by another one when its identity was
+/// removed. Joining again waits for exactly this: the listener of the identity that was removed holds the address
+/// until its transport is gone, and the new identity binds the same one.
+fn left(py: Python<'_>, joined: &Arc<Joined>, node: &Arc<Node>, then: &Ending) {
+    joined.shutdown();
+    node.let_go(joined);
+    match then {
+        Ending::Again => {
+            if let Err(failed) = node.rejoin(py) {
+                failed.restore(py);
             }
         }
-    }
-}
-
-#[pymethods]
-impl Departed {
-    fn __call__(&self, py: Python<'_>) {
-        self.settle(py);
+        Ending::Gone(gone) => {
+            node.stop_taking();
+            let gone = gone.bind(py);
+            if let Ok(done) = gone.call_method0("done")
+                && !done.is_truthy().unwrap_or(true)
+            {
+                let _ = gone.call_method1("set_result", (py.None(),));
+            }
+        }
     }
 }
 
@@ -436,49 +375,19 @@ enum Landed {
     Placed(Placed),
 }
 
-/// Hand the answer to the loop, which resolves the future the body is waiting on. An interpreter on its way out has
-/// no loop left to hand it to.
+/// Hand the answer to the loop, which resolves the future the body is waiting on. The loop may already be closed, which
+/// is what a system that stopped under an operation looks like.
 fn settle(running_loop: &Py<PyAny>, landed: Landed, answer: Py<PyAny>) {
-    let _ = Python::try_attach(|py| {
-        let call = match Bound::new(
-            py,
-            Settling {
-                landed: Mutex::new(Some(landed)),
-                answer,
-            },
-        ) {
-            Ok(call) => call,
-            Err(failed) => {
-                failed.restore(py);
-                return;
-            }
-        };
-        // The loop may already be closed, which is what a system that stopped under an operation looks like.
-        let _ = running_loop
-            .bind(py)
-            .call_method1("call_soon_threadsafe", (call,));
-    });
+    callback::on_loop(running_loop, move |py| landed.resolve(py, answer.bind(py)));
 }
 
-/// The answer of a store, as something the event loop can call.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Settling {
-    landed: Mutex<Option<Landed>>,
-    answer: Py<PyAny>,
-}
-
-#[pymethods]
-impl Settling {
-    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(landed) = self.landed.locked().take() else {
-            return Ok(());
-        };
-        let answer = self.answer.bind(py);
+impl Landed {
+    /// Resolve `answer` with what landed, on the loop.
+    fn resolve(self, py: Python<'_>, answer: &Bound<'_, PyAny>) -> PyResult<()> {
         if answer.call_method0("done")?.is_truthy()? {
             return Ok(());
         }
-        match landed {
+        match self {
             Landed::Taken(Ok(held)) => {
                 let taken = Bound::new(py, Taken::of(held))?;
                 answer.call_method1("set_result", (taken,))?;
@@ -551,28 +460,10 @@ impl Bridge {
     /// Queue `work` on the loop. It is dropped if the loop or the interpreter is gone, which is a process on its way
     /// out.
     fn hand_over(&self, work: Arriving) {
-        let _ = Python::try_attach(|py| {
-            let Some(node) = self.node.upgrade() else {
-                return;
-            };
-            let call = match Bound::new(
-                py,
-                Arrived {
-                    work: Mutex::new(Some(work)),
-                    node,
-                },
-            ) {
-                Ok(call) => call,
-                Err(failed) => {
-                    failed.restore(py);
-                    return;
-                }
-            };
-            let _ = self
-                .running_loop
-                .bind(py)
-                .call_method1("call_soon_threadsafe", (call,));
-        });
+        let Some(node) = self.node.upgrade() else {
+            return;
+        };
+        callback::on_loop(&self.running_loop, move |py| work.arrive(py, &node));
     }
 }
 
@@ -675,41 +566,30 @@ enum Arriving {
     Removed,
 }
 
-/// One thing the cluster asked of this process, as something the event loop can call.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Arrived {
-    work: Mutex<Option<Arriving>>,
-    node: Arc<Node>,
-}
-
-#[pymethods]
-impl Arrived {
-    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(work) = self.work.locked().take() else {
-            return Ok(());
-        };
-        match work {
-            Arriving::Hand(command) => self.node.take(py, command),
-            Arriving::Settle { id, outcome } => self.node.settle(py, id, &outcome),
-            Arriving::Members(members) => {
-                self.node.seen(py, members);
+impl Arriving {
+    /// Do what the cluster asked of `node`, on the loop.
+    fn arrive(self, py: Python<'_>, node: &Arc<Node>) -> PyResult<()> {
+        match self {
+            Self::Hand(command) => node.take(py, command),
+            Self::Settle { id, outcome } => node.settle(py, id, &outcome),
+            Self::Members(members) => {
+                node.seen(py, members);
                 Ok(())
             }
-            Arriving::Meet(actor) => {
-                self.node.met(py, &actor);
+            Self::Meet(actor) => {
+                node.met(py, &actor);
                 Ok(())
             }
             // A leaving node takes no key back, whatever asked for it before it started leaving.
-            Arriving::Attach { .. } if self.node.draining() => Ok(()),
-            Arriving::Attach { actor, key } => self.node.attach(py, &actor, &key).map(|_| ()),
-            Arriving::Release { actor, key } => self.node.relinquish(py, &actor, &key),
-            Arriving::Cancel {
+            Self::Attach { .. } if node.draining() => Ok(()),
+            Self::Attach { actor, key } => node.attach(py, &actor, &key).map(|_| ()),
+            Self::Release { actor, key } => node.relinquish(py, &actor, &key),
+            Self::Cancel {
                 actor,
                 key,
                 request,
-            } => self.node.cancelled(py, &actor, &key, &request),
-            Arriving::Removed => self.node.removed(py),
+            } => node.cancelled(py, &actor, &key, &request),
+            Self::Removed => node.removed(py),
         }
     }
 }
@@ -759,57 +639,29 @@ impl Mapping {
     /// Waiting here does not hold anything of the node up: a dial has a task of its own, and the worker it runs on
     /// is given back to the runtime while it waits. An answer that never comes leaves the address as it was, which
     /// is a node dialed directly instead of through whatever the map would have put in between.
-    fn dialed(&self, address: &str) -> String {
+    fn dialed(self: &Arc<Self>, address: &str) -> String {
         if let Some(found) = self.held(address) {
             return found;
         }
         let (answer, answered) = channel();
-        let asked = Python::try_attach(|py| -> PyResult<()> {
-            let call = Bound::new(
-                py,
-                Asking {
-                    map: self.map.clone_ref(py),
-                    address: address.to_owned(),
-                    answer: Mutex::new(Some(answer)),
-                },
-            )?;
-            self.running_loop
+        let (mapping, asked) = (Arc::clone(self), address.to_owned());
+        let handed = callback::on_loop(&self.running_loop, move |py| {
+            let dialed = mapping
+                .map
                 .bind(py)
-                .call_method1("call_soon_threadsafe", (call,))?;
+                .call1((asked.clone(),))
+                .and_then(|dialed| dialed.extract::<String>())
+                .unwrap_or(asked);
+            let _ = answer.send(dialed);
             Ok(())
         });
-        if !matches!(asked, Some(Ok(()))) {
+        if !handed {
             return address.to_owned();
         }
         let dialed = tokio::task::block_in_place(|| answered.recv_timeout(ASKING))
             .unwrap_or_else(|_| address.to_owned());
         self.took(address, dialed.clone());
         dialed
-    }
-}
-
-/// One address on its way to the map, as something the event loop can call.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Asking {
-    map: Py<PyAny>,
-    address: String,
-    answer: Mutex<Option<Sender<String>>>,
-}
-
-#[pymethods]
-impl Asking {
-    fn __call__(&self, py: Python<'_>) {
-        let Some(answer) = self.answer.locked().take() else {
-            return;
-        };
-        let dialed = self
-            .map
-            .bind(py)
-            .call1((self.address.clone(),))
-            .and_then(|dialed| dialed.extract::<String>())
-            .unwrap_or_else(|_| self.address.clone());
-        let _ = answer.send(dialed);
     }
 }
 

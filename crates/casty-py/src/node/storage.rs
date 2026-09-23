@@ -11,8 +11,8 @@
 //! state the store may still keep, until the store has forgotten the deletion, `leave_timeout` after it.
 
 use core::time::Duration;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 
 use casty_core::replication::messages::Stamp;
 use casty_core::store::{Durable, Pages, Storage, Stored, version};
@@ -24,9 +24,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
 
 use super::Node;
+use super::callback;
 use super::cluster::Taken;
 use super::observe::Observed;
-use crate::lock::Locked;
 
 /// What a durable type asks of the store of a system running alone: when it keeps the writes, and how long a call to
 /// it may take, in seconds.
@@ -68,17 +68,22 @@ pub fn hand(
     request: Storing,
 ) {
     let id = request.id;
-    let call = Bound::new(
-        py,
-        Starting {
-            store: store.clone_ref(py),
-            request: Mutex::new(Some(request)),
-            node: node.clone(),
-        },
-    );
-    if let Err(failed) =
-        call.and_then(|call| running_loop.call_method1("call_soon_threadsafe", (call,)))
-    {
+    let (store, cluster) = (store.clone_ref(py), node.clone());
+    let started = callback::threadsafe(running_loop, move |py| {
+        perform(
+            py,
+            store.bind(py),
+            &request.actor,
+            &request.key,
+            &request.storage,
+            request.within.as_secs_f64(),
+            Box::new(move |_, kept| {
+                cluster.from_store(id, kept);
+                Ok(())
+            }),
+        )
+    });
+    if let Err(failed) = started {
         // A loop that takes no more calls is a system on its way out; the node hears the call went nowhere.
         node.from_store(id, Err(format!("the event loop took no call: {failed}")));
     }
@@ -118,16 +123,15 @@ fn perform(
         Ok(task) => task,
         Err(failed) => return then(py, Err(described(py, &failed, within))),
     };
-    let finished = Bound::new(
-        py,
-        Finished {
-            loading: matches!(storage, Storage::Load),
-            within,
-            then: Mutex::new(Some(then)),
-        },
-    )?;
-    task.call_method1("add_done_callback", (finished,))?;
-    Ok(())
+    let loading = matches!(storage, Storage::Load);
+    callback::when_done(&task, move |py, task| {
+        let kept = match task.call_method0("result") {
+            Ok(answered) if loading => record(&answered),
+            Ok(_) => Ok(None),
+            Err(failed) => Err(described(py, &failed, within)),
+        };
+        then(py, kept)
+    })
 }
 
 /// The record `load` answered: `None`, or the version and the state, which is `None` for a deletion.
@@ -193,70 +197,6 @@ fn unavailable(py: Python<'_>, why: String) -> Bound<'_, PyAny> {
         .into_value(py)
         .into_bound(py)
         .into_any()
-}
-
-/// A request of the node of a cluster to the store, as something the event loop can call.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Starting {
-    store: Py<PyAny>,
-    request: Mutex<Option<Storing>>,
-    node: Cluster,
-}
-
-#[pymethods]
-impl Starting {
-    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(request) = self.request.locked().take() else {
-            return Ok(());
-        };
-        let node = self.node.clone();
-        let id = request.id;
-        perform(
-            py,
-            self.store.bind(py),
-            &request.actor,
-            &request.key,
-            &request.storage,
-            request.within.as_secs_f64(),
-            Box::new(move |_, kept| {
-                node.from_store(id, kept);
-                Ok(())
-            }),
-        )
-    }
-}
-
-/// The end of a call to the store, as the callback of its task.
-#[pyclass(frozen, module = "casty._casty")]
-struct Finished {
-    loading: bool,
-    within: f64,
-    then: Mutex<Option<Then>>,
-}
-
-impl core::fmt::Debug for Finished {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_struct("Finished")
-            .field("loading", &self.loading)
-            .finish_non_exhaustive()
-    }
-}
-
-#[pymethods]
-impl Finished {
-    fn __call__(&self, py: Python<'_>, task: &Bound<'_, PyAny>) -> PyResult<()> {
-        let Some(then) = self.then.locked().take() else {
-            return Ok(());
-        };
-        let kept = match task.call_method0("result") {
-            Ok(answered) if self.loading => record(&answered),
-            Ok(_) => Ok(None),
-            Err(failed) => Err(described(py, &failed, self.within)),
-        };
-        then(py, kept)
-    }
 }
 
 impl Node {
@@ -471,22 +411,22 @@ impl Node {
         period: Duration,
         within: f64,
     ) -> PyResult<()> {
-        let flush = Bound::new(
-            py,
-            Flush {
-                node: Arc::clone(self),
-                actor: actor.to_owned(),
-                key: key.to_owned(),
-                period,
-                within,
-            },
-        )?;
-        self.later(py, period.as_secs_f64(), flush.into_any())?;
+        let node = Arc::clone(self);
+        let (actor, key) = (actor.to_owned(), key.to_owned());
+        self.later(py, period.as_secs_f64(), move |py| {
+            let Some(stored) = node.store().due(&actor, &key) else {
+                return Ok(());
+            };
+            node.flush(py, &actor, &key, stored, period, within)
+        })?;
         Ok(())
     }
 
     /// Ask the store to forget the deletion `stamp` `leave_timeout` from now: the time a save older than it may still
     /// be on its way to the store, which the drop has to come after.
+    ///
+    /// The tombstone kept here goes once the store has forgotten the deletion, and the drop is asked again
+    /// `leave_timeout` later when it has not.
     fn forgetting(
         self: &Arc<Self>,
         py: Python<'_>,
@@ -498,88 +438,26 @@ impl Node {
         if self.storage.is_none() {
             return Ok(());
         }
-        let forget = Bound::new(
-            py,
-            Forget {
-                node: Arc::clone(self),
-                actor: actor.to_owned(),
-                key: key.to_owned(),
-                stamp,
-                within,
-            },
-        )?;
-        self.later(
-            py,
-            self.settings.leave_timeout.as_secs_f64(),
-            forget.into_any(),
-        )?;
-        Ok(())
-    }
-}
-
-/// The save of the last write of a key whose type saves on a schedule, as the loop calls it once the period is over.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Flush {
-    node: Arc<Node>,
-    actor: String,
-    key: String,
-    period: Duration,
-    within: f64,
-}
-
-#[pymethods]
-impl Flush {
-    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(stored) = self.node.store().due(&self.actor, &self.key) else {
-            return Ok(());
-        };
-        self.node
-            .flush(py, &self.actor, &self.key, stored, self.period, self.within)
-    }
-}
-
-/// The drop of a deletion from the store, as the loop calls it: the tombstone kept here goes once the store has
-/// forgotten the deletion, and the drop is asked again `leave_timeout` later when it has not.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Forget {
-    node: Arc<Node>,
-    actor: String,
-    key: String,
-    stamp: Stamp,
-    within: f64,
-}
-
-#[pymethods]
-impl Forget {
-    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let node = Arc::clone(&self.node);
-        let (actor, key, stamp, within) = (
-            self.actor.clone(),
-            self.key.clone(),
-            self.stamp.clone(),
-            self.within,
-        );
-        let then: Then = Box::new(move |py, kept| {
-            match kept {
-                Ok(_) => node.store().purge(&actor, &key, &stamp),
-                Err(why) => {
-                    let why =
-                        format!("{actor}/{key}: the store did not forget the deletion: {why}");
-                    node.reported(py, &actor, &key, Operation::Write, why);
-                    node.forgetting(py, &actor, &key, stamp, within)?;
+        let node = Arc::clone(self);
+        let (actor, key) = (actor.to_owned(), key.to_owned());
+        self.later(py, self.settings.leave_timeout.as_secs_f64(), move |py| {
+            let dropped = Storage::Drop(stamp.clone());
+            let held = Arc::clone(&node);
+            let (owner, name) = (actor.clone(), key.clone());
+            let then: Then = Box::new(move |py, kept| {
+                match kept {
+                    Ok(_) => held.store().purge(&owner, &name, &stamp),
+                    Err(why) => {
+                        let why =
+                            format!("{owner}/{name}: the store did not forget the deletion: {why}");
+                        held.reported(py, &owner, &name, Operation::Write, why);
+                        held.forgetting(py, &owner, &name, stamp, within)?;
+                    }
                 }
-            }
-            Ok(())
-        });
-        self.node.stow(
-            py,
-            &self.actor,
-            &self.key,
-            &Storage::Drop(self.stamp.clone()),
-            self.within,
-            then,
-        )
+                Ok(())
+            });
+            node.stow(py, &actor, &key, &dropped, within, then)
+        })?;
+        Ok(())
     }
 }

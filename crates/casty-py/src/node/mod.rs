@@ -1,6 +1,7 @@
 //! A node: the keys it hosts, the answers it is waiting for, and the settings they share.
 
 pub mod activation;
+pub mod callback;
 pub mod catalog;
 pub mod cluster;
 pub mod context;
@@ -425,13 +426,14 @@ impl Node {
         py.import("time")?.call_method0("time")?.extract()
     }
 
+    /// Call `call` on the loop `delay` seconds from now, giving back the timer that cancels it.
     pub fn later<'py>(
         &self,
         py: Python<'py>,
         delay: f64,
-        call: Bound<'py, PyAny>,
+        call: impl FnOnce(Python<'_>) -> PyResult<()> + Send + 'static,
     ) -> PyResult<Bound<'py, PyAny>> {
-        self.running(py)?.call_method1("call_later", (delay, call))
+        callback::later(&self.running(py)?, delay, call)
     }
 
     pub fn learn(&self, py: Python<'_>, behavior: &Behavior) {
@@ -990,17 +992,11 @@ impl Node {
             Activation::drain(activation.bind(py), py)?;
         }
         // The deadline is the deadline: a body that never ends does not keep the process alive.
-        let abandon = Bound::new(
-            py,
-            Abandoning {
-                node: Arc::clone(self),
-            },
-        )?;
-        self.later(
-            py,
-            self.settings.leave_timeout.as_secs_f64(),
-            abandon.into_any(),
-        )?;
+        let node = Arc::clone(self);
+        self.later(py, self.settings.leave_timeout.as_secs_f64(), move |py| {
+            node.abandon(py);
+            Ok(())
+        })?;
         Ok(waiting)
     }
 
@@ -1274,15 +1270,13 @@ system_methods!(ActorSystem {
         if let Some(cluster) = node.cluster() {
             cluster.node().leaving();
         }
+        // It leaves the cluster once every activation of this node has ended.
         let left = node.leave(py)?;
-        let departing = Bound::new(
-            py,
-            Departing {
-                node,
-                gone: gone.clone().unbind(),
-            },
-        )?;
-        left.call_method1("add_done_callback", (departing,))?;
+        let then = gone.clone().unbind();
+        callback::when_done(&left, move |py, _| {
+            node.departed(py, false, then.bind(py));
+            Ok(())
+        })?;
         Ok(Bound::new(py, Awaited::of(gone))?.into_any())
     }
 
@@ -1561,15 +1555,22 @@ pub fn located<'py>(
 }
 
 /// End the request at `within`, so that nothing waits for an answer that is not coming.
+///
+/// A request that nothing answered by then ends with a timeout, and the key it went to hears so.
 pub fn armed(py: Python<'_>, node: &Arc<Node>, id: i64, within: f64) -> PyResult<()> {
-    let expire = Bound::new(
-        py,
-        Expire {
-            node: node.clone(),
-            id,
-        },
-    )?;
-    let timer = node.later(py, within, expire.into_any())?;
+    let held = Arc::clone(node);
+    let timer = node.later(py, within, move |py| {
+        let Some(waiting) = held.forget(id) else {
+            return Ok(());
+        };
+        let future = waiting.future.bind(py);
+        if !future.call_method0("done")?.is_truthy()? {
+            let timeout =
+                pyo3::exceptions::PyTimeoutError::new_err("the answer did not arrive in time");
+            future.call_method1("set_exception", (timeout,))?;
+        }
+        replies::cancel(py, id, &waiting, &held)
+    })?;
     node.deadline(id, &timer);
     Ok(())
 }
@@ -1580,30 +1581,6 @@ pub fn abandoned(py: Python<'_>, node: &Arc<Node>, id: i64) -> PyResult<()> {
     match node.forget(id) {
         Some(waiting) => replies::cancel(py, id, &waiting, node),
         None => Ok(()),
-    }
-}
-
-/// What a request that nothing answered by its deadline ends with. The key it went to hears so.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Expire {
-    node: Arc<Node>,
-    id: i64,
-}
-
-#[pymethods]
-impl Expire {
-    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(waiting) = self.node.forget(self.id) else {
-            return Ok(());
-        };
-        let future = waiting.future.bind(py);
-        if !future.call_method0("done")?.is_truthy()? {
-            let timeout =
-                pyo3::exceptions::PyTimeoutError::new_err("the answer did not arrive in time");
-            future.call_method1("set_exception", (timeout,))?;
-        }
-        replies::cancel(py, self.id, &waiting, &self.node)
     }
 }
 
@@ -1681,36 +1658,6 @@ fn observing(py: Python<'_>, observer: Option<&Bound<'_, PyAny>>) -> PyResult<Py
             .getattr("LoggingObserver")?
             .call0()?
             .unbind()),
-    }
-}
-
-/// What leaves the cluster once every activation of this node has ended.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Departing {
-    node: Arc<Node>,
-    gone: Py<PyAny>,
-}
-
-#[pymethods]
-impl Departing {
-    #[pyo3(signature = (*_args))]
-    fn __call__(&self, py: Python<'_>, _args: &Bound<'_, PyTuple>) {
-        self.node.departed(py, false, self.gone.bind(py));
-    }
-}
-
-/// What ends the activations that did not finish before the deadline of the exit.
-#[pyclass(frozen, module = "casty._casty")]
-#[derive(Debug)]
-struct Abandoning {
-    node: Arc<Node>,
-}
-
-#[pymethods]
-impl Abandoning {
-    fn __call__(&self, py: Python<'_>) {
-        self.node.abandon(py);
     }
 }
 
