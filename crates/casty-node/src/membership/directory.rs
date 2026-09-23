@@ -15,6 +15,7 @@ use casty_core::node::NodeId;
 use casty_core::rolls::Rolls;
 use casty_net::pool::Target;
 
+use super::Members;
 use super::service::{Member, Outgoing};
 use super::wire::{Body, Message, Sender, decode, encode};
 
@@ -30,8 +31,8 @@ pub struct Directory {
     /// Whether the last question was answered: it goes back to a seed when one was not.
     answered: bool,
     /// Whether the first table has arrived, which is what the start of a client waits for.
-    pub joined: bool,
-    pub changed: bool,
+    joined: bool,
+    changed: bool,
     sends: Vec<Outgoing>,
 }
 
@@ -50,33 +51,6 @@ impl Directory {
             changed: false,
             sends: Vec::new(),
         }
-    }
-
-    /// The members of the last table, the ones the transport could not reach since then as dead.
-    #[must_use]
-    pub fn members(&self) -> Vec<Member> {
-        self.members
-            .iter()
-            .map(|member| Member {
-                status: if self.unreached.contains(&member.node) {
-                    Status::Dead
-                } else {
-                    member.status
-                },
-                ..member.clone()
-            })
-            .collect()
-    }
-
-    pub fn take(&mut self) -> Vec<Outgoing> {
-        core::mem::take(&mut self.sends)
-    }
-
-    /// The changes of status since the last call, from one table that arrived to the next.
-    ///
-    /// A member that went through several statuses between two tables is one change, from the first to the last.
-    pub fn transitions(&mut self) -> Vec<Transition> {
-        core::mem::take(&mut self.moved)
     }
 
     /// Ask a member for the whole table, or a seed when the last question went unanswered, and ask each member that
@@ -101,30 +75,6 @@ impl Directory {
         }
     }
 
-    /// A connection to `node` ended: ask it for the table at once, which dials it again and says whether it is there.
-    pub fn lost(&mut self, node: &NodeId) {
-        if self.members.iter().any(|member| member.node == *node) {
-            self.question(Target::Node(node.clone()));
-        }
-    }
-
-    /// The transport dropped what was sent to `node`: no connection to it opened, or another incarnation answers at
-    /// its address.
-    pub fn unreached(&mut self, node: &NodeId) {
-        let Some(member) = self.members.iter().find(|member| member.node == *node) else {
-            return;
-        };
-        if member.status == Status::Dead || !self.unreached.insert(node.clone()) {
-            return;
-        }
-        self.moved.push(Transition {
-            node: node.clone(),
-            status: Status::Dead,
-            previous: Some(member.status),
-        });
-        self.changed = true;
-    }
-
     fn question(&mut self, to: Target) {
         self.sends.push(Outgoing {
             to,
@@ -135,8 +85,35 @@ impl Directory {
         });
     }
 
+    /// The bytes of what is queued, which is what the transport sends.
+    #[must_use]
+    pub fn payload(message: &Message) -> Vec<u8> {
+        encode(message)
+    }
+}
+
+impl Members for Directory {
+    /// The members of the last table, the ones the transport could not reach since then as dead.
+    fn members(&self) -> Vec<Member> {
+        self.members
+            .iter()
+            .map(|member| Member {
+                status: if self.unreached.contains(&member.node) {
+                    Status::Dead
+                } else {
+                    member.status
+                },
+                ..member.clone()
+            })
+            .collect()
+    }
+
+    fn take(&mut self) -> Vec<Outgoing> {
+        core::mem::take(&mut self.sends)
+    }
+
     /// The answer of a member, which is the only thing that ever arrives here.
-    pub fn receive(&mut self, payload: &[u8]) {
+    fn receive(&mut self, payload: &[u8], _: f64) {
         let Ok(message) = decode(payload) else {
             return;
         };
@@ -168,10 +145,60 @@ impl Directory {
         self.changed = true;
     }
 
-    /// The bytes of what is queued, which is what the transport sends.
-    #[must_use]
-    pub fn payload(message: &Message) -> Vec<u8> {
-        encode(message)
+    fn changed(&mut self) -> bool {
+        core::mem::take(&mut self.changed)
+    }
+
+    fn mark(&mut self) {
+        self.changed = true;
+    }
+
+    fn joined(&self) -> bool {
+        self.joined
+    }
+
+    /// The changes of status since the last call, from one table that arrived to the next.
+    ///
+    /// A member that went through several statuses between two tables is one change, from the first to the last.
+    fn transitions(&mut self) -> Vec<Transition> {
+        core::mem::take(&mut self.moved)
+    }
+
+    /// A client is in no table: it asks a member for the one it holds.
+    fn join(&mut self) {
+        self.ask();
+    }
+
+    fn anti_entropy(&mut self) {
+        self.ask();
+    }
+
+    /// No connection to `node` opened, or another incarnation answers at its address. A client has neither a failure
+    /// detector nor the gossip of others to wait for, so the node is dead here.
+    fn unreached(&mut self, node: &NodeId, _: f64) -> bool {
+        if let Some(member) = self.members.iter().find(|member| member.node == *node)
+            && member.status != Status::Dead
+            && self.unreached.insert(node.clone())
+        {
+            self.moved.push(Transition {
+                node: node.clone(),
+                status: Status::Dead,
+                previous: Some(member.status),
+            });
+            self.changed = true;
+        }
+        true
+    }
+
+    /// A connection to `node` ended: ask it for the table at once, which dials it again and says whether it is there.
+    fn lost(&mut self, node: &NodeId) {
+        if self.members.iter().any(|member| member.node == *node) {
+            self.question(Target::Node(node.clone()));
+        }
+    }
+
+    fn refresh(&mut self) {
+        self.ask();
     }
 }
 
@@ -212,6 +239,7 @@ mod tests {
     use casty_core::rolls::Rolls;
     use casty_net::pool::Target;
 
+    use super::super::Members;
     use super::super::wire::{Body, Message, Sender, encode};
     use super::{Directory, Member, diff};
 
@@ -324,10 +352,10 @@ mod tests {
     fn a_member_the_transport_did_not_reach_is_dead_until_it_answers() {
         let ids = Rolls::seeded(84).nodes(3);
         let mut directory = Directory::new(ids[2].clone(), vec!["10.0.0.1:7400".to_owned()]);
-        directory.receive(&table(&ids[0], &ids[..2]));
+        directory.receive(&table(&ids[0], &ids[..2]), 0.0);
         directory.transitions();
 
-        directory.unreached(&ids[1]);
+        directory.unreached(&ids[1], 0.0);
 
         assert_eq!(statuses(&directory), vec![Status::Alive, Status::Dead]);
         assert_eq!(
@@ -335,11 +363,11 @@ mod tests {
             vec![transition(&ids[1], Status::Dead, Some(Status::Alive))]
         );
         // Another member still lists it up, which says nothing about whether this client reaches it.
-        directory.receive(&table(&ids[0], &ids[..2]));
+        directory.receive(&table(&ids[0], &ids[..2]), 0.0);
         assert_eq!(statuses(&directory), vec![Status::Alive, Status::Dead]);
         assert!(directory.transitions().is_empty());
 
-        directory.receive(&table(&ids[1], &ids[..2]));
+        directory.receive(&table(&ids[1], &ids[..2]), 0.0);
 
         assert_eq!(statuses(&directory), vec![Status::Alive, Status::Alive]);
         assert_eq!(
@@ -352,8 +380,8 @@ mod tests {
     fn a_member_not_reached_is_asked_again_with_every_table_question() {
         let ids = Rolls::seeded(85).nodes(3);
         let mut directory = Directory::new(ids[2].clone(), vec!["10.0.0.1:7400".to_owned()]);
-        directory.receive(&table(&ids[0], &ids[..2]));
-        directory.unreached(&ids[1]);
+        directory.receive(&table(&ids[0], &ids[..2]), 0.0);
+        directory.unreached(&ids[1], 0.0);
         directory.take();
 
         directory.ask();
@@ -369,7 +397,7 @@ mod tests {
     fn a_lost_connection_asks_the_member_at_once() {
         let ids = Rolls::seeded(86).nodes(2);
         let mut directory = Directory::new(ids[1].clone(), vec!["10.0.0.1:7400".to_owned()]);
-        directory.receive(&table(&ids[0], &ids[..1]));
+        directory.receive(&table(&ids[0], &ids[..1]), 0.0);
 
         directory.lost(&ids[0]);
 

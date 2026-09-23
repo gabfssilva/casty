@@ -13,6 +13,7 @@ use casty_core::node::{NodeId, Send as Pushed};
 use casty_core::rolls::Rolls;
 use casty_net::pool::Target;
 
+use super::Members;
 use super::wire::{Body, Message, Sender};
 
 /// The periods the membership of a cluster runs by.
@@ -71,9 +72,9 @@ pub struct Membership {
     leaving: bool,
     sends: Vec<Outgoing>,
     /// Whether this node is in a cluster, whether it was declared gone, and whether the members changed.
-    pub joined: bool,
-    pub removed: bool,
-    pub changed: bool,
+    joined: bool,
+    removed: bool,
+    changed: bool,
 }
 
 impl Membership {
@@ -111,10 +112,11 @@ impl Membership {
             changed: false,
         }
     }
+}
 
+impl Members for Membership {
     /// The members this node knows, itself included and the ones that left excluded.
-    #[must_use]
-    pub fn members(&self) -> Vec<Member> {
+    fn members(&self) -> Vec<Member> {
         self.table
             .records()
             .filter(|record| record.status != Status::Left)
@@ -127,18 +129,32 @@ impl Membership {
     }
 
     /// Whether this node sees a majority of the members alive, itself included (`MemberTable::majority`).
-    #[must_use]
-    pub fn majority(&self) -> bool {
+    fn majority(&self) -> bool {
         self.table.majority()
     }
 
-    /// What this node must put on the wire, taken out so that the caller sends it.
-    pub fn take(&mut self) -> Vec<Outgoing> {
+    fn take(&mut self) -> Vec<Outgoing> {
         core::mem::take(&mut self.sends)
     }
 
+    fn changed(&mut self) -> bool {
+        core::mem::take(&mut self.changed)
+    }
+
+    fn mark(&mut self) {
+        self.changed = true;
+    }
+
+    fn joined(&self) -> bool {
+        self.joined
+    }
+
+    fn removed(&self) -> bool {
+        self.removed
+    }
+
     /// The changes of status of the members since the last call, each one once and in the order the table made them.
-    pub fn transitions(&mut self) -> Vec<Transition> {
+    fn transitions(&mut self) -> Vec<Transition> {
         self.table.transitions()
     }
 
@@ -146,7 +162,7 @@ impl Membership {
     ///
     /// Every seed, and not one of them, because two nodes that join each other and no seed settle into a second
     /// cluster that the first one never hears about.
-    pub fn join(&mut self) {
+    fn join(&mut self) {
         for address in self.seeds.clone() {
             self.send(Target::Seed(address), Body::View(View::Join));
         }
@@ -159,7 +175,7 @@ impl Membership {
         self.send_any(&alive, &Body::View(View::Join));
     }
 
-    pub fn receive(&mut self, payload: &[u8], now: f64) {
+    fn receive(&mut self, payload: &[u8], now: f64) {
         let Ok(message) = super::wire::decode(payload) else {
             return;
         };
@@ -223,7 +239,7 @@ impl Membership {
     /// Watching only the active view leaves a member this node has no link to alive for as long as nobody else
     /// reports it: the minority of a partition would keep counting the unreachable side as alive, and an alive
     /// majority is exactly what lets a node remove the dead.
-    pub fn probe(&mut self, now: f64) {
+    fn probe(&mut self, now: f64) {
         let silent = self.timings.suspect_after.as_secs_f64();
         let watched: Vec<NodeId> = self
             .views
@@ -252,7 +268,7 @@ impl Membership {
     ///
     /// Without it a node busy enough to queue its membership messages behind the traffic of its keys would be
     /// suspected for the silence of the one component while the others keep talking.
-    pub fn heard(&mut self, node: &NodeId, now: f64) {
+    fn heard(&mut self, node: &NodeId, now: f64) {
         let watched = self
             .table
             .record(node)
@@ -275,7 +291,7 @@ impl Membership {
     /// A suspicion and not a death: the node refutes it if it is alive and only this link failed, and `dead_after`
     /// still passes before anyone takes its keys. A node that is leaving is left to the heartbeat, since its handoff
     /// is what a false suspicion would cut short.
-    pub fn unreached(&mut self, node: &NodeId, now: f64) {
+    fn unreached(&mut self, node: &NodeId, now: f64) -> bool {
         let alive = self
             .table
             .record(node)
@@ -283,20 +299,21 @@ impl Membership {
         if alive && *node != self.node {
             self.suspect(node, now);
         }
+        false
     }
 
-    pub fn expire(&mut self, now: f64) {
+    fn expire(&mut self, now: f64) {
         let changed = self.table.expire(now);
         self.publish(changed, None, now);
         self.settle();
     }
 
-    pub fn graft(&mut self, now: f64) {
+    fn graft(&mut self, now: f64) {
         let grafts = self.broadcast.tick(now);
         self.deliver(grafts);
     }
 
-    pub fn shuffle(&mut self, now: f64) {
+    fn shuffle(&mut self, now: f64) {
         let effects = self.views.shuffle();
         self.apply(effects, now);
     }
@@ -305,7 +322,7 @@ impl Membership {
     ///
     /// The target is any member that has not left, and not only an alive one: after a partition heals, the minority
     /// is left for the majority, which no longer talks to it, and only such a sync tells it so.
-    pub fn anti_entropy(&mut self) {
+    fn anti_entropy(&mut self) {
         let others: Vec<NodeId> = self
             .table
             .records()
@@ -317,7 +334,7 @@ impl Membership {
     }
 
     /// Tell the cluster of a type this node met, so that every member has it before a ring gives it keys.
-    pub fn know(&mut self, types: &BTreeSet<String>, now: f64) {
+    fn know(&mut self, types: &BTreeSet<String>, now: f64) {
         if let Some(record) = self.table.know(types, now) {
             self.publish(vec![record], None, now);
         }
@@ -327,7 +344,7 @@ impl Membership {
     ///
     /// It stays in the ring and keeps replicating, so nothing it holds is lost, and stops being chosen as owner, so
     /// nothing new is routed to it.
-    pub fn leave(&mut self, now: f64) {
+    fn leave(&mut self, now: f64) {
         if self.leaving {
             return;
         }
@@ -337,11 +354,13 @@ impl Membership {
     }
 
     /// Tell the cluster this node is gone, which also takes it out of the ring of every type it hosted.
-    pub fn depart(&mut self, now: f64) {
+    fn depart(&mut self, now: f64) {
         let record = self.table.depart(now);
         self.publish(vec![record], None, now);
     }
+}
 
+impl Membership {
     /// The member with the oldest sign of life among those outside the active view, if there is one.
     fn elsewhere(&self) -> Option<NodeId> {
         self.table
@@ -476,6 +495,7 @@ mod tests {
     use casty_core::node::NodeId;
     use casty_net::pool::Target;
 
+    use super::super::Members;
     use super::super::wire::encode;
     use super::{Membership, Timings};
 

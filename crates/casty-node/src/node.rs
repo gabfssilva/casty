@@ -14,7 +14,7 @@ use casty_core::backoff::Backoff;
 use casty_core::chain::Chain;
 use casty_core::handoff::sweep::{Kept, sweep};
 use casty_core::mailbox::{Command, Deliver, Start};
-use casty_core::membership::table::{Status, Transition};
+use casty_core::membership::table::Status;
 use casty_core::membership::views::Overlay;
 use casty_core::node::{NodeId, Target};
 use casty_core::outcome::Outcome;
@@ -32,8 +32,9 @@ use tokio::time::Instant;
 
 use crate::events::{Event, Operation, abandoned};
 use crate::handoff::service::Handoff;
+use crate::membership::Members;
 use crate::membership::directory::Directory;
-use crate::membership::service::{Member, Membership, Outgoing, Timings};
+use crate::membership::service::{Member, Membership, Timings};
 use crate::membership::wire as membership;
 use crate::placement::{Counts, Placement};
 use crate::replication::service::{
@@ -633,16 +634,16 @@ impl Running {
             write_timeouts,
             durables,
         } = Declared::of(types);
-        let membership = if member {
-            Table::Member(Box::new(Membership::new(
+        let membership: Box<dyn Members> = if member {
+            Box::new(Membership::new(
                 id.clone(),
                 counts.known(),
                 cluster.seeds.clone(),
                 cluster.timings,
                 cluster.overlay,
-            )))
+            ))
         } else {
-            Table::Client(Box::new(Directory::new(id.clone(), cluster.seeds.clone())))
+            Box::new(Directory::new(id.clone(), cluster.seeds.clone()))
         };
         let (members, watching) = watch::channel(membership.members());
         let (entered, joining) = oneshot::channel();
@@ -740,126 +741,11 @@ impl Running {
     }
 }
 
-/// Where a node gets the member table: gossip, or asking a member for the whole of it.
-///
-/// A client is in no ring and hosts nothing. It keeps the table to know where to send, asks for it again when a
-/// message comes back from the wrong owner, and is never in it itself.
-enum Table {
-    Member(Box<Membership>),
-    Client(Box<Directory>),
-}
-
-impl Table {
-    fn members(&self) -> Vec<Member> {
-        match self {
-            Self::Member(membership) => membership.members(),
-            Self::Client(directory) => directory.members(),
-        }
-    }
-
-    fn take(&mut self) -> Vec<Outgoing> {
-        match self {
-            Self::Member(membership) => membership.take(),
-            Self::Client(directory) => directory.take(),
-        }
-    }
-
-    fn receive(&mut self, payload: &[u8], now: f64) {
-        match self {
-            Self::Member(membership) => membership.receive(payload, now),
-            Self::Client(directory) => directory.receive(payload),
-        }
-    }
-
-    fn changed(&mut self) -> bool {
-        let changed = match self {
-            Self::Member(membership) => &mut membership.changed,
-            Self::Client(directory) => &mut directory.changed,
-        };
-        core::mem::take(changed)
-    }
-
-    fn mark(&mut self) {
-        match self {
-            Self::Member(membership) => membership.changed = true,
-            Self::Client(directory) => directory.changed = true,
-        }
-    }
-
-    fn joined(&self) -> bool {
-        match self {
-            Self::Member(membership) => membership.joined,
-            Self::Client(directory) => directory.joined,
-        }
-    }
-
-    fn removed(&self) -> bool {
-        match self {
-            Self::Member(membership) => membership.removed,
-            Self::Client(_) => false,
-        }
-    }
-
-    /// Whether this node sees a majority of the members alive. A client owns no key, so it never needs one.
-    fn majority(&self) -> bool {
-        match self {
-            Self::Member(membership) => membership.majority(),
-            Self::Client(_) => false,
-        }
-    }
-
-    /// The changes of status since the last call, in the order the table made them.
-    fn transitions(&mut self) -> Vec<Transition> {
-        match self {
-            Self::Member(membership) => membership.transitions(),
-            Self::Client(directory) => directory.transitions(),
-        }
-    }
-
-    /// Ask for the whole table again, which only a client does: the one it holds is older than the owner's.
-    fn refresh(&mut self) {
-        if let Self::Client(directory) = self {
-            directory.ask();
-        }
-    }
-
-    /// A connection to `node` ended. A member leaves it to its failure detector; a client, which has none, asks the
-    /// node again at once.
-    fn lost(&mut self, node: &NodeId) {
-        if let Self::Client(directory) = self {
-            directory.lost(node);
-        }
-    }
-
-    /// The transport dropped what was sent to `node`, and whether that is the death of the node here. A member only
-    /// suspects it, and leaves the verdict to `dead_after` and the gossip of the others; a client, which has neither,
-    /// takes it as the death.
-    fn unreached(&mut self, node: &NodeId, now: f64) -> bool {
-        match self {
-            Self::Member(membership) => {
-                membership.unreached(node, now);
-                false
-            }
-            Self::Client(directory) => {
-                directory.unreached(node);
-                true
-            }
-        }
-    }
-
-    /// An envelope of any component arrived from `node`, which a member counts as a sign of life.
-    fn heard(&mut self, node: &NodeId, now: f64) {
-        if let Self::Member(membership) = self {
-            membership.heard(node, now);
-        }
-    }
-}
-
 /// Everything the task of a node owns.
 struct Held {
     node: Node,
     host: Arc<dyn Host>,
-    membership: Table,
+    membership: Box<dyn Members>,
     placement: Placement,
     counts: Counts,
     handoff: Handoff,
@@ -1056,9 +942,7 @@ impl Held {
         if !self.counts.counted(&kind.actor) {
             self.counts.learn(&kind.actor, kind.replicas);
             self.placement.learned(&kind.actor);
-            if let Table::Member(membership) = &mut self.membership {
-                membership.know(&BTreeSet::from([kind.actor]), now);
-            }
+            self.membership.know(&BTreeSet::from([kind.actor]), now);
             self.membership.mark();
         }
     }
@@ -1204,11 +1088,7 @@ async fn run(
     let mut anti_entropy = tokio::time::interval(timings.anti_entropy);
     let sender = endpoint.sender();
     let mut entered = Some(entered);
-    match &mut held.membership {
-        Table::Member(membership) => membership.join(),
-        // A client is in no table: it asks a member for the one it holds, and again every `anti_entropy`.
-        Table::Client(directory) => directory.ask(),
-    }
+    held.membership.join();
     held.membership.mark();
     flush(&sender, &mut held, &members, &mut entered);
     loop {
@@ -1228,25 +1108,12 @@ async fn run(
                 None => break,
             },
             _ = heartbeat.tick() => {
-                if let Table::Member(membership) = &mut held.membership {
-                    membership.probe(now());
-                    membership.expire(now());
-                }
+                held.membership.probe(now());
+                held.membership.expire(now());
             }
-            _ = graft.tick() => {
-                if let Table::Member(membership) = &mut held.membership {
-                    membership.graft(now());
-                }
-            }
-            _ = shuffle.tick() => {
-                if let Table::Member(membership) = &mut held.membership {
-                    membership.shuffle(now());
-                }
-            }
-            _ = anti_entropy.tick() => match &mut held.membership {
-                Table::Member(membership) => membership.anti_entropy(),
-                Table::Client(directory) => directory.ask(),
-            },
+            _ = graft.tick() => held.membership.graft(now()),
+            _ = shuffle.tick() => held.membership.shuffle(now()),
+            _ = anti_entropy.tick() => held.membership.anti_entropy(),
             () = deadline(earliest(&held)) => operations(&mut held),
             ask = asks.recv() => match ask {
                 Some(ask) => {
@@ -1405,15 +1272,9 @@ fn asked(sender: &Sender, held: &mut Held, ask: Ask, now: f64) -> bool {
         Ask::Heard(peer) => held.heard(peer, now),
         Ask::Leave => {
             held.routing.stopped = true;
-            if let Table::Member(membership) = &mut held.membership {
-                membership.leave(now);
-            }
+            held.membership.leave(now);
         }
-        Ask::Depart => {
-            if let Table::Member(membership) = &mut held.membership {
-                membership.depart(now);
-            }
-        }
+        Ask::Depart => held.membership.depart(now),
         Ask::Stop => return false,
     }
     true
