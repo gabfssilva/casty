@@ -14,8 +14,7 @@ use casty_core::outcome::Outcome;
 use casty_core::replication::messages::Write;
 use casty_core::store::{Durable, Held, Pages, Storage, Stored, version};
 use casty_net::limits::Limits;
-use casty_node::membership::runner::Cluster;
-use casty_node::node::{Host, Kind, Node, Running};
+use casty_node::node::{Cluster, Host, Kind, Node, Running};
 use casty_node::replication::service::{Failure, Storing};
 
 use common::{ACTOR, Idle, WITHIN, cluster, kind};

@@ -7,9 +7,8 @@ use core::time::Duration;
 use casty_core::mailbox::Command;
 use casty_core::outcome::Outcome;
 use casty_core::replication::messages::Write;
-use casty_node::membership::runner::Cluster;
 use casty_node::membership::service::{Member, Timings};
-use casty_node::node::{Host, Kind, Node, Running};
+use casty_node::node::{Cluster, Host, Kind, Node, Running};
 
 pub const ACTOR: &str = "tests.app:account";
 pub const WITHIN: Duration = Duration::from_secs(30);

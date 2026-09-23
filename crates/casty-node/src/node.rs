@@ -10,17 +10,22 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use casty_core::backoff::Backoff;
 use casty_core::chain::Chain;
 use casty_core::handoff::sweep::{Kept, sweep};
 use casty_core::mailbox::{Command, Deliver, Start};
 use casty_core::membership::table::{Status, Transition};
+use casty_core::membership::views::Overlay;
 use casty_core::node::{NodeId, Target};
 use casty_core::outcome::Outcome;
 use casty_core::placement::pinned;
 use casty_core::replication::messages::Write;
 use casty_core::store::{Durable, Held as State, Pages};
+use casty_net::compress::Name;
 use casty_net::endpoint::{Config, Endpoint, Meter, Sender, TooLarge};
-use casty_net::pool::{Heard, Peer, Target as Destination};
+use casty_net::limits::Limits;
+use casty_net::pool::{AddressMap, Heard, Peer, Target as Destination};
+use casty_net::tls::Tls;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -28,8 +33,7 @@ use tokio::time::Instant;
 use crate::events::{Event, Operation, abandoned};
 use crate::handoff::service::Handoff;
 use crate::membership::directory::Directory;
-use crate::membership::runner::Cluster;
-use crate::membership::service::{Member, Membership, Outgoing};
+use crate::membership::service::{Member, Membership, Outgoing, Timings};
 use crate::membership::wire as membership;
 use crate::placement::{Counts, Placement};
 use crate::replication::service::{
@@ -56,6 +60,62 @@ pub struct Kind {
     pub pinned: bool,
     /// When the store of the system keeps the writes of the type. Nothing keeps them in memory only.
     pub durable: Option<Durable>,
+}
+
+/// How a node reaches the cluster it belongs to.
+#[derive(Clone)]
+pub struct Cluster {
+    pub bind: String,
+    pub advertise: Option<String>,
+    pub seeds: Vec<String>,
+    pub name: String,
+    pub timings: Timings,
+    pub overlay: Overlay,
+    pub tls: Option<Tls>,
+    pub compression: Option<Vec<Name>>,
+    /// The smallest piece of a message that is compressed; anything shorter goes as it is.
+    pub min_compressed: usize,
+    pub address_map: Option<AddressMap>,
+    pub limits: Limits,
+    /// How long an activation or a write waits for the replicas of its key.
+    pub write_timeout: core::time::Duration,
+    /// How long a node waits before asking again for what another one owes it.
+    pub backoff: Backoff,
+    /// How long a node that is leaving waits for the nodes that replicate its keys now to take them.
+    pub leave_timeout: core::time::Duration,
+}
+
+impl core::fmt::Debug for Cluster {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Cluster")
+            .field("bind", &self.bind)
+            .field("seeds", &self.seeds)
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Cluster {
+    #[must_use]
+    pub fn at(bind: &str) -> Self {
+        Self {
+            bind: bind.to_owned(),
+            advertise: None,
+            seeds: Vec::new(),
+            name: "casty".to_owned(),
+            timings: Timings::default(),
+            overlay: Overlay::default(),
+            tls: None,
+            compression: None,
+            min_compressed: 4096,
+            address_map: None,
+            limits: Limits::default(),
+            write_timeout: core::time::Duration::from_secs(5),
+            backoff: Backoff::default(),
+            leave_timeout: core::time::Duration::from_secs(30),
+        }
+    }
 }
 
 /// What runs the bodies of the keys this node hosts.
@@ -821,7 +881,7 @@ struct Held {
     standing: Standing,
     /// The node each request went to, and how it ends if that node never answers.
     toward: HashMap<i64, (NodeId, Outcome)>,
-    timings: crate::membership::service::Timings,
+    timings: Timings,
 }
 
 /// Whether a node acts as the owner of the keys the ring gives it: it does while it sees a majority of the members

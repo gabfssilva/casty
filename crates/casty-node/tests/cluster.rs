@@ -3,15 +3,19 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::io;
+use std::sync::Arc;
 
 use casty_core::membership::table::Status;
-use casty_node::membership::runner::{Cluster, Joined};
+use casty_core::replication::messages::Write;
 use casty_node::membership::service::Member;
+use casty_node::node::{Cluster, Running};
 
-use common::{ACTOR, WITHIN, cluster};
+use common::{ACTOR, Idle, WITHIN, cluster, kind, until};
 
-fn types() -> BTreeSet<String> {
-    BTreeSet::from([ACTOR.to_owned()])
+/// A node that hosts the type of the tests and runs no body.
+async fn start(cluster: Cluster) -> io::Result<Running> {
+    Running::start(cluster, Arc::new(Idle), vec![kind(3, Write::Majority)]).await
 }
 
 fn alive(members: &[Member]) -> usize {
@@ -22,125 +26,109 @@ fn alive(members: &[Member]) -> usize {
 }
 
 /// Wait until every node sees `count` members alive.
-async fn converged(nodes: &mut [Joined], count: usize) {
-    let waiting = tokio::time::timeout(WITHIN, async {
-        for node in nodes.iter_mut() {
-            node.until(|members| alive(members) == count).await;
-        }
-    })
-    .await;
+async fn converged(nodes: &[Running], count: usize) {
+    let waiting =
+        tokio::time::timeout(WITHIN, until(nodes, |members| alive(members) == count)).await;
     assert!(
         waiting.is_ok(),
         "they never agreed on {count}: {:?}",
         nodes
             .iter()
-            .map(|node| alive(&node.members()))
+            .map(|running| alive(&running.node.members()))
             .collect::<Vec<_>>()
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nodes_that_join_through_a_seed_all_see_each_other() {
-    let first = Joined::start(cluster(&[]), types())
-        .await
-        .expect("a free port");
+    let first = start(cluster(&[])).await.expect("a free port");
     let seed = first
-        .node()
+        .node
+        .id()
         .address
         .clone()
         .expect("a bound node has an address");
     let mut nodes = vec![first];
     for _ in 0..4 {
         nodes.push(
-            Joined::start(cluster(std::slice::from_ref(&seed)), types())
+            start(cluster(std::slice::from_ref(&seed)))
                 .await
                 .expect("it joined"),
         );
     }
 
-    converged(&mut nodes, 5).await;
+    converged(&nodes, 5).await;
 
-    for node in &nodes {
-        let members = node.members();
+    for running in &nodes {
+        let members = running.node.members();
         assert_eq!(members.len(), 5);
         for member in members {
             assert_eq!(
                 member.types,
-                types(),
+                BTreeSet::from([ACTOR.to_owned()]),
                 "a member arrived without the types it hosts"
             );
         }
     }
-    for node in nodes {
-        node.crash().await;
-    }
+    common::crash(nodes).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_machine_that_disappears_is_suspected_then_declared_dead() {
-    let first = Joined::start(cluster(&[]), types())
-        .await
-        .expect("a free port");
-    let seed = first.node().address.clone().expect("an address");
+    let first = start(cluster(&[])).await.expect("a free port");
+    let seed = first.node.id().address.clone().expect("an address");
     let mut nodes = vec![first];
     for _ in 0..2 {
         nodes.push(
-            Joined::start(cluster(std::slice::from_ref(&seed)), types())
+            start(cluster(std::slice::from_ref(&seed)))
                 .await
                 .expect("it joined"),
         );
     }
-    converged(&mut nodes, 3).await;
+    converged(&nodes, 3).await;
 
     let gone = nodes.pop().expect("a node to lose");
-    let lost = gone.node().clone();
+    let lost = gone.node.id().clone();
     gone.crash().await;
 
-    let noticed = tokio::time::timeout(WITHIN, async {
-        for node in &mut nodes {
-            node.until(|members| {
-                members
-                    .iter()
-                    .any(|member| member.node == lost && member.status != Status::Alive)
-            })
-            .await;
-        }
-    })
+    let noticed = tokio::time::timeout(
+        WITHIN,
+        until(&nodes, |members| {
+            members
+                .iter()
+                .any(|member| member.node == lost && member.status != Status::Alive)
+        }),
+    )
     .await;
     assert!(noticed.is_ok(), "nobody noticed the machine was gone");
 
     // Two of three alive is a majority, so the dead one is taken out of the cluster.
-    let removed = tokio::time::timeout(WITHIN, async {
-        for node in &mut nodes {
-            node.until(|members| !members.iter().any(|member| member.node == lost))
-                .await;
-        }
-    })
+    let removed = tokio::time::timeout(
+        WITHIN,
+        until(&nodes, |members| {
+            !members.iter().any(|member| member.node == lost)
+        }),
+    )
     .await;
     assert!(
         removed.is_ok(),
         "the majority never removed the node it buried"
     );
 
-    for node in nodes {
-        node.crash().await;
-    }
+    common::crash(nodes).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_seed_of_another_cluster_refuses_the_node() {
-    let other = Joined::start(
-        Cluster {
-            name: "another".to_owned(),
-            ..cluster(&[])
-        },
-        types(),
-    )
+    let other = start(Cluster {
+        name: "another".to_owned(),
+        ..cluster(&[])
+    })
     .await
     .expect("a free port");
-    let seed = other.node().address.clone().expect("an address");
+    let seed = other.node.id().address.clone().expect("an address");
 
-    let refused = Joined::start(cluster(std::slice::from_ref(&seed)), types()).await;
+    let refused = start(cluster(std::slice::from_ref(&seed))).await;
 
     let Err(why) = refused else {
         panic!("a node of another cluster was let in");
@@ -151,35 +139,31 @@ async fn a_seed_of_another_cluster_refuses_the_node() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_that_says_goodbye_leaves_the_cluster_at_once() {
-    let first = Joined::start(cluster(&[]), types())
-        .await
-        .expect("a free port");
-    let seed = first.node().address.clone().expect("an address");
+    let first = start(cluster(&[])).await.expect("a free port");
+    let seed = first.node.id().address.clone().expect("an address");
     let mut nodes = vec![first];
     for _ in 0..2 {
         nodes.push(
-            Joined::start(cluster(std::slice::from_ref(&seed)), types())
+            start(cluster(std::slice::from_ref(&seed)))
                 .await
                 .expect("it joined"),
         );
     }
-    converged(&mut nodes, 3).await;
+    converged(&nodes, 3).await;
 
     let going = nodes.pop().expect("a node to lose");
-    let left = going.node().clone();
+    let left = going.node.id().clone();
     going.leave().await;
 
-    let noticed = tokio::time::timeout(WITHIN, async {
-        for node in &mut nodes {
-            node.until(|members| !members.iter().any(|member| member.node == left))
-                .await;
-        }
-    })
+    let noticed = tokio::time::timeout(
+        WITHIN,
+        until(&nodes, |members| {
+            !members.iter().any(|member| member.node == left)
+        }),
+    )
     .await;
     // An orderly exit does not wait for the failure detector: the node says it is gone.
     assert!(noticed.is_ok(), "the goodbye was not heard");
 
-    for node in nodes {
-        node.crash().await;
-    }
+    common::crash(nodes).await;
 }

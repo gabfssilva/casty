@@ -16,8 +16,7 @@ use casty_core::replication::messages::Write;
 use casty_core::wire::Writer;
 use casty_net::endpoint::{Config, Endpoint, TooLarge};
 use casty_net::pool::Target as Address;
-use casty_node::membership::runner::Cluster;
-use casty_node::node::{Host, Node, Running};
+use casty_node::node::{Cluster, Host, Node, Running};
 use casty_node::routing::wire::{Answer, Message, Routed, decode_answer, encode};
 use tokio::sync::{Notify, oneshot};
 
