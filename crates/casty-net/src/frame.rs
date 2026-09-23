@@ -1,7 +1,7 @@
 //! Frames of a multiplexed connection: a twelve byte header and a payload.
 //!
 //! The header is version, type, flags, stream and length, in that order and big endian. A window update carries its
-//! credit in the length field and has no payload.
+//! credit in the length field. It has no payload, and neither do ping, pong and go-away.
 
 use core::fmt;
 
@@ -11,10 +11,9 @@ const DATA: u8 = 0;
 const WINDOW_UPDATE: u8 = 1;
 const PING: u8 = 2;
 const GO_AWAY: u8 = 3;
-const ACK: u16 = 0x2;
+const PONG: u8 = 4;
 const COMPRESSED: u16 = 0x10;
 const HEADER: usize = 12;
-const OPAQUE: [u8; 8] = [0; 8];
 
 /// `Frame::GoAway` as written, which is the last thing a connection writes.
 pub const GOODBYE: [u8; HEADER] = [VERSION, GO_AWAY, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -70,14 +69,8 @@ impl Frame {
             Self::WindowUpdate { stream, credit } => {
                 header(out, WINDOW_UPDATE, 0, *stream, *credit);
             }
-            Self::Ping => {
-                header(out, PING, 0, 0, length(OPAQUE.len()));
-                out.extend_from_slice(&OPAQUE);
-            }
-            Self::Pong => {
-                header(out, PING, ACK, 0, length(OPAQUE.len()));
-                out.extend_from_slice(&OPAQUE);
-            }
+            Self::Ping => header(out, PING, 0, 0, 0),
+            Self::Pong => header(out, PONG, 0, 0, 0),
             Self::GoAway => out.extend_from_slice(&GOODBYE),
         }
     }
@@ -171,8 +164,8 @@ impl Decoder {
                 payload,
                 compressed: true,
             })),
-            (PING, 0) if length == OPAQUE.len() => Ok(Some(Frame::Ping)),
-            (PING, ACK) if length == OPAQUE.len() => Ok(Some(Frame::Pong)),
+            (PING, 0) if length == 0 => Ok(Some(Frame::Ping)),
+            (PONG, 0) if length == 0 => Ok(Some(Frame::Pong)),
             (GO_AWAY, 0) => Ok(Some(Frame::GoAway)),
             _ => Err(ProtocolError::new(format!(
                 "unknown frame type {kind} with flags {flags:#x}"
@@ -218,8 +211,14 @@ mod tests {
             }),
             [VERSION, 1, 0, 0, 0, 0, 0, 5, 0, 0, 1, 0]
         );
-        assert_eq!(encoded(&Frame::Ping)[..4], [VERSION, 2, 0, 0]);
-        assert_eq!(encoded(&Frame::Pong)[..4], [VERSION, 2, 0, 2]);
+        assert_eq!(
+            encoded(&Frame::Ping),
+            [VERSION, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            encoded(&Frame::Pong),
+            [VERSION, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
         assert_eq!(
             encoded(&Frame::GoAway),
             [VERSION, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
