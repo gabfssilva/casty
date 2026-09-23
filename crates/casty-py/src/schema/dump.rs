@@ -260,7 +260,6 @@ impl Writer<'_> {
         value: &Bound<'_, PyAny>,
         out: &mut Vec<u8>,
     ) -> Outcome<()> {
-        let py = value.py();
         let holds = match container {
             Container::Tuple => value.is_instance_of::<PyTuple>(),
             Container::FrozenSet => value.is_instance_of::<PyFrozenSet>(),
@@ -268,7 +267,6 @@ impl Writer<'_> {
         if !holds {
             return Err(wrong(container.name(), value)?);
         }
-        let _ = py;
         if canonical && container == Container::FrozenSet {
             let mut written: Vec<Vec<u8>> = Vec::new();
             for element in value.try_iter()? {
