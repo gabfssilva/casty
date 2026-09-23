@@ -28,6 +28,7 @@ use introspect::Introspect;
 pub struct Schema {
     tree: Tree,
     classes: Vec<Py<PyType>>,
+    codecs: Vec<compile::Codec>,
     values: values::Values,
 }
 
@@ -77,7 +78,8 @@ impl Schema {
                         field.node,
                         &value.getattr(field.name.as_str())?,
                         &mut out,
-                    )?;
+                    )
+                    .map_err(|failure| failure.under(&field.name))?;
                     written.set_item(field.name.as_str(), PyBytes::new(py, &out))?;
                 }
             }
@@ -116,6 +118,7 @@ impl Schema {
         Ok(Self {
             tree: compiled.tree,
             classes: compiled.classes,
+            codecs: compiled.codecs,
             values: values::Values::new(py)?,
         })
     }
@@ -172,7 +175,9 @@ impl Schema {
                 }
                 for field in &dataclass.fields {
                     let at = value.getattr(field.name.as_str())?;
-                    written.insert(field.name.clone(), Self::write(slf, field.node, &at)?);
+                    let page = Self::write(slf, field.node, &at)
+                        .map_err(|failure| failure.under(&field.name))?;
+                    written.insert(field.name.clone(), page);
                 }
             }
         }
@@ -200,6 +205,11 @@ impl Schema {
     #[must_use]
     pub fn class(&self, at: casty_core::schema::ClassRef) -> &Py<PyType> {
         &self.classes[at.0 as usize]
+    }
+
+    #[must_use]
+    pub fn codec(&self, at: casty_core::schema::CodecRef) -> &compile::Codec {
+        &self.codecs[at.0 as usize]
     }
 
     #[must_use]

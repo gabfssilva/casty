@@ -5,6 +5,7 @@ mod awaited;
 mod collections;
 mod errors;
 mod generic;
+mod lock;
 mod node;
 mod refs;
 mod schema;

@@ -8,7 +8,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import timedelta
 
-from casty import ActorDefinition, ActorSystem, Client, Cluster, Overlay
+from casty import ActorDefinition, ActorSystem, Client, Cluster, Compression, Limits, Observer, Overlay, Store
 from tests.support import eventually
 
 
@@ -32,6 +32,8 @@ class Timing:
 
 FAST = Timing()
 OVERLAY = Overlay()
+LIMITS = Limits()
+COMPRESSION = Compression()
 
 
 class Node:
@@ -58,10 +60,26 @@ class Harness:
         *,
         timing: Timing = FAST,
         overlay: Overlay = OVERLAY,
+        limits: Limits = LIMITS,
+        compression: Compression = COMPRESSION,
+        observer: Callable[[int], Observer] | None = None,
+        store: Store | None = None,
     ) -> AsyncGenerator["Harness"]:
-        """Start `count` nodes at once and wait until they all see each other."""
+        """Start `count` nodes at once and wait until they all see each other.
+
+        `observer` gives the observer of each node, from the `id` of the node, the ones added later included. `store`
+        is the store of every node, the ones added later included.
+        """
         async with asyncio.TaskGroup() as tasks:
-            harness = cls(tasks, timing=timing, overlay=overlay)
+            harness = cls(
+                tasks,
+                timing=timing,
+                overlay=overlay,
+                limits=limits,
+                compression=compression,
+                observer=observer,
+                store=store,
+            )
             try:
                 addresses = tuple(harness._address() for _ in range(count))
                 async with asyncio.TaskGroup() as starting:
@@ -81,10 +99,18 @@ class Harness:
         *,
         timing: Timing,
         overlay: Overlay,
+        limits: Limits,
+        compression: Compression,
+        observer: Callable[[int], Observer] | None = None,
+        store: Store | None = None,
     ) -> None:
         self._tasks = tasks
         self._timing = timing
         self._overlay = overlay
+        self._limits = limits
+        self._compression = compression
+        self._observer = observer
+        self._store = store
         self._clients = AsyncExitStack()
         self._nodes: list[Node] = []
         self._proxies: dict[tuple[int, str], Proxy] = {}
@@ -97,6 +123,11 @@ class Harness:
     def nodes(self) -> tuple[Node, ...]:
         """The nodes still running, in the order they were started."""
         return tuple(self._nodes)
+
+    @property
+    def forwarded(self) -> int:
+        """Bytes every proxy of the harness has put on the wire so far, both ways."""
+        return sum(proxy.forwarded for proxy in self._proxies.values())
 
     async def add(
         self,
@@ -126,6 +157,8 @@ class Harness:
             seeds=_seeds(tuple(node.address for node in self._nodes), None),
             name=name,
             address_map=lambda target: self._proxy(source, target).address,
+            limits=self._limits,
+            compression=self._compression,
             ask_timeout=self._timing.ask_timeout,
             sync_every=self._timing.sync_every,
         )
@@ -170,6 +203,8 @@ class Harness:
             seeds=seeds,
             name=name,
             address_map=lambda target: self._proxy(source, target).address,
+            limits=self._limits,
+            compression=self._compression,
             heartbeat=self._timing.heartbeat,
             suspect_after=self._timing.suspect_after,
             dead_after=self._timing.dead_after,
@@ -186,6 +221,8 @@ class Harness:
             ask_timeout=self._timing.ask_timeout,
             write_timeout=self._timing.write_timeout,
             leave_timeout=self._timing.leave_timeout,
+            observer=None if self._observer is None else self._observer(source),
+            store=self._store,
         )
         started: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         stop = asyncio.Event()
@@ -291,6 +328,8 @@ class Versioned(ActorSystem):
         ask_timeout: timedelta,
         write_timeout: timedelta,
         leave_timeout: timedelta,
+        observer: Observer | None = None,
+        store: Store | None = None,
     ) -> None:
         super().__init__(
             cluster=cluster,
@@ -298,6 +337,8 @@ class Versioned(ActorSystem):
             ask_timeout=ask_timeout,
             write_timeout=write_timeout,
             leave_timeout=leave_timeout,
+            observer=observer,
+            store=store,
         )
         for definition in version:
             self._learn(definition)
@@ -319,6 +360,7 @@ class Proxy:
         self._writers: set[asyncio.StreamWriter] = set()
         self._open = asyncio.Event()
         self._open.set()
+        self._delay = 0.0
         self.forwarded = 0
         """Bytes this pair put on the wire, both ways."""
 
@@ -327,6 +369,10 @@ class Proxy:
             self._open.clear()
         else:
             self._open.set()
+
+    def slow(self, delay: timedelta, /) -> None:
+        """Hold what each read brings for `delay` before forwarding it: a link that much longer, both ways."""
+        self._delay = delay.total_seconds()
 
     async def close(self) -> None:
         """Close every connection and wait for it.
@@ -379,6 +425,9 @@ class Proxy:
             while data := await reader.read(_CHUNK):
                 # The read that was already waiting would cross the partition; holding it is what makes the block whole.
                 await self._open.wait()
+                if self._delay:
+                    await asyncio.sleep(self._delay)
+                    await self._open.wait()
                 self.forwarded += len(data)
                 writer.write(data)
                 await writer.drain()

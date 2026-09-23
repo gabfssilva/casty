@@ -1,0 +1,55 @@
+name: chaos
+
+# The chaos suite runs node processes on the runner and crashes, partitions, slows and skews them for as long as
+# CHAOS_MINUTES says, so it runs every night and on demand, never on a push.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      nodes:
+        description: Node processes (CHAOS_NODES)
+        type: number
+        default: 20
+      minutes:
+        description: Minutes of faults and traffic (CHAOS_MINUTES)
+        type: number
+        default: 30
+      seed:
+        description: Seed of the schedule (CHAOS_SEED); empty picks one at random
+        type: string
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  chaos:
+    runs-on: ubuntu-latest
+    env:
+      CASTY_CHAOS: "1"
+      # A scheduled run has no inputs, and takes these.
+      CHAOS_NODES: ${{ inputs.nodes || 20 }}
+      CHAOS_MINUTES: ${{ inputs.minutes || 30 }}
+      # What the run leaves, pass or fail: run.json, which replays it, the journal, the report and each node's log.
+      CHAOS_OUTPUT: ${{ github.workspace }}/chaos-output
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync
+      # An empty CHAOS_SEED is not a seed, so it is set only when one was given.
+      - if: inputs.seed != ''
+        env:
+          SEED: ${{ inputs.seed }}
+        run: echo "CHAOS_SEED=$SEED" >> "$GITHUB_ENV"
+      - run: uv run pytest tests/chaos -s
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CHAOS_OUTPUT }}

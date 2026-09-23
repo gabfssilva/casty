@@ -2,12 +2,25 @@ import asyncio
 import time
 from dataclasses import replace
 from datetime import timedelta
+from itertools import pairwise
 from uuid import uuid4
 
 import pytest
 
 from casty import ActorDefinition, Collections, NodeId, Unavailable, replicas
-from casty.collections import Binding, ConfigurationError, Value, barrier, configured, entry, semaphore, table
+from casty.collections import (
+    Binding,
+    ConfigurationError,
+    Missing,
+    Value,
+    barrier,
+    configured,
+    entry,
+    queue,
+    queue_segment,
+    semaphore,
+    table_segment,
+)
 from tests.cluster import FAST, Harness, Node
 from tests.support import eventually
 
@@ -29,10 +42,12 @@ def _holder(harness: Harness, actor: ActorDefinition, key: str) -> NodeId:
 
 
 def describe_distributed_collections() -> None:
-    async def it_updates_registered_entries_without_the_index_owner() -> None:
+    async def it_updates_listed_entries_without_the_index_owner() -> None:
         async with Harness.start(3, timing=replace(FAST, remove_after=None)) as harness:
-            index = configured(table.actor, 3, "majority")
-            index_owner = _owner(harness, index, "dict", "entries")
+            # The first segment of the only shard, which lists every key until the shard splits.
+            segment = configured(table_segment.actor, 3, "majority")
+            index = _holder(harness, segment, "dict:7:entries:0.0")
+            index_owner = next(node for node in harness.nodes if node.system.node == index)
             definition = configured(entry.actor, 3, "majority")
             keys = Value(str, Binding(harness.nodes[0].system, "dict", "entries", replicas=3, write="majority").system)
             key = next(
@@ -47,14 +62,15 @@ def describe_distributed_collections() -> None:
             harness.isolate(index_owner)
             await entries.put(key, 2)
             assert await entries.get(key) == 2
-            assert await entries.remove(key)
-            await entries.put(key, 3)
             harness.heal()
 
-            async def updated_entry_is_listed() -> None:
+            # Removing a key and putting it back change its listing, so they wait for the index to be reachable.
+            async def removed_and_listed_again() -> None:
+                await entries.remove(key)
+                await entries.put(key, 3)
                 assert await entries.items() == [(key, 3)]
 
-            await eventually(updated_entry_is_listed, timedelta(seconds=15))
+            await eventually(removed_and_listed_again, timedelta(seconds=15))
 
     async def it_distributes_entries_and_recovers_after_an_entry_owner_dies() -> None:
         async with Harness.start(3) as harness:
@@ -236,3 +252,58 @@ def describe_distributed_collections() -> None:
                 assert remaining.items() <= {str(i): i for i in range(64)}.items()
 
             await eventually(successful_deletions_remain_deleted, timedelta(seconds=15))
+
+    async def it_keeps_queue_order_while_the_owner_of_a_segment_crashes_under_load() -> None:
+        async with Harness.start(3) as harness:
+            client = await harness.client()
+            jobs = Collections(client).queue("jobs", value=int)
+            index = Binding(client, "queue", "jobs", replicas=3, write="majority").ref(queue.actor)
+            acked: list[int] = []
+            polled: list[int] = []
+            failed_polls = 0
+
+            async def produce() -> None:
+                for i in range(3_000):
+                    # A failed offer may have committed, so offering it again can repeat it but never reorder it.
+                    while True:
+                        try:
+                            await jobs.offer(i)
+                            break
+                        except (TimeoutError, Unavailable):
+                            await asyncio.sleep(0.05)
+                    acked.append(i)
+
+            async def consume(producer: asyncio.Task[None]) -> None:
+                nonlocal failed_polls
+                while True:
+                    finished = producer.done()
+                    try:
+                        item = await jobs.poll()
+                    except (TimeoutError, Unavailable):
+                        failed_polls += 1
+                        await asyncio.sleep(0.05)
+                        continue
+                    if not isinstance(item, Missing):
+                        polled.append(item)
+                    elif finished:
+                        return
+                    else:
+                        await asyncio.sleep(0.01)
+
+            async def backlog_spans_segments() -> None:
+                assert len(acked) >= 1_500
+
+            async with asyncio.timeout(120), asyncio.TaskGroup() as group:
+                producer = group.create_task(produce())
+                await eventually(backlog_spans_segments, timedelta(seconds=60))
+                group.create_task(consume(producer))
+                _, tail = await index.ask(queue.Advance, 0, 0)
+                segments = configured(queue_segment.actor, 3, "majority")
+                owner = _holder(harness, segments, f"queue:4:jobs:{tail}")
+                victim = next(node for node in harness.nodes if node.system.node == owner)
+                harness.isolate(victim)
+                await harness.crash(victim)
+
+            assert all(earlier <= later for earlier, later in pairwise(polled))
+            # A failed poll may have taken an item it never answered with; nothing else may be missing.
+            assert len(set(acked) - set(polled)) <= failed_polls

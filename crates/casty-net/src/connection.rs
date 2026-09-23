@@ -5,7 +5,7 @@
 //! side from draining what the peer is writing.
 
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -56,6 +56,33 @@ impl core::fmt::Display for Broken {
     }
 }
 
+/// The bytes the connections of one transport wrote to their sockets and read from them, since it started.
+#[derive(Debug, Default)]
+pub struct Bytes {
+    sent: AtomicU64,
+    received: AtomicU64,
+}
+
+impl Bytes {
+    #[must_use]
+    pub fn sent(&self) -> u64 {
+        self.sent.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn received(&self) -> u64 {
+        self.received.load(Ordering::Relaxed)
+    }
+
+    fn wrote(&self, count: usize) {
+        self.sent.fetch_add(count as u64, Ordering::Relaxed);
+    }
+
+    fn read(&self, count: usize) {
+        self.received.fetch_add(count as u64, Ordering::Relaxed);
+    }
+}
+
 /// An envelope that arrived, with the connection whose credit it holds until it is taken.
 #[derive(Debug)]
 pub struct Arrival {
@@ -83,16 +110,19 @@ pub struct Greeting<S: Socket> {
     mux: Mux,
     frames: Decoder,
     limits: Limits,
+    /// What the transport counts the bytes of this socket in, from the handshake on.
+    bytes: Arc<Bytes>,
 }
 
 impl<S: Socket> Greeting<S> {
     #[must_use]
-    pub fn new(socket: S, limits: Limits, min_compressed: usize) -> Self {
+    pub fn new(socket: S, limits: Limits, min_compressed: usize, bytes: Arc<Bytes>) -> Self {
         Self {
             socket,
             mux: Mux::new(limits, min_compressed),
             frames: Decoder::new(limits.frame),
             limits,
+            bytes,
         }
     }
 
@@ -102,6 +132,7 @@ impl<S: Socket> Greeting<S> {
         self.mux.send(CONTROL, name, &payload);
         let out = self.mux.output();
         self.socket.write_all(&out).await?;
+        self.bytes.wrote(out.len());
         Ok(())
     }
 
@@ -137,6 +168,7 @@ impl<S: Socket> Greeting<S> {
             if read == 0 {
                 return Err(Broken::Closed);
             }
+            self.bytes.read(read);
             self.frames.feed(&buffer[..read]);
         }
     }
@@ -153,6 +185,7 @@ impl<S: Socket> Greeting<S> {
             mux,
             frames,
             limits,
+            bytes,
         } = self;
         let connection = Arc::new(Connection {
             mux: Mutex::new(mux),
@@ -161,6 +194,7 @@ impl<S: Socket> Greeting<S> {
             closing: AtomicBool::new(false),
             ended: AtomicBool::new(false),
             over: tokio::sync::watch::channel(false).0,
+            bytes,
         });
         let (reader, writer) = tokio::io::split(socket);
         let writing = Arc::clone(&connection);
@@ -186,6 +220,7 @@ pub struct Connection {
     closing: AtomicBool,
     ended: AtomicBool,
     over: tokio::sync::watch::Sender<bool>,
+    bytes: Arc<Bytes>,
 }
 
 impl Connection {
@@ -263,6 +298,7 @@ impl Connection {
                     self.end();
                     return;
                 }
+                self.bytes.wrote(out.len());
             }
             if self.closing.load(Ordering::SeqCst) {
                 let _ = writer.write_all(&Frame::GoAway.encoded()).await;
@@ -321,6 +357,7 @@ impl Connection {
             if read == 0 {
                 return Ok(());
             }
+            self.bytes.read(read);
             frames.feed(&buffer[..read]);
         }
     }

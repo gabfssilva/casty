@@ -35,6 +35,8 @@ pub struct Cluster {
     pub overlay: Overlay,
     pub tls: Option<Tls>,
     pub compression: Option<Vec<Name>>,
+    /// The smallest piece of a message that is compressed; anything shorter goes as it is.
+    pub min_compressed: usize,
     pub address_map: Option<AddressMap>,
     pub limits: Limits,
     /// How long an activation or a write waits for the replicas of its key.
@@ -68,6 +70,7 @@ impl Cluster {
             overlay: Overlay::default(),
             tls: None,
             compression: None,
+            min_compressed: 4096,
             address_map: None,
             limits: Limits::default(),
             write_timeout: Duration::from_secs(5),
@@ -106,12 +109,12 @@ impl Joined {
             bind: Some(cluster.bind.clone()),
             advertise: cluster.advertise.clone(),
             cluster: cluster.name.clone(),
-            codec: "msgpack".to_owned(),
             tls: cluster.tls.clone(),
             compression: cluster.compression.clone(),
-            min_compressed: 4096,
+            min_compressed: cluster.min_compressed,
             address_map: cluster.address_map.clone(),
             limits: cluster.limits,
+            lost: None,
         })
         .await?;
         let node = endpoint.node().clone();
@@ -263,6 +266,8 @@ fn flush(
         service.changed = false;
         let _ = members.send(service.members());
     }
+    // The table keeps its transitions until they are taken, and this runner has nobody to report them to.
+    service.transitions();
     if service.removed {
         let _ = removed.send(true);
     }

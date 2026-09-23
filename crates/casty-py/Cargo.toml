@@ -10,6 +10,7 @@ name = "_casty"
 crate-type = ["cdylib"]
 
 [dependencies]
+blake2 = { version = "0.10", default-features = false }
 casty-core = { path = "../casty-core" }
 casty-net = { path = "../casty-net" }
 casty-node = { path = "../casty-node" }

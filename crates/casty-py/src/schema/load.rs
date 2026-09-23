@@ -6,12 +6,16 @@
 use std::sync::Arc;
 
 use casty_core::node::{NodeId, Target};
-use casty_core::schema::ir::{Container, Dataclass, Literal, Native, Node, NodeRef};
-use casty_core::schema::{Int, Kind, Reader, SchemaError};
+use casty_core::schema::ir::{
+    Container, Dataclass, Enum, Literal, Native, Node, NodeRef, Opaque, Union,
+};
+use casty_core::schema::{ClassRef, Int, Kind, Reader, SchemaError};
+use pyo3::exceptions::PyArithmeticError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFrozenSet, PyString, PyTuple};
 
 use super::Schema;
+use super::compile::qualname;
 use super::failure::{Failure, Outcome};
 use crate::node::Node as Host;
 use crate::refs::Ref;
@@ -54,7 +58,10 @@ pub fn from_pages<'py>(
         };
         let raw: Vec<u8> = page.extract()?;
         let mut reader = Reader::new(&raw);
-        found[at] = Some(loader.read(field.node, &mut reader)?);
+        let read = loader
+            .read(field.node, &mut reader)
+            .map_err(|failure| failure.under(&field.name))?;
+        found[at] = Some(read);
         reader
             .finish()
             .map_err(SchemaError::from)
@@ -86,7 +93,26 @@ impl<'py> Loader<'_, 'py> {
             }
             Node::Native(native) => self.native(*native, kind, reader)?,
             Node::Literal(values) => self.literal(values, kind, reader)?,
-            Node::Datetime => self.datetime(kind, reader)?,
+            Node::Datetime => {
+                let (micros, offset) = Self::pair("datetime", kind, reader)?;
+                self.schema.get().values().moment(py, micros, offset)?
+            }
+            Node::Date => {
+                let days = Self::int("date", kind, reader)?;
+                self.schema.get().values().day(py, days)?
+            }
+            Node::Time => {
+                let (micros, offset) = Self::pair("time", kind, reader)?;
+                self.schema.get().values().clock(py, micros, offset)?
+            }
+            Node::Timedelta => {
+                let micros = Self::int("timedelta", kind, reader)?;
+                self.schema.get().values().duration(py, micros)?
+            }
+            Node::Decimal => self.decimal(kind, reader)?,
+            Node::Enum(enumeration) => self.member(enumeration, kind, reader)?,
+            Node::Path(class) => self.path(*class, kind, reader)?,
+            Node::Opaque(opaque) => self.opaque(opaque, kind, reader)?,
             Node::Uuid => {
                 let Kind::Bytes = kind else {
                     return Err(wrong("UUID", kind));
@@ -127,12 +153,12 @@ impl<'py> Loader<'_, 'py> {
                 let Kind::Map = kind else {
                     return Err(wrong(&dataclass.qualname, kind));
                 };
-                self.fields(at, reader)?
+                self.fields(dataclass, reader)?
             }
-            Node::Tagged(inner) => self.tagged(*inner, kind, reader)?,
-            Node::Union(_) => self.union(at, kind, reader)?,
+            Node::Tagged(dataclass) => self.tagged(dataclass, kind, reader)?,
+            Node::Union(union) => self.union(union, kind, reader)?,
             Node::Ref(messages) => self.reference(*messages, kind, reader)?,
-            Node::Alias(_) => unreachable!("aliases are rewritten away when the tree is built"),
+            Node::Alias(named) => self.read(*named, reader)?,
         })
     }
 
@@ -229,10 +255,10 @@ impl<'py> Loader<'_, 'py> {
         })
     }
 
-    fn datetime(&self, kind: Kind, reader: &mut Reader<'_>) -> Outcome<Bound<'py, PyAny>> {
-        let py = self.schema.py();
+    /// The `[int, int]` a `datetime` or a `time` travels as: its microseconds and the offset of its zone in seconds.
+    fn pair(expected: &str, kind: Kind, reader: &mut Reader<'_>) -> Outcome<(i64, i32)> {
         let Kind::List = kind else {
-            return Err(wrong("datetime", kind));
+            return Err(wrong(expected, kind));
         };
         let mut pair = reader.clone();
         let len = pair.read_array_len().map_err(SchemaError::from)?;
@@ -242,19 +268,94 @@ impl<'py> Loader<'_, 'py> {
         };
         if !two {
             reader.skip().map_err(SchemaError::from)?;
-            return Err(wrong("datetime", kind));
+            return Err(wrong(expected, kind));
         }
         reader.read_array_len().map_err(SchemaError::from)?;
         let micros = reader.read_int().map_err(SchemaError::from)?;
         let offset = reader.read_int().map_err(SchemaError::from)?;
-        let micros = micros.as_i64().ok_or_else(|| wrong("datetime", kind))?;
-        let offset = offset.as_i64().ok_or_else(|| wrong("datetime", kind))?;
+        let micros = micros.as_i64().ok_or_else(|| wrong(expected, kind))?;
+        let offset = offset.as_i64().ok_or_else(|| wrong(expected, kind))?;
         #[allow(clippy::cast_possible_truncation)]
-        Ok(self
+        Ok((micros, offset as i32))
+    }
+
+    /// The single int a `date` or a `timedelta` travels as.
+    fn int(expected: &str, kind: Kind, reader: &mut Reader<'_>) -> Outcome<i64> {
+        let Kind::Int = kind else {
+            return Err(wrong(expected, kind));
+        };
+        let read = reader.read_int().map_err(SchemaError::from)?;
+        read.as_i64().ok_or_else(|| wrong(expected, kind))
+    }
+
+    fn decimal(&self, kind: Kind, reader: &mut Reader<'_>) -> Outcome<Bound<'py, PyAny>> {
+        let py = self.schema.py();
+        let Kind::Str = kind else {
+            return Err(wrong("Decimal", kind));
+        };
+        let text = reader.read_str().map_err(SchemaError::from)?;
+        match self.schema.get().values().decimal.bind(py).call1((text,)) {
+            Ok(number) => Ok(number),
+            // `InvalidOperation`, which is what a string that is not a number raises.
+            Err(raised) if raised.is_instance_of::<PyArithmeticError>(py) => {
+                Err(wrong("Decimal", kind))
+            }
+            Err(raised) => Err(raised.into()),
+        }
+    }
+
+    /// The member of an enum by its name, where a name the enum no longer has is an error and not a default.
+    fn member(
+        &self,
+        enumeration: &Enum,
+        kind: Kind,
+        reader: &mut Reader<'_>,
+    ) -> Outcome<Bound<'py, PyAny>> {
+        let Kind::Str = kind else {
+            return Err(wrong(&enumeration.qualname, kind));
+        };
+        let name = reader.read_str().map_err(SchemaError::from)?;
+        if !enumeration.has(name) {
+            let why = format!("{} has no member {name}", enumeration.qualname);
+            return Err(SchemaError::new(why).into());
+        }
+        let class = self
             .schema
             .get()
-            .values()
-            .moment(py, micros, offset as i32)?)
+            .class(enumeration.class)
+            .bind(self.schema.py());
+        Ok(class.get_item(name)?)
+    }
+
+    /// A path as the class it was annotated with, whatever class wrote it.
+    fn path(
+        &self,
+        class: ClassRef,
+        kind: Kind,
+        reader: &mut Reader<'_>,
+    ) -> Outcome<Bound<'py, PyAny>> {
+        let class = self.schema.get().class(class).bind(self.schema.py());
+        let Kind::Str = kind else {
+            return Err(wrong(&qualname(class)?, kind));
+        };
+        let text = reader.read_str().map_err(SchemaError::from)?;
+        Ok(class.call1((text,))?)
+    }
+
+    /// The value the caller's `decode` makes of the bytes its `encode` wrote.
+    fn opaque(
+        &self,
+        opaque: &Opaque,
+        kind: Kind,
+        reader: &mut Reader<'_>,
+    ) -> Outcome<Bound<'py, PyAny>> {
+        let py = self.schema.py();
+        let Kind::Bytes = kind else {
+            return Err(wrong(&opaque.name, kind));
+        };
+        let raw = reader.read_bin().map_err(SchemaError::from)?;
+        let decode = self.schema.get().codec(opaque.codec).decode.bind(py);
+        Ok(decode.call1((PyBytes::new(py, raw),))?)
     }
 
     fn items(
@@ -307,16 +408,18 @@ impl<'py> Loader<'_, 'py> {
     }
 
     /// The fields of a dataclass from a map, where a name this version does not know is stepped over.
-    fn fields(&self, at: NodeRef, reader: &mut Reader<'_>) -> Outcome<Bound<'py, PyAny>> {
-        let Node::Dataclass(dataclass) = self.tree().node(at) else {
-            unreachable!("only a dataclass has fields");
-        };
+    fn fields(&self, dataclass: &Dataclass, reader: &mut Reader<'_>) -> Outcome<Bound<'py, PyAny>> {
         let len = reader.read_map_len().map_err(SchemaError::from)?;
         let mut found: Vec<Option<Bound<'py, PyAny>>> = vec![None; dataclass.fields.len()];
         for _ in 0..len {
             let name = reader.read_str().map_err(SchemaError::from)?.to_owned();
             match dataclass.position(&name) {
-                Some(at) => found[at] = Some(self.read(dataclass.fields[at].node, reader)?),
+                Some(at) => {
+                    let read = self
+                        .read(dataclass.fields[at].node, reader)
+                        .map_err(|failure| failure.under(&name))?;
+                    found[at] = Some(read);
+                }
                 None => reader.skip().map_err(SchemaError::from)?,
             }
         }
@@ -346,38 +449,32 @@ impl<'py> Loader<'_, 'py> {
 
     fn tagged(
         &self,
-        inner: NodeRef,
+        dataclass: &Dataclass,
         kind: Kind,
         reader: &mut Reader<'_>,
     ) -> Outcome<Bound<'py, PyAny>> {
-        let Node::Dataclass(dataclass) = self.tree().node(inner) else {
-            unreachable!("only a dataclass is tagged");
-        };
         let Some(name) = Self::tag(kind, reader)? else {
             return Err(wrong(&dataclass.qualname, kind));
         };
         if name != dataclass.qualname {
             return Err(wrong(&dataclass.qualname, kind));
         }
-        self.fields(inner, reader)
+        self.fields(dataclass, reader)
     }
 
     fn union(
         &self,
-        at: NodeRef,
+        union: &Union,
         kind: Kind,
         reader: &mut Reader<'_>,
     ) -> Outcome<Bound<'py, PyAny>> {
-        let Node::Union(union) = self.tree().node(at) else {
-            unreachable!("only a union has alternatives");
-        };
         if !union.tagged.is_empty()
             && let Some(name) = Self::tag(kind, reader)?
         {
-            let Some(node) = union.tag(&name) else {
+            let Some(dataclass) = self.tree().alternative(union, &name) else {
                 return Err(SchemaError::new(format!("unknown alternative {name}")).into());
             };
-            return self.fields(node, reader);
+            return self.fields(dataclass, reader);
         }
         for node in &union.untagged {
             if self.tree().kinds(*node).has(kind) {

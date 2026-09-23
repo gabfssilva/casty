@@ -1,4 +1,4 @@
-//! The consistent hashing ring of one actor type.
+//! The consistent hashing ring of one actor type, and the pinned keys it does not place.
 //!
 //! Every node derives the same ring from the same members, so the hash and the order of the tokens are part of the
 //! wire: a node of either implementation must place a key on the same replicas.
@@ -33,6 +33,24 @@ impl Range {
 #[must_use]
 pub fn token(actor: &str, key: &str) -> Token {
     digest(&format!("{actor}/{key}"))
+}
+
+/// The address a pinned key names, or nothing for a key the ring places.
+///
+/// A pinned key is `@{address}/{name}`, `address` being the advertised `host:port` of the node that runs it. The form
+/// is part of the wire like the hash: every node, and every client, reads the owner of a pinned key from the key alone.
+#[must_use]
+pub fn pinned(key: &str) -> Option<&str> {
+    let (address, _) = key.strip_prefix('@')?.split_once('/')?;
+    let (host, port) = address.rsplit_once(':')?;
+    let numeric = !port.is_empty() && port.bytes().all(|digit| digit.is_ascii_digit());
+    (!host.is_empty() && numeric).then_some(address)
+}
+
+/// The key `name` pinned to the node advertised at `address`.
+#[must_use]
+pub fn pin(address: &str, name: &str) -> String {
+    format!("@{address}/{name}")
 }
 
 /// Where the keys of one actor type live: `vnodes` tokens per node on a circle of `blake2b/8` digests.
@@ -252,7 +270,7 @@ fn digest(value: &str) -> Token {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{Ring, Token, chain, order, token};
+    use super::{Ring, Token, chain, order, pin, pinned, token};
     use crate::node::NodeId;
     use crate::rolls::Rolls;
 
@@ -435,5 +453,33 @@ mod tests {
         let ring = Ring::build(Vec::new(), VNODES);
         assert!(ring.nodes().is_empty());
         assert!(ring.replicas(token("account", "a"), REPLICAS).is_empty());
+    }
+
+    #[test]
+    fn a_pinned_key_names_the_address_it_was_pinned_to() {
+        for address in ["10.0.0.5:7400", "worker-3.internal:7400", "[::1]:7400"] {
+            // The name is whatever the caller chose, a slash or another pinned key included.
+            for name in ["", "gpu", "a/b", "@10.0.0.6:7400/nested"] {
+                assert_eq!(pinned(&pin(address, name)), Some(address));
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_that_names_no_address_is_placed_by_the_ring() {
+        for key in [
+            "acc-1",
+            "",
+            "@",
+            "@handle",
+            "@handle/x",
+            "@10.0.0.5:7400",
+            "@:7400/x",
+            "@10.0.0.5:/x",
+            "@10.0.0.5:74a0/x",
+            "x@10.0.0.5:7400/y",
+        ] {
+            assert_eq!(pinned(key), None, "{key:?} was read as pinned");
+        }
     }
 }

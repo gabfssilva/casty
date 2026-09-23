@@ -18,7 +18,9 @@ _core = import_module("casty._casty")
 
 ActorFailed = _core.ActorFailed
 MailboxFull = _core.MailboxFull
+MessageTooLarge = _core.MessageTooLarge
 NotStarted = _core.NotStarted
+ReentrancyError = _core.ReentrancyError
 Refused = _core.Refused
 SchemaError = _core.SchemaError
 Unavailable = _core.Unavailable
@@ -59,6 +61,25 @@ class Member:
 
 
 @dataclass(frozen=True)
+class Placement:
+    """Where a key is, as the system asked sees it, which is what it sends a message to the key by.
+
+    Attributes
+    ----------
+    owner
+        The first of `replicas` that is `alive` or `suspect`: the node a message to the key goes to, and where the key
+        activates. `None` when none of them is, and an `ask` raises `Unavailable`.
+    replicas
+        The nodes that keep the state of the key, in the order the ring gives them, or the one node a pinned key names.
+        While the ring changes, a key whose copies are still on their way to the node asked stays where it was until
+        they arrive.
+    """
+
+    owner: NodeId | None
+    replicas: tuple[NodeId, ...]
+
+
+@dataclass(frozen=True)
 class TLS:
     """Certificates for connections between nodes and clients.
 
@@ -76,12 +97,74 @@ class TLS:
 class Compression:
     """Compression offered on each connection and negotiated with the peer.
 
-    `codecs=None` offers every one this build has, in the order zstd, lz4, zlib. Payloads smaller than
-    `min_bytes` are sent uncompressed.
+    `codecs=None` offers every one this build has, in the order zstd, lz4, zlib. A frame shorter than `min_bytes` is
+    sent uncompressed, so a payload smaller than it never is compressed.
     """
 
     codecs: tuple[Literal["zstd", "lz4", "zlib"], ...] | None = None
     min_bytes: int = 4096
+
+    def __post_init__(self) -> None:
+        if self.min_bytes < 0:
+            raise ValueError(f"compression.min_bytes is {self.min_bytes}, and a size is not negative")
+
+
+@dataclass(frozen=True)
+class Limits:
+    """Sizes, in bytes, of what crosses a connection.
+
+    `message` bounds one envelope between two nodes: a message to a key, its answer, and each message that moves state
+    between replicas. A message or an initial state over it raises `MessageTooLarge` where it is sent, and an answer
+    over it reaches the caller as `MessageTooLarge`, also when the key is on the node that sends it. `frame` bounds
+    each piece an envelope is cut into on the wire, and `window` is how much of a stream may be in flight before the
+    receiver has taken it. Every node and client of a cluster has the same limits: the handshake refuses a peer whose
+    limits differ.
+    """
+
+    frame: int = 256 * 1024
+    message: int = 4 * 1024 * 1024
+    window: int = 256 * 1024
+
+    def __post_init__(self) -> None:
+        for name, size in (("frame", self.frame), ("message", self.message), ("window", self.window)):
+            if not 0 < size <= 2**31:
+                raise ValueError(f"limits.{name} is {size}, and a size on the wire is between 1 byte and 2 GiB")
+        if self.message < 128 * 1024:
+            raise ValueError(
+                f"limits.message is {self.message}, below 128 KiB: a message that moves state keeps 64 KiB of it for "
+                "what surrounds the state"
+            )
+        if self.frame > self.message:
+            raise ValueError(f"limits.frame is {self.frame}, above limits.message of {self.message}")
+        if self.window < self.frame:
+            raise ValueError(f"limits.window is {self.window}, below limits.frame of {self.frame}")
+
+
+@dataclass(frozen=True)
+class Opaque[T]:
+    """The functions a value travels with when the schema does not take its type: `encode` to bytes, `decode` back.
+
+    It goes in the metadata of an `Annotated`, so that the checkers see `T` and the wire carries bytes::
+
+        type Frame = Annotated[np.ndarray, Opaque(encode=to_bytes, decode=from_bytes)]
+
+    The functions are taken from the annotation when it is compiled, and called for every value. casty does not read
+    the bytes, so what the schema does for other types is up to them: a node reading bytes written by another version
+    of `T` gets whatever `decode` makes of them, a reader in another language gets bytes, and every node must `decode`
+    what any other `encode`s. Two values are the same stored value only if `encode` gives them the same bytes, which a
+    collection key and `compare_and_set` rely on.
+
+    Parameters
+    ----------
+    encode
+        The bytes of a value. A result that is not `bytes` raises `SchemaError`; what it raises reaches the writer as
+        it is.
+    decode
+        The value `encode` made the bytes from. What it raises reaches the reader as it is.
+    """
+
+    encode: Callable[[T], bytes]
+    decode: Callable[[bytes], T]
 
 
 @dataclass(frozen=True)
@@ -94,8 +177,9 @@ class Backoff:
     factor: float = 2.0
 
     def __post_init__(self) -> None:
-        if self.factor < 1:
-            raise ValueError(f"backoff.factor is {self.factor}, so a body that keeps failing would retry ever faster")
+        # Negated so that NaN, which no comparison holds for, is refused as well.
+        if not self.factor >= 1:
+            raise ValueError(f"backoff.factor is {self.factor}, and the delay grows only by a factor of at least 1")
         if self.first > self.limit:
             raise ValueError(f"backoff.first is {self.first}, above backoff.limit of {self.limit}")
 
@@ -128,7 +212,39 @@ class Cluster:
 
     `advertise` defaults to `bind`. Seeds equal to the advertised address are ignored; with no other seed, the node
     starts a cluster alone. `address_map` replaces an advertised address by the one to dial, for tunnels and NAT.
-    `remove_after=None` disables the automatic removal of dead members.
+    `limits` must be the same on every node and client. `remove_after=None` disables the automatic removal of dead
+    members.
+
+    Attributes
+    ----------
+    bind
+        The `host:port` the node listens on. A port of 0 binds wherever it can.
+    seeds
+        Nodes to join the cluster through, as `host:port`.
+    advertise
+        The `host:port` other nodes and clients dial.
+    name
+        The name of the cluster. A node or client of another name is refused.
+    tls
+        Certificates for the connections. `None` connects without TLS.
+    compression
+        Compression offered on each connection.
+    address_map
+        The address to dial for an advertised one.
+    limits
+        Sizes of what crosses a connection.
+    heartbeat
+        Period of the heartbeats a node sends the neighbors of its active view.
+    suspect_after
+        Silence after which a neighbor is `suspect`. It is above `heartbeat`.
+    dead_after
+        Time as `suspect`, without a refutation, after which a member is `dead`.
+    remove_after
+        Time as `dead` after which a node that sees a majority of the members alive removes it.
+    anti_entropy
+        Period of the exchange of the whole member table with a random member.
+    overlay
+        Sizes and periods of the membership overlay.
     """
 
     bind: str
@@ -138,6 +254,7 @@ class Cluster:
     tls: TLS | None = None
     compression: Compression = Compression()
     address_map: Callable[[str], str] | None = None
+    limits: Limits = Limits()
     heartbeat: timedelta = timedelta(seconds=1)
     suspect_after: timedelta = timedelta(seconds=5)
     dead_after: timedelta = timedelta(seconds=5)
@@ -167,6 +284,8 @@ def address(parameter: str, value: str, /) -> None:
 
 type Body[S, M] = Callable[[Context[S, M]], Awaitable[None]]
 type Write = Literal["one", "majority", "all"]
+type OnFull = Literal["refuse", "wait"]
+type Durable = Literal["write"] | timedelta
 
 
 @runtime_checkable
@@ -176,13 +295,27 @@ class System(Protocol):
     @property
     def node(self) -> NodeId: ...
 
-    def ref[S, M](self, actor: Actor[S, M] | DefaultedActor[S, M], key: str, /, *, initial: S | None = None) -> Ref[M]:
+    def ref[S, M](
+        self,
+        actor: Actor[S, M] | DefaultedActor[S, M],
+        key: str,
+        /,
+        *,
+        initial: S | None = None,
+        at: Member | NodeId | str | None = None,
+    ) -> Ref[M]:
         """Reference to the entity `(actor, key)`, wherever it is placed.
 
         Obtaining it asks the owner to create the key, if it does not exist, and to activate it; nobody waits for
         that, and what goes wrong with it shows in the first `ask`. A key that does not exist starts from `initial`,
         or from the default of its type. A type without a default takes `initial`, unless its state can be `None`,
-        which is then what the key starts from; anything else raises `TypeError`.
+        which is then what the key starts from; anything else raises `TypeError`. In a cluster, an `initial` larger
+        than `Limits.message` raises `MessageTooLarge`.
+
+        A type declared with `pinned=True` runs the key on the node `at` names: a member of `members`, its `NodeId`,
+        or the `host:port` it advertises. The key carries that address, `@host:port/key` as `ctx.key` reads it, so the
+        ref reaches the node after a restart, and `ask` raises `Unavailable` while no member up advertises it. Any
+        other type is placed by the ring and takes no `at`.
         """
         ...
 
@@ -209,6 +342,11 @@ class ActorDefinition(Protocol):
         ...
 
     @property
+    def pinned(self) -> bool:
+        """Whether each key runs on the node its ref names with `at`, instead of where the ring places it."""
+        ...
+
+    @property
     def replicas(self) -> int: ...
 
     @property
@@ -217,18 +355,124 @@ class ActorDefinition(Protocol):
     @property
     def mailbox(self) -> int | None: ...
 
+    @property
+    def on_full(self) -> OnFull:
+        """What an `ask` that finds the bounded mailbox full meets.
+
+        `"refuse"` fails it with `MailboxFull`. `"wait"` holds it, within its deadline, until there is room: the
+        message stays with its sender, which sends it again when the owner calls it back. A `tell` that finds the
+        mailbox full is dropped either way.
+        """
+        ...
+
+    @property
+    def concurrency(self) -> int:
+        """How many messages of one key the body handles at once, 1 by default.
+
+        Above 1, up to that many runs of the body read the same `inbox`, each taking the next message as it reads,
+        so an `ask` or any other `await` in one run no longer holds up the others. The state is then read-only:
+        `state.set`, `state.update` and `become` raise `RuntimeError`, since two runs writing it is the race one
+        mailbox per key exists to prevent. The types of the collections take one message at a time and refuse it.
+        """
+        ...
+
+    @property
+    def idle_after(self) -> timedelta | None:
+        """Time without messages after which `inbox` ends. `None` is the system's."""
+        ...
+
+    @property
+    def ask_timeout(self) -> timedelta | None:
+        """Deadline of an `ask` to this type. `None` is the system's."""
+        ...
+
+    @property
+    def write_timeout(self) -> timedelta | None:
+        """How long a write of the state or an activation waits for replicas. `None` is the system's."""
+        ...
+
+    @property
+    def backoff(self) -> Backoff | None:
+        """Delay before restarting a body that raised. `None` is the system's."""
+        ...
+
+    @property
+    def durable(self) -> Durable | None:
+        """When the store of the system keeps the writes of the type. `None` keeps them in memory only.
+
+        `"write"` saves every confirmed write before it returns. A `timedelta` saves the latest confirmed write at
+        most that long after it, and the write a key lets go with, or is deleted by, at once; writes return without
+        waiting for the store.
+        """
+        ...
+
     def configured(self, name: str, replicas: int, write: Write, /) -> Self:
-        """The same type under another name, with the replicas and write level it was configured with."""
+        """The same type under another name, with the replicas and write level it was configured with.
+
+        Everything else the type sets, its mailbox and its timings, carries over.
+        """
+        ...
+
+
+@runtime_checkable
+class Store(Protocol):
+    """Where the state of the durable types outlives every node: one record per key, shared by the nodes of a cluster.
+
+    Each node of a cluster is given a store that reaches the same records (a database, object storage, a directory
+    every machine mounts), and a type opts in with `@actor(durable=...)`. A record is a `version` and a `state`. The
+    version orders the writes of a key as bytes compared in order, and a store keeps the greatest it was given: saves
+    reach it in any order, and a late save of a node that lost the key must not undo a later one. `state` is what casty
+    wrote, which the store keeps as it is, or `None` for a deletion.
+
+    Each method is called on the event loop and runs as a task, bounded by the write timeout of the type: a call that
+    has not returned by then is cancelled and counts as failed. A load that fails fails the activation, and a save
+    that fails fails the write of a type saved on every write.
+
+    `casty.sqlite.SQLiteStore` is one in a SQLite file, for a system alone or the nodes of one machine.
+    """
+
+    async def load(self, actor: str, key: str, /) -> tuple[bytes, bytes | None] | None:
+        """The record of `(actor, key)` as `(version, state)`, or `None` when there is none."""
+        ...
+
+    async def save(self, actor: str, key: str, version: bytes, state: bytes | None, /) -> None:
+        """Keep `(version, state)` as the record of `(actor, key)`, unless its record has a greater version."""
+        ...
+
+    async def drop(self, actor: str, key: str, version: bytes, /) -> None:
+        """Forget the record of `(actor, key)` if its version is not greater than `version`."""
         ...
 
 
 from casty.collections import Collections as Collections  # noqa: E402
+from casty.observer import (  # noqa: E402
+    Activation,
+    ActivationEnded,
+    ActivationFailed,
+    ActivationStarted,
+    ActorStats,
+    ConnectionLost,
+    Event,
+    HandoffEnded,
+    HandoffStarted,
+    LoggingObserver,
+    MemberChanged,
+    MessageDropped,
+    Observer,
+    Stats,
+    WriteFailed,
+)
 
 __all__ = [
     "TLS",
+    "Activation",
+    "ActivationEnded",
+    "ActivationFailed",
+    "ActivationStarted",
     "Actor",
     "ActorDefinition",
     "ActorFailed",
+    "ActorStats",
     "ActorSystem",
     "Backoff",
     "Body",
@@ -236,20 +480,38 @@ __all__ = [
     "Cluster",
     "Collections",
     "Compression",
+    "ConnectionLost",
     "Context",
     "DefaultedActor",
+    "Durable",
+    "Event",
+    "HandoffEnded",
+    "HandoffStarted",
+    "Limits",
+    "LoggingObserver",
     "MailboxFull",
     "Member",
+    "MemberChanged",
+    "MessageDropped",
+    "MessageTooLarge",
     "NodeId",
     "NotStarted",
+    "Observer",
+    "OnFull",
+    "Opaque",
     "Overlay",
+    "Placement",
+    "ReentrancyError",
     "Ref",
     "Refused",
     "SchemaError",
     "State",
+    "Stats",
+    "Store",
     "System",
     "Unavailable",
     "UnknownActor",
     "Write",
+    "WriteFailed",
     "actor",
 ]

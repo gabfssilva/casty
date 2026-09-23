@@ -382,21 +382,34 @@ impl<'a> Reader<'a> {
     }
 
     pub fn read_array_len(&mut self) -> Result<usize> {
-        match self.take_marker()? {
-            marker @ 0x90..=0x9f => Ok(usize::from(marker & 0x0f)),
-            0xdc => Ok(usize::from(u16::from_be_bytes(*self.take::<2>()?))),
-            0xdd => Ok(u32::from_be_bytes(*self.take::<4>()?) as usize),
-            marker => Err(Malformed::Marker(marker)),
-        }
+        let len = match self.take_marker()? {
+            marker @ 0x90..=0x9f => usize::from(marker & 0x0f),
+            0xdc => usize::from(u16::from_be_bytes(*self.take::<2>()?)),
+            0xdd => u32::from_be_bytes(*self.take::<4>()?) as usize,
+            marker => return Err(Malformed::Marker(marker)),
+        };
+        self.holding(len)
     }
 
     pub fn read_map_len(&mut self) -> Result<usize> {
-        match self.take_marker()? {
-            marker @ 0x80..=0x8f => Ok(usize::from(marker & 0x0f)),
-            0xde => Ok(usize::from(u16::from_be_bytes(*self.take::<2>()?))),
-            0xdf => Ok(u32::from_be_bytes(*self.take::<4>()?) as usize),
-            marker => Err(Malformed::Marker(marker)),
+        let len = match self.take_marker()? {
+            marker @ 0x80..=0x8f => usize::from(marker & 0x0f),
+            0xde => usize::from(u16::from_be_bytes(*self.take::<2>()?)),
+            0xdf => u32::from_be_bytes(*self.take::<4>()?) as usize,
+            marker => return Err(Malformed::Marker(marker)),
+        };
+        self.holding(len)
+    }
+
+    /// A count of values the rest of the payload can hold, at a byte each at least.
+    ///
+    /// The count is what a reader sizes its buffer by, so five bytes that claim four billion values would otherwise
+    /// ask for gigabytes before the first missing value is noticed.
+    fn holding(&self, len: usize) -> Result<usize> {
+        if len > self.data.len().saturating_sub(self.at) {
+            return Err(Malformed::Truncated);
         }
+        Ok(len)
     }
 
     /// Step over the next value, whatever it is: a field this version of the type does not know.
@@ -636,5 +649,20 @@ mod tests {
         let mut trailing = Reader::new(&[0xc0, 0xc0]);
         assert_eq!(trailing.read_nil(), Ok(()));
         assert_eq!(trailing.finish(), Err(Malformed::Trailing));
+    }
+
+    #[test]
+    fn refuses_a_count_the_rest_of_the_payload_cannot_hold() {
+        let mut huge = Reader::new(&[0xdd, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(huge.read_array_len(), Err(Malformed::Truncated));
+        let mut huge = Reader::new(&[0xdf, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(huge.read_map_len(), Err(Malformed::Truncated));
+        let mut short = Reader::new(&[0x92, 0xc0]);
+        assert_eq!(short.read_array_len(), Err(Malformed::Truncated));
+
+        let mut full = Reader::new(&[0x92, 0xc0, 0xc0]);
+        assert_eq!(full.read_array_len(), Ok(2));
+        let mut empty = Reader::new(&[0x80]);
+        assert_eq!(empty.read_map_len(), Ok(0));
     }
 }

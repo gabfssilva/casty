@@ -1,4 +1,5 @@
 import asyncio
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -29,11 +30,32 @@ INVALID: list[tuple[Callable[[], object], str]] = [
     (lambda: Overlay(active=0), "overlay.active"),
     (lambda: Overlay(active=5, passive=4), "overlay.passive"),
     (lambda: Backoff(factor=0.5), "backoff.factor"),
+    (lambda: Backoff(factor=math.nan), "backoff.factor"),
     (lambda: Backoff(first=timedelta(seconds=20)), "backoff.first"),
     (lambda: actor(initial=0, replicas=0)(counter), "replicas"),
     (lambda: actor(initial=0, mailbox=0)(counter), "mailbox"),
+    (lambda: actor(initial=0, on_full="wait")(counter), "on_full"),
+    (lambda: actor(initial=0, concurrency=0)(counter), "concurrency"),
+    (lambda: actor(initial=0, ask_timeout=timedelta(seconds=-1))(counter), "ask_timeout"),
+    (lambda: actor(initial=0, backoff=Backoff(first=timedelta(seconds=-1)))(counter), "backoff.first"),
     (lambda: Client(seeds=()), "seeds"),
     (lambda: Client(seeds=("10.0.0.4",)), "seeds"),
+    (lambda: ActorSystem(idle_after=timedelta(seconds=-1)), "idle_after"),
+    (lambda: ActorSystem(ask_timeout=timedelta(seconds=-1)), "ask_timeout"),
+    (lambda: ActorSystem(write_timeout=timedelta(seconds=-1)), "write_timeout"),
+    (lambda: ActorSystem(leave_timeout=timedelta(seconds=-1)), "leave_timeout"),
+    (lambda: ActorSystem(backoff=Backoff(first=timedelta(seconds=-1))), "backoff.first"),
+    (lambda: Client(seeds=("10.0.0.4:7400",), ask_timeout=timedelta(seconds=-1)), "ask_timeout"),
+    (lambda: Client(seeds=("10.0.0.4:7400",), sync_every=timedelta(0)), "sync_every"),
+]
+
+#: Cluster timings that pass the dataclass and that the node refuses once it joins: the transport repeats the first
+#: three and would never wait between two rounds, and the last is a threshold that cannot be negative.
+REFUSED_ON_JOIN: list[tuple[Cluster, str]] = [
+    (Cluster(bind="127.0.0.1:0", heartbeat=timedelta(0)), "heartbeat"),
+    (Cluster(bind="127.0.0.1:0", anti_entropy=timedelta(0)), "anti_entropy"),
+    (Cluster(bind="127.0.0.1:0", overlay=Overlay(graft_after=timedelta(0))), "overlay.graft_after"),
+    (Cluster(bind="127.0.0.1:0", dead_after=timedelta(seconds=-1)), "dead_after"),
 ]
 
 
@@ -172,12 +194,47 @@ def describe_configuration() -> None:
         with pytest.raises(ValueError, match=parameter.replace(".", r"\.")):
             build()
 
+    @pytest.mark.parametrize(
+        ("network", "parameter"), REFUSED_ON_JOIN, ids=[parameter for _, parameter in REFUSED_ON_JOIN]
+    )
+    async def it_refuses_to_join_with_a_timing_the_transport_cannot_run(network: Cluster, parameter: str) -> None:
+        with pytest.raises(ValueError, match=parameter.replace(".", r"\.")):
+            async with ActorSystem(cluster=network):
+                pass
+
     def when_the_parameters_agree() -> None:
         def it_accepts_them() -> None:
             # The settings of the tests and of the docstring of `Cluster` are the ones that must keep working.
             assert Cluster(bind="0.0.0.0:0", seeds=("10.0.0.4:7400",), heartbeat=timedelta(milliseconds=50))
             assert Overlay(active=2)
             assert account.replicas == notes.replicas == 3
+
+    def when_a_type_sets_its_own_timings() -> None:
+        def it_keeps_them_through_configured_and_leaves_the_unset_ones_to_the_system() -> None:
+            backoff = Backoff(first=timedelta(milliseconds=10))
+            tuned = actor(
+                initial=0,
+                idle_after=timedelta(seconds=1),
+                ask_timeout=timedelta(seconds=2),
+                write_timeout=timedelta(seconds=3),
+                backoff=backoff,
+            )(counter)
+
+            configured = tuned.configured("tests.test_operation:tuned_5_all", 5, "all")
+
+            assert (configured.replicas, configured.write) == (5, "all")
+            assert (configured.idle_after, configured.ask_timeout, configured.write_timeout, configured.backoff) == (
+                timedelta(seconds=1),
+                timedelta(seconds=2),
+                timedelta(seconds=3),
+                backoff,
+            )
+            assert (account.idle_after, account.ask_timeout, account.write_timeout, account.backoff) == (
+                None,
+                None,
+                None,
+                None,
+            )
 
 
 async def _run(system: ActorSystem, stop: asyncio.Event, exited: asyncio.Event, /) -> None:

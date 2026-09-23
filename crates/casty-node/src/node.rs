@@ -10,29 +10,34 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use casty_core::chain::Chain;
 use casty_core::handoff::sweep::{Kept, sweep};
 use casty_core::mailbox::{Command, Deliver, Start};
-use casty_core::membership::table::Status;
+use casty_core::membership::table::{Status, Transition};
 use casty_core::node::{NodeId, Target};
 use casty_core::outcome::Outcome;
+use casty_core::placement::pinned;
 use casty_core::replication::messages::Write;
-use casty_core::store::{Held as State, Pages};
-use casty_net::endpoint::{Config, Endpoint, Sender};
-use casty_net::pool::Target as Destination;
+use casty_core::store::{Durable, Held as State, Pages};
+use casty_net::endpoint::{Config, Endpoint, Meter, Sender, TooLarge};
+use casty_net::pool::{Lost, Target as Destination};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::events::{Event, Operation, abandoned};
 use crate::handoff::service::Handoff;
 use crate::membership::directory::Directory;
 use crate::membership::runner::Cluster;
 use crate::membership::service::{Member, Membership, Outgoing};
 use crate::membership::wire as membership;
 use crate::placement::{Counts, Placement};
-use crate::replication::service::{Around, Entity, Failure, Replication};
+use crate::replication::service::{
+    Around, Entity, Failure, Replication, StoreAnswer, Storing, Written,
+};
 use crate::replication::wire::{self as replication};
-use crate::routing::service::{Decision, Routing};
-use crate::routing::wire::{self as routing, Answer, Routed};
+use crate::routing::service::{Decision, Routing, cancelling};
+use crate::routing::wire::{self as routing, Answer, Cancel, Routed};
 
 const MEMBERSHIP: &str = "membership";
 const ACTORS: &str = "actors";
@@ -45,6 +50,12 @@ pub struct Kind {
     pub actor: String,
     pub replicas: usize,
     pub write: Write,
+    /// How long an operation over a key of the type waits for its replicas. Nothing means the node's.
+    pub write_timeout: Option<core::time::Duration>,
+    /// Whether each key runs on the node its key names, which leaves the type out of the ranges of the ring.
+    pub pinned: bool,
+    /// When the store of the system keeps the writes of the type. Nothing keeps them in memory only.
+    pub durable: Option<Durable>,
 }
 
 /// What runs the bodies of the keys this node hosts.
@@ -80,8 +91,32 @@ pub trait Host: Send + Sync + 'static {
         let _ = (actor, key);
     }
 
+    /// The caller of `request`, sent to `(actor, key)`, stopped waiting for its answer: it timed out or was cancelled.
+    ///
+    /// It arrives whether or not this node owns the key, and nothing answers it. A host with no activation of the key,
+    /// or whose activation already answered the request or never received it, drops it.
+    fn cancel(&self, actor: &str, key: &str, request: &Target) {
+        let _ = (actor, key, request);
+    }
+
     /// The cluster declared this node left. It never comes back under the same identity: what it knew is gone.
     fn removed(&self) {}
+
+    /// Something the node saw or did, for whoever watches it. A host that nobody watches lets it go.
+    fn observe(&self, event: Event) {
+        let _ = event;
+    }
+
+    /// Carry `request` out on the store of the system, and answer it with `Node::from_store` once the store has, within
+    /// `request.within`, or with the failure that says why it did not.
+    ///
+    /// A host without a store answers every request with that failure, which is what a durable type meets on it.
+    fn store(&self, node: &Node, request: Storing) {
+        node.from_store(
+            request.id,
+            Err("this node has no store, which a durable type needs".to_owned()),
+        );
+    }
 }
 
 /// What the node is asked to do from outside its task.
@@ -97,7 +132,7 @@ enum Ask {
         node: NodeId,
         failure: Outcome,
     },
-    Forget(i64),
+    Cancel(Cancel),
     Learn(Kind),
     GaveUp(String),
     Activate {
@@ -109,13 +144,33 @@ enum Ask {
     Commit {
         actor: String,
         key: String,
+        lease: u64,
         pages: Pages,
+        active: bool,
+        answer: oneshot::Sender<Result<(), Failure>>,
+    },
+    Delete {
+        actor: String,
+        key: String,
+        lease: u64,
         active: bool,
         answer: oneshot::Sender<Result<(), Failure>>,
     },
     Release {
         actor: String,
         key: String,
+        lease: u64,
+    },
+    Placed {
+        actor: String,
+        key: String,
+        answer: oneshot::Sender<Placed>,
+    },
+    Stored(oneshot::Sender<Vec<(String, String, bool)>>),
+    /// What the store of the system answered to the request `id`.
+    FromStore {
+        id: u64,
+        kept: StoreAnswer,
     },
     Attached {
         actor: String,
@@ -126,6 +181,10 @@ enum Ask {
         key: String,
     },
     Handed(oneshot::Sender<Vec<Entity>>),
+    /// The leave stopped waiting for `Handed`: what is still owed is what the node goes without.
+    Abandon,
+    /// A connection to a peer ended, which the transport says from a task of its own.
+    Lost(NodeId),
     Leave,
     Depart,
     Stop,
@@ -143,12 +202,51 @@ struct Reach {
     asks: mpsc::UnboundedSender<Ask>,
     ids: AtomicI64,
     members: watch::Receiver<Vec<Member>>,
+    /// The largest message between two nodes, which every command and answer is measured against.
+    message: usize,
+    /// What the transport counts, and what the replication counts of the writes it drove.
+    meter: Meter,
+    written: Arc<Written>,
+}
+
+/// What a node has counted, read at one moment: the connections it holds now, the bytes they carried, and how many
+/// writes of the keys it owns the replicas confirmed and how many failed, since it started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Tally {
+    pub connections: usize,
+    pub sent: u64,
+    pub received: u64,
+    pub confirmed: u64,
+    pub failed: u64,
+}
+
+/// Where a key is, as a node sees it at one moment: the nodes that keep it, in the order the ring gives them, and the
+/// first of them that is up, which is where a message to the key goes. A pinned key is kept by the member advertised
+/// at its address.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Placed {
+    pub owner: Option<NodeId>,
+    pub replicas: Vec<NodeId>,
 }
 
 impl Node {
     #[must_use]
     pub fn id(&self) -> &NodeId {
         &self.inner.id
+    }
+
+    /// What this node has counted so far. The transport and the replication count as they go, on their own threads,
+    /// so this reads their counters and asks the task of the node nothing.
+    #[must_use]
+    pub fn tally(&self) -> Tally {
+        let traffic = self.inner.meter.traffic();
+        Tally {
+            connections: traffic.connections,
+            sent: traffic.sent,
+            received: traffic.received,
+            confirmed: self.inner.written.confirmed(),
+            failed: self.inner.written.failed(),
+        }
     }
 
     /// The members this node knows right now.
@@ -172,28 +270,80 @@ impl Node {
         }
     }
 
-    /// Send a message to the entity `(actor, key)`, answering `reply` when there is one waiting.
-    pub fn deliver(&self, actor: &str, key: &str, message: Vec<u8>, reply: Option<Target>) {
-        self.ask(Ask::Route(Command::Deliver(Deliver {
+    /// Send a message to the entity `(actor, key)`, answering `reply` when there is one waiting, with the `chain` of
+    /// the bodies that wait for that answer.
+    ///
+    /// A message larger than one envelope between two nodes carries is refused here, before it is routed, so that it
+    /// fails the same way wherever its key is.
+    pub fn deliver(
+        &self,
+        actor: &str,
+        key: &str,
+        message: Vec<u8>,
+        reply: Option<Target>,
+        chain: Chain,
+    ) -> Result<(), TooLarge> {
+        self.route(Command::Deliver(Deliver {
             actor: actor.to_owned(),
             key: key.to_owned(),
             message,
             reply,
-        })));
+            chain,
+        }))
     }
 
     /// Create the key, from `state` or from the default of its type, and activate it. Nothing answers.
-    pub fn start(&self, actor: &str, key: &str, state: Option<Vec<u8>>) {
-        self.ask(Ask::Route(Command::Start(Start {
+    ///
+    /// A state larger than one envelope between two nodes carries is refused here, as a message is.
+    pub fn start(&self, actor: &str, key: &str, state: Option<Vec<u8>>) -> Result<(), TooLarge> {
+        self.route(Command::Start(Start {
             actor: actor.to_owned(),
             key: key.to_owned(),
             state,
-        })));
+        }))
     }
 
-    /// Answer the request `target` waits for, wherever it waits.
+    fn route(&self, command: Command) -> Result<(), TooLarge> {
+        let size = routing::routed_size(&command, &self.inner.id);
+        if size > self.inner.message {
+            let what = match &command {
+                Command::Deliver(_) => "the message to",
+                Command::Start(_) => "the initial state of",
+            };
+            return Err(TooLarge(format!(
+                "{what} {}/{} takes {size} bytes between two nodes, over limits.message of {}",
+                command.actor(),
+                command.key(),
+                self.inner.message
+            )));
+        }
+        self.ask(Ask::Route(command));
+        Ok(())
+    }
+
+    /// Answer the request `target` waits for, wherever it waits. An answer that does not fit is replaced by the
+    /// refusal `oversized` gives.
     pub fn answer(&self, target: Target, outcome: Outcome) {
+        let outcome = self.oversized(&target, &outcome).unwrap_or(outcome);
         self.ask(Ask::Answer { target, outcome });
+    }
+
+    /// What answers `target` in place of `outcome` when that is larger than one envelope between two nodes carries.
+    ///
+    /// It is measured whether or not the caller is on this node, so that an answer does not arrive or fail by where
+    /// the key landed. A host that settles an answer to a caller of its own without `answer` measures it here.
+    #[must_use]
+    pub fn oversized(&self, target: &Target, outcome: &Outcome) -> Option<Outcome> {
+        let Target::Reply { id, .. } = target else {
+            return None;
+        };
+        let size = routing::answer_size(*id, outcome);
+        (size > self.inner.message).then(|| {
+            Outcome::TooLarge(format!(
+                "the answer takes {size} bytes between two nodes, over limits.message of {}",
+                self.inner.message
+            ))
+        })
     }
 
     /// Note the node a request went to, and how it ends if that node never answers.
@@ -201,9 +351,14 @@ impl Node {
         self.ask(Ask::Toward { id, node, failure });
     }
 
-    /// Stop waiting for the answer of `id`, which a timeout or a cancellation does.
-    pub fn forget(&self, id: i64) {
-        self.ask(Ask::Forget(id));
+    /// Stop waiting for the answer of `request`, and tell the key `(actor, key)` it was sent to that nobody waits for
+    /// it any more. A timeout or a cancellation does this.
+    pub fn cancel(&self, actor: &str, key: &str, request: Target) {
+        self.ask(Ask::Cancel(Cancel {
+            actor: actor.to_owned(),
+            key: key.to_owned(),
+            request,
+        }));
     }
 
     /// Tell the node of a type this process has, so that the cluster and the rings know of it.
@@ -235,11 +390,13 @@ impl Node {
         stopped(answered.await, actor, key)
     }
 
-    /// Write the state of a key this node owns. Without `active` the key lets go of it instead.
+    /// Write the state of a key this node owns, from the activation `lease` names. Without `active` the key lets go
+    /// of it instead.
     pub async fn commit(
         &self,
         actor: &str,
         key: &str,
+        lease: u64,
         pages: Pages,
         active: bool,
     ) -> Result<(), Failure> {
@@ -247,6 +404,7 @@ impl Node {
         self.ask(Ask::Commit {
             actor: actor.to_owned(),
             key: key.to_owned(),
+            lease,
             pages,
             active,
             answer,
@@ -254,12 +412,62 @@ impl Node {
         stopped(answered.await, actor, key)
     }
 
-    /// Drop the owner of a key this node stopped holding. Its replica keeps the state.
-    pub fn release(&self, actor: &str, key: &str) {
+    /// Delete the state of a key this node owns, at the write level of its type. The key is activated again from
+    /// `initial`, as one nothing ever wrote. Without `active` the key lets go with it, as with a release.
+    pub async fn delete(
+        &self,
+        actor: &str,
+        key: &str,
+        lease: u64,
+        active: bool,
+    ) -> Result<(), Failure> {
+        let (answer, answered) = oneshot::channel();
+        self.ask(Ask::Delete {
+            actor: actor.to_owned(),
+            key: key.to_owned(),
+            lease,
+            active,
+            answer,
+        });
+        stopped(answered.await, actor, key)
+    }
+
+    /// Drop the owner of a key this node stopped holding, while it still serves the activation `lease` names. Its
+    /// replica keeps the state.
+    pub fn release(&self, actor: &str, key: &str, lease: u64) {
         self.ask(Ask::Release {
             actor: actor.to_owned(),
             key: key.to_owned(),
+            lease,
         });
+    }
+
+    /// Where `(actor, key)` is as this node sees it now, which is what it routes a message to the key by: a key of a
+    /// range still arriving here is placed on the ring before the change, as its messages are.
+    ///
+    /// Nothing, once the node has stopped.
+    pub async fn placed(&self, actor: &str, key: &str) -> Placed {
+        let (answer, answered) = oneshot::channel();
+        self.ask(Ask::Placed {
+            actor: actor.to_owned(),
+            key: key.to_owned(),
+            answer,
+        });
+        answered.await.unwrap_or_default()
+    }
+
+    /// Every key the replica of this node keeps, and whether what it keeps is the tombstone of a deletion.
+    ///
+    /// Nothing, once the node has stopped.
+    pub async fn stored(&self) -> Vec<(String, String, bool)> {
+        let (answer, answered) = oneshot::channel();
+        self.ask(Ask::Stored(answer));
+        answered.await.unwrap_or_default()
+    }
+
+    /// What the store of the system answered to the request `id` the node handed to the host.
+    pub fn from_store(&self, id: u64, kept: StoreAnswer) {
+        self.ask(Ask::FromStore { id, kept });
     }
 
     /// Tell the cluster this node is going, so that nothing new is routed to it while it finishes what it is on.
@@ -267,7 +475,8 @@ impl Node {
         self.ask(Ask::Leave);
     }
 
-    /// An activation started here, which is what keeps a sweep from starting a second one.
+    /// An activation started here. The sweep ends it once its key belongs to another node, and does not start a second
+    /// one while it runs.
     pub fn attached(&self, actor: &str, key: &str) {
         self.ask(Ask::Attached {
             actor: actor.to_owned(),
@@ -338,31 +547,33 @@ impl Running {
         types: Vec<Kind>,
         member: bool,
     ) -> io::Result<Self> {
+        let (asks, taking) = mpsc::unbounded_channel();
+        // Weak, so that the transport holding it does not keep the task of the node waiting for asks forever.
+        let reporting = asks.downgrade();
+        let lost: Lost = Arc::new(move |peer: &NodeId| {
+            if let Some(asks) = reporting.upgrade() {
+                let _ = asks.send(Ask::Lost(peer.clone()));
+            }
+        });
         let endpoint = Endpoint::start(Config {
             bind: member.then(|| cluster.bind.clone()),
             advertise: cluster.advertise.clone(),
             cluster: cluster.name.clone(),
-            codec: "msgpack".to_owned(),
             tls: cluster.tls.clone(),
             compression: cluster.compression.clone(),
-            min_compressed: 4096,
+            min_compressed: cluster.min_compressed,
             address_map: cluster.address_map.clone(),
             limits: cluster.limits,
+            lost: Some(lost),
         })
         .await?;
         let id = endpoint.node().clone();
-        let mut counts = Counts::default();
-        let mut kinds = HashMap::new();
-        for kind in types {
-            counts.learn(&kind.actor, kind.replicas);
-            kinds.insert(
-                kind.actor,
-                crate::handoff::service::Kind {
-                    replicas: kind.replicas,
-                    write: kind.write,
-                },
-            );
-        }
+        let Declared {
+            counts,
+            kinds,
+            write_timeouts,
+            durables,
+        } = Declared::of(types);
         let membership = if member {
             Table::Member(Box::new(Membership::new(
                 id.clone(),
@@ -375,14 +586,24 @@ impl Running {
             Table::Client(Box::new(Directory::new(id.clone(), cluster.seeds.clone())))
         };
         let (members, watching) = watch::channel(membership.members());
-        let (asks, taking) = mpsc::unbounded_channel();
         let (entered, joining) = oneshot::channel();
+        // A tombstone lingers as long as a handover is given: an older copy of the key it fences may be on its way to
+        // a replica for that long.
+        let replication = Replication::new(
+            id.clone(),
+            cluster.limits.message - ENVELOPE,
+            cluster.write_timeout,
+            cluster.leave_timeout,
+        );
         let node = Node {
             inner: Arc::new(Reach {
                 id,
                 asks,
                 ids: AtomicI64::new(0),
                 members: watching.clone(),
+                message: cluster.limits.message,
+                meter: endpoint.meter(),
+                written: replication.written(),
             }),
         };
         let task = tokio::spawn(run(
@@ -400,15 +621,14 @@ impl Running {
                     cluster.backoff,
                 ),
                 routing: Routing::new(node.id().clone()),
-                replication: Replication::new(
-                    node.id().clone(),
-                    cluster.limits.message - ENVELOPE,
-                    cluster.write_timeout,
-                ),
+                replication,
                 kinds,
+                write_timeouts,
+                durables,
                 running: BTreeSet::new(),
                 handed: None,
                 told: false,
+                standing: Standing::new(cluster.timings.dead_after / 2),
                 toward: HashMap::new(),
                 timings: cluster.timings,
             },
@@ -454,15 +674,17 @@ impl Running {
         owed
     }
 
-    /// Wait until every key this node stopped replicating has been taken, up to the deadline of the handover.
+    /// Wait until every key this node stopped replicating has been taken, up to the deadline of the handover, and
+    /// give back what is still owed then.
     async fn handed(&self) -> Vec<Entity> {
-        let (answer, answered) = oneshot::channel();
+        let (answer, mut answered) = oneshot::channel();
         self.node.ask(Ask::Handed(answer));
-        match tokio::time::timeout(self.handover, answered).await {
-            Ok(Ok(owed)) => owed,
-            // The node stopped, or nobody took what it owed: either way it goes without it.
-            Ok(Err(_)) | Err(_) => Vec::new(),
+        if let Ok(settled) = tokio::time::timeout(self.handover, &mut answered).await {
+            // Everything was taken, or the node stopped: either way nothing is left to report.
+            return settled.unwrap_or_default();
         }
+        self.node.ask(Ask::Abandon);
+        answered.await.unwrap_or_default()
     }
 
     /// Stop without a word, which is what a machine going away looks like to the others.
@@ -532,6 +754,22 @@ impl Table {
         }
     }
 
+    /// Whether this node sees a majority of the members alive. A client owns no key, so it never needs one.
+    fn majority(&self) -> bool {
+        match self {
+            Self::Member(membership) => membership.majority(),
+            Self::Client(_) => false,
+        }
+    }
+
+    /// The changes of status since the last call, in the order the table made them.
+    fn transitions(&mut self) -> Vec<Transition> {
+        match self {
+            Self::Member(membership) => membership.transitions(),
+            Self::Client(directory) => directory.transitions(),
+        }
+    }
+
     /// Ask for the whole table again, which only a client does: the one it holds is older than the owner's.
     fn refresh(&mut self) {
         if let Self::Client(directory) = self {
@@ -552,21 +790,109 @@ struct Held {
     replication: Replication,
     /// What this node knows of each type it has: how many replicas its keys have and who confirms a write.
     kinds: HashMap<String, crate::handoff::service::Kind>,
+    /// How long an operation over a key waits for its replicas, for the types that set it themselves.
+    write_timeouts: HashMap<String, core::time::Duration>,
+    /// When the store of the system keeps the writes of each durable type.
+    durables: HashMap<String, Durable>,
     /// The keys with an activation here, which the host reports as they come and go.
     running: BTreeSet<Entity>,
     /// Who is waiting for every key this node stopped replicating to be taken by the nodes that replicate it now.
     handed: Option<oneshot::Sender<Vec<Entity>>>,
     /// Whether the host was already told the cluster declared this node left.
     told: bool,
+    /// Whether this node acts as the owner of the keys the ring gives it.
+    standing: Standing,
     /// The node each request went to, and how it ends if that node never answers.
     toward: HashMap<i64, (NodeId, Outcome)>,
     timings: crate::membership::service::Timings,
 }
 
+/// Whether a node acts as the owner of the keys the ring gives it: it does while it sees a majority of the members
+/// alive, and for a `grace` after it stopped seeing one.
+///
+/// A member goes `suspect` after a silence and comes back `alive` on the next answer, so the majority a node sees
+/// flickers around the threshold, at times several times within a few milliseconds. A node that stepped down on
+/// every flicker would end and start its activations again each time, and the ones it ended would linger in the
+/// host beside the ones it started. The grace is half the `dead_after` the other side of a partition waits before
+/// it takes the keys over, which leaves the other half for the step-down itself.
+#[derive(Debug)]
+struct Standing {
+    /// When the node stopped seeing a majority, while it does not.
+    lost: Option<Instant>,
+    grace: core::time::Duration,
+    acting: bool,
+}
+
+impl Standing {
+    fn new(grace: core::time::Duration) -> Self {
+        Self {
+            lost: None,
+            grace,
+            acting: true,
+        }
+    }
+
+    /// Note whether the node sees a majority `now`, and say whether it changed what the node acts as.
+    fn observe(&mut self, majority: bool, now: Instant) -> bool {
+        if majority {
+            self.lost = None;
+        } else {
+            self.lost.get_or_insert(now);
+        }
+        let acting = self.lost.is_none_or(|at| now < at + self.grace);
+        let changed = acting != self.acting;
+        self.acting = acting;
+        changed
+    }
+
+    /// When the grace ends, while the node is in it.
+    fn due(&self) -> Option<Instant> {
+        self.lost.filter(|_| self.acting).map(|at| at + self.grace)
+    }
+}
+
+/// What the types a node starts with declare, split into the tables the node task keeps.
+#[derive(Default)]
+struct Declared {
+    counts: Counts,
+    kinds: HashMap<String, crate::handoff::service::Kind>,
+    write_timeouts: HashMap<String, core::time::Duration>,
+    durables: HashMap<String, Durable>,
+}
+
+impl Declared {
+    fn of(types: Vec<Kind>) -> Self {
+        let mut declared = Self::default();
+        for kind in types {
+            declared.counts.learn(&kind.actor, kind.replicas);
+            if let Some(timeout) = kind.write_timeout {
+                declared.write_timeouts.insert(kind.actor.clone(), timeout);
+            }
+            if let Some(durable) = kind.durable {
+                declared.durables.insert(kind.actor.clone(), durable);
+            }
+            declared.kinds.insert(
+                kind.actor,
+                crate::handoff::service::Kind {
+                    replicas: kind.replicas,
+                    write: kind.write,
+                    pinned: kind.pinned,
+                },
+            );
+        }
+        declared
+    }
+}
+
 impl Held {
     fn owner(&self, actor: &str, key: &str) -> Option<NodeId> {
-        self.placement
-            .owner(actor, key, &self.counts, &self.handoff)
+        acting(
+            self.placement
+                .owner(actor, key, &self.counts, &self.handoff),
+            key,
+            self.node.id(),
+            self.standing.acting,
+        )
     }
 
     /// The replica set of a key and what an operation over it needs to know, or nothing if no member hosts the type.
@@ -597,28 +923,120 @@ impl Held {
                 .kinds
                 .get(actor)
                 .map_or(Write::Majority, |kind| kind.write),
+            write_timeout: self.write_timeouts.get(actor).copied(),
+            durable: self.durables.get(actor).copied(),
             replicas,
         })
+    }
+
+    /// Send a command toward the owner of its key, remembering where a request went so a lost node can fail it.
+    fn route(&mut self, sender: &Sender, command: Command) {
+        let owner = self.owner(command.actor(), command.key());
+        if let (Some(owner), Some(Target::Reply { id, .. })) = (owner.as_ref(), command.reply()) {
+            let failure = Outcome::unreached(command.actor(), command.key());
+            self.toward.insert(*id, (owner.clone(), failure));
+        }
+        let routed = Routed {
+            command,
+            origin: self.node.id().clone(),
+            attempt: 1,
+        };
+        let decision = self.routing.route(routed, owner);
+        self.act(sender, decision);
+    }
+
+    /// Stop waiting for a request of this node, and send its cancellation toward whoever runs the key.
+    fn cancel(&mut self, sender: &Sender, cancel: Cancel) {
+        if let Target::Reply { node, id } = &cancel.request
+            && node == self.node.id()
+        {
+            self.toward.remove(id);
+        }
+        let owner = self.owner(&cancel.actor, &cancel.key);
+        if let Some(decision) = cancelling(cancel, owner) {
+            self.act(sender, decision);
+        }
+    }
+
+    /// Take in what a type declares, and start counting it the first time it is seen.
+    fn learn(&mut self, kind: Kind, now: f64) {
+        self.kinds.insert(
+            kind.actor.clone(),
+            crate::handoff::service::Kind {
+                replicas: kind.replicas,
+                write: kind.write,
+                pinned: kind.pinned,
+            },
+        );
+        match kind.write_timeout {
+            Some(timeout) => self.write_timeouts.insert(kind.actor.clone(), timeout),
+            None => self.write_timeouts.remove(&kind.actor),
+        };
+        match kind.durable {
+            Some(durable) => self.durables.insert(kind.actor.clone(), durable),
+            None => self.durables.remove(&kind.actor),
+        };
+        if !self.counts.counted(&kind.actor) {
+            self.counts.learn(&kind.actor, kind.replicas);
+            self.placement.learned(&kind.actor);
+            if let Table::Member(membership) = &mut self.membership {
+                membership.know(&BTreeSet::from([kind.actor]), now);
+            }
+            self.membership.mark();
+        }
+    }
+
+    /// Activate a key from its replicas, or fail at once when no member hosts its type.
+    fn activate(
+        &mut self,
+        actor: String,
+        key: String,
+        initial: Option<Pages>,
+        answer: oneshot::Sender<Result<Option<State>, Failure>>,
+    ) {
+        if let Some(around) = self.around(&actor, &key) {
+            self.replication
+                .activate(&actor, &key, initial, &around, answer, Instant::now());
+        } else {
+            let failure = Failure::Unavailable(format!("no member hosts {actor}"));
+            let _ = answer.send(Err(failure.clone()));
+            self.host.observe(Event::WriteFailed {
+                actor,
+                key,
+                operation: Operation::Activate,
+                failure,
+            });
+        }
     }
 
     /// Carry out what the routing decided.
     fn act(&mut self, sender: &Sender, decision: Decision) {
         match decision {
             Decision::Send { to, message } => {
+                // Never too large: `Node::route` measured the command in its largest form before it came in.
                 let _ = sender.send(&to, ACTORS, &routing::encode(&message));
             }
             Decision::Hand(command) => {
                 let host = Arc::clone(&self.host);
                 host.hand(&self.node, command);
             }
+            Decision::Cancel(cancel) => {
+                self.host
+                    .cancel(&cancel.actor, &cancel.key, &cancel.request);
+            }
             // A message nobody waits for ends here, and the sender was told delivery is at most once.
             Decision::Refuse {
-                command, outcome, ..
-            } => {
-                if let Some(target) = command.reply().cloned() {
-                    self.answer(sender, &target, outcome);
-                }
-            }
+                command,
+                outcome,
+                why,
+            } => match command.reply().cloned() {
+                Some(target) => self.answer(sender, &target, outcome),
+                None => self.host.observe(Event::MessageDropped {
+                    actor: command.actor().to_owned(),
+                    key: command.key().to_owned(),
+                    reason: why,
+                }),
+            },
         }
     }
 
@@ -632,6 +1050,7 @@ impl Held {
             return;
         }
         let payload = routing::encode_answer(&Answer { id: *id, outcome });
+        // Never too large: `Node::answer` replaced an answer that does not fit, and a refusal is a few names.
         let _ = sender.send(&Destination::Node(node.clone()), REPLIES, &payload);
     }
 
@@ -756,6 +1175,7 @@ fn received(sender: &Sender, held: &mut Held, name: &str, payload: &[u8], now: f
                 routing::Message::Routed(routed) | routing::Message::WrongOwner(routed) => {
                     held.owner(routed.command.actor(), routed.command.key())
                 }
+                routing::Message::Cancel(cancel) => held.owner(&cancel.actor, &cancel.key),
             };
             let decision = held.routing.receive(message, owner);
             held.act(sender, decision);
@@ -793,79 +1213,92 @@ fn received(sender: &Sender, held: &mut Held, name: &str, payload: &[u8], now: f
 /// What the host asked of the node. `false` says the node is to stop.
 fn asked(sender: &Sender, held: &mut Held, ask: Ask, now: f64) -> bool {
     match ask {
-        Ask::Route(command) => {
-            let owner = held.owner(command.actor(), command.key());
-            if let (Some(owner), Some(Target::Reply { id, .. })) = (owner.as_ref(), command.reply())
-            {
-                let failure = Outcome::unreached(command.actor(), command.key());
-                held.toward.insert(*id, (owner.clone(), failure));
-            }
-            let routed = Routed {
-                command,
-                origin: held.node.id().clone(),
-                attempt: 1,
-            };
-            let decision = held.routing.route(routed, owner);
-            held.act(sender, decision);
-        }
+        Ask::Route(command) => held.route(sender, command),
         Ask::Answer { target, outcome } => held.answer(sender, &target, outcome),
         Ask::Toward { id, node, failure } => {
             held.toward.insert(id, (node, failure));
         }
-        Ask::Forget(id) => {
-            held.toward.remove(&id);
-        }
-        Ask::Learn(kind) => {
-            held.kinds.insert(
-                kind.actor.clone(),
-                crate::handoff::service::Kind {
-                    replicas: kind.replicas,
-                    write: kind.write,
-                },
-            );
-            if !held.counts.counted(&kind.actor) {
-                held.counts.learn(&kind.actor, kind.replicas);
-                held.placement.learned(&kind.actor);
-                if let Table::Member(membership) = &mut held.membership {
-                    membership.know(&BTreeSet::from([kind.actor]), now);
-                }
-                held.membership.mark();
-            }
-        }
+        Ask::Cancel(cancel) => held.cancel(sender, cancel),
+        Ask::Learn(kind) => held.learn(kind, now),
         Ask::GaveUp(actor) => held.counts.give_up(&actor),
         Ask::Activate {
             actor,
             key,
             initial,
             answer,
-        } => match held.around(&actor, &key) {
-            Some(around) => {
-                held.replication
-                    .activate(&actor, &key, initial, &around, answer, Instant::now());
-            }
-            None => {
-                let _ = answer.send(Err(Failure::Unavailable(format!(
-                    "no member hosts {actor}"
-                ))));
-            }
-        },
+        } => held.activate(actor, key, initial, answer),
         Ask::Commit {
             actor,
             key,
+            lease,
             pages,
             active,
             answer,
-        } => held
-            .replication
-            .commit(&actor, &key, pages, active, answer, Instant::now()),
-        Ask::Release { actor, key } => held.replication.forget(&actor, &key),
+        } => {
+            let around = held.around(&actor, &key);
+            let entity = (actor, key);
+            held.replication.commit(
+                &entity,
+                lease,
+                pages,
+                active,
+                around.as_ref(),
+                answer,
+                Instant::now(),
+            );
+        }
+        Ask::Delete {
+            actor,
+            key,
+            lease,
+            active,
+            answer,
+        } => {
+            let around = held.around(&actor, &key);
+            let entity = (actor, key);
+            held.replication.delete(
+                &entity,
+                lease,
+                active,
+                around.as_ref(),
+                answer,
+                Instant::now(),
+            );
+        }
+        Ask::Release { actor, key, lease } => held.replication.forget(&actor, &key, lease),
+        Ask::Placed { actor, key, answer } => {
+            let _ = answer.send(Placed {
+                owner: held.owner(&actor, &key),
+                replicas: held
+                    .placement
+                    .replicas(&actor, &key, &held.counts, &held.handoff),
+            });
+        }
+        Ask::Stored(answer) => {
+            let _ = answer.send(held.replication.replica().kept());
+        }
+        Ask::FromStore { id, kept } => held.replication.stored(id, kept),
         Ask::Attached { actor, key } => {
+            // Handed here before a change moved the key, and started after the sweep of that change read what runs.
+            if held.owner(&actor, &key).as_ref() != Some(held.node.id()) {
+                held.host.release(&actor, &key);
+            }
             held.running.insert((actor, key));
         }
         Ask::Detached { actor, key } => {
             held.running.remove(&(actor, key));
         }
         Ask::Handed(answer) => held.handed = Some(answer),
+        Ask::Abandon => {
+            if let Some(handed) = held.handed.take() {
+                let owed = held.handoff.owed();
+                for event in abandoned(&owed) {
+                    held.host.observe(event);
+                }
+                let _ = handed.send(owed);
+            }
+        }
+        Ask::Lost(node) => held.host.observe(Event::ConnectionLost { node }),
         Ask::Leave => {
             held.routing.stopped = true;
             if let Table::Member(membership) = &mut held.membership {
@@ -892,13 +1325,18 @@ async fn deadline(due: Option<Instant>) {
 
 /// The earliest moment anything on this node has to be looked at again.
 fn earliest(held: &Held) -> Option<Instant> {
-    match (held.replication.due(), held.handoff.due()) {
-        (Some(one), Some(other)) => Some(one.min(other)),
-        (due, None) | (None, due) => due,
-    }
+    [
+        held.replication.due(),
+        held.handoff.due(),
+        held.standing.due(),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
 }
 
-/// Carry out the deadlines that came due, and start again the activations another owner fenced.
+/// Carry out the deadlines that came due, start again the activations another owner fenced, and ask about the
+/// tombstones that have lingered.
 fn operations(held: &mut Held) {
     let now = Instant::now();
     for entity in held.replication.fired(now) {
@@ -906,6 +1344,18 @@ fn operations(held: &mut Held) {
             continue;
         };
         held.replication.again(&entity, &around);
+    }
+    for entity in held.replication.burying(now) {
+        // A range of this node that is still arriving may hand it an older copy of the key yet, and a tombstone
+        // forgotten before that copy lands would let it back in. It is asked about again one linger later.
+        if held.handoff.arriving(&entity.0, &entity.1) {
+            continue;
+        }
+        let Some(around) = held.around(&entity.0, &entity.1) else {
+            continue;
+        };
+        held.replication
+            .bury(&entity, &around.replicas, around.durable.is_some());
     }
     held.handoff.fired(now, held.replication.replica());
 }
@@ -923,6 +1373,8 @@ fn flush(
     for (actor, key) in held.replication.arrived() {
         held.arrived(&actor, &key);
     }
+    // A deletion, a copy or a burial laid a tombstone here, which lingers from now on.
+    held.replication.lay(Instant::now());
     let changed = held.membership.changed();
     if changed {
         let seen = held.membership.members();
@@ -938,9 +1390,17 @@ fn flush(
         held.unreachable(&seen);
         let _ = members.send(seen.clone());
         held.host.members(seen);
+        // After the table itself, so that an observer reading the members finds them as the event says.
+        for moved in held.membership.transitions() {
+            held.host.observe(moved.into());
+        }
     }
-    // A ring, an owner or a range that arrived may have moved a key, so what this node keeps is decided again.
-    if held.handoff.resweep() || changed {
+    let standing = held
+        .standing
+        .observe(held.membership.majority(), Instant::now());
+    // A ring, an owner or a copy that arrived may have moved a key, so what this node keeps is decided again; so
+    // does a node that stopped or started acting as an owner.
+    if held.handoff.resweep() || changed || standing {
         held.placement.settle(&mut held.handoff);
         swept(held);
     }
@@ -950,6 +1410,18 @@ fn flush(
     for out in held.replication.take() {
         let payload = replication::encode(&out.message);
         let _ = sender.send(&Destination::Node(out.to), REPLICATION, &payload);
+    }
+    // The host carries what the replication asks of the store out, and answers through the channel of the node.
+    for request in held.replication.storing() {
+        held.host.store(&held.node, request);
+    }
+    for event in held
+        .replication
+        .observed()
+        .into_iter()
+        .chain(held.handoff.observed())
+    {
+        held.host.observe(event);
     }
     if !held.handoff.owing()
         && let Some(handed) = held.handed.take()
@@ -977,7 +1449,7 @@ fn message_actor(message: &replication::Message) -> &str {
 }
 
 /// Room left around the pages of a message for the envelope that carries them.
-const ENVELOPE: usize = 64 * 1024;
+pub(crate) const ENVELOPE: usize = 64 * 1024;
 
 /// Decide again what this node keeps: the keys to bring back, the activations to end, and the keys to give away.
 fn swept(held: &mut Held) {
@@ -1005,6 +1477,8 @@ fn swept(held: &mut Held) {
             placement: &held.placement,
             counts: &held.counts,
             handoff: &held.handoff,
+            node: held.node.id(),
+            majority: held.standing.acting,
         },
     );
     for (actor, key) in decided.end {
@@ -1013,7 +1487,8 @@ fn swept(held: &mut Held) {
     for (actor, key) in decided.reattach {
         held.host.attach(&held.node, &actor, &key);
     }
-    held.handoff.give(decided.given, Instant::now());
+    held.handoff
+        .give(decided.given, held.replication.replica(), Instant::now());
 }
 
 /// Where the keys are, as the sweep reads it.
@@ -1021,6 +1496,21 @@ struct Where<'a> {
     placement: &'a Placement,
     counts: &'a Counts,
     handoff: &'a Handoff,
+    node: &'a NodeId,
+    majority: bool,
+}
+
+/// The owner of `key` as `node` acts on it: nobody, where the ring gives the key to `node` and `node` does not see a
+/// majority of the members alive (`Standing`).
+///
+/// Such a node may be on the small side of a partition, whose other side takes its keys over once it declares it dead.
+/// It stops seeing the others `alive` a `dead_after` before that, and gives its keys up then, so that an activation it
+/// kept does not answer from a state the new owner has written past. A pinned key has no other node to go to.
+fn acting(owner: Option<NodeId>, key: &str, node: &NodeId, majority: bool) -> Option<NodeId> {
+    match owner {
+        Some(owner) if owner == *node && !majority && pinned(key).is_none() => None,
+        owner => owner,
+    }
 }
 
 impl casty_core::handoff::sweep::Placement for Where<'_> {
@@ -1030,6 +1520,49 @@ impl casty_core::handoff::sweep::Placement for Where<'_> {
     }
 
     fn owner(&self, actor: &str, key: &str) -> Option<NodeId> {
-        self.placement.owner(actor, key, self.counts, self.handoff)
+        acting(
+            self.placement.owner(actor, key, self.counts, self.handoff),
+            key,
+            self.node,
+            self.majority,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::time::Duration;
+
+    use tokio::time::Instant;
+
+    use super::Standing;
+
+    #[test]
+    fn a_node_keeps_acting_through_a_majority_that_flickers_and_steps_down_once_it_stays_lost() {
+        let grace = Duration::from_secs(5);
+        let mut standing = Standing::new(grace);
+        let start = Instant::now();
+        assert!(standing.acting);
+        assert_eq!(standing.due(), None);
+
+        // Lost and seen again within the grace: the node acts on, and no sweep is asked for.
+        assert!(!standing.observe(false, start));
+        assert_eq!(standing.due(), Some(start + grace));
+        assert!(!standing.observe(true, start + Duration::from_millis(20)));
+        assert!(standing.acting);
+        assert_eq!(standing.due(), None);
+
+        // Lost for the whole grace: the node steps down when it ends, and not before.
+        let lost = start + Duration::from_secs(1);
+        assert!(!standing.observe(false, lost));
+        assert!(!standing.observe(false, lost + grace - Duration::from_millis(1)));
+        assert!(standing.acting);
+        assert!(standing.observe(false, lost + grace));
+        assert!(!standing.acting);
+        assert_eq!(standing.due(), None);
+
+        // Seen again after that: it acts at once.
+        assert!(standing.observe(true, lost + grace + Duration::from_secs(3)));
+        assert!(standing.acting);
     }
 }

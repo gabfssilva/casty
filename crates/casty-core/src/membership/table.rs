@@ -1,7 +1,8 @@
 //! Members of the cluster as one node sees them, with the SWIM merge rules.
 //!
 //! Instants are monotonic seconds passed by the caller. Every method gives back the records that changed, and the
-//! caller is what broadcasts them.
+//! caller is what broadcasts them. The changes of status are kept, in the order they were made, until the caller
+//! takes them.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -58,6 +59,15 @@ impl Record {
     }
 }
 
+/// A member whose status changed in the table: to `status`, from `previous`, or from nothing when the table did not
+/// hold it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transition {
+    pub node: NodeId,
+    pub status: Status,
+    pub previous: Option<Status>,
+}
+
 /// A `left` record is forgotten a minute after it was written.
 const TOMBSTONE: f64 = 60.0;
 
@@ -68,6 +78,7 @@ pub struct MemberTable {
     remove_after: Option<f64>,
     records: HashMap<NodeId, Record>,
     since: HashMap<NodeId, f64>,
+    moved: Vec<Transition>,
 }
 
 impl MemberTable {
@@ -90,6 +101,7 @@ impl MemberTable {
             node,
             dead_after,
             remove_after,
+            moved: Vec::new(),
         }
     }
 
@@ -106,6 +118,14 @@ impl MemberTable {
     #[must_use]
     pub fn record(&self, node: &NodeId) -> Option<&Record> {
         self.records.get(node)
+    }
+
+    /// The changes of status since the last call, in the order the table made them, each one once.
+    ///
+    /// A record that only raises the incarnation changes no status, and neither does a `left` record of a member the
+    /// table does not hold: that is the tombstone of a departure it never saw, or already forgot.
+    pub fn transitions(&mut self) -> Vec<Transition> {
+        core::mem::take(&mut self.moved)
     }
 
     /// Apply an observation and give back the record that changed, if any.
@@ -180,20 +200,9 @@ impl MemberTable {
     /// Apply the timeouts.
     ///
     /// `suspect` becomes `dead` after `dead_after`. `dead` becomes `left` after `remove_after`, only while this node
-    /// sees more than half of the members that have not left as `alive`, itself included: two sides of a partition
-    /// cannot both have that majority. `left` records are forgotten after a minute.
+    /// sees a `majority`. `left` records are forgotten after a minute.
     pub fn expire(&mut self, now: f64) -> Vec<Record> {
-        let left = self
-            .records
-            .values()
-            .filter(|held| held.status == Status::Left)
-            .count();
-        let alive = self
-            .records
-            .values()
-            .filter(|held| held.status == Status::Alive)
-            .count();
-        let majority = 2 * alive > self.records.len() - left;
+        let majority = self.majority();
         let mut changed = Vec::new();
         let mut forgotten = Vec::new();
         for (node, record) in &self.records {
@@ -227,6 +236,23 @@ impl MemberTable {
         changed
     }
 
+    /// Whether this node sees more than half of the members that have not left as `alive`, itself included: two sides
+    /// of a partition cannot both see that.
+    #[must_use]
+    pub fn majority(&self) -> bool {
+        let left = self
+            .records
+            .values()
+            .filter(|held| held.status == Status::Left)
+            .count();
+        let alive = self
+            .records
+            .values()
+            .filter(|held| held.status == Status::Alive)
+            .count();
+        2 * alive > self.records.len() - left
+    }
+
     fn mark(&mut self, status: Status, now: f64) -> Record {
         let record = Record {
             status,
@@ -237,6 +263,18 @@ impl MemberTable {
     }
 
     fn set(&mut self, record: Record, now: f64) {
+        let previous = self.records.get(&record.node).map(|held| held.status);
+        let moved = match previous {
+            Some(previous) => previous != record.status,
+            None => record.status != Status::Left,
+        };
+        if moved {
+            self.moved.push(Transition {
+                node: record.node.clone(),
+                status: record.status,
+                previous,
+            });
+        }
         self.since.insert(record.node.clone(), now);
         self.records.insert(record.node.clone(), record);
     }
@@ -246,7 +284,7 @@ impl MemberTable {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{MemberTable, Record, Status};
+    use super::{MemberTable, Record, Status, Transition};
     use crate::node::NodeId;
     use crate::rolls::Rolls;
 
@@ -272,6 +310,100 @@ mod tests {
             .records()
             .map(|record| (record.node.clone(), (record.incarnation, record.status)))
             .collect()
+    }
+
+    fn heard(index: u8, incarnation: u64, status: Status) -> Record {
+        Record {
+            node: node(index),
+            incarnation,
+            status,
+            types: types(),
+        }
+    }
+
+    fn transition(index: u8, status: Status, previous: Option<Status>) -> Transition {
+        Transition {
+            node: node(index),
+            status,
+            previous,
+        }
+    }
+
+    #[test]
+    fn every_change_of_status_is_reported_once_in_the_order_the_table_made_it() {
+        let me = node(0);
+        let mut held = table(&me);
+        for index in 1..=3 {
+            held.merge(heard(index, 0, Status::Alive), 0.0);
+        }
+        held.merge(heard(1, 0, Status::Suspect), 0.0);
+        held.merge(heard(1, 0, Status::Suspect), 0.1);
+
+        // Nobody took them between the two changes of the first member, and both are there.
+        assert_eq!(
+            held.transitions(),
+            vec![
+                transition(1, Status::Alive, None),
+                transition(2, Status::Alive, None),
+                transition(3, Status::Alive, None),
+                transition(1, Status::Suspect, Some(Status::Alive)),
+            ]
+        );
+        assert!(
+            held.transitions().is_empty(),
+            "a transition was reported twice"
+        );
+
+        held.expire(0.6);
+        held.expire(2.0);
+
+        assert_eq!(
+            held.transitions(),
+            vec![
+                transition(1, Status::Dead, Some(Status::Suspect)),
+                transition(1, Status::Left, Some(Status::Dead)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_incarnation_a_refutation_or_the_tombstone_of_a_stranger_changes_no_status() {
+        let me = node(0);
+        let mut held = table(&me);
+        held.merge(heard(1, 0, Status::Alive), 0.0);
+        assert_eq!(held.transitions().len(), 1);
+
+        held.merge(heard(1, 1, Status::Alive), 0.0);
+        held.merge(
+            Record {
+                node: me.clone(),
+                incarnation: 3,
+                status: Status::Suspect,
+                types: types(),
+            },
+            0.0,
+        );
+        held.know(&BTreeSet::from(["order".to_owned()]), 0.0);
+        held.merge(heard(2, 0, Status::Left), 0.0);
+
+        assert!(held.transitions().is_empty());
+    }
+
+    #[test]
+    fn this_node_going_away_is_leaving_then_left() {
+        let me = node(0);
+        let mut held = table(&me);
+
+        held.leave(0.0);
+        held.depart(0.1);
+
+        assert_eq!(
+            held.transitions(),
+            vec![
+                transition(0, Status::Leaving, Some(Status::Alive)),
+                transition(0, Status::Left, Some(Status::Leaving)),
+            ]
+        );
     }
 
     #[test]

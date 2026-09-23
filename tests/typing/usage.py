@@ -2,9 +2,37 @@
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
-from typing import Never, assert_never, assert_type
+from datetime import datetime, timedelta
+from typing import Annotated, Never, assert_never, assert_type
 
-from casty import Actor, ActorSystem, Client, Cluster, Collections, Context, DefaultedActor, Ref, State, System, actor
+from casty import (
+    Activation,
+    Actor,
+    ActorSystem,
+    Backoff,
+    Client,
+    Cluster,
+    Collections,
+    Compression,
+    Context,
+    DefaultedActor,
+    Durable,
+    Event,
+    Limits,
+    MemberChanged,
+    MessageDropped,
+    MessageTooLarge,
+    NodeId,
+    OnFull,
+    Opaque,
+    Placement,
+    Ref,
+    State,
+    Stats,
+    Store,
+    System,
+    actor,
+)
 from casty.collections import (
     MISSING,
     Barrier,
@@ -117,11 +145,40 @@ async def state_types(ctx: Context[Offset]) -> None:
     assert_type(await ctx.state.update(advanced), Offset)
 
 
-@actor(initial=Offset(), mailbox=1_000)
+@actor(initial=Offset(), mailbox=1_000, on_full="wait")
 async def consumer(ctx: Context[Offset]) -> None:
     async for record in broker.stream(ctx.key, ctx.state.value.value):
         await process(record)
         await ctx.state.set(Offset(record.offset + 1))
+
+
+assert_type(consumer.on_full, OnFull)
+
+
+@actor(initial=Account(), concurrency=8)
+async def statement(ctx: Context[Account, Withdraw]) -> None:
+    async for msg in ctx.inbox:
+        msg.reply_to.tell(msg.amount <= ctx.state.value.balance)
+
+
+assert_type(statement.concurrency, int)
+
+
+@actor(
+    initial=Offset(),
+    idle_after=timedelta(minutes=10),
+    ask_timeout=timedelta(minutes=2),
+    write_timeout=timedelta(seconds=30),
+    backoff=Backoff(limit=timedelta(minutes=1)),
+)
+async def indexer(ctx: Context[Offset]) -> None:
+    async for record in broker.stream(ctx.key, ctx.state.value.value):
+        await process(record)
+        await ctx.state.set(Offset(record.offset + 1))
+
+
+assert_type(indexer.ask_timeout, timedelta | None)
+assert_type(indexer.backoff, Backoff | None)
 
 
 @dataclass(frozen=True)
@@ -165,13 +222,57 @@ async def journal(ctx: Context[tuple[str, ...], AccountMsg]) -> None:
         await ctx.state.set((*ctx.state.value, "entry"))
 
 
+@actor(initial=Offset(), durable="write")
+async def cursor(ctx: Context[Offset, Tick]) -> None:
+    async for tick in ctx.inbox:
+        await ctx.state.set(Offset(ctx.state.value.value + tick.count))
+
+
+@actor(initial=Offset(), durable=timedelta(seconds=5))
+async def gauge(ctx: Context[Offset, Tick]) -> None:
+    async for tick in ctx.inbox:
+        await ctx.state.set(Offset(tick.count))
+
+
+assert_type(cursor.durable, Durable | None)
+
+
+class Files:
+    """A store as a caller writes one: three coroutines over records of a version and a state."""
+
+    async def load(self, actor: str, key: str, /) -> tuple[bytes, bytes | None] | None:
+        return None
+
+    async def save(self, actor: str, key: str, version: bytes, state: bytes | None, /) -> None: ...
+
+    async def drop(self, actor: str, key: str, version: bytes, /) -> None: ...
+
+
+def keeper() -> Store:
+    return Files()
+
+
+async def stored_types() -> None:
+    async with ActorSystem(store=keeper()) as system:
+        system.ref(cursor, "c-1").tell(Tick(1))
+        system.ref(gauge, "g-1").tell(Tick(2))
+
+
 async def main() -> None:
     assert_type(account, DefaultedActor[Account, AccountMsg])
     assert_type(order, Actor[Pending, Pay])
     assert_type(consumer, DefaultedActor[Offset, Never])
     assert_type(journal, DefaultedActor[tuple[str, ...], AccountMsg])
 
-    cluster = Cluster(bind="0.0.0.0:7400", advertise="10.0.0.5:7400", seeds=("10.0.0.4:7400",))
+    limits = Limits(message=32 * 1024 * 1024)
+    compression = Compression(min_bytes=16 * 1024)
+    cluster = Cluster(
+        bind="0.0.0.0:7400",
+        advertise="10.0.0.5:7400",
+        seeds=("10.0.0.4:7400",),
+        limits=limits,
+        compression=compression,
+    )
 
     async with ActorSystem(cluster=cluster) as system:
         assert_type(system.ref(journal, "diary"), Ref[AccountMsg])
@@ -180,8 +281,39 @@ async def main() -> None:
         assert_type(await acc.ask(Withdraw, 30), bool)
         assert_type(await acc.ask(Withdraw, amount=30), bool)
         acc.tell(Deposit(10))
+        try:
+            await acc.ask(Withdraw, 30)
+        except MessageTooLarge as refused:
+            assert_type(refused, MessageTooLarge)
         assert_type(system.ref(order, "o-1", initial=Pending()), Ref[Pay])
         assert_type(system.ref(consumer, "orders-0"), Ref[Never])
+
+
+class Alarms:
+    """An observer that takes only the kinds of event it raises an alarm on."""
+
+    def wants(self, kind: type[Event], /) -> bool:
+        return kind in (MemberChanged, MessageDropped)
+
+    def __call__(self, event: Event, /) -> None: ...
+
+
+async def observed_types() -> None:
+    async with ActorSystem(observer=Alarms()) as system:
+        stats = system.stats()
+        assert_type(stats, Stats)
+        assert_type(stats.actors[account.name].deepest, int)
+        assert_type(stats.writes_confirmed, int)
+        listed = system.activations()
+        assert_type(listed, tuple[Activation, ...])
+        assert_type(listed[0].since, datetime)
+        placed = await system.placement(account, "acc-1")
+        assert_type(placed, Placement)
+        assert_type(placed.owner, NodeId | None)
+        assert_type(await system.release(order, "o-1"), bool)
+    async with Client(seeds=("10.0.0.4:7400",)) as client:
+        assert_type(client.stats().bytes_received, int)
+        assert_type((await client.placement(account, "acc-1")).replicas, tuple[NodeId, ...])
 
 
 async def collection_types(system: System) -> None:
@@ -191,6 +323,9 @@ async def collection_types(system: System) -> None:
     assert_type(await entries.get("one"), Account | Missing)
     await entries.put("one", Account(1))
     assert_type(await entries.items(), list[tuple[str, Account]])
+    assert_type(entries.scan(), AsyncIterator[tuple[str, Account]])
+    assert_type(collections.set("names", value=str).scan(), AsyncIterator[str])
+    assert_type(collections.multimap("owners", key=str, value=Account).scan(), AsyncIterator[tuple[str, Account]])
     assert_type(collections.counter("visits"), Counter)
     register = collections.register("account", value=Account)
     assert_type(register, Register[Account])
@@ -209,5 +344,41 @@ async def collection_types(system: System) -> None:
     assert_type(collections.lock("resource"), Lock)
     assert_type(collections.barrier("round", parties=3), Barrier)
 
-    async with Client(seeds=("10.0.0.4:7400",)) as client:
+    async with Client(seeds=("10.0.0.4:7400",), limits=Limits(message=32 * 1024 * 1024)) as client:
         assert_type(await client.ref(account, "acc-1").ask(Withdraw, 30), bool)
+
+
+def packed(numbers: list[int]) -> bytes:
+    return bytes(numbers)
+
+
+def unpacked(data: bytes) -> list[int]:
+    return list(data)
+
+
+type Numbers = Annotated[list[int], Opaque(encode=packed, decode=unpacked)]
+
+
+@dataclass(frozen=True)
+class Sketch:
+    strokes: Numbers
+
+
+@dataclass(frozen=True)
+class Stroke:
+    reply_to: Ref[Numbers]
+    value: int
+
+
+@actor(initial=Sketch([]))
+async def sketch(ctx: Context[Sketch, Stroke]) -> None:
+    async for msg in ctx.inbox:
+        assert_type(ctx.state.value.strokes, list[int])
+        strokes = [*ctx.state.value.strokes, msg.value]
+        await ctx.state.set(Sketch(strokes))
+        msg.reply_to.tell(strokes)
+
+
+async def opaque_types(system: System) -> None:
+    assert_type(Opaque(encode=packed, decode=unpacked), Opaque[list[int]])
+    assert_type(await system.ref(sketch, "s-1").ask(Stroke, 3), list[int])

@@ -6,6 +6,19 @@ use crate::store::Pages;
 /// Reserved page that marks a key as active.
 pub const ACTIVE: &str = "@active";
 
+/// Reserved page that marks a key as deleted.
+///
+/// A deletion is a write like any other, of a state that holds this page and nothing else: the tombstone. It takes
+/// the place of the state on the replicas that accept it, fences the older copies the way any later write does, and an
+/// activation that finds it as the latest write starts the key from `initial`, as one nothing ever wrote.
+pub const DELETED: &str = "@deleted";
+
+/// The state a deletion writes.
+#[must_use]
+pub fn tombstone() -> Pages {
+    Pages::from([(DELETED.to_owned(), Vec::new())])
+}
+
 /// The replicas that confirm a `save`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Write {
@@ -68,14 +81,15 @@ impl Stamp {
 
 /// A key as a replica keeps it: the write it accepted, the epoch it promised, and the pages of that write.
 ///
-/// `pages` may carry part of the state when the whole of it does not fit in one message, and `final_part` says it is
-/// the last part of the key.
+/// `pages` may carry part of the state when the whole of it does not fit in one message: part `part` of the key holds
+/// the next bytes of the pages it names, as `parts::split` cuts them, and `final_part` says it is the last one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Copy {
     pub key: String,
     pub accepted: Option<Stamp>,
     pub promised: Option<Epoch>,
     pub pages: Pages,
+    pub part: u32,
     pub final_part: bool,
 }
 
@@ -89,8 +103,9 @@ pub enum Request {
     },
     /// Part `part` of the write `stamp`.
     ///
-    /// `pages` and `dropped` are a delta against the write `base`, or the whole state when there is no base. A
-    /// replica publishes the write on the final part, and only if it received every earlier part in order.
+    /// `pages` and `dropped` are a delta against the write `base`, or the whole state when there is no base. A page
+    /// larger than a message goes on across parts, each with the next bytes of it. A replica publishes the write on
+    /// the final part, and only if it received every earlier part in order.
     Accept {
         actor: String,
         key: String,
@@ -101,11 +116,23 @@ pub enum Request {
         pages: Pages,
         dropped: Vec<String>,
     },
+    /// Part `part` of the pages `names` of the write a replica accepted, cut to fit in a message.
     FetchPages {
         actor: String,
         key: String,
         epoch: Epoch,
         names: Vec<String>,
+        part: u32,
+    },
+    /// Whether the replica keeps a copy of `key` older than the deletion `stamp`, which it replaces by the tombstone of
+    /// that deletion if it does. `node` keeps the tombstone, and lets it go once every other replica has answered.
+    ///
+    /// It is not a request of the owner: any replica holding a tombstone asks it, once the tombstone has lingered.
+    Bury {
+        actor: String,
+        key: String,
+        stamp: Stamp,
+        node: NodeId,
     },
 }
 
@@ -115,16 +142,18 @@ impl Request {
         match self {
             Self::Prepare { actor, .. }
             | Self::Accept { actor, .. }
-            | Self::FetchPages { actor, .. } => actor,
+            | Self::FetchPages { actor, .. }
+            | Self::Bury { actor, .. } => actor,
         }
     }
 
     #[must_use]
     pub fn key(&self) -> &str {
         match self {
-            Self::Prepare { key, .. } | Self::Accept { key, .. } | Self::FetchPages { key, .. } => {
-                key
-            }
+            Self::Prepare { key, .. }
+            | Self::Accept { key, .. }
+            | Self::FetchPages { key, .. }
+            | Self::Bury { key, .. } => key,
         }
     }
 
@@ -134,6 +163,7 @@ impl Request {
         match self {
             Self::Prepare { epoch, .. } | Self::FetchPages { epoch, .. } => &epoch.node,
             Self::Accept { stamp, .. } => &stamp.epoch.node,
+            Self::Bury { node, .. } => node,
         }
     }
 }
@@ -158,11 +188,14 @@ pub enum Reply {
         replica: NodeId,
         promised: Epoch,
     },
+    /// Part `part` of the pages a `FetchPages` asked for, and `final_part` says there is none after it.
     Pages {
         actor: String,
         key: String,
         epoch: Epoch,
         accepted: Option<Stamp>,
+        part: u32,
+        final_part: bool,
         pages: Pages,
     },
     Accepted {
@@ -178,5 +211,14 @@ pub enum Reply {
         key: String,
         stamp: Stamp,
         replica: NodeId,
+    },
+    /// The replica keeps nothing of `key` older than the deletion `stamp`. `receiving` says a range it is still
+    /// filling holds the key, which may bring an older copy yet, so the answer does not count.
+    Buried {
+        actor: String,
+        key: String,
+        stamp: Stamp,
+        replica: NodeId,
+        receiving: bool,
     },
 }

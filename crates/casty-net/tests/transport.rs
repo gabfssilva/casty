@@ -8,11 +8,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use casty_core::schema::msgpack::Reader;
 use casty_net::compress::Name;
 use casty_net::endpoint::{Config, Endpoint, Received};
 use casty_net::frame::{Frame, VERSION};
 use casty_net::limits::Limits;
-use casty_net::pool::Target;
+use casty_net::pool::{Lost, Target, Traffic};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -210,6 +211,87 @@ async fn it_reports_a_seed_that_belongs_to_another_cluster() {
     assert!(reason.contains("another"), "{reason}");
     other.close(true).await;
     joining.close(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_reports_a_seed_whose_limits_differ() {
+    let other = Endpoint::start(Config {
+        limits: Limits {
+            message: 8 * 1024 * 1024,
+            ..Limits::default()
+        },
+        ..config(Some("127.0.0.1:0"))
+    })
+    .await
+    .unwrap();
+    let address = other.node().address.clone().unwrap();
+    let mut joining = node().await;
+
+    joining
+        .send(&Target::Seed(address), "actors", b"hello")
+        .unwrap();
+
+    let refused = tokio::time::timeout(WITHIN, joining.recv()).await.unwrap();
+    let Some(Err(reason)) = refused else {
+        panic!("the seed did not refuse: {refused:?}");
+    };
+    assert!(reason.contains("message=8388608"), "{reason}");
+    other.close(true).await;
+    joining.close(true).await;
+}
+
+/// The hello names the cluster, the node, its role, the compressors and the limits, and no payload format: there is
+/// only one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hello_names_no_payload_format() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let limits = Limits::default();
+    let heard = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut frames = casty_net::frame::Decoder::new(limits.frame);
+        let mut mux = casty_net::mux::Mux::new(limits, 1 << 30);
+        let mut buffer = vec![0_u8; 8 * 1024];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "the connection ended before the hello");
+            frames.feed(&buffer[..read]);
+            while let Some(frame) = frames.frame().unwrap() {
+                let records = mux.receive(frame).unwrap();
+                if let Some(hello) = records.into_iter().find(|record| record.name == "hello") {
+                    return hello.payload;
+                }
+            }
+        }
+    });
+    let talker = node().await;
+    talker
+        .send(&Target::Seed(address), "actors", b"anyone there")
+        .unwrap();
+
+    let payload = tokio::time::timeout(WITHIN, heard).await.unwrap().unwrap();
+    let mut reader = Reader::new(&payload);
+    let mut names = Vec::new();
+    for _ in 0..reader.read_map_len().unwrap() {
+        names.push(reader.read_str().unwrap().to_owned());
+        reader.skip().unwrap();
+    }
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "address",
+            "cluster",
+            "compression",
+            "frame",
+            "incarnation",
+            "message",
+            "role",
+            "versions",
+            "window",
+        ]
+    );
+    talker.close(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -460,4 +542,85 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
     let given_up = tokio::time::timeout(Duration::from_secs(5), deaf).await;
     assert!(given_up.is_ok(), "the connection to a silent peer was kept");
     talker.close(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_reports_the_peer_of_a_connection_that_ended() {
+    let (lost, mut heard) = tokio::sync::mpsc::unbounded_channel();
+    let reporting: Lost = Arc::new(move |peer: &casty_core::node::NodeId| {
+        let _ = lost.send(peer.clone());
+    });
+    let mut watching = Endpoint::start(Config {
+        lost: Some(reporting),
+        ..config(Some("127.0.0.1:0"))
+    })
+    .await
+    .unwrap();
+    let peer = node().await;
+    let gone = peer.node().clone();
+    peer.send(&Target::Node(watching.node().clone()), "actors", b"hello")
+        .unwrap();
+    take(&mut watching, 1).await;
+
+    peer.close(true).await;
+
+    let reported = tokio::time::timeout(WITHIN, heard.recv()).await;
+    assert_eq!(
+        reported,
+        Ok(Some(gone)),
+        "the lost connection was not reported"
+    );
+    watching.close(true).await;
+}
+
+/// What `endpoint` counts once `holds` says yes of it, or what it counted last when that never happens.
+async fn counted(endpoint: &Endpoint, holds: impl Fn(&Traffic) -> bool) -> Traffic {
+    let deadline = tokio::time::Instant::now() + WITHIN;
+    loop {
+        let traffic = endpoint.meter().traffic();
+        if holds(&traffic) || tokio::time::Instant::now() >= deadline {
+            return traffic;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_counts_the_connections_it_holds_and_the_bytes_they_carry() {
+    let plain = || Config {
+        compression: Some(Vec::new()),
+        ..config(Some("127.0.0.1:0"))
+    };
+    let mut receiver = Endpoint::start(plain()).await.unwrap();
+    let sender = Endpoint::start(plain()).await.unwrap();
+    assert_eq!(sender.meter().traffic(), Traffic::default());
+    let payload = vec![7_u8; 100_000];
+    let size = payload.len() as u64;
+
+    sender
+        .send(&Target::Node(receiver.node().clone()), "actors", &payload)
+        .unwrap();
+    take(&mut receiver, 1).await;
+
+    // Uncompressed, each side carried the payload and the handshake and frames around it. A write is counted once it
+    // returns, which can be after the other side has read it, so both are waited for.
+    let out = counted(&sender, |traffic| {
+        traffic.connections == 1 && traffic.sent > size
+    })
+    .await;
+    assert!(out.connections == 1 && out.sent > size, "{out:?}");
+    let into = counted(&receiver, |traffic| {
+        traffic.connections == 1 && traffic.received > size
+    })
+    .await;
+    assert!(into.connections == 1 && into.received > size, "{into:?}");
+
+    sender.close(true).await;
+    let gone = counted(&receiver, |traffic| traffic.connections == 0).await;
+    assert_eq!(
+        gone.connections, 0,
+        "a connection that ended is still counted"
+    );
+    assert!(gone.received >= into.received, "a count went back");
+    receiver.close(true).await;
 }

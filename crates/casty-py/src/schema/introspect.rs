@@ -18,6 +18,9 @@ pub struct Introspect<'py> {
     is_dataclass: Bound<'py, PyAny>,
     missing: Bound<'py, PyAny>,
     pub literal: Bound<'py, PyAny>,
+    pub annotated: Bound<'py, PyAny>,
+    /// `casty.Opaque`, the metadata of an `Annotated` that makes a value travel as the bytes of the caller's functions.
+    pub opaque: Bound<'py, PyType>,
     pub never: Bound<'py, PyAny>,
     pub union: Bound<'py, PyAny>,
     pub union_type: Bound<'py, PyAny>,
@@ -25,7 +28,15 @@ pub struct Introspect<'py> {
     pub type_alias_type: Bound<'py, PyType>,
     pub mapping: Bound<'py, PyAny>,
     pub datetime: Bound<'py, PyType>,
+    pub date: Bound<'py, PyType>,
+    pub time: Bound<'py, PyType>,
+    pub timedelta: Bound<'py, PyType>,
+    pub decimal: Bound<'py, PyType>,
     pub uuid: Bound<'py, PyType>,
+    /// `PurePosixPath`, `PureWindowsPath` and `Path`.
+    pub paths: [Bound<'py, PyType>; 3],
+    pub enumeration: Bound<'py, PyType>,
+    pub flag: Bound<'py, PyType>,
     pub none_type: Bound<'py, PyType>,
     pub bool_type: Bound<'py, PyType>,
     pub int_type: Bound<'py, PyType>,
@@ -49,6 +60,9 @@ impl<'py> Introspect<'py> {
         let dataclasses = py.import("dataclasses")?;
         let types = py.import("types")?;
         let builtins = py.import("builtins")?;
+        let moments = py.import("datetime")?;
+        let enumerations = py.import("enum")?;
+        let pathlib = py.import("pathlib")?;
         Ok(Self {
             py,
             get_origin: typing.getattr("get_origin")?,
@@ -58,14 +72,27 @@ impl<'py> Introspect<'py> {
             is_dataclass: dataclasses.getattr("is_dataclass")?,
             missing: dataclasses.getattr("MISSING")?,
             literal: typing.getattr("Literal")?,
+            annotated: typing.getattr("Annotated")?,
+            opaque: py.import("casty")?.getattr("Opaque")?.cast_into()?,
             never: typing.getattr("Never")?,
             union: typing.getattr("Union")?,
             union_type: types.getattr("UnionType")?,
             type_var: typing.getattr("TypeVar")?.cast_into()?,
             type_alias_type: typing.getattr("TypeAliasType")?.cast_into()?,
             mapping: py.import("collections.abc")?.getattr("Mapping")?,
-            datetime: py.import("datetime")?.getattr("datetime")?.cast_into()?,
+            datetime: moments.getattr("datetime")?.cast_into()?,
+            date: moments.getattr("date")?.cast_into()?,
+            time: moments.getattr("time")?.cast_into()?,
+            timedelta: moments.getattr("timedelta")?.cast_into()?,
+            decimal: py.import("decimal")?.getattr("Decimal")?.cast_into()?,
             uuid: py.import("uuid")?.getattr("UUID")?.cast_into()?,
+            paths: [
+                pathlib.getattr("PurePosixPath")?.cast_into()?,
+                pathlib.getattr("PureWindowsPath")?.cast_into()?,
+                pathlib.getattr("Path")?.cast_into()?,
+            ],
+            enumeration: enumerations.getattr("Enum")?.cast_into()?,
+            flag: enumerations.getattr("Flag")?.cast_into()?,
             none_type: types.getattr("NoneType")?.cast_into()?,
             bool_type: builtins.getattr("bool")?.cast_into()?,
             int_type: builtins.getattr("int")?.cast_into()?,
@@ -101,8 +128,14 @@ impl<'py> Introspect<'py> {
             .collect())
     }
 
+    /// The annotations of the fields of `class`, with their `Annotated` metadata kept: it is where `Opaque` is.
     pub fn hints(&self, class: &Bound<'py, PyType>) -> PyResult<Bound<'py, PyDict>> {
-        Ok(self.get_type_hints.call1((class,))?.cast_into()?)
+        let named = PyDict::new(self.py);
+        named.set_item("include_extras", true)?;
+        Ok(self
+            .get_type_hints
+            .call((class,), Some(&named))?
+            .cast_into()?)
     }
 
     pub fn is_dataclass(&self, value: &Bound<'py, PyAny>) -> PyResult<bool> {

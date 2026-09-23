@@ -18,25 +18,34 @@ pub enum Pull {
     },
     /// Part of an answer to a `PullRange`: keys in order, split so that each part fits in a message.
     ///
-    /// `final_part` says the source has nothing more for the request, and `receiving` that the source is itself
-    /// waiting for one of the ranges, so that this answer does not count toward the threshold of the node that asked.
+    /// `stream` names the answer among every stream of keys the source sent, and `part` numbers its messages from the
+    /// first: an answer a message of which went missing leaves keys out, and does not count. `final_part` says the
+    /// source has nothing more for the request, and `receiving` that the source is itself waiting for one of the
+    /// ranges, so that this answer does not count toward the threshold of the node that asked.
     RangeKeys {
         actor: String,
         replica: NodeId,
         transfer: u64,
+        stream: u64,
         part: u32,
         final_part: bool,
         receiving: bool,
         keys: Vec<Copy>,
     },
-    /// Part of a handover: keys the sender stopped replicating, whole, for a node that replicates them now.
+    /// Part of a handover: keys the sender stopped replicating, for a node that replicates them now, in a numbered
+    /// stream as for a range.
     HandKeys {
         actor: String,
         node: NodeId,
+        stream: u64,
+        part: u32,
         final_part: bool,
         keys: Vec<Copy>,
     },
-    /// The keys of a handover that are installed here, which is what lets the sender drop its copies.
+    /// The keys one message of a handover completed here, which is what lets the sender drop its copies.
+    ///
+    /// Each message is answered for on its own: a list of every key of a handover would not fit in one message, while
+    /// the names of the keys one message completed take less room than that message did.
     TookKeys {
         actor: String,
         replica: NodeId,

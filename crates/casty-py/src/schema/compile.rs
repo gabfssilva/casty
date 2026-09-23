@@ -4,9 +4,10 @@
 //! of every refusal is part of the contract: a test reads it word for word.
 
 use casty_core::schema::ir::{
-    Container, Dataclass, Field, Kinds, Literal, Native, Node, NodeRef, Tree, Union,
+    CodecRef, Container, Dataclass, Enum, Field, Kinds, Literal, Native, Node, NodeRef, Opaque,
+    Tree, Union,
 };
-use casty_core::schema::{Kind, SchemaError};
+use casty_core::schema::{ClassRef, Kind, SchemaError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyInt, PyString, PyType};
 
@@ -14,10 +15,18 @@ use super::failure::{Failure, Outcome};
 use super::introspect::Introspect;
 use super::naming::{name, replacement};
 
-/// A compiled annotation and the classes its dataclasses are.
+/// The functions of an `Opaque`, which the value it annotates is written and read with.
+#[derive(Debug)]
+pub struct Codec {
+    pub encode: Py<PyAny>,
+    pub decode: Py<PyAny>,
+}
+
+/// A compiled annotation, the classes its dataclasses, enums and paths are, and the functions of its opaque values.
 pub struct Compiled {
     pub tree: Tree,
     pub classes: Vec<Py<PyType>>,
+    pub codecs: Vec<Codec>,
 }
 
 /// Compile `annotation`, with `canonical` ordering for the containers whose state is compared byte for byte.
@@ -30,6 +39,7 @@ pub fn compile(
         introspect,
         nodes: Vec::new(),
         classes: Vec::new(),
+        codecs: Vec::new(),
         shared: Vec::new(),
         canonical,
     };
@@ -44,6 +54,7 @@ struct Compiler<'a, 'py> {
     /// Filled as the walk returns; a node still empty at the end is a type that refers only to itself.
     nodes: Vec<Option<Node>>,
     classes: Vec<Py<PyType>>,
+    codecs: Vec<Codec>,
     /// What each dataclass and alias compiled to, by the type arguments it was compiled with.
     shared: Vec<(Py<PyAny>, Vec<NodeRef>, NodeRef)>,
     canonical: bool,
@@ -64,6 +75,7 @@ impl<'py> Compiler<'_, 'py> {
         Ok(Compiled {
             tree: Tree::new(nodes, root)?,
             classes: self.classes,
+            codecs: self.codecs,
         })
     }
 
@@ -107,8 +119,25 @@ impl<'py> Compiler<'_, 'py> {
                 Ok(Node::Alias(compiler.compile(&value, &path, &bound)?))
             });
         }
+        if origin.is(&introspect.annotated) {
+            return self.annotated(annotation, &args, path, env);
+        }
         if let Some(node) = self.leaf(annotation) {
             return Ok(self.push(node));
+        }
+        if let Some(class) = self.path_class(annotation) {
+            let class = self.class(&class);
+            return Ok(self.push(Node::Path(class)));
+        }
+        if let Some((class, names)) = self.enumeration(annotation)? {
+            let target = class.clone();
+            return self.shared(class.as_any(), &[], move |compiler| {
+                Ok(Node::Enum(Enum {
+                    qualname: qualname(&target)?,
+                    class: compiler.class(&target),
+                    names,
+                }))
+            });
         }
         if origin.is(&introspect.literal) {
             return self.literal(annotation, &args, path);
@@ -143,7 +172,7 @@ impl<'py> Compiler<'_, 'py> {
         Err(error(path, format!("{named} is not supported")))
     }
 
-    /// An annotation that stands for itself: a native type, `Never`, a `datetime` or a `UUID`.
+    /// An annotation that stands for itself: a native type, `Never`, or a value class of the standard library.
     fn leaf(&self, annotation: &Bound<'py, PyAny>) -> Option<Node> {
         let introspect = self.introspect;
         let native = if annotation.is_none() || annotation.is(&introspect.none_type) {
@@ -162,6 +191,14 @@ impl<'py> Compiler<'_, 'py> {
             return Some(Node::Never);
         } else if annotation.is(&introspect.datetime) {
             return Some(Node::Datetime);
+        } else if annotation.is(&introspect.date) {
+            return Some(Node::Date);
+        } else if annotation.is(&introspect.time) {
+            return Some(Node::Time);
+        } else if annotation.is(&introspect.timedelta) {
+            return Some(Node::Timedelta);
+        } else if annotation.is(&introspect.decimal) {
+            return Some(Node::Decimal);
         } else if annotation.is(&introspect.uuid) {
             return Some(Node::Uuid);
         } else {
@@ -170,7 +207,109 @@ impl<'py> Compiler<'_, 'py> {
         Some(Node::Native(native))
     }
 
+    /// The `pathlib` class `annotation` is, which is what its string is read back as.
+    fn path_class(&self, annotation: &Bound<'py, PyAny>) -> Option<Bound<'py, PyType>> {
+        self.introspect
+            .paths
+            .iter()
+            .find(|class| annotation.is(*class))
+            .cloned()
+    }
+
+    /// `Annotated[T, ...]`: a value written by the caller's functions when an `Opaque` is among its metadata, and `T`
+    /// when none is.
+    ///
+    /// `T` is not compiled for an opaque value, since the schema never reads it: it is only what the checkers see and
+    /// what a mismatch names.
+    fn annotated(
+        &mut self,
+        annotation: &Bound<'py, PyAny>,
+        args: &[Bound<'py, PyAny>],
+        path: &[String],
+        env: Env<'_, 'py>,
+    ) -> Outcome<NodeRef> {
+        let introspect = self.introspect;
+        let Some((inner, metadata)) = args.split_first() else {
+            let named = name(introspect, annotation)?;
+            return Err(error(path, format!("{named} is not supported")));
+        };
+        match self.hatches(metadata)?.as_slice() {
+            [] => self.compile(inner, path, env),
+            [hatch] => {
+                #[allow(clippy::cast_possible_truncation)]
+                let codec = CodecRef(self.codecs.len() as u32);
+                self.codecs.push(Codec {
+                    encode: hatch.getattr("encode")?.unbind(),
+                    decode: hatch.getattr("decode")?.unbind(),
+                });
+                let opaque = Opaque {
+                    codec,
+                    name: name(introspect, inner)?,
+                };
+                Ok(self.push(Node::Opaque(opaque)))
+            }
+            _ => {
+                let named = name(introspect, annotation)?;
+                Err(error(path, format!("{named} has more than one Opaque")))
+            }
+        }
+    }
+
+    /// The `Opaque`s among the metadata of an `Annotated`.
+    fn hatches(&self, metadata: &[Bound<'py, PyAny>]) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let mut found = Vec::new();
+        for item in metadata {
+            if item.is_instance(&self.introspect.opaque)? {
+                found.push(item.clone());
+            }
+        }
+        Ok(found)
+    }
+
+    /// `annotation` without the `Annotated` around it, which only an `Opaque` among its metadata keeps.
+    fn bare(&self, annotation: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let introspect = self.introspect;
+        if introspect.origin(annotation)?.is(&introspect.annotated) {
+            let args = introspect.args(annotation)?;
+            if let Some((inner, metadata)) = args.split_first()
+                && self.hatches(metadata)?.is_empty()
+            {
+                return self.bare(inner);
+            }
+        }
+        Ok(annotation.clone())
+    }
+
+    /// An `Enum` with members, and every name they answer to.
+    ///
+    /// A `Flag` is not one: a combination of flags has no single name, and an `IntFlag` keeps bits no member names. An
+    /// enum without members is a base class, whose values would be members of subclasses it cannot name.
+    fn enumeration(
+        &self,
+        annotation: &Bound<'py, PyAny>,
+    ) -> PyResult<Option<(Bound<'py, PyType>, Vec<String>)>> {
+        let introspect = self.introspect;
+        let Ok(class) = annotation.cast::<PyType>() else {
+            return Ok(None);
+        };
+        if !class.is_subclass(&introspect.enumeration)? || class.is_subclass(&introspect.flag)? {
+            return Ok(None);
+        }
+        let names: Vec<String> = class
+            .getattr("__members__")?
+            .try_iter()?
+            .map(|name| name?.extract::<String>())
+            .collect::<PyResult<_>>()?;
+        if names.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((class.clone(), names)))
+    }
+
     /// A container of other annotations, which the arguments of the origin say what holds what.
+    ///
+    /// Nothing when the arguments are not the ones the container takes, which `typing.FrozenSet` or `Mapping[K]` leave
+    /// out: the annotation is then refused as not supported.
     fn container(
         &mut self,
         origin: &Bound<'py, PyAny>,
@@ -180,8 +319,10 @@ impl<'py> Compiler<'_, 'py> {
     ) -> Outcome<Option<Node>> {
         let introspect = self.introspect;
         if origin.is(&introspect.tuple_type) {
-            if args.len() == 2 && args[1].is(&introspect.ellipsis) {
-                let item = self.compile(&args[0], path, env)?;
+            if let [item, ellipsis] = args
+                && ellipsis.is(&introspect.ellipsis)
+            {
+                let item = self.compile(item, path, env)?;
                 return Ok(Some(Node::Items {
                     item,
                     container: Container::Tuple,
@@ -191,25 +332,31 @@ impl<'py> Compiler<'_, 'py> {
             let items = self.all(args, path, env)?;
             return Ok(Some(Node::Tuple(items)));
         }
-        if origin.is(&introspect.frozenset_type) {
-            let item = self.compile(&args[0], path, env)?;
+        if origin.is(&introspect.frozenset_type)
+            && let [item] = args
+        {
+            let item = self.compile(item, path, env)?;
             return Ok(Some(Node::Items {
                 item,
                 container: Container::FrozenSet,
                 canonical: self.canonical,
             }));
         }
-        if origin.is(&introspect.mapping) {
-            let key = self.compile(&args[0], path, env)?;
-            let value = self.compile(&args[1], path, env)?;
+        if origin.is(&introspect.mapping)
+            && let [key, value] = args
+        {
+            let key = self.compile(key, path, env)?;
+            let value = self.compile(value, path, env)?;
             return Ok(Some(Node::Mapping {
                 key,
                 value,
                 canonical: self.canonical,
             }));
         }
-        if origin.is(&introspect.reference) {
-            let messages = self.compile(&args[0], path, env)?;
+        if origin.is(&introspect.reference)
+            && let [messages] = args
+        {
+            let messages = self.compile(messages, path, env)?;
             // What the ref writes is what travels, so a dataclass at the top of its messages goes tagged.
             let messages = self.sent(messages);
             return Ok(Some(Node::Ref(messages)));
@@ -297,18 +444,24 @@ impl<'py> Compiler<'_, 'py> {
         Ok(self.push(Node::Union(union)))
     }
 
-    /// The alternatives of a union, with the ones that are aliases of another union folded in.
+    /// The alternatives of a union, with the ones that are unions themselves folded in: an alias of another union, or
+    /// a union inside an `Annotated` that is not opaque.
+    ///
+    /// A dataclass inside such an `Annotated` is tagged as the dataclass is, which is what it was when the metadata was
+    /// dropped before the compiler saw it.
     fn alternatives(&self, annotation: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
         let introspect = self.introspect;
         let mut found = Vec::new();
         for alternative in introspect.args(annotation)? {
-            let nested = alternative.is_instance(&introspect.type_alias_type)? && {
-                let value = alternative.getattr("__value__")?;
-                let origin = introspect.origin(&value)?;
-                origin.is(&introspect.union_type) || origin.is(&introspect.union)
+            let alternative = self.bare(&alternative)?;
+            let value = if alternative.is_instance(&introspect.type_alias_type)? {
+                alternative.getattr("__value__")?
+            } else {
+                alternative.clone()
             };
-            if nested {
-                found.extend(self.alternatives(&alternative.getattr("__value__")?)?);
+            let origin = introspect.origin(&value)?;
+            if origin.is(&introspect.union_type) || origin.is(&introspect.union) {
+                found.extend(self.alternatives(&value)?);
             } else {
                 found.push(alternative);
             }
@@ -370,14 +523,19 @@ impl<'py> Compiler<'_, 'py> {
                 required,
             });
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let reference = casty_core::schema::ClassRef(self.classes.len() as u32);
-        self.classes.push(class.clone().unbind());
         Ok(Node::Dataclass(Dataclass {
-            class: reference,
+            class: self.class(class),
             qualname,
             fields,
         }))
+    }
+
+    /// Keep `class` in the table beside the tree, and give back where it is.
+    fn class(&mut self, class: &Bound<'py, PyType>) -> ClassRef {
+        #[allow(clippy::cast_possible_truncation)]
+        let at = ClassRef(self.classes.len() as u32);
+        self.classes.push(class.clone().unbind());
+        at
     }
 
     fn dataclass_of(&self, annotation: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyType>>> {
@@ -435,8 +593,9 @@ impl<'py> Compiler<'_, 'py> {
 
     /// The node `at` travels as: a dataclass goes tagged, and anything else as it is.
     fn sent(&mut self, at: NodeRef) -> NodeRef {
-        if matches!(self.nodes[at as usize], Some(Node::Dataclass(_))) {
-            return self.push(Node::Tagged(at));
+        if let Some(Node::Dataclass(dataclass)) = &self.nodes[at as usize] {
+            let tagged = Node::Tagged(dataclass.clone());
+            return self.push(tagged);
         }
         at
     }
@@ -463,19 +622,9 @@ impl<'py> Compiler<'_, 'py> {
             return Kinds::NONE;
         };
         match node {
-            Node::Never => Kinds::NONE,
-            Node::Native(native) => Kinds::of(native.kind()),
             Node::Literal(values) => values.iter().fold(Kinds::NONE, |found, value| {
                 found.union(Kinds::of(value.kind()))
             }),
-            Node::Uuid => Kinds::of(Kind::Bytes),
-            Node::Dataclass(_) => Kinds::of(Kind::Map),
-            Node::Datetime
-            | Node::Items { .. }
-            | Node::Tuple(_)
-            | Node::Mapping { .. }
-            | Node::Tagged(_)
-            | Node::Ref(_) => Kinds::of(Kind::List),
             Node::Alias(named) => self.kinds_seen(*named, seen),
             Node::Union(union) => {
                 let tagged = if union.tagged.is_empty() {
@@ -487,6 +636,7 @@ impl<'py> Compiler<'_, 'py> {
                     found.union(self.kinds_seen(*item, seen))
                 })
             }
+            other => other.kind().map_or(Kinds::NONE, Kinds::of),
         }
     }
 }
@@ -496,6 +646,6 @@ fn error(path: &[String], message: String) -> Failure {
     Failure::Schema(SchemaError::at(&path, message))
 }
 
-fn qualname(class: &Bound<'_, PyType>) -> PyResult<String> {
+pub fn qualname(class: &Bound<'_, PyType>) -> PyResult<String> {
     class.getattr("__qualname__")?.extract::<String>()
 }

@@ -26,7 +26,8 @@ pub fn actor_of(reply: &Reply) -> &str {
         | Reply::Rejected { actor, .. }
         | Reply::Pages { actor, .. }
         | Reply::Accepted { actor, .. }
-        | Reply::NeedFull { actor, .. } => actor,
+        | Reply::NeedFull { actor, .. }
+        | Reply::Buried { actor, .. } => actor,
     }
 }
 
@@ -37,7 +38,8 @@ pub fn key_of(reply: &Reply) -> &str {
         | Reply::Rejected { key, .. }
         | Reply::Pages { key, .. }
         | Reply::Accepted { key, .. }
-        | Reply::NeedFull { key, .. } => key,
+        | Reply::NeedFull { key, .. }
+        | Reply::Buried { key, .. } => key,
     }
 }
 
@@ -48,7 +50,8 @@ pub fn replica_of(reply: &Reply) -> &NodeId {
         Reply::Promise { replica, .. }
         | Reply::Rejected { replica, .. }
         | Reply::Accepted { replica, .. }
-        | Reply::NeedFull { replica, .. } => replica,
+        | Reply::NeedFull { replica, .. }
+        | Reply::Buried { replica, .. } => replica,
         Reply::Pages { epoch, .. } => &epoch.node,
     }
 }
@@ -119,8 +122,9 @@ fn request_of(writer: &mut Writer, request: &Request) {
             key,
             epoch,
             names,
+            part,
         } => {
-            writer.tagged("FetchPages", 4);
+            writer.tagged("FetchPages", 5);
             writer.name("actor");
             writer.text(actor);
             writer.name("key");
@@ -129,6 +133,24 @@ fn request_of(writer: &mut Writer, request: &Request) {
             epoch_of(writer, epoch);
             writer.name("names");
             names_of(writer, names);
+            writer.name("part");
+            writer.unsigned(u64::from(*part));
+        }
+        Request::Bury {
+            actor,
+            key,
+            stamp,
+            node,
+        } => {
+            writer.tagged("Bury", 4);
+            writer.name("actor");
+            writer.text(actor);
+            writer.name("key");
+            writer.text(key);
+            writer.name("stamp");
+            stamp_of(writer, stamp);
+            writer.name("node");
+            writer.node(node);
         }
     }
 }
@@ -190,9 +212,11 @@ fn reply_of(writer: &mut Writer, reply: &Reply) {
             key,
             epoch,
             accepted,
+            part,
+            final_part,
             pages,
         } => {
-            writer.tagged("Pages", 5);
+            writer.tagged("Pages", 7);
             writer.name("actor");
             writer.text(actor);
             writer.name("key");
@@ -201,6 +225,10 @@ fn reply_of(writer: &mut Writer, reply: &Reply) {
             epoch_of(writer, epoch);
             writer.name("accepted");
             optional_stamp(writer, accepted.as_ref());
+            writer.name("part");
+            writer.unsigned(u64::from(*part));
+            writer.name("final");
+            writer.bool(*final_part);
             writer.name("pages");
             pages_of(writer, pages);
         }
@@ -239,6 +267,25 @@ fn reply_of(writer: &mut Writer, reply: &Reply) {
             writer.name("replica");
             writer.node(replica);
         }
+        Reply::Buried {
+            actor,
+            key,
+            stamp,
+            replica,
+            receiving,
+        } => {
+            writer.tagged("Buried", 5);
+            writer.name("actor");
+            writer.text(actor);
+            writer.name("key");
+            writer.text(key);
+            writer.name("stamp");
+            stamp_of(writer, stamp);
+            writer.name("replica");
+            writer.node(replica);
+            writer.name("receiving");
+            writer.bool(*receiving);
+        }
     }
 }
 
@@ -271,18 +318,21 @@ fn pull_of(writer: &mut Writer, pull: &Pull) {
             actor,
             replica,
             transfer,
+            stream,
             part,
             final_part,
             receiving,
             keys,
         } => {
-            writer.tagged("RangeKeys", 7);
+            writer.tagged("RangeKeys", 8);
             writer.name("actor");
             writer.text(actor);
             writer.name("replica");
             writer.node(replica);
             writer.name("transfer");
             writer.unsigned(*transfer);
+            writer.name("stream");
+            writer.unsigned(*stream);
             writer.name("part");
             writer.unsigned(u64::from(*part));
             writer.name("final");
@@ -295,14 +345,20 @@ fn pull_of(writer: &mut Writer, pull: &Pull) {
         Pull::HandKeys {
             actor,
             node,
+            stream,
+            part,
             final_part,
             keys,
         } => {
-            writer.tagged("HandKeys", 4);
+            writer.tagged("HandKeys", 6);
             writer.name("actor");
             writer.text(actor);
             writer.name("node");
             writer.node(node);
+            writer.name("stream");
+            writer.unsigned(*stream);
+            writer.name("part");
+            writer.unsigned(u64::from(*part));
             writer.name("final");
             writer.bool(*final_part);
             writer.name("keys");
@@ -371,7 +427,7 @@ fn stamp_fields(writer: &mut Writer, stamp: &Stamp) {
 fn copies_of(writer: &mut Writer, keys: &[Copy]) {
     writer.items(keys.len());
     for copy in keys {
-        writer.fields(5);
+        writer.fields(6);
         writer.name("key");
         writer.text(&copy.key);
         writer.name("accepted");
@@ -380,6 +436,8 @@ fn copies_of(writer: &mut Writer, keys: &[Copy]) {
         optional_epoch(writer, copy.promised.as_ref());
         writer.name("pages");
         pages_of(writer, &copy.pages);
+        writer.name("part");
+        writer.unsigned(u64::from(copy.part));
         writer.name("final");
         writer.bool(copy.final_part);
     }
@@ -420,6 +478,7 @@ struct Held {
     ranges: Vec<Range>,
     copies: Vec<Copy>,
     transfer: u64,
+    stream: u64,
     part: u32,
     final_part: bool,
     receiving: bool,
@@ -451,6 +510,7 @@ impl Held {
                 }
             }
             "transfer" => self.transfer = reading.unsigned()?,
+            "stream" => self.stream = reading.unsigned()?,
             "part" => self.part = small(reading.unsigned()?)?,
             "final" => self.final_part = reading.bool()?,
             "receiving" => self.receiving = reading.bool()?,
@@ -483,6 +543,13 @@ impl Held {
                 key: self.key,
                 epoch: self.epoch.ok_or_else(missing)?,
                 names: self.names,
+                part: self.part,
+            }),
+            "Bury" => Message::Request(Request::Bury {
+                actor: self.actor,
+                key: self.key,
+                stamp: self.stamp.ok_or_else(missing)?,
+                node: self.node.ok_or_else(missing)?,
             }),
             "Promise" => Message::Reply(Reply::Promise {
                 actor: self.actor,
@@ -505,6 +572,8 @@ impl Held {
                 key: self.key,
                 epoch: self.epoch.ok_or_else(missing)?,
                 accepted: self.accepted,
+                part: self.part,
+                final_part: self.final_part,
                 pages: self.pages,
             }),
             "Accepted" => Message::Reply(Reply::Accepted {
@@ -520,6 +589,13 @@ impl Held {
                 stamp: self.stamp.ok_or_else(missing)?,
                 replica: self.replica.ok_or_else(missing)?,
             }),
+            "Buried" => Message::Reply(Reply::Buried {
+                actor: self.actor,
+                key: self.key,
+                stamp: self.stamp.ok_or_else(missing)?,
+                replica: self.replica.ok_or_else(missing)?,
+                receiving: self.receiving,
+            }),
             "PullRange" => Message::Pull(Pull::PullRange {
                 actor: self.actor,
                 node: self.node.ok_or_else(missing)?,
@@ -530,6 +606,7 @@ impl Held {
                 actor: self.actor,
                 replica: self.replica.ok_or_else(missing)?,
                 transfer: self.transfer,
+                stream: self.stream,
                 part: self.part,
                 final_part: self.final_part,
                 receiving: self.receiving,
@@ -538,6 +615,8 @@ impl Held {
             "HandKeys" => Message::Pull(Pull::HandKeys {
                 actor: self.actor,
                 node: self.node.ok_or_else(missing)?,
+                stream: self.stream,
+                part: self.part,
                 final_part: self.final_part,
                 keys: self.copies,
             }),
@@ -672,6 +751,7 @@ fn read_copies(reading: &mut Reading<'_>) -> Result<Vec<Copy>> {
         let mut accepted = None;
         let mut promised = None;
         let mut pages = Pages::new();
+        let mut part = 0;
         let mut final_part = false;
         for _ in 0..fields {
             match reading.name()? {
@@ -679,6 +759,7 @@ fn read_copies(reading: &mut Reading<'_>) -> Result<Vec<Copy>> {
                 "accepted" => accepted = read_tagged_stamp(reading)?,
                 "promised" => promised = read_tagged_epoch(reading)?,
                 "pages" => pages = read_pages(reading)?,
+                "part" => part = small(reading.unsigned()?)?,
                 "final" => final_part = reading.bool()?,
                 _ => reading.skip()?,
             }
@@ -688,8 +769,47 @@ fn read_copies(reading: &mut Reading<'_>) -> Result<Vec<Copy>> {
             accepted,
             promised,
             pages,
+            part,
             final_part,
         });
     }
     Ok(copies)
+}
+
+#[cfg(test)]
+mod tests {
+    use casty_core::replication::messages::{Epoch, Reply, Request, Stamp};
+    use casty_core::rolls::Rolls;
+
+    use super::{Message, decode, encode};
+
+    #[test]
+    fn a_burial_and_its_answer_read_back_as_they_were_written() {
+        let ids = Rolls::seeded(81).nodes(2);
+        let stamp = Stamp {
+            epoch: Epoch {
+                round: 3,
+                node: ids[0].clone(),
+            },
+            version: 9,
+        };
+        let messages = [
+            Message::Request(Request::Bury {
+                actor: "tests.app:ledger".to_owned(),
+                key: "key-1".to_owned(),
+                stamp: stamp.clone(),
+                node: ids[1].clone(),
+            }),
+            Message::Reply(Reply::Buried {
+                actor: "tests.app:ledger".to_owned(),
+                key: "key-1".to_owned(),
+                stamp,
+                replica: ids[0].clone(),
+                receiving: true,
+            }),
+        ];
+        for message in messages {
+            assert_eq!(decode(&encode(&message)).ok(), Some(message));
+        }
+    }
 }

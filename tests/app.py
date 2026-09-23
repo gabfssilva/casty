@@ -135,6 +135,12 @@ async def loose(ctx: Context[Ledger, LedgerMsg]) -> None:
     await _entries(ctx)
 
 
+@actor(initial=Ledger(), durable="write")
+async def durable_ledger(ctx: Context[Ledger, LedgerMsg]) -> None:
+    """A ledger its store keeps too: an entry it confirmed outlives every replica of its key, and every node."""
+    await _entries(ctx)
+
+
 @dataclass(frozen=True)
 class Notebook:
     notes: tuple[int, ...] = ()

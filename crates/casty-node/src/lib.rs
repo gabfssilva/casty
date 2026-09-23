@@ -4,6 +4,7 @@
 //! threads of the transport; only the activation of a key and the body it runs cross into Python, and that crossing
 //! lives in `casty-py`.
 
+pub mod events;
 pub mod handoff;
 pub mod membership;
 pub mod node;

@@ -16,7 +16,7 @@ use crate::connection::{Incoming, Socket};
 use crate::frame::VERSION;
 use crate::handshake::{Hello, Role, VERSIONS};
 use crate::limits::Limits;
-use crate::pool::{AddressMap, Pool, Settings, Target};
+use crate::pool::{AddressMap, Lost, Pool, Settings, Target, Traffic};
 use crate::tls::Tls;
 
 /// How a node reaches the others.
@@ -25,13 +25,14 @@ pub struct Config {
     pub bind: Option<String>,
     pub advertise: Option<String>,
     pub cluster: String,
-    pub codec: String,
     pub tls: Option<Tls>,
     /// The compressors offered, in order of preference. Nothing means every one this build has.
     pub compression: Option<Vec<Name>>,
     pub min_compressed: usize,
     pub address_map: Option<AddressMap>,
     pub limits: Limits,
+    /// What hears of a connection that ended while this node was running. Nothing listens by default.
+    pub lost: Option<Lost>,
 }
 
 impl core::fmt::Debug for Config {
@@ -51,12 +52,12 @@ impl Default for Config {
             bind: None,
             advertise: None,
             cluster: "casty".to_owned(),
-            codec: "msgpack".to_owned(),
             tls: None,
             compression: None,
             min_compressed: 4096,
             address_map: None,
             limits: Limits::default(),
+            lost: None,
         }
     }
 }
@@ -108,7 +109,6 @@ impl Endpoint {
         let local = Hello {
             versions: VERSIONS.to_vec(),
             cluster: config.cluster.clone(),
-            codec: config.codec.clone(),
             node: node.clone(),
             role: if node.address.is_none() {
                 Role::Client
@@ -119,6 +119,7 @@ impl Endpoint {
                 .into_iter()
                 .map(|name| name.name().to_owned())
                 .collect(),
+            sizes: config.limits.into(),
         };
         let pool = Pool::new(
             Settings {
@@ -128,6 +129,7 @@ impl Endpoint {
                 min_compressed: config.min_compressed,
                 tls: identity.clone(),
                 address_map: config.address_map.clone(),
+                lost: config.lost.clone(),
             },
             inbound.clone(),
         );
@@ -157,6 +159,14 @@ impl Endpoint {
     #[must_use]
     pub fn node(&self) -> &NodeId {
         &self.node
+    }
+
+    /// A handle that only reads what the transport holds and carried, from any thread.
+    #[must_use]
+    pub fn meter(&self) -> Meter {
+        Meter {
+            pool: Arc::clone(&self.pool),
+        }
     }
 
     /// A handle that only sends, which is what every thread but the one reading holds.
@@ -228,6 +238,20 @@ fn take(
             pool.accept(stream);
         }
     });
+}
+
+/// What reads the counts of a transport without being able to send.
+#[derive(Debug, Clone)]
+pub struct Meter {
+    pool: Arc<Pool>,
+}
+
+impl Meter {
+    /// The connections open now and the bytes every connection carried so far.
+    #[must_use]
+    pub fn traffic(&self) -> Traffic {
+        self.pool.traffic()
+    }
 }
 
 /// What sends envelopes, on its own so that reading and sending are not the same borrow.

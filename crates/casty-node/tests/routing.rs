@@ -7,14 +7,19 @@ use core::time::Duration;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use casty_core::mailbox::Command;
-use casty_core::node::NodeId;
+use casty_core::chain::Chain;
+use casty_core::mailbox::{Command, Deliver};
+use casty_core::node::{NodeId, Target};
 use casty_core::outcome::Outcome;
 use casty_core::replication::messages::Write;
+use casty_core::wire::Writer;
+use casty_net::endpoint::{Config, Endpoint, TooLarge};
+use casty_net::pool::Target as Address;
 use casty_node::membership::runner::Cluster;
 use casty_node::membership::service::Timings;
 use casty_node::node::{Host, Kind, Node, Running};
-use tokio::sync::oneshot;
+use casty_node::routing::wire::{Answer, Message, Routed, decode_answer, encode};
+use tokio::sync::{Notify, oneshot};
 
 const ACTOR: &str = "tests.app:account";
 const REPLICAS: usize = 3;
@@ -45,6 +50,9 @@ fn cluster(seeds: &[String]) -> Cluster {
 struct Counting {
     taken: Mutex<BTreeMap<String, u64>>,
     waiting: Mutex<BTreeMap<i64, oneshot::Sender<Outcome>>>,
+    /// The cancellations that reached this host, as the key and the request they name.
+    cancelled: Mutex<Vec<(String, Target)>>,
+    cancelling: Notify,
 }
 
 impl Counting {
@@ -53,6 +61,17 @@ impl Counting {
         let (answer, waiting) = oneshot::channel();
         self.waiting.lock().expect("a live lock").insert(id, answer);
         waiting
+    }
+
+    /// Wait until a cancellation has reached this host, and give back every one that has.
+    async fn cancellations(&self) -> Vec<(String, Target)> {
+        loop {
+            let seen = self.cancelled.lock().expect("a live lock").clone();
+            if !seen.is_empty() {
+                return seen;
+            }
+            self.cancelling.notified().await;
+        }
     }
 }
 
@@ -77,6 +96,15 @@ impl Host for Counting {
             let _ = answer.send(outcome);
         }
     }
+
+    fn cancel(&self, _: &str, key: &str, request: &Target) {
+        self.cancelled
+            .lock()
+            .expect("a live lock")
+            .push((key.to_owned(), request.clone()));
+        // A permit is kept when nobody waits yet, so a cancellation that lands before the wait is not missed.
+        self.cancelling.notify_one();
+    }
 }
 
 struct World {
@@ -90,6 +118,9 @@ impl World {
             actor: ACTOR.to_owned(),
             replicas: REPLICAS,
             write: Write::Majority,
+            write_timeout: None,
+            pinned: false,
+            durable: None,
         }];
         let mut nodes = Vec::new();
         let mut hosts = Vec::new();
@@ -115,6 +146,31 @@ impl World {
         })
         .await;
         assert!(waiting.is_ok(), "they never agreed on {count} members");
+        let settling = tokio::time::timeout(WITHIN, self.settled(count.min(REPLICAS))).await;
+        assert!(settling.is_ok(), "they never agreed on where the keys are");
+    }
+
+    /// Wait until every node places the keys of the tests on the same `replicas` nodes.
+    ///
+    /// A node that joined holds the keys of the ranges it gained on the ring before it until they have arrived, so
+    /// agreeing on the members is not yet agreeing on the owners.
+    async fn settled(&self, replicas: usize) {
+        loop {
+            let mut agreed = true;
+            for index in 0..200 {
+                let key = format!("acc-{index}");
+                let mut seen = Vec::new();
+                for running in &self.nodes {
+                    seen.push(running.node.placed(ACTOR, &key).await);
+                }
+                agreed &= seen.windows(2).all(|pair| pair[0] == pair[1])
+                    && seen.iter().all(|placed| placed.replicas.len() == replicas);
+            }
+            if agreed {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Ask `key` from the node `at`, and wait for the answer.
@@ -122,7 +178,14 @@ impl World {
         let node = &self.nodes[at].node;
         let id = node.take();
         let waiting = self.hosts[at].expect(id);
-        node.deliver(ACTOR, key, b"hello".to_vec(), Some(node.waiting(id)));
+        node.deliver(
+            ACTOR,
+            key,
+            b"hello".to_vec(),
+            Some(node.waiting(id)),
+            Chain::default(),
+        )
+        .expect("it fits");
         tokio::time::timeout(WITHIN, waiting)
             .await
             .expect("the answer never came")
@@ -213,7 +276,14 @@ async fn an_ask_to_a_node_that_died_fails_instead_of_waiting_for_the_deadline() 
     let node = &world.nodes[0].node;
     let id = node.take();
     let waiting = world.hosts[0].expect(id);
-    node.deliver(ACTOR, &owned, b"hello".to_vec(), Some(node.waiting(id)));
+    node.deliver(
+        ACTOR,
+        &owned,
+        b"hello".to_vec(),
+        Some(node.waiting(id)),
+        Chain::default(),
+    )
+    .expect("it fits");
     let outcome = tokio::time::timeout(WITHIN, waiting)
         .await
         .expect("the ask never ended")
@@ -227,6 +297,99 @@ async fn an_ask_to_a_node_that_died_fails_instead_of_waiting_for_the_deadline() 
     world.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancellation_reaches_the_node_that_took_the_request_and_no_other() {
+    let mut world = World::start(3).await;
+    world.converged(3).await;
+    // A key another node took, so that the cancellation crosses the network the way the request did.
+    let asker = world.nodes[0].node.id().clone();
+    let mut far = None;
+    for index in 0..200 {
+        let key = format!("acc-{index}");
+        world.ask(0, &key).await;
+        let holders = world.holders(&key);
+        if !holders.contains(&asker) {
+            far = Some((key, holders));
+            break;
+        }
+    }
+    let (key, holders) = far.expect("every key of the two hundred landed on the node that asked");
+    let holder = world
+        .nodes
+        .iter()
+        .position(|node| holders.contains(node.node.id()))
+        .expect("a node took the key");
+
+    let node = &world.nodes[0].node;
+    let request = node.waiting(node.take());
+    node.cancel(ACTOR, &key, request.clone());
+    let seen = tokio::time::timeout(WITHIN, world.hosts[holder].cancellations())
+        .await
+        .expect("the cancellation never arrived");
+
+    assert_eq!(seen, vec![(key, request)]);
+    for (at, host) in world.hosts.iter().enumerate() {
+        if at != holder {
+            assert!(
+                host.cancelled.lock().expect("a live lock").is_empty(),
+                "the cancellation also reached node {at}"
+            );
+        }
+    }
+    world.stop().await;
+}
+
+/// What a peer that knows no cancellation meets in one that sends them: a message of a kind it does not know, which it
+/// drops, and the connection it came on goes on carrying the rest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_of_a_kind_the_node_does_not_know_is_dropped_and_what_follows_it_is_answered() {
+    let mut world = World::start(1).await;
+    world.converged(1).await;
+    let mut peer = Endpoint::start(Config::default())
+        .await
+        .expect("it started");
+    let node = Address::Node(world.nodes[0].node.id().clone());
+
+    let mut unknown = Writer::new();
+    unknown.tagged("Unheard", 1);
+    unknown.name("actor");
+    unknown.text(ACTOR);
+    peer.send(&node, "actors", &unknown.finish())
+        .expect("it fits");
+    let request = Routed {
+        command: Command::Deliver(Deliver {
+            actor: ACTOR.to_owned(),
+            key: "only".to_owned(),
+            message: b"hello".to_vec(),
+            reply: Some(Target::Reply {
+                node: peer.node().clone(),
+                id: 1,
+            }),
+            chain: Chain::default(),
+        }),
+        origin: peer.node().clone(),
+        attempt: 1,
+    };
+    peer.send(&node, "actors", &encode(&Message::Routed(request)))
+        .expect("it fits");
+    let received = tokio::time::timeout(WITHIN, peer.recv())
+        .await
+        .expect("the answer never came")
+        .expect("the endpoint closed")
+        .expect("the node refused the peer");
+
+    assert_eq!(received.name, "replies");
+    assert_eq!(
+        decode_answer(&received.payload).expect("an answer"),
+        Answer {
+            id: 1,
+            outcome: Outcome::Value(1_u64.to_be_bytes().to_vec()),
+        }
+    );
+    peer.close(true).await;
+    world.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_node_alone_takes_its_own_messages() {
     let mut world = World::start(1).await;
@@ -237,5 +400,87 @@ async fn a_node_alone_takes_its_own_messages() {
 
     assert_eq!(first, Outcome::Value(1_u64.to_be_bytes().to_vec()));
     assert_eq!(second, Outcome::Value(2_u64.to_be_bytes().to_vec()));
+    world.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn what_does_not_fit_in_one_message_is_refused_even_when_the_key_is_here() {
+    let mut world = World::start(1).await;
+    world.converged(1).await;
+    let node = &world.nodes[0].node;
+    let limit = Cluster::at("127.0.0.1:0").limits.message;
+
+    let id = node.take();
+    let refused = node.deliver(
+        ACTOR,
+        "only",
+        vec![0; limit],
+        Some(node.waiting(id)),
+        Chain::default(),
+    );
+    assert!(
+        refused.is_err_and(|TooLarge(why)| why.contains("limits.message")),
+        "a message of the limit itself went out"
+    );
+    assert!(node.start(ACTOR, "only", Some(vec![0; limit])).is_err());
+    // Nothing went out: the next message is the first the key takes.
+    assert_eq!(
+        world.ask(0, "only").await,
+        Outcome::Value(1_u64.to_be_bytes().to_vec())
+    );
+
+    let id = node.take();
+    let waiting = world.hosts[0].expect(id);
+    node.answer(node.waiting(id), Outcome::Value(vec![0; limit]));
+    let outcome = tokio::time::timeout(WITHIN, waiting)
+        .await
+        .expect("the answer never came")
+        .expect("the answer was dropped");
+    assert!(
+        matches!(&outcome, Outcome::TooLarge(why) if why.contains("limits.message")),
+        "{outcome:?}"
+    );
+    world.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_node_places_a_key_where_its_messages_land() {
+    let mut world = World::start(3).await;
+    world.converged(3).await;
+
+    for index in 0..12 {
+        let key = format!("acc-{index}");
+        world.ask(0, &key).await;
+        let holders = world.holders(&key);
+        for running in &world.nodes {
+            let placed = running.node.placed(ACTOR, &key).await;
+            assert_eq!(placed.replicas.len(), REPLICAS, "{key}: {placed:?}");
+            assert_eq!(
+                placed.owner.as_ref(),
+                placed.replicas.first(),
+                "{key}: {placed:?}"
+            );
+            assert_eq!(
+                placed.owner.into_iter().collect::<BTreeSet<_>>(),
+                holders,
+                "{key} is placed away from where it ran"
+            );
+        }
+    }
+    // A pinned key is placed on the node its address names, and on no other.
+    for pinned in &world.nodes {
+        let address = pinned
+            .node
+            .id()
+            .address
+            .clone()
+            .expect("a member has an address");
+        let key = casty_core::placement::pin(&address, "worker");
+        for running in &world.nodes {
+            let placed = running.node.placed(ACTOR, &key).await;
+            assert_eq!(placed.owner.as_ref(), Some(pinned.node.id()), "{key}");
+            assert_eq!(placed.replicas, vec![pinned.node.id().clone()], "{key}");
+        }
+    }
     world.stop().await;
 }

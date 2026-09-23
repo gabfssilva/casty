@@ -3,32 +3,41 @@ name: publish
 on:
   release:
     types: [published]
+  # A manual run builds every wheel and the sdist without publishing them.
+  workflow_dispatch:
 
 jobs:
-  # casty is a compiled extension: one abi3 wheel per platform, built on that platform.
+  # casty is a compiled extension, built on each platform twice: an abi3 wheel for every CPython from 3.13 with the
+  # GIL, and a cp314t wheel, because abi3 does not cover free-threaded CPython.
   wheels:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        platform:
           - { os: ubuntu-latest, target: x86_64 }
           - { os: ubuntu-latest, target: aarch64 }
           - { os: macos-latest, target: x86_64 }
           - { os: macos-latest, target: aarch64 }
           - { os: windows-latest, target: x64 }
-    runs-on: ${{ matrix.os }}
+        python: ["3.13", "3.14t"]
+    runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v5
+      # Linux builds run in the manylinux container, which carries its own interpreters, free-threaded ones included.
+      - uses: actions/setup-python@v6
+        if: runner.os != 'Linux'
+        with:
+          python-version: ${{ matrix.python }}
       - uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --interpreter 3.13
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --interpreter python${{ matrix.python }}
           manylinux: auto
           rust-toolchain: stable
           sccache: true
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          name: wheel-${{ matrix.platform.os }}-${{ matrix.platform.target }}-${{ matrix.python }}
           path: dist
 
   sdist:
@@ -46,6 +55,7 @@ jobs:
 
   publish:
     needs: [wheels, sdist]
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

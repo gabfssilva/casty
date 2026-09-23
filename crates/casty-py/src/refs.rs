@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use casty_core::chain::Chain;
 use casty_core::mailbox::{Command, Deliver};
 use casty_core::node::{NodeId, Target};
 use casty_core::outcome::Outcome;
@@ -79,16 +80,27 @@ impl Ref {
         reply: Option<Target>,
     ) -> PyResult<()> {
         match &self.target {
-            Target::Entity { actor, key } => node.hand(
-                py,
-                Command::Deliver(Deliver {
-                    actor: actor.clone(),
-                    key: key.clone(),
-                    message: data,
-                    reply,
-                }),
-            ),
-            answered @ Target::Reply { .. } => node.answer(py, answered, &Outcome::Value(data)),
+            Target::Entity { actor, key } => {
+                // Only an `ask` keeps its sender waiting.
+                let chain = match reply {
+                    Some(_) => node.chain(py),
+                    None => Chain::default(),
+                };
+                node.hand(
+                    py,
+                    Command::Deliver(Deliver {
+                        actor: actor.clone(),
+                        key: key.clone(),
+                        message: data,
+                        reply,
+                        chain,
+                    }),
+                )
+            }
+            answered @ Target::Reply { .. } => {
+                node.told(py, answered);
+                node.answer(py, answered, &Outcome::Value(data))
+            }
         }
     }
 }
@@ -145,9 +157,10 @@ impl Ref {
         all.extend(args.iter());
         let msg = build.call(PyTuple::new(py, all)?, kwargs)?;
         let data = Schema::write(self.schema.bind(py), self.messages, &msg)?;
-        crate::node::armed(py, node, id, &answer, node.settings.ask_timeout)?;
+        let within = crate::node::replies::timeout(py, node, &self.target);
+        crate::node::armed(py, node, id, within)?;
         self.send(py, node, data, Some(target))?;
-        Ok(Bound::new(py, Awaited::of(answer))?.into_any())
+        Ok(Bound::new(py, Awaited::answer(answer, node, id))?.into_any())
     }
 
     #[classmethod]

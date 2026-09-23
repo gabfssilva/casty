@@ -13,6 +13,12 @@ pub fn name(introspect: &Introspect<'_>, annotation: &Bound<'_, PyAny>) -> PyRes
         let parts: PyResult<Vec<String>> = args.iter().map(|arg| name(introspect, arg)).collect();
         return Ok(parts?.join(" | "));
     }
+    // `Annotated[T, ...]` is `T` to the checkers, and its metadata is not part of the type.
+    if origin.is(&introspect.annotated)
+        && let Some(inner) = args.first()
+    {
+        return name(introspect, inner);
+    }
     if !origin.is_none() && !origin.is(&introspect.literal) {
         let parts: PyResult<Vec<String>> = args.iter().map(|arg| name(introspect, arg)).collect();
         return Ok(format!(
@@ -38,12 +44,19 @@ pub fn name(introspect: &Introspect<'_>, annotation: &Bound<'_, PyAny>) -> PyRes
     Ok(annotation.repr()?.to_str()?.to_owned())
 }
 
-/// The container the annotation should have used instead, for the three mutable ones that are refused.
+/// What the annotation should have used instead, for the three mutable containers and for a `Flag`, which are refused.
+///
+/// An enum travels as the name of its member, and a combination of flags has no single name.
 pub fn replacement(
     introspect: &Introspect<'_>,
     container: &Bound<'_, PyAny>,
     args: &[Bound<'_, PyAny>],
 ) -> PyResult<Option<String>> {
+    if let Ok(class) = container.cast::<PyType>()
+        && class.is_subclass(&introspect.flag)?
+    {
+        return Ok(Some("a frozenset of an Enum".to_owned()));
+    }
     let (template, placeholder) = if container.is(&introspect.list_type) {
         ("tuple[{}, ...]", "T")
     } else if container.is(&introspect.set_type) {

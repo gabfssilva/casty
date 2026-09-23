@@ -12,6 +12,7 @@ state came from another key or from garbage. No repetition says no message was a
 import asyncio
 import random
 from collections.abc import AsyncGenerator, Sequence
+from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
 from itertools import count
@@ -20,6 +21,21 @@ from casty import System, Unavailable
 from tests.app import Append, Entries, Listing, ledger
 from tests.cluster import Harness
 from tests.support import eventually
+
+AMBIGUOUS = (Unavailable, TimeoutError)
+"""What an attempt that may or may not have been applied ends with, which is why the invariant is containment."""
+
+
+def kept(key: str, applied: Sequence[int], confirmed: AbstractSet[int], attempted: AbstractSet[int]) -> list[str]:
+    """What `applied` breaks of `confirmed ⊆ applied ⊆ attempted` and of applying each entry once, one line each."""
+    broken: list[str] = []
+    if len(set(applied)) != len(applied):
+        broken.append(f"{key} applied an entry twice: {applied}")
+    if lost := confirmed - set(applied):
+        broken.append(f"{key} lost {set(lost)}")
+    if invented := set(applied) - attempted:
+        broken.append(f"{key} invented {invented}")
+    return broken
 
 
 class Traffic:
@@ -72,10 +88,8 @@ class Traffic:
         async def every_key_kept_what_it_confirmed() -> None:
             for key in self.keys:
                 listing = listings[key] = await self._entries(key)
-                applied = listing.entries
-                assert len(set(applied)) == len(applied), f"{key} applied an entry twice: {applied}"
-                assert self._confirmed[key] <= set(applied), f"{key} lost {self._confirmed[key] - set(applied)}"
-                assert set(applied) <= self._attempted[key], f"{key} invented {set(applied) - self._attempted[key]}"
+                broken = kept(key, listing.entries, self._confirmed[key], self._attempted[key])
+                assert not broken, "; ".join(broken)
 
         await eventually(every_key_kept_what_it_confirmed, within)
         return listings
@@ -107,8 +121,7 @@ class Traffic:
         self._attempted[key].add(entry)
         try:
             confirmed = await sender.ref(ledger, key).ask(Append, entry)
-        except (Unavailable, TimeoutError) as error:
-            # Both mean "may or may not have been applied", which is why the invariant is containment, not equality.
+        except AMBIGUOUS as error:
             self._refused.append(f"{key}: {type(error).__name__}: {error}")
             return
         except RuntimeError:
@@ -126,6 +139,6 @@ class Traffic:
 
     async def _entries(self, key: str, /) -> Listing:
         for sender in self._senders():
-            with suppress(Unavailable, TimeoutError):
+            with suppress(*AMBIGUOUS):
                 return await sender.ref(ledger, key).ask(Entries)
         raise AssertionError(f"nothing answered for {key}")

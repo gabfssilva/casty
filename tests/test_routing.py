@@ -1,16 +1,28 @@
 import asyncio
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import timedelta
 
 import pytest
 
-from casty import Context, NodeId, Unavailable, UnknownActor, actor
-from tests.app import Deposit, Entries, Hold, Locate, Note, Notes, Where, account, gate, ledger, notes
+from casty import ActorSystem, Context, NodeId, Unavailable, UnknownActor, actor
+from tests.app import Deposit, Entries, Gate, Hold, Locate, Note, Notes, Where, account, gate, ledger, notes
 from tests.cluster import FAST, Harness, Node
 from tests.support import eventually
 
 WITHIN = timedelta(seconds=10)
+
+_STARTED: list[tuple[str, NodeId]] = []
+"""Every activation of `station`, as `(key, node)`, on whichever node of this process it happened."""
+
+
+@actor(pinned=True, initial=Gate())
+async def station(ctx: Context[Gate, Locate]) -> None:
+    """One per node, reached by the node: says where it runs, and notes every start."""
+    _STARTED.append((ctx.key, ctx.system.node))
+    async for msg in ctx.inbox:
+        msg.reply_to.tell(ctx.system.node)
 
 
 def describe_routing() -> None:
@@ -99,6 +111,106 @@ def describe_routing() -> None:
                 assert {answer for answer in answers if isinstance(answer, NodeId)} == {a.node}
                 assert any(isinstance(answer, UnknownActor) for answer in answers)
                 assert all(isinstance(answer, NodeId | UnknownActor) for answer in answers)
+
+    def when_a_type_is_pinned() -> None:
+        async def it_keeps_one_copy_and_refuses_more() -> None:
+            assert station.pinned
+            assert station.replicas == 1
+            assert not account.pinned
+            assert account.replicas == 3
+
+            with pytest.raises(ValueError, match="pinned"):
+
+                @actor(pinned=True, replicas=3, initial=Gate())
+                async def spread(ctx: Context[Gate, Locate]) -> None:
+                    async for msg in ctx.inbox:
+                        msg.reply_to.tell(ctx.system.node)
+
+        async def it_takes_the_node_with_at_and_no_other_type_does() -> None:
+            async with ActorSystem() as system:
+                with pytest.raises(TypeError, match="at="):
+                    system.ref(station, "worker")
+                with pytest.raises(TypeError, match="at="):
+                    system.ref(account, "acc-1", at="127.0.0.1:7400")
+                # Placement reads the key alone, so a key of the ring never looks like a pinned one.
+                with pytest.raises(ValueError, match="@host:port"):
+                    system.ref(account, "@127.0.0.1:7400/acc-1")
+                with pytest.raises(ValueError, match="host:port"):
+                    system.ref(station, "worker", at="nowhere")
+                with pytest.raises(ValueError, match="no address"):
+                    system.ref(station, "worker", at=system.node)
+
+        async def it_runs_each_key_on_the_node_it_names_and_nowhere_else() -> None:
+            _STARTED.clear()
+            async with Harness.start(5) as harness:
+                for target in harness.nodes:
+                    member = next(
+                        member for member in harness.nodes[0].system.members if member.node == target.system.node
+                    )
+                    # The node named in each of the ways a caller holds it, from every node.
+                    for at in (target.address, target.system.node, member):
+                        for node in harness.nodes:
+                            assert await node.system.ref(station, "worker", at=at).ask(Locate) == target.system.node
+
+                pinned = {f"@{node.address}/worker": node.system.node for node in harness.nodes}
+                assert Counter(key for key, _ in _STARTED) == dict.fromkeys(pinned, 1)
+                assert dict(_STARTED) == pinned
+
+        async def it_stays_on_its_node_while_nodes_join_and_leave() -> None:
+            _STARTED.clear()
+            async with Harness.start(3) as harness:
+                asking, going, third = harness.nodes
+                for node in harness.nodes:
+                    assert await asking.system.ref(station, "worker", at=node.address).ask(Locate) == node.system.node
+
+                joined = await asyncio.gather(harness.add(), harness.add())
+                pinned = {f"@{node.address}/worker": node.system.node for node in (asking, going, third, *joined)}
+                await harness.leave(going)
+                await _sees_only(asking, harness.nodes)
+
+                for node in harness.nodes:
+                    assert await asking.system.ref(station, "worker", at=node.address).ask(Locate) == node.system.node
+                # The key of the node that left is taken by no other.
+                with pytest.raises(Unavailable):
+                    await asking.system.ref(station, "worker", at=going.address).ask(Locate)
+
+                assert Counter(key for key, _ in _STARTED) == dict.fromkeys(pinned, 1)
+                assert dict(_STARTED) == pinned
+
+        async def it_is_reached_from_a_client_by_the_address_the_node_advertises() -> None:
+            async with Harness.start(3) as harness:
+                client = await harness.client()
+                for node in harness.nodes:
+                    assert await client.ref(station, "worker", at=node.address).ask(Locate) == node.system.node
+
+        async def it_follows_its_node_through_a_restart_on_the_same_address() -> None:
+            async with Harness.start(3) as harness:
+                asking, restarting, _ = harness.nodes
+                old = restarting.system.node
+                ref = asking.system.ref(station, "worker", at=restarting.address)
+                assert await ref.ask(Locate) == old
+
+                await harness.crash(restarting)
+                revived = await harness.add(address=restarting.address)
+
+                async def replaced() -> None:
+                    seen = {member.node: member.status for member in asking.system.members}
+                    assert seen.get(revived.system.node) == "alive"
+                    assert seen.get(old) != "alive"
+
+                await eventually(replaced, WITHIN)
+                # The same ref: it names the address, which outlives the incarnation that was running there.
+                assert await ref.ask(Locate) == revived.system.node
+
+
+async def _sees_only(node: Node, nodes: tuple[Node, ...]) -> None:
+    """Wait until `node` counts exactly `nodes` as alive."""
+
+    async def only_them() -> None:
+        alive = {member.node for member in node.system.members if member.status == "alive"}
+        assert alive == {other.system.node for other in nodes}
+
+    await eventually(only_them, WITHIN)
 
 
 async def _key_on(node: Node, answered_from: Callable[[str], Awaitable[NodeId]]) -> str:

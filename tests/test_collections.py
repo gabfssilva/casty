@@ -1,8 +1,10 @@
 import asyncio
+import gc
 import os
 import subprocess
 import sys
 import time
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
@@ -129,6 +131,94 @@ print(system._encode(schema, values).hex())
             with pytest.raises(ConfigurationError):
                 await collections.register("user", value=str).get()
 
+    async def it_answers_the_same_facade_for_equal_arguments() -> None:
+        from casty import Collections
+
+        async with ActorSystem() as system:
+            collections = Collections(system)
+            entries = collections.dict("x", key=str, value=bytes)
+            assert collections.dict("x", key=str, value=bytes) is entries
+            assert collections.dict(name="x", value=bytes, key=str, replicas=3) is entries
+            assert collections.lock("resource") is collections.lock("resource", ttl=30.0)
+            # Facades are kept per `Collections`, and each of those is over one system.
+            assert Collections(system).dict("x", key=str, value=bytes) is not entries
+
+    async def it_checks_the_configuration_with_the_cluster_once_for_many_operations(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from types import SimpleNamespace
+
+        from casty import Collections, Ref
+        from casty import collections as kinds
+        from casty.collections import register
+
+        compared = 0
+
+        def compare_and_set(reply_to: Ref[bool], expected: bytes | None, value: bytes) -> register.CompareAndSet:
+            nonlocal compared
+            compared += 1
+            return register.CompareAndSet(reply_to, expected, value)
+
+        # Every binding asks its metadata register through `register`, which now counts the compare-and-sets.
+        monkeypatch.setattr(
+            kinds, "register", SimpleNamespace(actor=register.actor, Get=register.Get, CompareAndSet=compare_and_set)
+        )
+        async with ActorSystem() as system:
+            collections = Collections(system)
+            entries = collections.dict("x", key=str, value=bytes)
+            for i in range(20):
+                await entries.put(str(i), b"")
+                assert await collections.dict("x", key=str, value=bytes).get(str(i)) == b""
+            assert compared == 1
+            await Collections(system).dict("x", key=str, value=bytes).get("0")
+            assert compared == 2
+            # Let go of, the facade goes with its binding, and the one built in its place checks again.
+            del entries
+            gc.collect()
+            await collections.dict("x", key=str, value=bytes).get("0")
+            assert compared == 3
+
+    async def it_lets_go_of_the_facades_nobody_holds() -> None:
+        from casty import Collections
+        from casty.collections import Counter
+
+        async with ActorSystem() as system:
+            collections = Collections(system)
+
+            async def touched(name: str) -> weakref.ref[Counter]:
+                counter = collections.counter(name)
+                await counter.add()
+                return weakref.ref(counter)
+
+            held = collections.counter("entity-0")
+            await held.add()
+            # A collection per entity name: what the caller let go of is not kept for it.
+            gone = [await touched(f"entity-{i}") for i in range(1, 100)]
+            gc.collect()
+            assert [facade for facade in gone if facade() is not None] == []
+            assert collections.counter("entity-0") is held
+            assert await collections.counter("entity-1").get() == 1
+
+    async def it_rejects_other_replicas_for_a_name_with_or_without_asking_the_cluster() -> None:
+        from casty import Collections
+        from casty.collections import ConfigurationError
+
+        async with ActorSystem() as system:
+            collections = Collections(system)
+            entries = collections.dict("x", key=str, value=bytes)
+            await entries.put("one", b"1")
+            # The factory raises while the facade whose binding confirmed the settings is held: nothing was asked.
+            with pytest.raises(ConfigurationError):
+                collections.dict("x", key=str, value=bytes, replicas=5)
+            with pytest.raises(ConfigurationError):
+                await Collections(system).dict("x", key=str, value=bytes, replicas=5).get("one")
+            first = collections.counter("y", replicas=3)
+            second = collections.counter("y", replicas=5)
+            await first.add()
+            with pytest.raises(ConfigurationError):
+                await second.add()
+            assert await collections.dict("x", key=str, value=bytes).get("one") == b"1"
+
     async def it_resolves_configured_actor_types_without_a_local_facade() -> None:
         from casty import Collections
 
@@ -207,6 +297,149 @@ print(system._encode(schema, values).hex())
             assert await multi.size() == 0
             assert set(await right.items()) == {"b", "c"}
 
+    async def it_finds_set_members_through_splits_a_lagging_facade_has_not_seen() -> None:
+        from casty import Collections
+
+        async with ActorSystem() as system:
+            first = Collections(system).set("members", value=int, shards=1)
+            late = Collections(system).set("members", value=int, shards=1)
+            assert await late.add(-1)
+            for i in range(3_000):
+                assert await first.add(i)
+            # `late` still counts one segment: those that split since refuse its keys and send it to the directory.
+            assert await late.contains(2_999)
+            assert not await late.add(1_500)
+            assert await late.remove(7)
+            assert not await first.contains(7)
+            assert await late.size() == 3_000
+            assert sorted(await late.items()) == [-1, *range(7), *range(8, 3_000)]
+
+    async def it_counts_a_set_growing_through_splits_without_losing_or_repeating_a_member() -> None:
+        from casty import Collections
+
+        async with ActorSystem() as system:
+            members = Collections(system).set("growing", value=int, shards=1)
+            added = 0
+
+            async def grow() -> None:
+                nonlocal added
+                for i in range(6_000):
+                    await members.add(i)
+                    added += 1
+
+            async with asyncio.TaskGroup() as group:
+                growing = group.create_task(grow())
+                while not growing.done():
+                    before = added
+                    size = await members.size()
+                    # The one addition in flight may be counted before it returns.
+                    assert before <= size <= added + 1
+            assert await members.size() == 6_000
+            assert sorted(await members.items()) == list(range(6_000))
+
+    async def it_keeps_the_values_of_a_multimap_key_together_through_splits() -> None:
+        from casty import Collections
+
+        async with ActorSystem() as system:
+            multi = Collections(system).multimap("grouped", key=int, value=str, shards=1)
+            for i in range(1_500):
+                assert await multi.put(i, "a")
+                assert await multi.put(i, "b")
+            assert await multi.size() == 3_000
+            assert sorted(await multi.get(1_234)) == ["a", "b"]
+            assert await multi.remove_key(1_234) == 2
+            assert await multi.contains(99, "b")
+            assert await multi.size() == 2_998
+            scanned = [pair async for pair in multi.scan()]
+            assert sorted(scanned) == [(i, value) for i in range(1_500) if i != 1_234 for value in ("a", "b")]
+
+    def it_visits_every_segment_of_a_shard_once_from_the_cursor_of_a_scan() -> None:
+        from casty.collections import _after, _place  # pyright: ignore[reportPrivateUsage]
+
+        for count in range(1, 300):
+            level = 1 << (count.bit_length() - 1)
+            visited: list[int] = []
+            position: int | None = 0
+            while position is not None:
+                at = _place(position, count)
+                visited.append(at)
+                # The segments this level split and the ones they split into tell twice as many hashes apart.
+                position = _after(position, 2 * level if at < count - level or at >= level else level)
+            assert sorted(visited) == list(range(count))
+
+    async def it_scans_a_set_page_by_page_through_splits_made_while_it_runs() -> None:
+        from casty import Collections
+
+        async with ActorSystem() as system:
+            writer = Collections(system).set("moving", value=int, shards=1)
+            for i in range(600):
+                await writer.add(i)
+            # A facade that has not seen the split: its segments refuse the positions they no longer hold.
+            reader = Collections(system).set("moving", value=int, shards=1)
+            seen: list[int] = []
+            async for member in reader.scan():
+                if not seen:
+                    # The first segment was read: splits now move members out of it and out of those still to come.
+                    for i in range(600, 6_000):
+                        await writer.add(i)
+                seen.append(member)
+            assert len(seen) == len(set(seen))
+            assert set(range(600)) <= set(seen) <= set(range(6_000))
+            assert len(seen) > 600
+
+    async def it_ends_a_scan_of_a_set_written_meanwhile_without_repeating_a_member() -> None:
+        from casty import Collections
+
+        async with ActorSystem() as system:
+            members = Collections(system).set("written", value=int, shards=2)
+            for i in range(1_000):
+                await members.add(i)
+
+            async def write() -> None:
+                for i in range(1_000, 8_000):
+                    await members.add(i)
+
+            async with asyncio.timeout(60), asyncio.TaskGroup() as group:
+                group.create_task(write())
+                seen = [member async for member in members.scan()]
+            assert len(seen) == len(set(seen))
+            assert set(range(1_000)) <= set(seen) <= set(range(8_000))
+
+    async def it_builds_the_set_algebra_from_scans_over_many_segments() -> None:
+        from casty import Collections
+
+        async with ActorSystem() as system:
+            collections = Collections(system)
+            left = collections.set("left", value=int, shards=1)
+            right = collections.set("right", value=int, shards=1)
+            for i in range(2_000):
+                await left.add(i)
+                await right.add(i + 1_000)
+            assert await left.union(right) == set(range(3_000))
+            assert await left.intersection(right) == set(range(1_000, 2_000))
+            assert await left.difference(right) == set(range(1_000))
+            assert await right.difference(left) == set(range(2_000, 3_000))
+
+    async def it_writes_as_much_per_member_added_to_a_large_set_as_to_a_small_one() -> None:
+        from casty import Collections
+
+        async with ActorSystem() as system:
+            writes = system._writes()  # pyright: ignore[reportPrivateUsage]
+            members = Collections(system).set("flat", value=int, shards=1)
+
+            async def written(values: range) -> int:
+                total = 0
+                for value in values:
+                    await members.add(value)
+                    total += sum(map(len, writes.payloads))
+                    writes.payloads.clear()
+                return total
+
+            small = await written(range(2_000))
+            await written(range(2_000, 30_000))
+            # With the whole shard in one page, these would write about fifteen times what the first did.
+            assert await written(range(30_000, 32_000)) < 2 * small
+
     async def it_delivers_queue_items_once_in_fifo_order_without_failures() -> None:
         from casty import Collections
         from casty.collections import MISSING
@@ -228,6 +461,110 @@ print(system._encode(schema, values).hex())
             assert await queue.size() == 0
             with pytest.raises(ValueError):
                 await queue.drain(-1)
+
+    async def it_keeps_fifo_order_over_100k_items_writing_at_most_a_segment_per_operation() -> None:
+        from casty import Collections
+
+        async with ActorSystem() as system:
+            writes = system._writes()  # pyright: ignore[reportPrivateUsage]
+            queue = Collections(system).queue("jobs", value=int)
+            largest = 0
+            for i in range(100_000):
+                await queue.offer(i)
+                largest = max([largest, *map(len, writes.payloads)])
+                writes.payloads.clear()
+            assert await queue.size() == 100_000
+            assert await queue.peek() == 0
+            taken: list[int] = []
+            while batch := await queue.drain(999):
+                taken += batch
+                largest = max([largest, *map(len, writes.payloads)])
+                writes.payloads.clear()
+            assert taken == list(range(100_000))
+            # A segment holds at most 64 KiB, where one page used to hold the whole queue.
+            assert largest <= 64 * 1024
+
+    async def it_writes_as_much_per_offer_to_a_long_queue_as_to_a_short_one() -> None:
+        from casty import Collections
+
+        async with ActorSystem() as system:
+            writes = system._writes()  # pyright: ignore[reportPrivateUsage]
+            queue = Collections(system).queue("jobs", value=bytes)
+
+            async def written(offers: int) -> int:
+                total = 0
+                for _ in range(offers):
+                    await queue.offer(b"x" * 100)
+                    total += sum(map(len, writes.payloads))
+                    writes.payloads.clear()
+                return total
+
+            short = await written(2_000)
+            await written(20_000)
+            # With the whole queue in one page, the last offers would write more than ten times what the first did.
+            assert await written(2_000) < 2 * short
+
+    async def it_keeps_order_across_segments_for_facades_that_lag_behind_the_index() -> None:
+        from casty import Collections
+        from casty.collections import MISSING
+
+        async with ActorSystem() as system:
+            first = Collections(system).queue("jobs", value=bytes)
+            late = Collections(system).queue("jobs", value=bytes)
+            items = [str(i).encode() for i in range(2_500)]
+            for item in items:
+                await first.offer(item)
+            # `late` has not seen the tail move, so it reaches sealed segments and catches up through the index.
+            await late.offer(b"late")
+            large = b"x" * 100_000
+            await first.offer(large)
+            await late.offer(b"after")
+            assert await late.size() == 2_503
+            assert await late.peek() == b"0"
+            assert await late.drain(1_500) == items[:1_500]
+            assert await first.poll() == b"1500"
+            assert await first.drain(2_000) == [*items[1_501:], b"late", large, b"after"]
+            assert await late.poll() == MISSING
+            for item in items:
+                await late.offer(item)
+            await first.clear()
+            assert await late.size() == 0
+            assert await first.poll() == MISSING
+            await late.offer(b"again")
+            assert await first.poll() == b"again"
+
+    async def it_keeps_no_key_for_the_segments_it_drained() -> None:
+        from casty.collections import MISSING, Binding, Queue, configured, queue_segment
+        from tests.support import eventually
+
+        async with ActorSystem(idle_after=timedelta(milliseconds=200)) as system:
+
+            def facade() -> Queue[int]:
+                binding = Binding(system, "queue", "drained", replicas=3, write="majority", signature=(repr(int),))
+                return Queue(binding, int)
+
+            jobs, lagging = facade(), facade()
+            await lagging.offer(-1)
+            assert await jobs.poll() == -1
+            count = 3 * 1024 + 10
+            for item in range(count):
+                await jobs.offer(item)
+            assert await jobs.drain(count) == list(range(count))
+            actor = configured(queue_segment.actor, 3, "majority").name
+
+            async def only_the_tail_is_kept() -> None:
+                stored = await system._stored()  # pyright: ignore[reportPrivateUsage]
+                segments = [key for held, key, _ in stored if held == actor]
+                assert len(segments) == 1, segments
+
+            await eventually(only_the_tail_is_kept, timedelta(seconds=10))
+            # `lagging` still offers to the first segment, which was sealed, drained and deleted since: it is refused
+            # there as it was before, and the item goes to the tail.
+            await lagging.offer(count)
+            assert await jobs.poll() == count
+            assert await jobs.poll() == MISSING
+            assert await lagging.size() == 0
+            await eventually(only_the_tail_is_kept, timedelta(seconds=10))
 
     async def it_canonicalizes_unordered_fields_used_as_keys_or_compared_values() -> None:
         from casty import Collections

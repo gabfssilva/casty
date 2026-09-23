@@ -7,7 +7,7 @@ use core::time::Duration;
 use std::collections::{BTreeSet, HashMap};
 
 use casty_core::membership::broadcast::{Broadcast, Broadcaster, Send as Pushed};
-use casty_core::membership::table::{MemberTable, Record, Status};
+use casty_core::membership::table::{MemberTable, Record, Status, Transition};
 use casty_core::membership::views::{Effect, Overlay, View, Views};
 use casty_core::node::NodeId;
 use casty_core::rolls::Rolls;
@@ -126,9 +126,20 @@ impl Membership {
             .collect()
     }
 
+    /// Whether this node sees a majority of the members alive, itself included (`MemberTable::majority`).
+    #[must_use]
+    pub fn majority(&self) -> bool {
+        self.table.majority()
+    }
+
     /// What this node must put on the wire, taken out so that the caller sends it.
     pub fn take(&mut self) -> Vec<Outgoing> {
         core::mem::take(&mut self.sends)
+    }
+
+    /// The changes of status of the members since the last call, each one once and in the order the table made them.
+    pub fn transitions(&mut self) -> Vec<Transition> {
+        self.table.transitions()
     }
 
     /// Ask to enter the cluster, through every seed and through one member already known.

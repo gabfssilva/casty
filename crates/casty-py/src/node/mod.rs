@@ -4,41 +4,48 @@ pub mod activation;
 pub mod catalog;
 pub mod cluster;
 pub mod context;
+pub mod observe;
 pub mod replies;
+pub mod runs;
+pub mod stats;
+pub mod storage;
 
+use core::time::Duration;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use casty_core::chain::Chain;
 use casty_core::mailbox::{Backoff, Start};
 use casty_core::node::{NodeId, Target};
 use casty_core::outcome::Outcome;
 use casty_core::store::{LocalStore, Pages};
+use casty_net::endpoint::TooLarge;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple, PyType};
 
 use crate::actor::Behavior;
 use crate::awaited::Awaited;
+use crate::lock::Locked;
 use crate::refs::Ref;
 use crate::schema::Schema;
 use activation::Activation;
 use catalog::Catalog;
-use cluster::{Ending, Joined, Taken};
+use cluster::{Ending, Entered, Joined, Taken};
+use observe::{Kind, Observed, Wanted};
 use replies::{Replies, Waiting};
 
 /// The schema of the answer of each `ask` builder, held by the builder it was read from.
 type Answers = HashMap<usize, (Py<PyAny>, Py<Schema>)>;
 
-/// The periods a system runs by, in seconds.
+/// The periods a system runs by.
 #[derive(Debug, Clone, Copy)]
 pub struct Settings {
-    pub idle_after: f64,
-    pub ask_timeout: f64,
-    pub write_timeout: f64,
-    pub leave_timeout: f64,
-    pub backoff_first: f64,
-    pub backoff_limit: f64,
-    pub backoff_factor: f64,
+    pub idle_after: Duration,
+    pub ask_timeout: Duration,
+    pub write_timeout: Duration,
+    pub leave_timeout: Duration,
+    pub backoff: Backoff,
 }
 
 /// Everything a node owns. Nothing of it is global to the process: a second system is a second one of these.
@@ -60,18 +67,41 @@ pub struct Node {
     answers: Mutex<Answers>,
     catalog: Mutex<Catalog>,
     store: Mutex<LocalStore>,
+    /// The store the system was built with, which keeps the state of the durable types outside the process.
+    storage: Option<Py<PyAny>>,
     replies: Mutex<Replies>,
+    /// Requests whose cancellation arrived before them, until their deadline in loop time: the request is dropped if
+    /// it arrives after all.
+    forestalled: Mutex<HashMap<Target, f64>>,
     activations: Mutex<HashMap<(String, String), Py<Activation>>>,
+    /// Which run of a body each task reads for, which is how an `ask` or an answer knows the body it comes from.
+    runs: runs::Runs,
     leaving: Mutex<Option<Py<PyAny>>>,
     /// Whether this node takes no new message: it is on its way out and finishing what it is on.
     draining: AtomicBool,
     stopped: AtomicBool,
+    /// What the system reports to: the observer it was built with, or the one that logs.
+    observer: Py<PyAny>,
+    /// The kinds of event the observer takes, which nothing of another kind is built for.
+    wanted: Wanted,
+    /// The writes of the store of a node running alone, which are confirmed as they are made. In a cluster the
+    /// replication counts them.
+    saved: AtomicU64,
 }
 
 impl Node {
-    fn new(settings: Settings, id: NodeId) -> Self {
+    fn new(
+        settings: Settings,
+        id: NodeId,
+        observer: Py<PyAny>,
+        storage: Option<Py<PyAny>>,
+    ) -> Self {
         Self {
             settings,
+            observer,
+            storage,
+            wanted: Wanted::default(),
+            saved: AtomicU64::new(0),
             id: Mutex::new(id),
             joined: Mutex::new(None),
             network: Mutex::new(None),
@@ -83,6 +113,8 @@ impl Node {
             catalog: Mutex::new(Catalog::default()),
             store: Mutex::new(LocalStore::default()),
             replies: Mutex::new(Replies::default()),
+            forestalled: Mutex::new(HashMap::new()),
+            runs: runs::Runs::default(),
             activations: Mutex::new(HashMap::new()),
             leaving: Mutex::new(None),
             draining: AtomicBool::new(false),
@@ -96,6 +128,37 @@ impl Node {
         self.stopped.load(Ordering::SeqCst)
     }
 
+    /// What the system reports to.
+    #[must_use]
+    pub fn observer(&self, py: Python<'_>) -> Py<PyAny> {
+        self.observer.clone_ref(py)
+    }
+
+    /// Report what `event` makes to the observer, on the loop and after the step this is part of.
+    ///
+    /// `event` is called only when there is a loop to report on: a system that has not started, or has exited, has
+    /// nobody to tell. What it makes goes no further when the observer does not take its kind.
+    pub fn observe(&self, py: Python<'_>, event: impl FnOnce() -> Observed) {
+        let Ok(running) = self.running(py) else {
+            return;
+        };
+        let event = event();
+        if self.takes(event.kind()) {
+            observe::deliver(py, &running, &self.observer, event, false);
+        }
+    }
+
+    /// Whether the observer takes events of `kind`.
+    #[must_use]
+    pub fn takes(&self, kind: Kind) -> bool {
+        self.wanted.takes(kind)
+    }
+
+    /// Ask the observer which kinds of event it takes, which is all this node reports to it from now on.
+    fn subscribe(&self, py: Python<'_>) -> PyResult<()> {
+        self.wanted.ask(self.observer.bind(py))
+    }
+
     /// Whether this node takes new messages. It stops taking them at the start of the exit, while bodies finish.
     #[must_use]
     pub fn draining(&self) -> bool {
@@ -106,7 +169,8 @@ impl Node {
     ///
     /// In a cluster it never is. The node of the cluster refuses it there, in the same step that takes this node out
     /// of the choice of owner, so a message that arrives after that is sent on to whoever owns the key now instead
-    /// of being answered with a failure. What is already queued here goes the same way when the activation ends.
+    /// of being answered with a failure. What is already queued here goes the same way when the activation ends, and
+    /// so does what was on its way to the loop when the node started leaving.
     #[must_use]
     fn refusing(&self) -> bool {
         self.draining() && self.cluster().is_none()
@@ -121,29 +185,19 @@ impl Node {
     /// Where this node is. Alone it is an incarnation with no address; in a cluster it is the identity it joined under.
     #[must_use]
     pub fn id(&self) -> NodeId {
-        self.id
-            .lock()
-            .expect("the node lock is never poisoned")
-            .clone()
+        self.id.locked().clone()
     }
 
     /// The cluster this node is in, if it is in one.
     #[must_use]
-    pub fn cluster(&self) -> Option<Arc<Joined>> {
-        self.joined
-            .lock()
-            .expect("the node lock is never poisoned")
-            .clone()
-            .filter(|joined| joined.ready())
+    pub fn cluster(&self) -> Option<Entered> {
+        self.joined.locked().as_ref().and_then(Joined::entered)
     }
 
     /// The members of the cluster as this node last saw them. Alone, it is the only one.
     #[must_use]
     pub fn members(&self) -> Vec<casty_node::membership::service::Member> {
-        self.members
-            .lock()
-            .expect("the node lock is never poisoned")
-            .clone()
+        self.members.locked().clone()
     }
 
     /// Take the members the cluster reports, which is what `system.members` reads.
@@ -153,10 +207,7 @@ impl Node {
         if let Some(cluster) = self.cluster() {
             let _ = cluster.learn(py, &members);
         }
-        *self
-            .members
-            .lock()
-            .expect("the node lock is never poisoned") = members;
+        *self.members.locked() = members;
     }
 
     /// A type the cluster named: importing it is what tells the node whether this process has it.
@@ -173,23 +224,10 @@ impl Node {
         entered: &Bound<'_, PyAny>,
         system: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let backoff = Backoff {
-            first: core::time::Duration::from_secs_f64(self.settings.backoff_first),
-            limit: core::time::Duration::from_secs_f64(self.settings.backoff_limit),
-            factor: self.settings.backoff_factor,
-        };
         let map = network.getattr("address_map")?;
         let map = if map.is_none() { None } else { Some(map) };
-        let settings = cluster::settings(
-            network,
-            self.settings.write_timeout,
-            self.settings.leave_timeout,
-            backoff,
-        )?;
-        *self
-            .network
-            .lock()
-            .expect("the node lock is never poisoned") = Some(network.clone().unbind());
+        let settings = cluster::settings(network, &self.settings)?;
+        *self.network.locked() = Some(network.clone().unbind());
         self.enter(
             py,
             settings,
@@ -213,11 +251,7 @@ impl Node {
         system: &Bound<'_, PyAny>,
         member: bool,
     ) -> PyResult<()> {
-        let types = self
-            .catalog
-            .lock()
-            .expect("the node lock is never poisoned")
-            .kinds();
+        let types = self.catalog.locked().kinds();
         let joined = Joined::start(
             py,
             self,
@@ -229,7 +263,7 @@ impl Node {
             system.clone().unbind(),
             member,
         )?;
-        *self.joined.lock().expect("the node lock is never poisoned") = Some(joined);
+        *self.joined.locked() = Some(joined);
         Ok(())
     }
 
@@ -241,22 +275,14 @@ impl Node {
         if self.draining() {
             return Ok(());
         }
-        let activations: Vec<Py<Activation>> = self
-            .activations
-            .lock()
-            .expect("the node lock is never poisoned")
-            .drain()
-            .map(|(_, activation)| activation)
-            .collect();
-        for activation in activations {
+        let activations: Vec<((String, String), Py<Activation>)> =
+            self.activations.locked().drain().collect();
+        for ((actor, key), activation) in activations {
             let _ = Activation::release(activation.bind(py), py);
+            self.observe(py, || Observed::Ended { actor, key });
         }
         // The identity that was removed goes without a word: the cluster already buried it.
-        let shed = self
-            .joined
-            .lock()
-            .expect("the node lock is never poisoned")
-            .take();
+        let shed = self.joined.locked().take();
         match shed {
             Some(shed) => Joined::leave(&shed, py, self, true, Ending::Again),
             None => self.rejoin(py)?,
@@ -268,8 +294,7 @@ impl Node {
     pub fn rejoin(self: &Arc<Self>, py: Python<'_>) -> PyResult<()> {
         let network = self
             .network
-            .lock()
-            .expect("the node lock is never poisoned")
+            .locked()
             .as_ref()
             .map(|network| network.clone_ref(py));
         let (Some(network), Ok(system), Ok(running)) = (network, self.system(py), self.running(py))
@@ -287,25 +312,18 @@ impl Node {
     }
 
     /// The node is in the cluster: take the identity it joined under and what it sees.
-    pub fn entered(&self, py: Python<'_>, joined: &Arc<Joined>) {
-        *self.id.lock().expect("the node lock is never poisoned") = joined.id().clone();
-        let members = joined.members();
-        let _ = joined.learn(py, &members);
-        *self
-            .members
-            .lock()
-            .expect("the node lock is never poisoned") = members;
+    pub fn entered(&self, py: Python<'_>, cluster: &Entered) {
+        *self.id.locked() = cluster.id().clone();
+        let members = cluster.members();
+        let _ = cluster.learn(py, &members);
+        *self.members.locked() = members;
     }
 
     /// Say goodbye to the cluster and stop the transport, resolving `gone` once it is over.
     ///
     /// The cluster is let go of only when the leave has finished: what it holds is the runtime the leave runs on.
     pub fn departed(self: &Arc<Self>, py: Python<'_>, abort: bool, gone: &Bound<'_, PyAny>) {
-        let joined = self
-            .joined
-            .lock()
-            .expect("the node lock is never poisoned")
-            .clone();
+        let joined = self.joined.locked().clone();
         if let Some(joined) = joined {
             Joined::leave(
                 &joined,
@@ -327,21 +345,23 @@ impl Node {
 
     /// Let go of `joined`, unless this node has already taken another one in its place.
     pub fn let_go(&self, joined: &Arc<Joined>) {
-        let mut held = self.joined.lock().expect("the node lock is never poisoned");
+        let mut held = self.joined.locked();
         if held.as_ref().is_some_and(|held| Arc::ptr_eq(held, joined)) {
             *held = None;
         }
     }
 
     /// End the activation of a key whose owner moved: a write from it would be refused by the replicas anyway.
+    ///
+    /// A node shutting down moved every key it runs, and ends each one after the message it is on instead.
     pub fn relinquish(self: &Arc<Self>, py: Python<'_>, actor: &str, key: &str) -> PyResult<()> {
         let held = self
             .activations
-            .lock()
-            .expect("the node lock is never poisoned")
+            .locked()
             .get(&(actor.to_owned(), key.to_owned()))
             .map(|activation| activation.clone_ref(py));
         match held {
+            Some(activation) if self.draining() => Activation::drain(activation.bind(py), py),
             Some(activation) => Activation::release(activation.bind(py), py),
             None => Ok(()),
         }
@@ -349,11 +369,7 @@ impl Node {
 
     /// The loop this node runs on, which is the one that owns every future it hands out.
     pub fn running<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        match &*self
-            .running
-            .lock()
-            .expect("the node lock is never poisoned")
-        {
+        match &*self.running.locked() {
             Some(running) => Ok(running.bind(py).clone()),
             None => Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "the system has not started",
@@ -371,7 +387,7 @@ impl Node {
 
     /// The system this node belongs to, which is what a body reaches through `ctx.system`.
     pub fn system(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &*self.system.lock().expect("the node lock is never poisoned") {
+        match &*self.system.locked() {
             Some(system) => Ok(system.clone_ref(py)),
             None => Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "the system has not started",
@@ -383,10 +399,7 @@ impl Node {
     pub fn answers(&self, py: Python<'_>, build: &Bound<'_, PyAny>) -> PyResult<Py<Schema>> {
         let at = build.as_ptr() as usize;
         {
-            let answers = self
-                .answers
-                .lock()
-                .expect("the node lock is never poisoned");
+            let answers = self.answers.locked();
             if let Some((held, schema)) = answers.get(&at)
                 && held.bind(py).is(build)
             {
@@ -396,8 +409,7 @@ impl Node {
         let schema = crate::schema::reply_schema(py, build)?;
         let schema = Bound::new(py, schema)?.unbind();
         self.answers
-            .lock()
-            .expect("the node lock is never poisoned")
+            .locked()
             .insert(at, (build.clone().unbind(), schema.clone_ref(py)));
         Ok(schema)
     }
@@ -427,17 +439,9 @@ impl Node {
     }
 
     pub fn learn(&self, py: Python<'_>, behavior: &Behavior) {
-        self.catalog
-            .lock()
-            .expect("the node lock is never poisoned")
-            .learn(behavior, py);
+        self.catalog.locked().learn(behavior, py);
         if let Some(cluster) = self.cluster() {
-            let definition = behavior.definition();
-            cluster.node().learn(casty_node::node::Kind {
-                actor: definition.name.clone(),
-                replicas: definition.replicas,
-                write: definition.write,
-            });
+            cluster.node().learn(behavior.definition().kind());
         }
     }
 
@@ -445,10 +449,7 @@ impl Node {
     #[must_use]
     pub fn resolve(&self, py: Python<'_>, name: &str) -> Option<Behavior> {
         {
-            let catalog = self
-                .catalog
-                .lock()
-                .expect("the node lock is never poisoned");
+            let catalog = self.catalog.locked();
             if let Some(known) = catalog.known(name) {
                 return Some(known.clone_ref(py));
             }
@@ -458,10 +459,7 @@ impl Node {
         }
         // The import runs without the lock: it is arbitrary Python, and it can reach back into this node.
         let found = catalog::imported(py, name);
-        let mut catalog = self
-            .catalog
-            .lock()
-            .expect("the node lock is never poisoned");
+        let mut catalog = self.catalog.locked();
         let Some(behavior) = found else {
             catalog.give_up(name);
             drop(catalog);
@@ -474,45 +472,157 @@ impl Node {
         drop(catalog);
         // A type met by importing it is one this node hosts, so the cluster and the rings hear of it too.
         if let Some(cluster) = self.cluster() {
-            let definition = behavior.definition();
-            cluster.node().learn(casty_node::node::Kind {
-                actor: definition.name.clone(),
-                replicas: definition.replicas,
-                write: definition.write,
-            });
+            cluster.node().learn(behavior.definition().kind());
         }
         Some(behavior)
     }
 
     pub fn store(&self) -> std::sync::MutexGuard<'_, LocalStore> {
-        self.store.lock().expect("the node lock is never poisoned")
+        self.store.locked()
     }
 
     /// Send `command` to the key it names, wherever that key is.
     ///
-    /// In a cluster the node decides where it goes and hands it back here if this is the node that owns the key.
+    /// In a cluster the node decides where it goes and hands it back here if this is the node that owns the key. A
+    /// command larger than one message between two nodes goes nowhere, wherever the key is: whoever waits for its
+    /// answer is answered with the refusal at once, and a command nobody waits for raises it.
     pub fn hand(
         self: &Arc<Self>,
         py: Python<'_>,
         command: casty_core::mailbox::Command,
     ) -> PyResult<()> {
+        if let casty_core::mailbox::Command::Deliver(deliver) = &command {
+            self.sent(py, deliver);
+        }
         let Some(cluster) = self.cluster() else {
             return self.take(py, command);
         };
-        match command {
-            casty_core::mailbox::Command::Deliver(deliver) => {
-                cluster.node().deliver(
-                    &deliver.actor,
-                    &deliver.key,
-                    deliver.message,
-                    deliver.reply,
-                );
-            }
+        let reply = command.reply().cloned();
+        let sent = match command {
+            casty_core::mailbox::Command::Deliver(deliver) => cluster.node().deliver(
+                &deliver.actor,
+                &deliver.key,
+                deliver.message,
+                deliver.reply,
+                deliver.chain,
+            ),
             casty_core::mailbox::Command::Start(start) => {
-                cluster.node().start(&start.actor, &start.key, start.state);
+                cluster.node().start(&start.actor, &start.key, start.state)
             }
+        };
+        let Err(TooLarge(why)) = sent else {
+            return Ok(());
+        };
+        match reply {
+            Some(target) => self.answer(py, &target, &Outcome::TooLarge(why)),
+            None => Err(crate::errors::MessageTooLarge::new_err(why)),
         }
+    }
+
+    /// Note the key an `ask` of this node went to, which is where its cancellation goes, and keep what it sent when
+    /// the owner may call it back to send it again.
+    fn sent(&self, py: Python<'_>, deliver: &casty_core::mailbox::Deliver) {
+        let Some(Target::Reply { node, id }) = &deliver.reply else {
+            return;
+        };
+        if *node == self.id() {
+            let again = replies::waits(py, self, &deliver.actor);
+            self.replies.locked().sent(*id, deliver, again);
+        }
+    }
+
+    /// The bodies an `ask` made now keeps waiting: the chain of the message the run of the task running now is on,
+    /// and that run. Outside a body, or in a task the body started beside it, nobody.
+    #[must_use]
+    pub fn chain(&self, py: Python<'_>) -> Chain {
+        match self.runs.running(py) {
+            Some((activation, run)) => activation.get().chain(run),
+            None => Chain::default(),
+        }
+    }
+
+    /// Something on this node told `target` its answer. From the run holding the request `target` waits on, that
+    /// request is answered: nobody waits on it any more, and a cancellation of it changes nothing.
+    pub fn told(&self, py: Python<'_>, target: &Target) {
+        if let Some((activation, run)) = self.runs.running(py) {
+            activation.get().told(run, target);
+        }
+    }
+
+    /// Tell the key `(actor, key)` that nobody waits for the answer of the request `id` of this node any more.
+    pub fn cancel(
+        self: &Arc<Self>,
+        py: Python<'_>,
+        actor: &str,
+        key: &str,
+        id: i64,
+    ) -> PyResult<()> {
+        let request = Target::Reply {
+            node: self.id(),
+            id,
+        };
+        match self.cluster() {
+            Some(cluster) => {
+                cluster.node().cancel(actor, key, request);
+                Ok(())
+            }
+            None => self.cancelled(py, actor, key, &request),
+        }
+    }
+
+    /// The caller of `request`, sent to `(actor, key)`, stopped waiting for its answer: it timed out or was cancelled.
+    ///
+    /// This is where a cancellation lands on the node that runs the request, from the cluster or from a caller on the
+    /// same node. It reaches the activation of the key here and never starts one. The activation matches `request`
+    /// against the reply target of the messages its runs are on, of those it queues and of the callers it holds.
+    ///
+    /// A request it does not have is remembered until its deadline and dropped if it arrives: a request an owner sent
+    /// back went again from the caller, and its cancellation, which took the direct way, can arrive first. One that
+    /// was answered already is remembered for nothing, and forgotten at the deadline.
+    pub fn cancelled(
+        self: &Arc<Self>,
+        py: Python<'_>,
+        actor: &str,
+        key: &str,
+        request: &Target,
+    ) -> PyResult<()> {
+        let held = self
+            .activations
+            .locked()
+            .get(&(actor.to_owned(), key.to_owned()))
+            .map(|activation| activation.clone_ref(py));
+        let found = match held {
+            Some(activation) => Activation::cancelled(activation.bind(py), py, request)?,
+            None => false,
+        };
+        if found {
+            return Ok(());
+        }
+        let now = self.now(py)?;
+        let within = replies::timeout(
+            py,
+            self,
+            &Target::Entity {
+                actor: actor.to_owned(),
+                key: key.to_owned(),
+            },
+        );
+        let mut forestalled = self.forestalled.locked();
+        forestalled.retain(|_, until| *until > now);
+        forestalled.insert(request.clone(), now + within);
         Ok(())
+    }
+
+    /// Whether the caller of `request` cancelled it before it arrived here, so that nobody waits for it.
+    fn forestalls(&self, py: Python<'_>, request: &Target) -> bool {
+        let until = {
+            let mut forestalled = self.forestalled.locked();
+            if forestalled.is_empty() {
+                return false;
+            }
+            forestalled.remove(request)
+        };
+        until.is_some_and(|until| self.now(py).is_ok_and(|now| now < until))
     }
 
     /// Send `command` to the activation of its key here, starting one when the key has none.
@@ -521,6 +631,11 @@ impl Node {
         py: Python<'_>,
         command: casty_core::mailbox::Command,
     ) -> PyResult<()> {
+        if let Some(request) = command.reply()
+            && self.forestalls(py, request)
+        {
+            return Ok(());
+        }
         if self.refusing() {
             return self.refuse(
                 py,
@@ -528,6 +643,15 @@ impl Node {
                 "the node is shutting down",
                 Outcome::unreached,
             );
+        }
+        // Handed over before the node started leaving, it reaches the loop after the activation of its key ended:
+        // starting another one here would take the key back from the node that owns it now.
+        if self.draining() && !self.holds(command.actor(), command.key()) {
+            let (actor, key) = (command.actor().to_owned(), command.key().to_owned());
+            if let Err(refused) = self.hand(py, command) {
+                self.dropped(py, &actor, &key, &refused.value(py).to_string());
+            }
+            return Ok(());
         }
         let Some(activation) = self.attach(py, command.actor(), command.key())? else {
             return self.refuse(
@@ -540,6 +664,13 @@ impl Node {
         Activation::put(activation.bind(py), py, command)
     }
 
+    /// Whether `key` has an activation here.
+    fn holds(&self, actor: &str, key: &str) -> bool {
+        self.activations
+            .locked()
+            .contains_key(&(actor.to_owned(), key.to_owned()))
+    }
+
     /// The activation of `key`, started if it has none. Nothing when this node does not have the type.
     pub fn attach(
         self: &Arc<Self>,
@@ -549,10 +680,7 @@ impl Node {
     ) -> PyResult<Option<Py<Activation>>> {
         let at = (actor.to_owned(), key.to_owned());
         {
-            let activations = self
-                .activations
-                .lock()
-                .expect("the node lock is never poisoned");
+            let activations = self.activations.locked();
             if let Some(found) = activations.get(&at) {
                 return Ok(Some(found.clone_ref(py)));
             }
@@ -562,29 +690,94 @@ impl Node {
         };
         let started = Activation::new(py, self, &behavior, actor, key)?;
         let held = {
-            let mut activations = self
-                .activations
-                .lock()
-                .expect("the node lock is never poisoned");
+            let mut activations = self.activations.locked();
             activations
                 .entry(at)
                 .or_insert_with(|| started.clone_ref(py))
                 .clone_ref(py)
         };
         if held.is(&started) {
+            if let Some(cluster) = self.cluster() {
+                cluster.node().attached(actor, key);
+            }
+            self.observe(py, || Observed::Started {
+                actor: actor.to_owned(),
+                key: key.to_owned(),
+            });
             Activation::begin(held.bind(py), py)?;
         }
         Ok(Some(held))
     }
 
-    pub fn remove(&self, actor: &str, key: &str) -> Option<Py<Activation>> {
+    /// Take the activation of `key` out of the table, which is where a message that arrives next starts a new one.
+    pub fn remove(&self, py: Python<'_>, actor: &str, key: &str) -> Option<Py<Activation>> {
+        let removed = self
+            .activations
+            .locked()
+            .remove(&(actor.to_owned(), key.to_owned()));
+        if removed.is_some() {
+            if let Some(cluster) = self.cluster() {
+                cluster.node().detached(actor, key);
+            }
+            self.observe(py, || Observed::Ended {
+                actor: actor.to_owned(),
+                key: key.to_owned(),
+            });
+        }
+        removed
+    }
+
+    /// Take `activation` out of the table, unless another activation of its key has taken its place there.
+    pub fn vacate(&self, activation: &Bound<'_, Activation>) {
+        let (actor, key) = (activation.get().entry(), activation.get().key());
+        let held = self
+            .activations
+            .locked()
+            .get(&(actor.to_owned(), key.to_owned()))
+            .is_some_and(|held| held.is(activation));
+        if held {
+            self.remove(activation.py(), actor, key);
+        }
+    }
+
+    /// Let the key go on purpose, as if its activation here idled out now. The future it gives back resolves with
+    /// whether there was one, once it is over.
+    pub fn retire<'py>(
+        &self,
+        py: Python<'py>,
+        actor: &str,
+        key: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let over = self.future(py)?;
+        let held = self
+            .activations
+            .locked()
+            .get(&(actor.to_owned(), key.to_owned()))
+            .map(|activation| activation.clone_ref(py));
+        match held {
+            Some(activation) => Activation::retire(activation.bind(py), py, &over)?,
+            None => {
+                over.call_method1("set_result", (false,))?;
+            }
+        }
+        Ok(over)
+    }
+
+    /// Every activation this node holds now, which is what a reading of the node goes through: each one answers for
+    /// its type, its key and its mailbox.
+    #[must_use]
+    pub fn census(&self, py: Python<'_>) -> Vec<Py<Activation>> {
         self.activations
-            .lock()
-            .expect("the node lock is never poisoned")
-            .remove(&(actor.to_owned(), key.to_owned()))
+            .locked()
+            .values()
+            .map(|activation| activation.clone_ref(py))
+            .collect()
     }
 
     /// Answer the request `target` is waiting for, wherever it waits.
+    ///
+    /// In a cluster an answer larger than one message between two nodes is replaced by the refusal that says so, for a
+    /// caller on this node too, so that an answer does not arrive or fail by where the key landed.
     pub fn answer(
         self: &Arc<Self>,
         py: Python<'_>,
@@ -594,24 +787,24 @@ impl Node {
         let Target::Reply { node, id } = target else {
             return Ok(());
         };
-        if let Some(cluster) = self.cluster()
-            && node != cluster.id()
-        {
+        let Some(cluster) = self.cluster() else {
+            return self.settle(py, *id, outcome);
+        };
+        if node != cluster.id() {
             cluster.node().answer(target.clone(), outcome.clone());
             return Ok(());
         }
-        self.settle(py, *id, outcome)
+        match cluster.node().oversized(target, outcome) {
+            Some(refused) => self.settle(py, *id, &refused),
+            None => self.settle(py, *id, outcome),
+        }
     }
 
     /// Answer the request numbered `id`, which something on this node is waiting for.
     pub fn settle(self: &Arc<Self>, py: Python<'_>, id: i64, outcome: &Outcome) -> PyResult<()> {
-        let waiting = self
-            .replies
-            .lock()
-            .expect("the node lock is never poisoned")
-            .forget(id);
+        let waiting = self.replies.locked().forget(id);
         match waiting {
-            Some(waiting) => replies::settle(py, &waiting, outcome, self),
+            Some(waiting) => replies::settle(py, id, waiting, outcome, self),
             None => Ok(()),
         }
     }
@@ -630,6 +823,8 @@ impl Node {
         let taken = self.future(py)?;
         if let Some(cluster) = self.cluster() {
             cluster.activate(py, actor, key, initial, taken.clone().unbind());
+        } else if let Some(durability) = self.durability(py, actor) {
+            self.take_stored(py, actor, key, initial, durability, &taken)?;
         } else {
             let held = self.store().activate(actor, key, initial);
             taken.call_method1("set_result", (Bound::new(py, Taken::of(held))?,))?;
@@ -643,13 +838,13 @@ impl Node {
         py: Python<'py>,
         actor: &str,
         key: &str,
+        lease: u64,
         pages: Pages,
         active: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let watching = self
             .writes
-            .lock()
-            .expect("the node lock is never poisoned")
+            .locked()
             .as_ref()
             .map(|writes| writes.clone_ref(py));
         if let Some(watching) = watching {
@@ -657,12 +852,56 @@ impl Node {
         }
         let written = self.future(py)?;
         if let Some(cluster) = self.cluster() {
-            cluster.commit(py, actor, key, pages, active, written.clone().unbind());
+            cluster.commit(
+                py,
+                actor,
+                key,
+                lease,
+                pages,
+                active,
+                written.clone().unbind(),
+            );
+        } else if let Some(durability) = self.durability(py, actor) {
+            self.commit_stored(py, actor, key, pages, active, durability, &written)?;
         } else {
             self.store().commit(actor, key, pages, active);
+            self.saved.fetch_add(1, Ordering::Relaxed);
             written.call_method1("set_result", (py.None(),))?;
         }
         Ok(written)
+    }
+
+    /// Delete the state of the key, resolving the future it gives back once the deletion is written. Without
+    /// `active` the key lets go with it, which is the last write of its activation.
+    pub fn delete<'py>(
+        self: &Arc<Self>,
+        py: Python<'py>,
+        actor: &str,
+        key: &str,
+        lease: u64,
+        active: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let deleted = self.future(py)?;
+        if let Some(cluster) = self.cluster() {
+            cluster.delete(py, actor, key, lease, active, deleted.clone().unbind());
+        } else if let Some(durability) = self.durability(py, actor) {
+            self.delete_stored(py, actor, key, durability, &deleted)?;
+        } else {
+            self.store().delete(actor, key);
+            self.saved.fetch_add(1, Ordering::Relaxed);
+            deleted.call_method1("set_result", (py.None(),))?;
+        }
+        Ok(deleted)
+    }
+
+    /// Let go of a key whose activation ended without a last write, so that the cluster drops what its owner kept.
+    ///
+    /// It goes out before anything a later activation of the key asks for, which is what keeps it from dropping the
+    /// owner that one builds.
+    pub fn forgo(&self, actor: &str, key: &str, lease: u64) {
+        if let Some(cluster) = self.cluster() {
+            cluster.node().release(actor, key, lease);
+        }
     }
 
     /// Start waiting for an answer, decoded with `schema`, and give back the id it comes addressed to.
@@ -671,17 +910,14 @@ impl Node {
         self.waited(future, Some(schema.clone_ref(py)))
     }
 
-    /// Start waiting for an answer whose value nobody reads, which is what a native body asks for.
+    /// Start waiting for an answer that no schema reads, which is what a native body asks for: it reads the bytes.
     #[must_use]
     pub fn awaited(&self, future: &Bound<'_, PyAny>) -> i64 {
         self.waited(future, None)
     }
 
     fn waited(&self, future: &Bound<'_, PyAny>, schema: Option<Py<Schema>>) -> i64 {
-        let mut replies = self
-            .replies
-            .lock()
-            .expect("the node lock is never poisoned");
+        let mut replies = self.replies.locked();
         let id = replies.take();
         replies.wait(
             id,
@@ -689,16 +925,15 @@ impl Node {
                 future: future.clone().unbind(),
                 schema,
                 deadline: None,
+                to: None,
+                again: None,
             },
         );
         id
     }
 
     pub fn deadline(&self, py: Python<'_>, id: i64, timer: &Bound<'_, PyAny>) {
-        let mut replies = self
-            .replies
-            .lock()
-            .expect("the node lock is never poisoned");
+        let mut replies = self.replies.locked();
         if let Some(waiting) = replies.forget(id) {
             replies.wait(
                 id,
@@ -712,10 +947,7 @@ impl Node {
     }
 
     pub fn forget(&self, id: i64) -> Option<Waiting> {
-        self.replies
-            .lock()
-            .expect("the node lock is never poisoned")
-            .forget(id)
+        self.replies.locked().forget(id)
     }
 
     fn refuse(
@@ -727,11 +959,20 @@ impl Node {
     ) -> PyResult<()> {
         match command.reply() {
             None => {
-                dropped(py, command.actor(), command.key(), why);
+                self.dropped(py, command.actor(), command.key(), why);
                 Ok(())
             }
             Some(target) => self.answer(py, target, &outcome(command.actor(), command.key())),
         }
+    }
+
+    /// A message nobody is waiting for, which ends here.
+    pub fn dropped(&self, py: Python<'_>, actor: &str, key: &str, why: &str) {
+        self.observe(py, || Observed::Dropped {
+            actor: actor.to_owned(),
+            key: key.to_owned(),
+            reason: why.to_owned(),
+        });
     }
 
     /// Take no more: a ref of this node raises from here on, and no activation goes further.
@@ -739,8 +980,7 @@ impl Node {
         self.stop_taking();
         let running: Vec<Py<Activation>> = self
             .activations
-            .lock()
-            .expect("the node lock is never poisoned")
+            .locked()
             .values()
             .map(|activation| activation.clone_ref(py))
             .collect();
@@ -757,8 +997,7 @@ impl Node {
         let waiting = self.future(py)?;
         let running: Vec<Py<Activation>> = self
             .activations
-            .lock()
-            .expect("the node lock is never poisoned")
+            .locked()
             .values()
             .map(|activation| activation.clone_ref(py))
             .collect();
@@ -766,10 +1005,7 @@ impl Node {
             waiting.call_method1("set_result", (py.None(),))?;
             return Ok(waiting);
         }
-        *self
-            .leaving
-            .lock()
-            .expect("the node lock is never poisoned") = Some(waiting.clone().unbind());
+        *self.leaving.locked() = Some(waiting.clone().unbind());
         for activation in running {
             Activation::drain(activation.bind(py), py)?;
         }
@@ -780,7 +1016,11 @@ impl Node {
                 node: Arc::clone(self),
             },
         )?;
-        self.later(py, self.settings.leave_timeout, abandon.into_any())?;
+        self.later(
+            py,
+            self.settings.leave_timeout.as_secs_f64(),
+            abandon.into_any(),
+        )?;
         Ok(waiting)
     }
 
@@ -788,8 +1028,7 @@ impl Node {
     pub fn abandon(self: &Arc<Self>, py: Python<'_>) {
         let running: Vec<Py<Activation>> = self
             .activations
-            .lock()
-            .expect("the node lock is never poisoned")
+            .locked()
             .values()
             .map(|activation| activation.clone_ref(py))
             .collect();
@@ -800,19 +1039,11 @@ impl Node {
 
     /// Called by an activation that ended: the last one out closes the shutdown.
     pub fn ended(&self, py: Python<'_>) -> PyResult<()> {
-        let empty = self
-            .activations
-            .lock()
-            .expect("the node lock is never poisoned")
-            .is_empty();
+        let empty = self.activations.locked().is_empty();
         if !empty {
             return Ok(());
         }
-        let waiting = self
-            .leaving
-            .lock()
-            .expect("the node lock is never poisoned")
-            .take();
+        let waiting = self.leaving.locked().take();
         if let Some(waiting) = waiting {
             let waiting = waiting.bind(py);
             if !waiting.call_method0("done")?.is_truthy()? {
@@ -834,8 +1065,7 @@ fn listed<'py>(node: &Arc<Node>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>
     if seen.is_empty() && node.cluster().is_none() {
         let types: Vec<String> = node
             .catalog
-            .lock()
-            .expect("the node lock is never poisoned")
+            .locked()
             .kinds()
             .into_iter()
             .map(|kind| kind.actor)
@@ -879,18 +1109,6 @@ fn decoded<'py>(
     )?)
 }
 
-/// A message nobody is waiting for, which ends here.
-pub fn dropped(py: Python<'_>, actor: &str, key: &str, why: &str) {
-    let _ = log(py, format!("dropped a message to {actor}/{key}: {why}"));
-}
-
-pub fn log(py: Python<'_>, message: String) -> PyResult<()> {
-    py.import("logging")?
-        .call_method1("getLogger", ("casty",))?
-        .call_method1("warning", ("%s", message))?;
-    Ok(())
-}
-
 /// A node. It hosts every actor type it meets: the ones this process uses, and the ones the cluster tells it of.
 #[pyclass(frozen, module = "casty._casty", subclass)]
 #[derive(Debug)]
@@ -908,53 +1126,45 @@ impl ActorSystem {
     #[pyo3(signature = (
         *_extra,
         cluster = None,
-        codec = "msgpack",
         idle_after = None,
         backoff = None,
         ask_timeout = None,
         write_timeout = None,
         leave_timeout = None,
+        observer = None,
+        store = None,
     ))]
     fn new(
         py: Python<'_>,
         // A subclass of its own may take arguments: what `object.__new__` ignores when `__init__` is overridden.
         _extra: &Bound<'_, pyo3::types::PyTuple>,
         cluster: Option<&Bound<'_, PyAny>>,
-        codec: &str,
         idle_after: Option<&Bound<'_, PyAny>>,
         backoff: Option<&Bound<'_, PyAny>>,
         ask_timeout: Option<&Bound<'_, PyAny>>,
         write_timeout: Option<&Bound<'_, PyAny>>,
         leave_timeout: Option<&Bound<'_, PyAny>>,
+        observer: Option<&Bound<'_, PyAny>>,
+        store: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        if codec != "msgpack" {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "codec is {codec:?}, and the only format is 'msgpack'"
-            )));
-        }
-        let (first, limit, factor) = match backoff {
-            None => (0.1, 10.0, 2.0),
-            Some(backoff) => (
-                seconds(&backoff.getattr("first")?)?,
-                seconds(&backoff.getattr("limit")?)?,
-                backoff.getattr("factor")?.extract()?,
-            ),
-        };
         let settings = Settings {
-            idle_after: optional(idle_after, 60.0)?,
-            ask_timeout: optional(ask_timeout, 10.0)?,
-            write_timeout: optional(write_timeout, 5.0)?,
-            leave_timeout: optional(leave_timeout, 30.0)?,
-            backoff_first: first,
-            backoff_limit: limit,
-            backoff_factor: factor,
+            idle_after: timing("idle_after", idle_after, Duration::from_secs(60))?,
+            ask_timeout: timing("ask_timeout", ask_timeout, Duration::from_secs(10))?,
+            write_timeout: timing("write_timeout", write_timeout, Duration::from_secs(5))?,
+            leave_timeout: timing("leave_timeout", leave_timeout, Duration::from_secs(30))?,
+            backoff: backoff.map_or(Ok(Backoff::default()), crate::actor::backed_off)?,
         };
         let id = NodeId {
             address: None,
             incarnation: incarnation(py)?,
         };
         Ok(Self {
-            node: Arc::new(Node::new(settings, id)),
+            node: Arc::new(Node::new(
+                settings,
+                id,
+                observing(py, observer)?,
+                storage::storing(store)?,
+            )),
             cluster: match cluster {
                 Some(cluster) if !cluster.is_none() => Some(cluster.clone().unbind()),
                 _ => None,
@@ -970,12 +1180,9 @@ impl ActorSystem {
     fn __aenter__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let node = &slf.get().node;
         let running = py.import("asyncio")?.call_method0("get_running_loop")?;
-        *node
-            .running
-            .lock()
-            .expect("the node lock is never poisoned") = Some(running.clone().unbind());
-        *node.system.lock().expect("the node lock is never poisoned") =
-            Some(slf.clone().into_any().unbind());
+        node.subscribe(py)?;
+        *node.running.locked() = Some(running.clone().unbind());
+        *node.system.locked() = Some(slf.clone().into_any().unbind());
         let entered = node.future(py)?;
         match &slf.get().cluster {
             // The join is answered by the loop, so it runs on the transport and comes back when it is done.
@@ -1032,6 +1239,44 @@ impl ActorSystem {
         listed(&self.node, py)
     }
 
+    /// What this node counts now: its activations by type, the answers it waits for, the writes of its keys, and its
+    /// connections and what they carried.
+    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        stats::snapshot(&self.node, py)
+    }
+
+    /// The keys active on this node now, each with its type, when it became active and what waits in its mailbox.
+    fn activations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        stats::listing(&self.node, py)
+    }
+
+    /// Where the key a ref of `actor` goes to is, as this node sees it: its owner and the nodes that keep it.
+    #[pyo3(signature = (actor, key, /, *, at = None))]
+    fn placement<'py>(
+        &self,
+        py: Python<'py>,
+        actor: &Bound<'py, PyAny>,
+        key: &str,
+        at: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        whereabouts(&self.node, py, actor, key, at)
+    }
+
+    /// Let the key go on purpose, as if its activation here idled out now, answering whether there was one once it
+    /// is over.
+    #[pyo3(signature = (actor, key, /))]
+    fn release<'py>(
+        &self,
+        py: Python<'py>,
+        actor: &Bound<'py, PyAny>,
+        key: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.node.started(py)?;
+        let name = Behavior::of(actor)?.definition().name.clone();
+        let over = self.node.retire(py, &name, key)?;
+        Ok(Bound::new(py, Awaited::of(over))?.into_any())
+    }
+
     /// Meet `actor` before the cluster names it, so this node runs it and not what the import would bring.
     ///
     /// A test hook, not part of the API: it is how a node of another deploy is built inside one process.
@@ -1058,6 +1303,74 @@ impl ActorSystem {
             .map(|behavior| behavior.held(py))
     }
 
+    /// Every key whose state this node keeps, as `(actor, key, deleted)`: `deleted` says what it keeps is the
+    /// tombstone of a deletion, which a replica holds until every other replica of the key has answered for it.
+    ///
+    /// A test hook, not part of the API.
+    #[pyo3(name = "_stored")]
+    fn stored<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stored = self.node.future(py)?;
+        if let Some(cluster) = self.node.cluster() {
+            cluster.stored(py, stored.clone().unbind());
+        } else {
+            let keys = self.node.store().kept();
+            stored.call_method1("set_result", (keys,))?;
+        }
+        Ok(Bound::new(py, Awaited::of(stored))?.into_any())
+    }
+
+    /// How many messages wait in the mailbox of `(actor, key)` on this node. Nothing when it has no activation here.
+    ///
+    /// A test hook, not part of the API: it is how a test sees that a mailbox holds no more than its bound.
+    #[pyo3(name = "_queued")]
+    fn queued(
+        &self,
+        py: Python<'_>,
+        actor: &Bound<'_, PyAny>,
+        key: &str,
+    ) -> PyResult<Option<usize>> {
+        let at = (
+            Behavior::of(actor)?.definition().name.clone(),
+            key.to_owned(),
+        );
+        let held = self
+            .node
+            .activations
+            .locked()
+            .get(&at)
+            .map(|activation| activation.clone_ref(py));
+        Ok(held.map(|activation| activation.bind(py).get().queued()))
+    }
+
+    /// The bodies an `ask` made now would name as waiting for its answer, `actor/key` each, the one asking last.
+    ///
+    /// A test hook, not part of the API: it is how a test sees what the chain of an `ask` carries.
+    #[pyo3(name = "_chain")]
+    fn chained(&self, py: Python<'_>) -> Vec<String> {
+        self.node
+            .chain(py)
+            .links()
+            .iter()
+            .map(|link| format!("{}/{}", link.actor, link.key))
+            .collect()
+    }
+
+    /// Cancel the request answered at `reply_to`, as if the cancellation of its caller reached `(actor, key)` now.
+    ///
+    /// A test hook, not part of the API: it is how a test makes a cancellation arrive after the body answered, which on
+    /// one node the answer always overtakes.
+    #[pyo3(name = "_cancel")]
+    fn cancelling(
+        &self,
+        py: Python<'_>,
+        actor: &Bound<'_, PyAny>,
+        key: &str,
+        reply_to: &Bound<'_, Ref>,
+    ) -> PyResult<()> {
+        let name = Behavior::of(actor)?.definition().name.clone();
+        self.node.cancelled(py, &name, key, reply_to.get().target())
+    }
+
     /// Watch the pages this node writes from here on.
     ///
     /// A test hook, not part of the API.
@@ -1071,11 +1384,7 @@ impl ActorSystem {
             },
         )?
         .unbind();
-        *self
-            .node
-            .writes
-            .lock()
-            .expect("the node lock is never poisoned") = Some(writes.clone_ref(py));
+        *self.node.writes.locked() = Some(writes.clone_ref(py));
         Ok(writes)
     }
 
@@ -1101,16 +1410,18 @@ impl ActorSystem {
         decoded(&self.node, schema, data)
     }
 
-    /// Reference to the entity `(actor, key)`, wherever it is placed. It creates the key if it has to, and activates it.
-    #[pyo3(name = "ref", signature = (actor, key, /, *, initial = None))]
+    /// Reference to the entity `(actor, key)`, wherever it is placed, or on the node `at` names for a pinned type. It
+    /// creates the key if it has to, and activates it.
+    #[pyo3(name = "ref", signature = (actor, key, /, *, initial = None, at = None))]
     fn reference(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         actor: &Bound<'_, PyAny>,
         key: &str,
         initial: Option<&Bound<'_, PyAny>>,
+        at: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Ref> {
-        Self::referenced(&slf.get().node, py, actor, key, initial)
+        Self::referenced(&slf.get().node, py, actor, key, initial, at)
     }
 
     #[getter]
@@ -1144,11 +1455,13 @@ impl ActorSystem {
         actor: &Bound<'_, PyAny>,
         key: &str,
         initial: Option<&Bound<'_, PyAny>>,
+        at: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Ref> {
         node.started(py)?;
         let behavior = Behavior::of(actor)?;
-        node.learn(py, &behavior);
         let definition = behavior.definition();
+        let key = placed(py, definition, key, at)?;
+        node.learn(py, &behavior);
         let state = definition.state.bind(py);
         let written: Option<Vec<u8>> = match (initial, &definition.initial) {
             (Some(initial), _) => Some(state.call_method1("dump", (initial,))?.extract()?),
@@ -1168,27 +1481,133 @@ impl ActorSystem {
             py,
             casty_core::mailbox::Command::Start(Start {
                 actor: definition.name.clone(),
-                key: key.to_owned(),
+                key: key.clone(),
                 state: written,
             }),
         )?;
         Ok(Ref::entity_of(
             definition.messages.clone_ref(py),
             definition.name.clone(),
-            key.to_owned(),
+            key,
             Some(node.clone()),
         ))
     }
 }
 
-/// End the request at `within`, so that nothing waits for an answer that is not coming.
-pub fn armed(
+/// The key a ref of `definition` goes to: `key` itself, which the ring places, or `key` pinned to the node `at` names.
+///
+/// A key of a pinned type always names its node, and a key of any other type never has the form of one: placement
+/// reads the form alone, so either would be sent where the type does not belong.
+fn placed(
     py: Python<'_>,
+    definition: &crate::actor::Definition,
+    key: &str,
+    at: Option<&Bound<'_, PyAny>>,
+) -> PyResult<String> {
+    let name = &definition.name;
+    match (definition.settings.pinned, at) {
+        (true, Some(at)) => {
+            let address = advertised(py, at)?;
+            let pinned = casty_core::placement::pin(&address, key);
+            if casty_core::placement::pinned(&pinned) != Some(address.as_str()) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "at is {address:?}, which is not the host:port a node advertises"
+                )));
+            }
+            Ok(pinned)
+        }
+        (true, None) => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{name} is pinned, so its ref names the node it runs on: pass at="
+        ))),
+        (false, Some(_)) => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{name} is placed by the ring, and only a type declared with pinned=True takes at="
+        ))),
+        (false, None) if casty_core::placement::pinned(key).is_some() => {
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{name}: the key {key:?} has the form @host:port/name, which only the keys of a pinned type have"
+            )))
+        }
+        (false, None) => Ok(key.to_owned()),
+    }
+}
+
+/// The advertised address `at` names: that of a `Member`, of a `NodeId`, or the `host:port` itself.
+fn advertised(py: Python<'_>, at: &Bound<'_, PyAny>) -> PyResult<String> {
+    let casty = py.import("casty")?;
+    let address: Option<String> = if at.is_instance(&casty.getattr("Member")?)? {
+        at.getattr("node")?.getattr("address")?.extract()?
+    } else if at.is_instance(&casty.getattr("NodeId")?)? {
+        at.getattr("address")?.extract()?
+    } else if let Ok(address) = at.extract::<String>() {
+        Some(address)
+    } else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "at is {at}, which is not a Member, a NodeId or a host:port"
+        )));
+    };
+    address.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "at is {at}, which has no address: only a node of a cluster runs keys"
+        ))
+    })
+}
+
+/// Where the key a ref of `actor` would go to is, as `node` sees it, as the future of a `casty.Placement`.
+///
+/// The key is the one `ref` makes of `key` and `at`, and the node meets the type first, as `ref` does: the number of
+/// replicas of a key is the one its type declares. Alone, the node is the owner and the only replica of every key.
+fn whereabouts<'py>(
     node: &Arc<Node>,
-    id: i64,
-    answer: &Bound<'_, PyAny>,
-    within: f64,
-) -> PyResult<()> {
+    py: Python<'py>,
+    actor: &Bound<'py, PyAny>,
+    key: &str,
+    at: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    node.started(py)?;
+    let behavior = Behavior::of(actor)?;
+    let key = placed(py, behavior.definition(), key, at)?;
+    node.learn(py, &behavior);
+    let answer = node.future(py)?;
+    if let Some(cluster) = node.cluster() {
+        cluster.placed(
+            py,
+            &behavior.definition().name,
+            &key,
+            answer.clone().unbind(),
+        );
+    } else {
+        let alone = node.id();
+        let placement = casty_node::node::Placed {
+            owner: Some(alone.clone()),
+            replicas: vec![alone],
+        };
+        answer.call_method1("set_result", (located(py, &placement)?,))?;
+    }
+    Ok(Bound::new(py, Awaited::of(answer))?.into_any())
+}
+
+/// A placement as the `Placement` of `casty`.
+pub fn located<'py>(
+    py: Python<'py>,
+    placed: &casty_node::node::Placed,
+) -> PyResult<Bound<'py, PyAny>> {
+    let owner = placed
+        .owner
+        .as_ref()
+        .map(|node| identity(py, node))
+        .transpose()?;
+    let replicas = placed
+        .replicas
+        .iter()
+        .map(|node| identity(py, node))
+        .collect::<PyResult<Vec<_>>>()?;
+    py.import("casty")?
+        .getattr("Placement")?
+        .call1((owner, PyTuple::new(py, replicas)?))
+}
+
+/// End the request at `within`, so that nothing waits for an answer that is not coming.
+pub fn armed(py: Python<'_>, node: &Arc<Node>, id: i64, within: f64) -> PyResult<()> {
     let expire = Bound::new(
         py,
         Expire {
@@ -1198,11 +1617,19 @@ pub fn armed(
     )?;
     let timer = node.later(py, within, expire.into_any())?;
     node.deadline(py, id, &timer);
-    let _ = answer;
     Ok(())
 }
 
-/// What a request that nothing answered by its deadline ends with.
+/// End the request `id`, which whoever waited for gave up on. If it still waits, nothing answered it, and the key it
+/// went to hears that nobody waits for it any more.
+pub fn abandoned(py: Python<'_>, node: &Arc<Node>, id: i64) -> PyResult<()> {
+    match node.forget(id) {
+        Some(waiting) => replies::cancel(py, id, &waiting, node),
+        None => Ok(()),
+    }
+}
+
+/// What a request that nothing answered by its deadline ends with. The key it went to hears so.
 #[pyclass(frozen, module = "casty._casty")]
 #[derive(Debug)]
 struct Expire {
@@ -1222,7 +1649,7 @@ impl Expire {
                 pyo3::exceptions::PyTimeoutError::new_err("the answer did not arrive in time");
             future.call_method1("set_exception", (timeout,))?;
         }
-        Ok(())
+        replies::cancel(py, self.id, &waiting, &self.node)
     }
 }
 
@@ -1279,15 +1706,28 @@ fn incarnation(py: Python<'_>) -> PyResult<[u8; 16]> {
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("a uuid is sixteen bytes"))
 }
 
-fn optional(value: Option<&Bound<'_, PyAny>>, default: f64) -> PyResult<f64> {
-    match value {
-        None => Ok(default),
-        Some(value) => seconds(value),
-    }
+/// A timing a constructor took, or `default` when it took none.
+fn timing(name: &str, value: Option<&Bound<'_, PyAny>>, default: Duration) -> PyResult<Duration> {
+    value.map_or(Ok(default), |value| crate::actor::period(name, value))
 }
 
-fn seconds(value: &Bound<'_, PyAny>) -> PyResult<f64> {
-    value.call_method0("total_seconds")?.extract()
+/// The observer a constructor took, which has to be something to call. Without one, the system logs what it reports.
+fn observing(py: Python<'_>, observer: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+    match observer {
+        Some(observer) if !observer.is_none() => {
+            if !observer.is_callable() {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "observer is {observer:?}, which cannot be called with an event"
+                )));
+            }
+            Ok(observer.clone().unbind())
+        }
+        _ => Ok(py
+            .import("casty")?
+            .getattr("LoggingObserver")?
+            .call0()?
+            .unbind()),
+    }
 }
 
 /// What leaves the cluster once every activation of this node has ended.
@@ -1339,30 +1779,27 @@ impl Client {
         *_extra,
         seeds,
         name = "casty",
-        codec = "msgpack",
         tls = None,
         compression = None,
         address_map = None,
+        limits = None,
         ask_timeout = None,
         sync_every = None,
+        observer = None,
     ))]
     fn new(
         py: Python<'_>,
         _extra: &Bound<'_, PyTuple>,
         seeds: Vec<String>,
         name: &str,
-        codec: &str,
         tls: Option<&Bound<'_, PyAny>>,
         compression: Option<&Bound<'_, PyAny>>,
         address_map: Option<&Bound<'_, PyAny>>,
+        limits: Option<&Bound<'_, PyAny>>,
         ask_timeout: Option<&Bound<'_, PyAny>>,
         sync_every: Option<&Bound<'_, PyAny>>,
+        observer: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        if codec != "msgpack" {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "codec is {codec:?}, and the only format is 'msgpack'"
-            )));
-        }
         if seeds.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "seeds is empty, and a client reaches a cluster only through a seed",
@@ -1377,23 +1814,29 @@ impl Client {
             Some(compression) if !compression.is_none() => compression.clone(),
             _ => py.import("casty")?.call_method0("Compression")?,
         };
-        let sync = optional(sync_every, 5.0)?;
+        let limits = match limits {
+            Some(limits) if !limits.is_none() => limits.clone(),
+            _ => py.import("casty")?.call_method0("Limits")?,
+        };
+        let sync = match sync_every {
+            Some(sync_every) => cluster::every("sync_every", sync_every)?,
+            None => Duration::from_secs(5),
+        };
         let settings = cluster::dialling(
             seeds,
             name.to_owned(),
             tls.unwrap_or(&none),
             &compression,
-            core::time::Duration::from_secs_f64(sync),
+            &limits,
+            sync,
         )?;
         // A client has no activation to idle out and no replica to write to: nothing of it waits for these.
         let held = Settings {
-            idle_after: 0.0,
-            ask_timeout: optional(ask_timeout, 10.0)?,
-            write_timeout: 0.0,
-            leave_timeout: 0.0,
-            backoff_first: 0.1,
-            backoff_limit: 10.0,
-            backoff_factor: 2.0,
+            idle_after: Duration::ZERO,
+            ask_timeout: timing("ask_timeout", ask_timeout, Duration::from_secs(10))?,
+            write_timeout: Duration::ZERO,
+            leave_timeout: Duration::ZERO,
+            backoff: Backoff::default(),
         };
         Ok(Self {
             node: Arc::new(Node::new(
@@ -1402,6 +1845,8 @@ impl Client {
                     address: None,
                     incarnation: incarnation(py)?,
                 },
+                observing(py, observer)?,
+                None,
             )),
             settings,
             map: match address_map {
@@ -1420,12 +1865,9 @@ impl Client {
         let held = slf.get();
         let node = &held.node;
         let running = py.import("asyncio")?.call_method0("get_running_loop")?;
-        *node
-            .running
-            .lock()
-            .expect("the node lock is never poisoned") = Some(running.clone().unbind());
-        *node.system.lock().expect("the node lock is never poisoned") =
-            Some(slf.clone().into_any().unbind());
+        node.subscribe(py)?;
+        *node.running.locked() = Some(running.clone().unbind());
+        *node.system.locked() = Some(slf.clone().into_any().unbind());
         let entered = node.future(py)?;
         let map = held.map.as_ref().map(|map| map.bind(py));
         node.enter(
@@ -1454,16 +1896,18 @@ impl Client {
         Ok(Bound::new(py, Awaited::of(gone))?.into_any())
     }
 
-    /// Reference to the entity `(actor, key)`, wherever it is placed. It creates the key if it has to, and activates it.
-    #[pyo3(name = "ref", signature = (actor, key, /, *, initial = None))]
+    /// Reference to the entity `(actor, key)`, wherever it is placed, or on the node `at` names for a pinned type. It
+    /// creates the key if it has to, and activates it.
+    #[pyo3(name = "ref", signature = (actor, key, /, *, initial = None, at = None))]
     fn reference(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         actor: &Bound<'_, PyAny>,
         key: &str,
         initial: Option<&Bound<'_, PyAny>>,
+        at: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Ref> {
-        ActorSystem::referenced(&slf.get().node, py, actor, key, initial)
+        ActorSystem::referenced(&slf.get().node, py, actor, key, initial, at)
     }
 
     /// `annotation` compiled in the canonical order a stored value is compared in.
@@ -1511,6 +1955,24 @@ impl Client {
         listed(&self.node, py)
     }
 
+    /// What this client counts now: the answers it waits for, and its connections and what they carried.
+    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        stats::snapshot(&self.node, py)
+    }
+
+    /// Where the key a ref of `actor` goes to is, as this client sees it: the node it sends to and the nodes that keep
+    /// the key.
+    #[pyo3(signature = (actor, key, /, *, at = None))]
+    fn placement<'py>(
+        &self,
+        py: Python<'py>,
+        actor: &Bound<'py, PyAny>,
+        key: &str,
+        at: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        whereabouts(&self.node, py, actor, key, at)
+    }
+
     #[getter]
     fn node(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.node.started(py)?;
@@ -1540,18 +2002,11 @@ pub struct Writes {
 impl Writes {
     /// Note the pages of a write, and refuse the one a test asked to fail.
     fn saw(&self, py: Python<'_>, pages: &Pages) -> PyResult<()> {
-        let refuse = self
-            .refuse
-            .lock()
-            .expect("the writes lock is never poisoned")
-            .clone();
+        let refuse = self.refuse.locked().clone();
         // A page that holds a stored value holds it as bytes, and that is what a test names.
         for page in pages.values() {
             if refuse.is_some() && casty_core::wire::Reading::new(page).bytes().ok() == refuse {
-                *self
-                    .refuse
-                    .lock()
-                    .expect("the writes lock is never poisoned") = None;
+                *self.refuse.locked() = None;
                 return Err(pyo3::exceptions::PyValueError::new_err("value save failed"));
             }
         }
@@ -1575,17 +2030,13 @@ impl Writes {
     #[getter]
     fn fail_on(&self, py: Python<'_>) -> Option<Py<PyBytes>> {
         self.refuse
-            .lock()
-            .expect("the writes lock is never poisoned")
+            .locked()
             .as_ref()
             .map(|page| PyBytes::new(py, page).unbind())
     }
 
     #[setter]
     fn set_fail_on(&self, page: Option<Vec<u8>>) {
-        *self
-            .refuse
-            .lock()
-            .expect("the writes lock is never poisoned") = page;
+        *self.refuse.locked() = page;
     }
 }

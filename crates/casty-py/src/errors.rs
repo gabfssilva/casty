@@ -29,7 +29,7 @@ pyo3::create_exception!(
     _casty,
     MailboxFull,
     pyo3::exceptions::PyException,
-    "`ask` to an activation whose bounded mailbox is full."
+    "`ask` to an activation whose bounded mailbox is full, of a type that refuses (`on_full=\"refuse\"`)."
 );
 
 pyo3::create_exception!(
@@ -44,7 +44,28 @@ pyo3::create_exception!(
     _casty,
     Refused,
     pyo3::exceptions::PyException,
-    "The node or client could not join the cluster: different cluster name, codec, or protocol version."
+    "The node or client could not join the cluster: different cluster name, limits, or protocol version."
+);
+
+pyo3::create_exception!(
+    _casty,
+    MessageTooLarge,
+    pyo3::exceptions::PyValueError,
+    "A message, an initial state or an answer is larger than `Limits.message`, the most one message between two \
+     nodes carries.\n\n\
+     Nothing of it was sent. It is refused wherever the key is, on the node that owns it too. A write of a state \
+     (`state.set`, `state.update`, `become`) raises it when a field has a name that leaves no room in a message for \
+     its data; a larger value is not refused, it travels across as many messages as it takes."
+);
+
+pyo3::create_exception!(
+    _casty,
+    ReentrancyError,
+    pyo3::exceptions::PyException,
+    "`ask` to a key whose body is waiting, down the chain of asks this one belongs to, for its answer: the key would \
+     never read the message. The message names the cycle.\n\n\
+     Raised at once, where waiting would end only at the deadline. A key of a type with `concurrency` above 1 takes \
+     the message while it has a run that is not waiting down the chain."
 );
 
 pyo3::create_exception!(
@@ -83,6 +104,8 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("MailboxFull", py.get_type::<MailboxFull>())?;
     module.add("Unavailable", py.get_type::<Unavailable>())?;
     module.add("Refused", py.get_type::<Refused>())?;
+    module.add("MessageTooLarge", py.get_type::<MessageTooLarge>())?;
+    module.add("ReentrancyError", py.get_type::<ReentrancyError>())?;
     module.add("ActorFailed", py.get_type::<ActorFailed>())?;
     Ok(())
 }

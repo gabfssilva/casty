@@ -1,13 +1,14 @@
 //! What two nodes tell each other before the first envelope crosses.
 //!
-//! The messages travel on the control stream, in the same msgpack maps the Python implementation writes, so the two
-//! sides of a mixed cluster shake hands.
+//! The messages travel on the control stream as msgpack maps of named fields. They name no payload format: there is
+//! one, msgpack.
 
 use casty_core::node::NodeId;
 use casty_core::schema::msgpack::{self, Int, Kind, Reader};
 
 use crate::compress::Name;
 use crate::frame::ProtocolError;
+use crate::limits::Limits;
 
 /// The versions of the wire protocol this build speaks.
 pub const VERSIONS: [i64; 1] = [1];
@@ -41,20 +42,49 @@ impl Role {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
     Cluster = 1,
-    Codec = 2,
     Version = 3,
     Itself = 4,
     Duplicate = 5,
+    Limits = 6,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     pub versions: Vec<i64>,
     pub cluster: String,
-    pub codec: String,
     pub node: NodeId,
     pub role: Role,
     pub compression: Vec<String>,
+    pub sizes: Sizes,
+}
+
+/// The sizes of `Limits` a node bounds what it receives by. Each side sends by its own, so a peer with other sizes
+/// would break the connection at the first frame, envelope or window past them: the handshake refuses it instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sizes {
+    pub frame: usize,
+    pub message: usize,
+    pub window: usize,
+}
+
+impl From<Limits> for Sizes {
+    fn from(limits: Limits) -> Self {
+        Self {
+            frame: limits.frame,
+            message: limits.message,
+            window: limits.window,
+        }
+    }
+}
+
+impl core::fmt::Display for Sizes {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "frame={}, message={}, window={}",
+            self.frame, self.message, self.window
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,10 +116,10 @@ pub fn answer(hello: &Hello, local: &Hello, ours: &[Name]) -> Result<Ack, Reject
             reason: format!("cluster {:?} is not {:?}", hello.cluster, local.cluster),
         });
     }
-    if hello.codec != local.codec {
+    if hello.sizes != local.sizes {
         return Err(Reject {
-            code: Rejection::Codec as i64,
-            reason: format!("codec {:?} is not {:?}", hello.codec, local.codec),
+            code: Rejection::Limits as i64,
+            reason: format!("limits {} are not {}", hello.sizes, local.sizes),
         });
     }
     let common = hello
@@ -123,7 +153,7 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
     let mut out = Vec::new();
     match message {
         Message::Hello(hello) => {
-            msgpack::write_map_len(&mut out, 7);
+            msgpack::write_map_len(&mut out, 9);
             key(&mut out, "versions");
             msgpack::write_array_len(&mut out, hello.versions.len());
             for version in &hello.versions {
@@ -131,8 +161,6 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
             }
             key(&mut out, "cluster");
             msgpack::write_str(&mut out, &hello.cluster);
-            key(&mut out, "codec");
-            msgpack::write_str(&mut out, &hello.codec);
             key(&mut out, "address");
             address(&mut out, &hello.node);
             key(&mut out, "incarnation");
@@ -143,6 +171,14 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
             msgpack::write_array_len(&mut out, hello.compression.len());
             for name in &hello.compression {
                 msgpack::write_str(&mut out, name);
+            }
+            for (name, size) in [
+                ("frame", hello.sizes.frame),
+                ("message", hello.sizes.message),
+                ("window", hello.sizes.window),
+            ] {
+                key(&mut out, name);
+                msgpack::write_int(&mut out, Int::Unsigned(size as u64));
             }
             ("hello", out)
         }
@@ -181,10 +217,14 @@ pub fn decode(name: &str, payload: &[u8]) -> Result<Message, ProtocolError> {
         "hello" => Ok(Message::Hello(Hello {
             versions: fields.integers("versions").ok_or_else(malformed)?,
             cluster: fields.text("cluster").ok_or_else(malformed)?,
-            codec: fields.text("codec").ok_or_else(malformed)?,
             node: fields.node().ok_or_else(malformed)?,
             role: Role::of(&fields.text("role").ok_or_else(malformed)?).ok_or_else(malformed)?,
             compression: fields.texts("compression").ok_or_else(malformed)?,
+            sizes: Sizes {
+                frame: fields.size("frame").ok_or_else(malformed)?,
+                message: fields.size("message").ok_or_else(malformed)?,
+                window: fields.size("window").ok_or_else(malformed)?,
+            },
         })),
         "hello-ack" => {
             let compression = match fields.take("compression") {
@@ -254,6 +294,10 @@ impl Fields {
             Value::Int(value) => Some(value),
             _ => None,
         }
+    }
+
+    fn size(&mut self, name: &str) -> Option<usize> {
+        usize::try_from(self.integer(name)?).ok()
     }
 
     fn text(&mut self, name: &str) -> Option<String> {
@@ -337,8 +381,11 @@ fn value(reader: &mut Reader<'_>) -> Option<Value> {
 mod tests {
     use casty_core::node::NodeId;
 
-    use super::{Ack, Hello, Message, Reject, Rejection, Role, VERSIONS, answer, decode, encode};
+    use super::{
+        Ack, Hello, Message, Reject, Rejection, Role, Sizes, VERSIONS, answer, decode, encode,
+    };
     use crate::compress::{Name, PREFERENCE};
+    use crate::limits::Limits;
 
     fn node(address: Option<&str>, tag: u8) -> NodeId {
         NodeId {
@@ -351,13 +398,13 @@ mod tests {
         Hello {
             versions: VERSIONS.to_vec(),
             cluster: cluster.to_owned(),
-            codec: "msgpack".to_owned(),
             node,
             role: Role::Member,
             compression: PREFERENCE
                 .iter()
                 .map(|name| name.name().to_owned())
                 .collect(),
+            sizes: Sizes::from(Limits::default()),
         }
     }
 
@@ -407,8 +454,8 @@ mod tests {
         let mut other = hello("other", node(Some("b:1"), 2));
         assert_eq!(refused(other.clone()), Rejection::Cluster as i64);
         other = hello("casty", node(Some("b:1"), 2));
-        other.codec = "json".to_owned();
-        assert_eq!(refused(other.clone()), Rejection::Codec as i64);
+        other.sizes.message *= 8;
+        assert_eq!(refused(other.clone()), Rejection::Limits as i64);
         other = hello("casty", node(Some("b:1"), 2));
         other.versions = vec![99];
         assert_eq!(refused(other), Rejection::Version as i64);

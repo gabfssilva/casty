@@ -2,4 +2,5 @@
 
 pub mod messages;
 pub mod owner;
+pub mod parts;
 pub mod replica;

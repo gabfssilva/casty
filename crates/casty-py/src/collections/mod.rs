@@ -35,6 +35,9 @@ pub enum Given<'a> {
 #[derive(Debug, Default)]
 pub struct Turn {
     pub save: Option<Pages>,
+    /// Delete the state of the key instead of writing one, at the write level of the type; `save` goes unwritten.
+    /// The body goes on from `initial`, which is where the key starts from the next time it is activated.
+    pub delete: bool,
     pub replies: Vec<(Target, Vec<u8>)>,
     /// When to run again with no message, for a body that has deadlines of its own.
     pub alarm: Option<f64>,
@@ -72,6 +75,12 @@ pub trait Native: Send + Sync + core::fmt::Debug + 'static {
     fn timed(&self) -> bool {
         false
     }
+
+    /// Whether a key that holds `held` when its activation ends keeps nothing a new activation would miss, and is
+    /// deleted then instead of written back. By default, a key back at `initial`.
+    fn disposable(&self, held: &Pages) -> bool {
+        *held == self.initial()
+    }
 }
 
 /// The body of `name`, when this process has a native one for it.
@@ -86,7 +95,9 @@ pub fn native(name: &str) -> Option<Arc<dyn Native>> {
         "register" => Some(Arc::new(register::Register)),
         "entry" => Some(Arc::new(entry::Entry)),
         "table" => Some(Arc::new(table::Table)),
+        "table_segment" => Some(Arc::new(table::Segment)),
         "queue" => Some(Arc::new(queue::Queue)),
+        "queue_segment" => Some(Arc::new(queue::Segment)),
         "barrier" => Some(Arc::new(barrier::Barrier)),
         "semaphore" => Some(Arc::new(semaphore::Semaphore)),
         _ => None,

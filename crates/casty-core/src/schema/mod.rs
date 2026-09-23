@@ -6,6 +6,7 @@ pub mod msgpack;
 
 pub use error::SchemaError;
 pub use ir::{
-    ClassRef, Container, Dataclass, Field, Kinds, Literal, Native, Node, NodeRef, Tree, Union,
+    ClassRef, CodecRef, Container, Dataclass, Enum, Field, Kinds, Literal, Native, Node, NodeRef,
+    Opaque, Tree, Union,
 };
 pub use msgpack::{Int, Kind, Malformed, Reader};

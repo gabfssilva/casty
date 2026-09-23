@@ -11,6 +11,9 @@ wheels/
 
 /benchmarks/results/
 
+# API reference, built by `mkdocs build`
+/site/
+
 # Rust
 /target/
 src/casty/_casty*.so

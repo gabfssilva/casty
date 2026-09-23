@@ -11,18 +11,24 @@ use super::activation::Activation;
 use crate::actor::Behavior;
 use crate::refs::Ref;
 
-/// The context of one activation: its key, its state, and the messages that reach it.
+/// The context of one run of the body of an activation: its key, its state, and the messages that reach it.
 #[pyclass(frozen, module = "casty._casty")]
 #[derive(Debug)]
 pub struct Context {
     activation: Py<Activation>,
     node: Arc<Node>,
+    /// The run of the body this context was given to, which is who its reads take messages for.
+    run: u64,
 }
 
 impl Context {
     #[must_use]
-    pub fn new(activation: Py<Activation>, node: Arc<Node>) -> Self {
-        Self { activation, node }
+    pub fn new(activation: Py<Activation>, node: Arc<Node>, run: u64) -> Self {
+        Self {
+            activation,
+            node,
+            run,
+        }
     }
 }
 
@@ -54,11 +60,12 @@ impl Context {
         }
     }
 
-    /// Messages in arrival order. Ends after the system's `idle_after` without messages.
+    /// Messages in arrival order. Ends after `idle_after` without messages: the type's, or the system's.
     #[getter]
     fn inbox(&self, py: Python<'_>) -> Inbox {
         Inbox {
             activation: self.activation.clone_ref(py),
+            run: self.run,
             source: None,
         }
     }
@@ -101,6 +108,7 @@ impl Context {
             .unwrap_or_else(|_| source.clone());
         Inbox {
             activation: self.activation.clone_ref(py),
+            run: self.run,
             source: Some(items.unbind()),
         }
     }
@@ -142,6 +150,11 @@ impl State {
     ) -> PyResult<Bound<'py, PyAny>> {
         Activation::update(self.activation.bind(py), py, change)
     }
+
+    /// Delete the state from the replicas and return once the type's write level confirms it.
+    fn delete<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Activation::delete(self.activation.bind(py), py)
+    }
 }
 
 /// The messages of an activation, on their own or merged with a source the body brought.
@@ -149,6 +162,7 @@ impl State {
 #[derive(Debug)]
 pub struct Inbox {
     activation: Py<Activation>,
+    run: u64,
     source: Option<Py<PyAny>>,
 }
 
@@ -159,7 +173,7 @@ impl Inbox {
     }
 
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        Activation::read(self.activation.bind(py), py, self.source.as_ref())
+        Activation::read(self.activation.bind(py), py, self.run, self.source.as_ref())
     }
 }
 

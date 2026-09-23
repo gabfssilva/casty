@@ -1,15 +1,18 @@
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections import defaultdict
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import timedelta
 
 import pytest
 
-from casty import NodeId, Overlay, Refused
+from casty import Event, MemberChanged, NodeId, Observer, Overlay, Refused
 from tests.cluster import FAST, Harness, Node
 from tests.support import eventually
 
 WITHIN = timedelta(seconds=10)
+QUIET = timedelta(milliseconds=500)
+"""Ten heartbeats of `FAST`: long enough for a transition reported twice to arrive after the one it repeats."""
 
 
 def describe_membership() -> None:
@@ -119,6 +122,72 @@ def describe_membership() -> None:
                         assert seen(node, old) is None
 
                 await eventually(the_others_replaced_the_old_incarnation, WITHIN)
+
+
+def describe_membership_events() -> None:
+    def when_a_machine_disappears() -> None:
+        async def it_reports_suspect_then_dead_once_each_on_every_survivor() -> None:
+            changes: defaultdict[int, list[MemberChanged]] = defaultdict(list)
+
+            async with Harness.start(4, observer=recording(changes)) as harness:
+                a, b, c, d = harness.nodes
+                gone = d.system.node
+
+                harness.isolate(d)
+                await harness.crash(d)
+
+                async def every_survivor_saw_it_die() -> None:
+                    for node in (a, b, c):
+                        assert since_alive(changes[node.id], gone) == ["suspect", "dead", "left"]
+
+                await eventually(every_survivor_saw_it_die, WITHIN)
+                await asyncio.sleep(QUIET.total_seconds())
+                await every_survivor_saw_it_die()
+
+    def when_a_node_shuts_down() -> None:
+        async def it_reports_leaving_then_left_once_each_on_every_other_node() -> None:
+            changes: defaultdict[int, list[MemberChanged]] = defaultdict(list)
+
+            async with Harness.start(3, observer=recording(changes)) as harness:
+                a, b, c = harness.nodes
+                going = c.system.node
+
+                await harness.leave(c)
+
+                async def the_others_saw_it_go() -> None:
+                    for node in (a, b):
+                        assert since_alive(changes[node.id], going) == ["leaving", "left"]
+
+                await eventually(the_others_saw_it_go, WITHIN)
+                await asyncio.sleep(QUIET.total_seconds())
+                await the_others_saw_it_go()
+
+
+def recording(changes: defaultdict[int, list[MemberChanged]]) -> Callable[[int], Observer]:
+    """An observer for each node of a harness, keeping the member changes it reports under the id of the node."""
+
+    def observer(source: int) -> Observer:
+        def observe(event: Event, /) -> None:
+            if isinstance(event, MemberChanged):
+                changes[source].append(event)
+
+        return observe
+
+    return observer
+
+
+def since_alive(changes: Sequence[MemberChanged], of: NodeId) -> list[str]:
+    """The statuses `of` took after it was last alive, once every event about it is checked to follow the one before.
+
+    An event whose `previous` is not the status before it is a transition reported twice, or one lost on the way.
+    """
+    statuses: list[str] = []
+    for change in changes:
+        if change.node == of:
+            assert change.previous == (statuses[-1] if statuses else None), f"{change} after {statuses}"
+            statuses.append(change.status)
+    alive = max((index for index, status in enumerate(statuses) if status == "alive"), default=-1)
+    return statuses[alive + 1 :]
 
 
 def members(node: Node) -> dict[NodeId, str]:

@@ -8,14 +8,17 @@ run in the core; what is here builds their messages and reads their answers.
 import asyncio
 import math
 import time
-from collections.abc import Awaitable, Callable, Hashable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from functools import wraps
 from hashlib import blake2b
-from typing import cast
+from inspect import Signature
+from typing import Concatenate, cast
 from uuid import UUID, uuid4
+from weakref import WeakKeyDictionary, WeakValueDictionary
 
-from casty import ActorDefinition, Context, DefaultedActor, Ref, System, Unavailable, Write, actor
+from casty import ActorDefinition, ActorFailed, Context, DefaultedActor, Ref, System, Unavailable, Write, actor
 
 __all__ = [
     "MISSING",
@@ -44,7 +47,7 @@ MISSING = Missing()
 
 
 class ConfigurationError(ValueError):
-    """A collection was used with settings other than the ones its first operation fixed."""
+    """A collection was asked for or used with settings other than the ones its first operation fixed."""
 
 
 @dataclass(frozen=True)
@@ -54,13 +57,21 @@ class RegisterState:
 
 @dataclass(frozen=True)
 class TableState:
+    segments: int = 1
+
+
+@dataclass(frozen=True)
+class TableSegmentState:
     entries: Mapping[bytes, tuple[bytes, ...]] = field(default_factory=dict[bytes, tuple[bytes, ...]])
+    modulus: int = 1
+    id: int = 0
+    version: int = 0
 
 
 @dataclass(frozen=True)
 class EntryState:
     value: bytes | None = None
-    indexed: bool = False
+    generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -116,6 +127,19 @@ class BarrierState:
     completed: tuple[Completed, ...] = ()
 
 
+@dataclass(frozen=True)
+class QueueState:
+    head: int = 0
+    tail: int = 0
+
+
+@dataclass(frozen=True)
+class QueueSegmentState:
+    items: tuple[bytes, ...] = ()
+    taken: int = 0
+    sealed: bool = False
+
+
 class counter:
     """A number that goes up and down. Striped: an aggregate read is not atomic across the stripes."""
 
@@ -169,39 +193,89 @@ class register:
         """The body runs in the core."""
 
 
-class table:
-    """A key with the values listed under it, which is what a set, a dict and a multimap are indexed by."""
+class table_segment:
+    """Keys of a shard of an index, with the values listed under each: those whose hash leaves `id` over `modulus`.
+
+    A message about a key the segment does not hold answers None and changes nothing, which is how a caller that has
+    not seen a split learns of it. `Add` and `List` answer whether they changed the listing and whether the segment
+    lists more than 512 keys, which is the cue to ask the directory for a split. `Size` and `Clear` answer the modulus
+    first, which tells a walk whether the segment still held the keys a split moved. `Scan` answers the modulus and
+    the keys, and is refused like a key at a `position` whose hash the segment does not hold. The split itself runs in
+    the core, from the directory to the segment and from the segment to the new one.
+    """
 
     @dataclass(frozen=True)
     class Add:
-        reply_to: Ref[bool]
+        reply_to: Ref[tuple[bool, bool] | None]
         key: bytes
         value: bytes
 
     @dataclass(frozen=True)
     class Get:
-        reply_to: Ref[tuple[bytes, ...]]
+        reply_to: Ref[tuple[bytes, ...] | None]
         key: bytes
 
     @dataclass(frozen=True)
     class Remove:
-        reply_to: Ref[int]
+        reply_to: Ref[int | None]
         key: bytes
         value: bytes | None
 
     @dataclass(frozen=True)
+    class List:
+        """List a dict key under `generation`, unless it is listed under a newer one."""
+
+        reply_to: Ref[tuple[bool, bool] | None]
+        key: bytes
+        generation: int
+
+    @dataclass(frozen=True)
+    class Unlist:
+        """Drop a dict key, unless it is listed under a newer generation than `generation`."""
+
+        reply_to: Ref[bool | None]
+        key: bytes
+        generation: int
+
+    @dataclass(frozen=True)
     class Size:
-        reply_to: Ref[int]
+        reply_to: Ref[tuple[int, int]]
+
+    @dataclass(frozen=True)
+    class Scan:
+        reply_to: Ref[tuple[int, Mapping[bytes, tuple[bytes, ...]]] | None]
+        position: int
 
     @dataclass(frozen=True)
     class Clear:
-        reply_to: Ref[None]
+        reply_to: Ref[tuple[int, int]]
+
+    type Message = Add | Get | Remove | List | Unlist | Size | Scan | Clear
+
+    @actor(initial=TableSegmentState())
+    async def actor(ctx: Context[TableSegmentState, Message]) -> None:
+        """The body runs in the core."""
+
+
+class table:
+    """The directory of a shard of an index: how many segments it has, split in order by linear hashing.
+
+    `Grow` splits the next segment, `split`, into a new one after the last, `into`, when the directory still counts
+    the `seen` segments the caller did, and answers how many it counts. A split is counted once it is done.
+    """
 
     @dataclass(frozen=True)
-    class Items:
-        reply_to: Ref[Mapping[bytes, tuple[bytes, ...]]]
+    class Segments:
+        reply_to: Ref[int]
 
-    type Message = Add | Get | Remove | Size | Clear | Items
+    @dataclass(frozen=True)
+    class Grow:
+        reply_to: Ref[int]
+        seen: int
+        split: Ref[table_segment.Message]
+        into: Ref[table_segment.Message]
+
+    type Message = Segments | Grow
 
     @actor(initial=TableState())
     async def actor(ctx: Context[TableState, Message]) -> None:
@@ -209,14 +283,20 @@ class table:
 
 
 class entry:
-    """One entry of a dict: the value under a key, and the index it is listed in."""
+    """One entry of a dict: the value under a key, and the generation its index lists the key under.
+
+    The entry never asks the index; the facade does. `Put` of a key with no value answers the generation to list the
+    key under, and saves the value when it is sent again with that generation as `listed`; any other put saves and
+    answers 0. `Remove` clears the value and answers the generation to unlist the key under. `Retire` answers the same
+    for a listing a walk found with no value, raising the entry to `listed` first when a put listed the key and never
+    saved its value, and answers 0 when there is a value.
+    """
 
     @dataclass(frozen=True)
     class Put:
-        reply_to: Ref[None]
-        key: bytes
+        reply_to: Ref[int]
         value: bytes
-        index: Ref[table.Message]
+        listed: int
 
     @dataclass(frozen=True)
     class Get:
@@ -228,9 +308,14 @@ class entry:
 
     @dataclass(frozen=True)
     class Remove:
-        reply_to: Ref[bool]
+        reply_to: Ref[tuple[bool, int]]
 
-    type Message = Put | Get | Contains | Remove
+    @dataclass(frozen=True)
+    class Retire:
+        reply_to: Ref[int]
+        listed: int
+
+    type Message = Put | Get | Contains | Remove | Retire
 
     @actor(initial=EntryState())
     async def actor(ctx: Context[EntryState, Message]) -> None:
@@ -238,25 +323,56 @@ class entry:
 
 
 class queue:
-    """Items taken in the order they were offered. A lost poll or drain can lose them to the caller."""
+    """The index of a queue: the first segment that may hold items, and the segment offers go to.
+
+    Both only move forward, to at least what `Advance` names, which answers where they are. A segment below the tail
+    is sealed, and one below the head is sealed and empty.
+    """
+
+    @dataclass(frozen=True)
+    class Advance:
+        reply_to: Ref[tuple[int, int]]
+        head: int
+        tail: int
+
+    type Message = Advance
+
+    @actor(initial=QueueState())
+    async def actor(ctx: Context[QueueState, Message]) -> None:
+        """The body runs in the core."""
+
+
+class queue_segment:
+    """Items of a queue in the order they were offered, under a key of their own.
+
+    A segment is sealed once it holds 1024 items or 64 KiB, and takes no offer after that: `Offer` answers whether it
+    took the item. `Take` and `Peek` answer the items and whether the segment is sealed, so that one that answers
+    fewer than asked for and is sealed is empty for good.
+
+    A segment sealed and drained is deleted when its activation ends. `Offer`, `Take` and `Peek` name the index of the
+    queue and the number of the segment, which a segment nothing wrote asks the index about: found below the tail,
+    it is one that was deleted, and answers as the sealed and empty segment it was.
+    """
 
     @dataclass(frozen=True)
     class Offer:
-        reply_to: Ref[None]
+        reply_to: Ref[bool]
         value: bytes
+        index: Ref[queue.Message]
+        at: int
 
     @dataclass(frozen=True)
-    class Poll:
-        reply_to: Ref[bytes | None]
+    class Take:
+        reply_to: Ref[tuple[tuple[bytes, ...], bool]]
+        limit: int
+        index: Ref[queue.Message]
+        at: int
 
     @dataclass(frozen=True)
     class Peek:
-        reply_to: Ref[bytes | None]
-
-    @dataclass(frozen=True)
-    class Drain:
-        reply_to: Ref[tuple[bytes, ...]]
-        limit: int
+        reply_to: Ref[tuple[tuple[bytes, ...], bool]]
+        index: Ref[queue.Message]
+        at: int
 
     @dataclass(frozen=True)
     class Size:
@@ -266,10 +382,10 @@ class queue:
     class Clear:
         reply_to: Ref[None]
 
-    type Message = Offer | Poll | Peek | Drain | Size | Clear
+    type Message = Offer | Take | Peek | Size | Clear
 
-    @actor(initial=cast("tuple[bytes, ...]", ()))
-    async def actor(ctx: Context[tuple[bytes, ...], Message]) -> None:
+    @actor(initial=QueueSegmentState())
+    async def actor(ctx: Context[QueueSegmentState, Message]) -> None:
         """The body runs in the core."""
 
 
@@ -350,8 +466,10 @@ _KINDS: dict[str, ActorDefinition] = {
     "counter": counter.actor,
     "register": register.actor,
     "table": table.actor,
+    "table_segment": table_segment.actor,
     "entry": entry.actor,
     "queue": queue.actor,
+    "queue_segment": queue_segment.actor,
     "semaphore": semaphore.actor,
     "barrier": barrier.actor,
 }
@@ -397,7 +515,10 @@ class Value[T]:
 
 
 class Binding:
-    """A named collection: the types its keys belong to, and the settings the first operation fixes."""
+    """A named collection: the types its keys belong to, and the settings the first operation fixes.
+
+    `confirmed` once an operation found the settings to be the collection's, which they then are for good.
+    """
 
     def __init__(
         self,
@@ -420,25 +541,24 @@ class Binding:
         self.replicas = replicas
         self.write: Write = write
         self.shards = shards
+        self.settings: tuple[str | int, ...] = (kind, replicas, write, shards, *signature)
+        self.confirmed = False
         self._metadata = system.ref(register.actor, f"{kind}:{len(name)}:{name}")
-        self._settings = Value[tuple[str | int, ...]](tuple[str | int, ...], system).dump(
-            (kind, replicas, write, shards, *signature)
-        )
-        self._ready = False
+        self._encoded = Value[tuple[str | int, ...]](tuple[str | int, ...], system).dump(self.settings)
         self._lock = asyncio.Lock()
 
     async def ready(self) -> None:
-        if self._ready:
+        if self.confirmed:
             return
         async with self._lock:
-            if self._ready:
+            if self.confirmed:
                 return
             if (
-                not await self._metadata.ask(register.CompareAndSet, None, self._settings)
-                and await self._metadata.ask(register.Get) != self._settings
+                not await self._metadata.ask(register.CompareAndSet, None, self._encoded)
+                and await self._metadata.ask(register.Get) != self._encoded
             ):
                 raise ConfigurationError(f"incompatible configuration for collection {self.name!r}")
-            self._ready = True
+            self.confirmed = True
 
     def ref[S, M](self, definition: DefaultedActor[S, M], shard: int | str = 0) -> Ref[M]:
         key = f"{self.kind}:{len(self.name)}:{self.name}:{shard}"
@@ -449,13 +569,36 @@ class Binding:
 
     async def each[T](self, operation: Callable[[int], Awaitable[T]]) -> list[T]:
         await self.ready()
-        async with asyncio.TaskGroup() as group:
-            tasks = [group.create_task(_run(operation, shard)) for shard in range(self.shards)]
-        return [task.result() for task in tasks]
+        return await _each(operation, range(self.shards))
 
 
-async def _run[T](operation: Callable[[int], Awaitable[T]], shard: int) -> T:
-    return await operation(shard)
+async def _each[I, T](operation: Callable[[I], Awaitable[T]], among: Iterable[I]) -> list[T]:
+    """`operation` on each of `among` at once, answered in their order."""
+    async with asyncio.TaskGroup() as group:
+        tasks = [group.create_task(_run(operation, at)) for at in among]
+    return [task.result() for task in tasks]
+
+
+async def _run[I, T](operation: Callable[[I], Awaitable[T]], at: I) -> T:
+    return await operation(at)
+
+
+_PROBES = 64
+"""How many keys of a segment are asked at once. Enough to overlap the round trips to the nodes that own them, and a
+task for each of these workers, not for each key, is what reading a segment costs on the loop."""
+
+
+async def _pooled[I, T](operation: Callable[[I], Awaitable[T]], among: Sequence[I]) -> list[T]:
+    """`operation` on each of `among`, `_PROBES` at a time, answered in their order."""
+    found: dict[int, T] = {}
+    pending = iter(enumerate(among))
+
+    async def work(_: int) -> None:
+        for at, item in pending:
+            found[at] = await operation(item)
+
+    await _each(work, range(min(_PROBES, len(among))))
+    return [found[at] for at in range(len(among))]
 
 
 def _duration(value: float, name: str, *, zero: bool = False) -> None:
@@ -522,32 +665,219 @@ class Register[T]:
         return self._value.optional(await self._ref.ask(register.GetAndSet, self._value.dump(value)))
 
 
-class _Table:
-    """What a set, a dict and a multimap share: an index sharded by key."""
+def _spread(raw: bytes) -> int:
+    """The hash that places a key among the segments of its shard: the high half of the digest that picks the shard."""
+    return int.from_bytes(blake2b(raw, digest_size=8).digest()) >> 32
+
+
+def _place(spread: int, segments: int) -> int:
+    """The segment holding the hash `spread` in a shard of `segments`, which are split in order by linear hashing."""
+    level = 1 << (segments.bit_length() - 1)
+    at = spread % (2 * level)
+    return at if at < segments else spread % level
+
+
+#: How many hashes `_spread` tells apart.
+_HASHES = 1 << 32
+
+
+def _reverse(spread: int) -> int:
+    """The 32 bits of `spread` in the opposite order."""
+    return int(f"{spread:032b}"[::-1], 2)
+
+
+def _after(position: int, modulus: int) -> int | None:
+    """Where a scan goes on after the segment that holds the hash `position` over `modulus`, or None past the last.
+
+    A scan takes the hashes in the order of their bits reversed. In that order the hashes a segment holds are
+    consecutive, and a split keeps them so, the segment holding the first half and the new one the second: the scan
+    never goes back into the hashes of a segment it read, whatever splits afterwards, and a split ahead of it leaves
+    every hash still to come where it was.
+    """
+    following = _reverse(position | (_HASHES - modulus)) + 1
+    return None if following == _HASHES else _reverse(following)
+
+
+class _Index:
+    """The shards of a set, a dict or a multimap: each a directory, and the segments it counts.
+
+    How many segments each shard has is kept from the last answer of its directory, and can only lag behind it: a
+    segment that split since refuses a key it no longer holds, and the directory is asked again. The refs are kept
+    too, since obtaining one asks the owner to start the key.
+    """
 
     def __init__(self, binding: Binding) -> None:
         self._binding = binding
+        self._counts = [1] * binding.shards
+        self._directories: dict[int, Ref[table.Message]] = {}
+        self._segments: dict[tuple[int, int], Ref[table_segment.Message]] = {}
+
+    async def add(self, raw: bytes, value: bytes) -> bool:
+        added, full = await self._keyed(raw, lambda segment: segment.ask(table_segment.Add, raw, value))
+        if full:
+            await self._grow(self._binding.shard(raw))
+        return added
+
+    async def get(self, raw: bytes) -> tuple[bytes, ...]:
+        return await self._keyed(raw, lambda segment: segment.ask(table_segment.Get, raw))
+
+    async def remove(self, raw: bytes, value: bytes | None) -> int:
+        return await self._keyed(raw, lambda segment: segment.ask(table_segment.Remove, raw, value))
+
+    async def list_under(self, raw: bytes, generation: int) -> bool:
+        """List a dict key under `generation`, and whether it is listed under it: not when it is under a newer one."""
+        listed, full = await self._keyed(raw, lambda segment: segment.ask(table_segment.List, raw, generation))
+        if full:
+            await self._grow(self._binding.shard(raw))
+        return listed
+
+    async def unlist(self, raw: bytes, generation: int) -> None:
+        await self._keyed(raw, lambda segment: segment.ask(table_segment.Unlist, raw, generation))
 
     async def size(self) -> int:
-        return sum(await self._binding.each(lambda shard: self._binding.ref(table.actor, shard).ask(table.Size)))
+        """How many values the segments list, with one ask to each of them."""
+        return sum(await self.walk(lambda segment: segment.ask(table_segment.Size)))
+
+    async def scan(self) -> AsyncIterator[Mapping[bytes, tuple[bytes, ...]]]:
+        """The listings of every segment, as `segments` reads them, shard after shard."""
+        for shard in range(self._binding.shards):
+            async for listed in self.segments(shard):
+                yield listed
+
+    async def segments(self, shard: int) -> AsyncIterator[Mapping[bytes, tuple[bytes, ...]]]:
+        """The listings of each segment of `shard`, one segment at a time, each from where `_after` goes on.
+
+        Not a snapshot: a key written meanwhile may be seen or not. A key is seen at most once, since the hashes
+        are read in an order no split takes back, and one listed throughout is seen.
+        """
+        await self._binding.ready()
+        position: int | None = 0
+        while position is not None:
+            modulus, listed = await self._page(shard, position)
+            yield listed
+            position = _after(position, modulus)
+
+    async def walk[R](self, visit: Callable[[Ref[table_segment.Message]], Awaitable[tuple[int, R]]]) -> list[R]:
+        """What `visit` answers at every segment of every shard, the shards at once and the segments of each at once.
+
+        Not a snapshot: a key written meanwhile may be seen or not, and one a split moves meanwhile is seen once.
+        """
+        await self._binding.ready()
+        shards = await _each(lambda shard: self._walk(shard, visit), range(self._binding.shards))
+        return [answer for shard in shards for answer in shard]
+
+    async def _walk[R](
+        self, shard: int, visit: Callable[[Ref[table_segment.Message]], Awaitable[tuple[int, R]]]
+    ) -> list[R]:
+        count = await self._count(shard)
+        visited = await _each(lambda at: visit(self._segment(shard, at)), range(count))
+        moduli = {at: modulus for at, (modulus, _) in enumerate(visited)}
+        found = [answer for _, answer in visited]
+        # A segment that split after the count was read answered without the keys it moved, and the segment they
+        # moved to is visited as well; one that split after it answered had them still, and it is not.
+        for at in range(count, await self._count(shard) + 1):
+            if moduli.get(at - (1 << (at.bit_length() - 1)), 0) > at:
+                moduli[at], answer = await visit(self._segment(shard, at))
+                found.append(answer)
+        return found
+
+    async def _page(self, shard: int, position: int) -> tuple[int, Mapping[bytes, tuple[bytes, ...]]]:
+        """The modulus and the listings of the segment of `shard` that holds the hash `position`."""
+        return await self._placed(shard, position, lambda segment: segment.ask(table_segment.Scan, position))
+
+    async def _keyed[T](self, raw: bytes, ask: Callable[[Ref[table_segment.Message]], Awaitable[T | None]]) -> T:
+        """What `ask` answers at the segment that holds `raw`."""
+        return await self._placed(self._binding.shard(raw), _spread(raw), ask)
+
+    async def _placed[T](
+        self, shard: int, spread: int, ask: Callable[[Ref[table_segment.Message]], Awaitable[T | None]]
+    ) -> T:
+        """What `ask` answers at the segment of `shard` that holds `spread`, following the splits not seen here yet."""
+        at = _place(spread, self._counts[shard])
+        while True:
+            answer = await ask(self._segment(shard, at))
+            if answer is not None:
+                return answer
+            count = await self._count(shard)
+            moved = _place(spread, count)
+            # Only the split the directory is making can be ahead of its count, and it moved the key to the new segment.
+            at = moved if moved != at else _place(spread, count + 1)
+
+    async def _grow(self, shard: int) -> None:
+        """Ask the directory of `shard` to split its next segment, as a write that found its segment full does."""
+        seen = self._counts[shard]
+        split = seen - (1 << (seen.bit_length() - 1))
+        try:
+            count = await self._directory(shard).ask(
+                table.Grow, seen, self._segment(shard, split), self._segment(shard, seen)
+            )
+        except (TimeoutError, Unavailable, ActorFailed):
+            # The write this follows went through, and the next one that finds a segment full asks again.
+            return
+        self._counts[shard] = max(self._counts[shard], count)
+
+    async def _count(self, shard: int) -> int:
+        count = await self._directory(shard).ask(table.Segments)
+        self._counts[shard] = max(self._counts[shard], count)
+        return count
+
+    def _directory(self, shard: int) -> Ref[table.Message]:
+        directory = self._directories.get(shard)
+        if directory is None:
+            directory = self._directories[shard] = self._binding.ref(table.actor, shard)
+        return directory
+
+    def _segment(self, shard: int, at: int) -> Ref[table_segment.Message]:
+        segment = self._segments.get((shard, at))
+        if segment is None:
+            segment = self._segments[shard, at] = self._binding.ref(table_segment.actor, f"{shard}.{at}")
+        return segment
+
+
+class _Table:
+    """What a set and a multimap share: an index sharded by key, each shard in segments."""
+
+    def __init__(self, binding: Binding) -> None:
+        self._binding = binding
+        self._index = _Index(binding)
+
+    async def size(self) -> int:
+        """Count the values listed, with one ask to each segment of the index."""
+        return await self._index.size()
 
     async def clear(self) -> None:
-        await self._binding.each(lambda shard: self._binding.ref(table.actor, shard).ask(table.Clear))
+        await self._index.walk(lambda segment: segment.ask(table_segment.Clear))
 
 
 class Dict[K, V]:
-    """Entries under their own keys, with an index of the keys sharded across `index_shards`."""
+    """Entries under their own keys, with an index of the keys sharded across `index_shards`.
+
+    Replacing the value of a key asks only its entry. A new key is listed before its value is saved, and a removed one
+    is unlisted after its value is cleared, so a call that stops halfway may leave a listing without a value but never
+    a value without a listing. `scan`, `items` and `clear` read the index a segment at a time, ask the entries of its
+    keys a few dozen at a time, and drop each listing they find without a value; `items` and `clear` read the shards of
+    the index at once. `size` counts the listings and asks no entry.
+    """
 
     def __init__(self, binding: Binding, key: type[K], value: type[V]) -> None:
         self._binding = binding
+        self._index = _Index(binding)
         self._key = Value(key, binding.system)
         self._value = Value(value, binding.system)
+        self._generation = Value(int, binding.system)
 
     async def put(self, key: K, value: V) -> None:
         await self._binding.ready()
         raw = self._key.dump(key)
-        index = self._binding.ref(table.actor, self._binding.shard(raw))
-        await self._entry(raw).ask(entry.Put, raw, self._value.dump(value), index)
+        data = self._value.dump(value)
+        ref = self._entry(raw)
+        # A key with no value answers the generation to list it under, and is saved when sent again naming that one.
+        listed = 0
+        while listed := await ref.ask(entry.Put, data, listed):
+            if not await self._index.list_under(raw, listed):
+                # A life of the key on a node whose clock ran ahead listed it later: the entry goes past that one.
+                await ref.ask(entry.Retire, self._under(await self._index.get(raw)))
+                listed = 0
 
     async def get(self, key: K) -> V | Missing:
         await self._binding.ready()
@@ -559,44 +889,99 @@ class Dict[K, V]:
 
     async def remove(self, key: K) -> bool:
         await self._binding.ready()
-        return await self._entry(self._key.dump(key)).ask(entry.Remove)
+        raw = self._key.dump(key)
+        removed, listed = await self._entry(raw).ask(entry.Remove)
+        # Unlisted even when nothing was removed: it drops the listing a removal that stopped halfway left behind.
+        await self._unlist(raw, listed)
+        return removed
+
+    async def scan(self) -> AsyncIterator[tuple[K, V]]:
+        """Every entry, reading the index a segment of about 512 keys at a time and the values of each together.
+
+        Not a snapshot: an entry written while the scan runs may be seen or not, and none is seen twice. Only the
+        segment being read is held, whatever the size of the dict.
+        """
+        async for listed in self._index.scan():
+            for pair in await self._entries(listed):
+                yield pair
 
     async def items(self) -> list[tuple[K, V]]:
-        return [item for shard in await self._binding.each(self._items) for item in shard]
+        """Every entry, read as `scan` reads them but the shards of the index at once."""
+        shards = await self._binding.each(self._shard_items)
+        return [pair for shard in shards for pair in shard]
 
     async def size(self) -> int:
-        return sum(await self._binding.each(self._size))
+        """Count the keys the index lists, with one ask to each of its segments and none to the entries.
+
+        A put or a removal that stopped halfway leaves a key listed without a value, which is counted until a `scan`,
+        `items` or `clear` drops it, or the key is put or removed again. So the count is never below the entries that
+        were there throughout, and above it by those listings.
+        """
+        return await self._index.size()
 
     async def clear(self) -> None:
-        await self._binding.each(self._clear)
+        """Remove every entry, as `items` reads them. Not atomic."""
+        await self._binding.each(self._clear_shard)
 
     def _entry(self, raw: bytes) -> Ref[entry.Message]:
         return self._binding.ref(entry.actor, f"key:{raw.hex()}")
 
-    async def _keys(self, shard: int) -> tuple[bytes, ...]:
-        return tuple(await self._binding.ref(table.actor, shard).ask(table.Items))
+    async def _shard_items(self, shard: int) -> list[tuple[K, V]]:
+        return [pair async for listed in self._index.segments(shard) for pair in await self._entries(listed)]
 
-    async def _items(self, shard: int) -> list[tuple[K, V]]:
-        items: list[tuple[K, V]] = []
-        for raw in await self._keys(shard):
-            value = await self._entry(raw).ask(entry.Get)
-            if value is not None:
-                items.append((self._key.load(raw), self._value.load(value)))
-        return items
+    async def _clear_shard(self, shard: int) -> None:
+        async for listed in self._index.segments(shard):
+            await self._probed(listed, self._drop)
 
-    async def _size(self, shard: int) -> int:
-        count = 0
-        for raw in await self._keys(shard):
-            count += await self._entry(raw).ask(entry.Contains)
-        return count
+    async def _entries(self, listed: Mapping[bytes, tuple[bytes, ...]]) -> list[tuple[K, V]]:
+        """The entries of the keys a segment lists, dropping each listing found without a value."""
+        return [
+            (self._key.load(raw), self._value.load(value))
+            for raw, value in await self._probed(listed, self._value_of)
+            if value is not None
+        ]
 
-    async def _clear(self, shard: int) -> None:
-        for raw in await self._keys(shard):
-            await self._entry(raw).ask(entry.Remove)
+    async def _probed[T](
+        self, listed: Mapping[bytes, tuple[bytes, ...]], probe: Callable[[bytes, tuple[bytes, ...]], Awaitable[T]]
+    ) -> list[tuple[bytes, T]]:
+        """What `probe` answers for every key of a segment and what the segment lists it under."""
+        keys = list(listed)
+        found = await _pooled(lambda raw: probe(raw, listed[raw]), keys)
+        return list(zip(keys, found, strict=True))
+
+    async def _value_of(self, raw: bytes, listing: tuple[bytes, ...]) -> bytes | None:
+        ref = self._entry(raw)
+        value = await ref.ask(entry.Get)
+        if value is None:
+            await self._unlist(raw, await ref.ask(entry.Retire, self._under(listing)))
+        return value
+
+    async def _drop(self, raw: bytes, listing: tuple[bytes, ...]) -> None:
+        ref = self._entry(raw)
+        _, generation = await ref.ask(entry.Remove)
+        listed = self._under(listing)
+        # A put that listed the key under a newer generation never saved its value: the entry is raised to it first.
+        if generation < listed:
+            generation = await ref.ask(entry.Retire, listed)
+        await self._unlist(raw, generation)
+
+    async def _unlist(self, raw: bytes, generation: int) -> None:
+        """Drop the listing of `raw` under the generation its entry answered, which is 0 when there is none to drop."""
+        if generation:
+            await self._index.unlist(raw, generation)
+
+    def _under(self, listed: tuple[bytes, ...]) -> int:
+        """The generation a key is listed under, which is the one value the index keeps for it."""
+        return max((self._generation.load(value) for value in listed), default=0)
 
 
 class Set[T: Hashable](_Table):
-    """Unique encoded values, with client-side set algebra over non-atomic snapshots."""
+    """Unique encoded values.
+
+    `scan` reads them a segment of the index at a time and is not a snapshot; `items`, which reads the shards at once,
+    and the set algebra are built on it, on the client. `intersection` and `difference` ask the other set about each
+    member of this one.
+    """
 
     def __init__(self, binding: Binding, value: type[T]) -> None:
         super().__init__(binding)
@@ -605,30 +990,55 @@ class Set[T: Hashable](_Table):
     async def add(self, value: T) -> bool:
         await self._binding.ready()
         raw = self._value.dump(value)
-        return await self._binding.ref(table.actor, self._binding.shard(raw)).ask(table.Add, raw, raw)
+        return await self._index.add(raw, raw)
 
     async def remove(self, value: T) -> bool:
         await self._binding.ready()
-        raw = self._value.dump(value)
-        return bool(await self._binding.ref(table.actor, self._binding.shard(raw)).ask(table.Remove, raw, None))
+        return bool(await self._index.remove(self._value.dump(value), None))
 
     async def contains(self, value: T) -> bool:
         await self._binding.ready()
-        raw = self._value.dump(value)
-        return bool(await self._binding.ref(table.actor, self._binding.shard(raw)).ask(table.Get, raw))
+        return bool(await self._index.get(self._value.dump(value)))
+
+    async def scan(self) -> AsyncIterator[T]:
+        """Every member, reading the index a segment of about 512 members at a time.
+
+        Not a snapshot: a member added or removed while the scan runs may be seen or not, and none is seen twice.
+        Only the segment being read is held, whatever the size of the set.
+        """
+        async for listed in self._index.scan():
+            for raw in listed:
+                yield self._value.load(raw)
 
     async def items(self) -> list[T]:
-        shards = await self._binding.each(lambda shard: self._binding.ref(table.actor, shard).ask(table.Items))
-        return [self._value.load(raw) for shard in shards for raw in shard]
+        """Every member, read as `scan` reads them but the shards of the index at once."""
+        shards = await self._binding.each(self._shard_members)
+        return [member for shard in shards for member in shard]
 
     async def union(self, other: "Set[T]") -> set[T]:
-        return set(await self.items()) | set(await other.items())
+        """Members of either set, scanning one and then the other."""
+        union = {member async for member in self.scan()}
+        async for member in other.scan():
+            union.add(member)
+        return union
 
     async def intersection(self, other: "Set[T]") -> set[T]:
-        return set(await self.items()) & set(await other.items())
+        """Members of this set that `other` holds, holding no more than the answer and a segment of this set."""
+        return {member async for member, held in self._held_by(other) if held}
 
     async def difference(self, other: "Set[T]") -> set[T]:
-        return set(await self.items()) - set(await other.items())
+        """Members of this set that `other` does not hold, holding no more than the answer and a segment of this set."""
+        return {member async for member, held in self._held_by(other) if not held}
+
+    async def _shard_members(self, shard: int) -> list[T]:
+        return [self._value.load(raw) async for listed in self._index.segments(shard) for raw in listed]
+
+    async def _held_by(self, other: "Set[T]") -> AsyncIterator[tuple[T, bool]]:
+        """Every member of this set and whether `other` holds it, asking `other` about a segment's members together."""
+        async for listed in self._index.scan():
+            members = [self._value.load(raw) for raw in listed]
+            for member, held in zip(members, await _pooled(other.contains, members), strict=True):
+                yield member, held
 
 
 class MultiMap[K, V](_Table):
@@ -641,73 +1051,126 @@ class MultiMap[K, V](_Table):
 
     async def put(self, key: K, value: V) -> bool:
         await self._binding.ready()
-        raw = self._key.dump(key)
-        return await self._binding.ref(table.actor, self._binding.shard(raw)).ask(
-            table.Add, raw, self._value.dump(value)
-        )
+        return await self._index.add(self._key.dump(key), self._value.dump(value))
 
     async def get(self, key: K) -> list[V]:
         await self._binding.ready()
-        raw = self._key.dump(key)
-        values = await self._binding.ref(table.actor, self._binding.shard(raw)).ask(table.Get, raw)
-        return [self._value.load(value) for value in values]
+        return [self._value.load(value) for value in await self._index.get(self._key.dump(key))]
 
     async def contains(self, key: K, value: V) -> bool:
         await self._binding.ready()
-        raw = self._key.dump(key)
-        values = await self._binding.ref(table.actor, self._binding.shard(raw)).ask(table.Get, raw)
-        return self._value.dump(value) in values
+        return self._value.dump(value) in await self._index.get(self._key.dump(key))
 
     async def remove(self, key: K, value: V) -> bool:
         await self._binding.ready()
-        raw = self._key.dump(key)
-        return bool(
-            await self._binding.ref(table.actor, self._binding.shard(raw)).ask(
-                table.Remove,
-                raw,
-                self._value.dump(value),
-            )
-        )
+        return bool(await self._index.remove(self._key.dump(key), self._value.dump(value)))
 
     async def remove_key(self, key: K) -> int:
         await self._binding.ready()
-        raw = self._key.dump(key)
-        return await self._binding.ref(table.actor, self._binding.shard(raw)).ask(table.Remove, raw, None)
+        return await self._index.remove(self._key.dump(key), None)
+
+    async def scan(self) -> AsyncIterator[tuple[K, V]]:
+        """Every value with its key, reading the index a segment at a time, the values of a key one after the other.
+
+        Not a snapshot: a value put or removed while the scan runs may be seen or not, and none is seen twice. Only
+        the segment being read is held, whatever the size of the multimap.
+        """
+        async for listed in self._index.scan():
+            for raw, values in listed.items():
+                key = self._key.load(raw)
+                for value in values:
+                    yield key, self._value.load(value)
 
 
 class Queue[T]:
-    """Single-owner FIFO. A lost poll/drain response can lose removed items to the caller."""
+    """FIFO kept in segments under keys of their own, so that an operation writes one segment and not the queue.
+
+    Offers go to the tail segment until it is sealed, polls take from the head segment until it is sealed and empty,
+    and the index of the two is asked only when one of them moves. `size` asks every segment in between and `clear`
+    empties each of them: neither is atomic, and an item offered while `clear` runs may survive it. A lost poll or
+    drain response can lose removed items to the caller. A segment drained for good is deleted once it idles, so
+    only the segments between the head and the tail stay.
+    """
 
     def __init__(self, binding: Binding, value: type[T]) -> None:
         self._binding = binding
         self._value = Value(value, binding.system)
-        self._ref = binding.ref(queue.actor)
+        self._index = binding.ref(queue.actor)
+        # Where the head and the tail were last seen. They can only lag behind the index, and a segment they left is
+        # sealed, which sends the call to the index to catch up.
+        self._head = 0
+        self._tail = 0
+        self._segments: dict[int, Ref[queue_segment.Message]] = {}
 
     async def offer(self, value: T) -> None:
         await self._binding.ready()
-        await self._ref.ask(queue.Offer, self._value.dump(value))
+        raw = self._value.dump(value)
+        while True:
+            tail = self._tail
+            if await self._segment(tail).ask(queue_segment.Offer, raw, self._index, tail):
+                return
+            await self._advance(self._head, tail + 1)
 
     async def poll(self) -> T | Missing:
-        await self._binding.ready()
-        return self._value.optional(await self._ref.ask(queue.Poll))
+        taken = await self._take(1)
+        return self._value.load(taken[0]) if taken else MISSING
 
     async def peek(self) -> T | Missing:
         await self._binding.ready()
-        return self._value.optional(await self._ref.ask(queue.Peek))
+        while True:
+            head = self._head
+            items, sealed = await self._segment(head).ask(queue_segment.Peek, self._index, head)
+            if items or not sealed:
+                return self._value.load(items[0]) if items else MISSING
+            await self._advance(head + 1, self._tail)
 
     async def size(self) -> int:
+        """Count the items segment by segment, with one ask to each of them."""
         await self._binding.ready()
-        return await self._ref.ask(queue.Size)
+        head, tail = await self._advance(self._head, self._tail)
+        return sum(await _each(lambda at: self._segment(at).ask(queue_segment.Size), range(head, tail + 1)))
 
     async def drain(self, max_items: int) -> list[T]:
         if max_items < 0:
             raise ValueError("max_items must be nonnegative")
-        await self._binding.ready()
-        return [self._value.load(raw) for raw in await self._ref.ask(queue.Drain, max_items)]
+        return [self._value.load(raw) for raw in await self._take(max_items)]
 
     async def clear(self) -> None:
         await self._binding.ready()
-        await self._ref.ask(queue.Clear)
+        head, tail = await self._advance(self._head, self._tail)
+        await _each(lambda at: self._segment(at).ask(queue_segment.Clear), range(head, tail + 1))
+        # The segments below the tail are sealed, and now empty for good.
+        await self._advance(tail, tail)
+
+    async def _take(self, limit: int) -> list[bytes]:
+        """Up to `limit` items from the head on, moving past every segment that is sealed and was emptied."""
+        await self._binding.ready()
+        taken: list[bytes] = []
+        while len(taken) < limit:
+            head = self._head
+            items, sealed = await self._segment(head).ask(queue_segment.Take, limit - len(taken), self._index, head)
+            taken += items
+            if len(taken) < limit:
+                # The segment is empty now: a sealed one for good, and an open one is the end of the queue.
+                if not sealed:
+                    break
+                await self._advance(head + 1, self._tail)
+        return taken
+
+    async def _advance(self, head: int, tail: int) -> tuple[int, int]:
+        """Move the index to at least `head` and `tail`, and learn where it is."""
+        head, tail = await self._index.ask(queue.Advance, head, tail)
+        self._head = max(self._head, head)
+        self._tail = max(self._tail, tail)
+        self._segments = {at: segment for at, segment in self._segments.items() if at >= self._head}
+        return head, tail
+
+    def _segment(self, at: int) -> Ref[queue_segment.Message]:
+        """The segment `at`, whose ref is kept: obtaining one asks the owner to start the key."""
+        segment = self._segments.get(at)
+        if segment is None:
+            segment = self._segments[at] = self._binding.ref(queue_segment.actor, at)
+        return segment
 
 
 @dataclass(frozen=True)
@@ -860,16 +1323,48 @@ class Barrier:
         return await self._ref.ask(barrier.Waiting)
 
 
+def _kept[**P, F](build: Callable[Concatenate["Collections", P], F]) -> Callable[Concatenate["Collections", P], F]:
+    """`build`, answering again what it built for equal arguments, for as long as something holds it.
+
+    Each factory keeps its own facades, which is what lets them keep the type the factory answers. They are kept
+    weakly, so a facade nobody holds is dropped, and built again when it is asked for again.
+    """
+    parameters = Signature.from_callable(build)
+    built: WeakKeyDictionary[Collections, WeakValueDictionary[tuple[object, ...], F]] = WeakKeyDictionary()
+
+    @wraps(build)
+    def kept(collections: "Collections", /, *args: P.args, **kwargs: P.kwargs) -> F:
+        arguments = parameters.bind(collections, *args, **kwargs)
+        arguments.apply_defaults()
+        key: tuple[object, ...] = tuple(arguments.arguments.values())[1:]
+        facades = built.setdefault(collections, WeakValueDictionary())
+        facade = facades.get(key)
+        if facade is None:
+            facade = facades[key] = build(collections, *args, **kwargs)
+        return facade
+
+    return kept
+
+
 class Collections:
     """Named collections over the supplied actor system or client.
 
     Configuration is fixed by the first operation. Mutating calls acknowledge saved state;
     a failed or timed-out call may have committed and is not automatically repeated.
+
+    Asked again with equal arguments, a factory answers the object it built, whose first operation is the only one
+    that checks the configuration with the cluster: a `Collections` is meant to be held, one per system. Once an
+    operation fixed the configuration of a name, other settings for it raise `ConfigurationError` here without asking
+    the cluster. All of that lasts while something holds the object: one nobody holds is dropped, so a collection per
+    entity name costs nothing once it is let go, and the one built in its place checks with the cluster again.
     """
 
     def __init__(self, system: System) -> None:
         self._system = system
+        # Weak: a binding lives as long as a facade that holds it.
+        self._bindings: WeakValueDictionary[tuple[str, str], Binding] = WeakValueDictionary()
 
+    @_kept
     def counter(
         self,
         name: str,
@@ -878,8 +1373,9 @@ class Collections:
         replicas: int = 3,
         write: Write = "majority",
     ) -> Counter:
-        return Counter(Binding(self._system, "counter", name, replicas=replicas, write=write, shards=stripes))
+        return Counter(self._table("counter", name, stripes, replicas, write, ()))
 
+    @_kept
     def register[T](
         self,
         name: str,
@@ -888,16 +1384,9 @@ class Collections:
         replicas: int = 3,
         write: Write = "majority",
     ) -> Register[T]:
-        binding = Binding(
-            self._system,
-            "register",
-            name,
-            replicas=replicas,
-            write=write,
-            signature=(repr(value),),
-        )
-        return Register(binding, value)
+        return Register(self._table("register", name, 1, replicas, write, (repr(value),)), value)
 
+    @_kept
     def dict[K, V](
         self,
         name: str,
@@ -911,6 +1400,7 @@ class Collections:
         binding = self._table("dict", name, index_shards, replicas, write, ("entry-v1", repr(key), repr(value)))
         return Dict(binding, key, value)
 
+    @_kept
     def set[T: Hashable](
         self,
         name: str,
@@ -922,6 +1412,7 @@ class Collections:
     ) -> Set[T]:
         return Set(self._table("set", name, shards, replicas, write, (repr(value),)), value)
 
+    @_kept
     def multimap[K, V](
         self,
         name: str,
@@ -934,6 +1425,7 @@ class Collections:
     ) -> MultiMap[K, V]:
         return MultiMap(self._table("multimap", name, shards, replicas, write, (repr(key), repr(value))), key, value)
 
+    @_kept
     def queue[T](
         self,
         name: str,
@@ -944,12 +1436,14 @@ class Collections:
     ) -> Queue[T]:
         return Queue(self._table("queue", name, 1, replicas, write, (repr(value),)), value)
 
+    @_kept
     def semaphore(self, name: str, *, capacity: int, replicas: int = 3) -> Semaphore:
         if capacity < 1:
             raise ValueError("capacity must be positive")
         binding = self._table("semaphore", name, 1, replicas, "majority", (str(capacity),))
         return Semaphore(binding, capacity)
 
+    @_kept
     def lock(
         self,
         name: str,
@@ -961,6 +1455,7 @@ class Collections:
         binding = self._table("lock", name, 1, replicas, "majority", ("1",))
         return Lock(Semaphore(binding, 1), ttl, timeout)
 
+    @_kept
     def barrier(self, name: str, *, parties: int, replicas: int = 3) -> Barrier:
         if parties < 1:
             raise ValueError("parties must be positive")
@@ -976,7 +1471,17 @@ class Collections:
         write: Write,
         signature: tuple[str, ...],
     ) -> Binding:
-        return Binding(
+        """The binding of `name`, which every facade of it held here shares.
+
+        Settings other than those the cluster confirmed for the binding can never be the collection's, so they raise
+        here. A binding not confirmed yet is replaced: the first operation is what decides.
+        """
+        held = self._bindings.get((kind, name))
+        if held is not None and held.settings == (kind, replicas, write, shards, *signature):
+            return held
+        if held is not None and held.confirmed:
+            raise ConfigurationError(f"incompatible configuration for collection {name!r}")
+        binding = self._bindings[kind, name] = Binding(
             self._system,
             kind,
             name,
@@ -985,3 +1490,4 @@ class Collections:
             shards=shards,
             signature=signature,
         )
+        return binding

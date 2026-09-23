@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use crate::node::NodeId;
+use crate::placement::pinned;
 
 /// A key this node keeps a copy of, and whether that copy carries the active mark.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +44,10 @@ pub trait Placement {
 /// activation elsewhere, the mark is what says the key was running and nobody removed it. An activation whose owner
 /// moved ends, because a write from it would be refused by the replicas anyway. A key whose replicas no longer
 /// include this node is handed to the ones that have it now, and only then dropped here.
+///
+/// A pinned key is brought back and ended like any other, its owner being the node at the address it names while that
+/// node is up, so a node that leaves ends it. It is never handed over: a process that replaced that node on its address
+/// starts the key from `initial`, not from what another one kept.
 pub fn sweep(
     kept: &[Kept],
     running: &BTreeSet<(String, String)>,
@@ -65,6 +70,7 @@ pub fn sweep(
         .collect();
     let given = kept
         .iter()
+        .filter(|item| pinned(&item.key).is_none())
         .filter_map(|item| {
             let replicas = where_.replicas(&item.actor, &item.key);
             if replicas.is_empty() || replicas.contains(node) {
@@ -88,8 +94,9 @@ pub fn sweep(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{Handover, Kept, Placement, sweep};
+    use super::{Handover, Kept, Placement, Sweep, sweep};
     use crate::node::NodeId;
+    use crate::placement::pin;
     use crate::rolls::Rolls;
 
     /// Where each key is, said outright instead of derived from a ring.
@@ -105,6 +112,21 @@ mod tests {
 
         fn owner(&self, actor: &str, key: &str) -> Option<NodeId> {
             self.replicas(actor, key).first().cloned()
+        }
+    }
+
+    /// `Placed` as it is while a node is leaving: still one of the replicas it was, and the owner of nothing.
+    struct Leaving<'a>(&'a Placed, &'a NodeId);
+
+    impl Placement for Leaving<'_> {
+        fn replicas(&self, actor: &str, key: &str) -> Vec<NodeId> {
+            self.0.replicas(actor, key)
+        }
+
+        fn owner(&self, actor: &str, key: &str) -> Option<NodeId> {
+            self.replicas(actor, key)
+                .into_iter()
+                .find(|node| node != self.1)
         }
     }
 
@@ -163,6 +185,25 @@ mod tests {
     }
 
     #[test]
+    fn it_leaves_alone_a_key_that_runs_here_and_is_still_owned_here() {
+        let ids = Rolls::seeded(44).nodes(2);
+        let placed = Placed(BTreeMap::from([(
+            at("a"),
+            vec![ids[0].clone(), ids[1].clone()],
+        )]));
+
+        let done = sweep(
+            &[kept("a", true)],
+            &BTreeSet::from([at("a")]),
+            &ids[0],
+            &placed,
+        );
+
+        // Marked active and owned here, and already running: neither brought back a second time nor ended.
+        assert_eq!(done, Sweep::default());
+    }
+
+    #[test]
     fn it_gives_away_what_it_no_longer_replicates_and_keeps_what_nobody_hosts() {
         let ids = Rolls::seeded(43).nodes(3);
         let placed = Placed(BTreeMap::from([
@@ -188,5 +229,62 @@ mod tests {
         );
         // A type no member hosts is not handed to nobody: the copy stays here until someone has it.
         assert!(done.given.iter().all(|given| given.key != "c"));
+    }
+
+    #[test]
+    fn a_pinned_key_comes_back_only_on_its_node_and_ends_there_when_the_node_leaves() {
+        let ids = Rolls::seeded(45).nodes(2);
+        let worker = pin("10.0.0.5:7400", "worker");
+        let placed = Placed(BTreeMap::from([(at(&worker), vec![ids[0].clone()])]));
+
+        let home = sweep(&[kept(&worker, true)], &BTreeSet::new(), &ids[0], &placed);
+        assert_eq!(home.reattach, vec![at(&worker)]);
+        // Any other node leaves a copy it holds alone: it does not own the key, and does not hand it over either.
+        let elsewhere = sweep(&[kept(&worker, true)], &BTreeSet::new(), &ids[1], &placed);
+        assert_eq!(elsewhere, Sweep::default());
+
+        let leaving = sweep(
+            &[kept(&worker, true)],
+            &BTreeSet::from([at(&worker)]),
+            &ids[0],
+            &Leaving(&placed, &ids[0]),
+        );
+        assert_eq!(
+            leaving,
+            Sweep {
+                end: vec![at(&worker)],
+                ..Sweep::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_pinned_key_is_never_handed_over() {
+        let ids = Rolls::seeded(46).nodes(3);
+        let worker = pin("10.0.0.5:7400", "worker");
+        // Another process now advertises the address the key names: it starts the key over instead of taking this copy.
+        let placed = Placed(BTreeMap::from([
+            (at(&worker), vec![ids[1].clone()]),
+            (at("a"), vec![ids[1].clone(), ids[2].clone()]),
+        ]));
+
+        let done = sweep(
+            &[kept(&worker, true), kept("a", false)],
+            &BTreeSet::new(),
+            &ids[0],
+            &placed,
+        );
+
+        assert_eq!(
+            done,
+            Sweep {
+                given: vec![Handover {
+                    actor: "account".to_owned(),
+                    key: "a".to_owned(),
+                    replicas: vec![ids[1].clone(), ids[2].clone()],
+                }],
+                ..Sweep::default()
+            }
+        );
     }
 }

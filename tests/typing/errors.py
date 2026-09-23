@@ -5,9 +5,9 @@ Input for the type checkers, never executed.
 """
 
 from dataclasses import dataclass
-from typing import assert_never
+from typing import Annotated, assert_never
 
-from casty import ActorSystem, Collections, Context, Ref, actor
+from casty import ActorSystem, Client, Collections, Context, Opaque, Ref, actor
 
 
 @dataclass(frozen=True)
@@ -115,6 +115,11 @@ async def unknown_write_level(ctx: Context[Account]) -> None:
     pass
 
 
+async def activations_of_a_client(client: Client) -> None:
+    client.activations()  # error
+    await client.release(account, "a")  # error
+
+
 async def invalid_collection_types(system: ActorSystem) -> None:
     collections = Collections(system)
     entries = collections.dict("accounts", key=str, value=Account)
@@ -128,3 +133,23 @@ async def invalid_collection_types(system: ActorSystem) -> None:
     await collections.counter("visits").add("one")  # error
     await collections.set("names", value=str).add(1)  # error
     await collections.multimap("names", key=str, value=int).put("one", "two")  # error
+
+
+def packed(numbers: list[int]) -> bytes:
+    return bytes(numbers)
+
+
+def unpacked(data: bytes) -> list[int]:
+    return list(data)
+
+
+type Numbers = Annotated[list[int], Opaque(encode=packed, decode=unpacked)]
+
+
+@dataclass(frozen=True)
+class Sketch:
+    strokes: Numbers
+
+
+def opaque_field_read_as_its_bytes(sketch: Sketch) -> bytes:
+    return sketch.strokes  # error

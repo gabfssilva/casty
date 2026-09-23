@@ -38,14 +38,7 @@ impl Catalog {
     pub fn kinds(&self) -> Vec<casty_node::node::Kind> {
         self.known
             .values()
-            .map(|behavior| {
-                let definition = behavior.definition();
-                casty_node::node::Kind {
-                    actor: definition.name.clone(),
-                    replicas: definition.replicas,
-                    write: definition.write,
-                }
-            })
+            .map(|behavior| behavior.definition().kind())
             .collect()
     }
 

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use casty_core::handoff::ranges::gained;
 use casty_core::membership::table::Status;
 use casty_core::node::NodeId;
-use casty_core::placement::{Range, Ring, chain, token};
+use casty_core::placement::{Range, Ring, chain, pinned, token};
 
 use crate::membership::service::Member;
 
@@ -139,6 +139,9 @@ impl Placement {
     }
 
     /// The nodes that keep `key`, the first being the one the ring gives it to.
+    ///
+    /// A pinned key is kept by the member advertised at the address it names and by no other: neither the ring nor a
+    /// step being walked moves it. With no such member in the table, it is kept nowhere.
     #[must_use]
     pub fn replicas(
         &self,
@@ -147,6 +150,9 @@ impl Placement {
         counts: &Counts,
         transfers: &impl Transfers,
     ) -> Vec<NodeId> {
+        if let Some(address) = pinned(key) {
+            return self.advertised(address).into_iter().collect();
+        }
         let Some(mut ring) = self.ring.as_ref() else {
             return Vec::new();
         };
@@ -176,8 +182,21 @@ impl Placement {
             .find(|node| {
                 self.members
                     .get(node)
-                    .is_some_and(|member| matches!(member.status, Status::Alive | Status::Suspect))
+                    .is_some_and(|member| up(member.status))
             })
+    }
+
+    /// The member advertised at `address`, the one most likely to answer when there are several.
+    ///
+    /// A node restarted on its address is another incarnation, and the older one can stay in the table beside it until
+    /// the join that replaced it has reached every node. Two that are equally up are told apart by their identity,
+    /// which every node orders the same way.
+    fn advertised(&self, address: &str) -> Option<NodeId> {
+        self.members
+            .values()
+            .filter(|member| member.node.address.as_deref() == Some(address))
+            .min_by_key(|member| (!up(member.status), member.status))
+            .map(|member| member.node.clone())
     }
 
     /// Take the member table: the ring when its nodes changed, and the steps each known type has to walk.
@@ -284,13 +303,18 @@ impl Placement {
     }
 }
 
+/// Whether a member can own a key: it answers, and it is not on its way out.
+fn up(status: Status) -> bool {
+    matches!(status, Status::Alive | Status::Suspect)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
     use casty_core::membership::table::Status;
     use casty_core::node::NodeId;
-    use casty_core::placement::{Ring, token};
+    use casty_core::placement::{Ring, pin, token};
     use casty_core::rolls::Rolls;
 
     use super::{Counts, Direct, Placement, Step, Transfers, VNODES};
@@ -311,6 +335,23 @@ mod tests {
         let mut counts = Counts::default();
         counts.learn(ACTOR, REPLICAS);
         counts
+    }
+
+    fn alive(nodes: &[NodeId]) -> Vec<Member> {
+        nodes
+            .iter()
+            .map(|node| member(node, Status::Alive))
+            .collect()
+    }
+
+    /// `name` pinned to the address `node` advertises.
+    fn pinned_to(node: &NodeId, name: &str) -> String {
+        pin(
+            node.address
+                .as_deref()
+                .expect("a member advertises an address"),
+            name,
+        )
     }
 
     fn keys() -> Vec<String> {
@@ -485,5 +526,143 @@ mod tests {
                 Some(ids[0].clone())
             );
         }
+    }
+
+    #[test]
+    fn a_pinned_key_is_kept_by_the_node_it_names_and_by_no_other() {
+        let ids = Rolls::seeded(57).nodes(5);
+        let members = alive(&ids);
+        // Every member and a client read the same owner from the key alone.
+        let views: Vec<Placement> = ids
+            .iter()
+            .cloned()
+            .map(Some)
+            .chain([None])
+            .map(|node| {
+                let mut placement = Placement::new(node);
+                placement.update(&members, &counts(), &mut Direct::default());
+                placement
+            })
+            .collect();
+
+        for target in &ids {
+            for name in ["worker", "gpu-0", "key-7"] {
+                let key = pinned_to(target, name);
+                for placement in &views {
+                    assert_eq!(
+                        placement.replicas(ACTOR, &key, &counts(), &Direct::default()),
+                        vec![target.clone()]
+                    );
+                    assert_eq!(
+                        placement.owner(ACTOR, &key, &counts(), &Direct::default()),
+                        Some(target.clone())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pinned_key_stays_on_its_node_while_members_enter_and_leave() {
+        let ids = Rolls::seeded(58).nodes(7);
+        let target = &ids[2];
+        let key = pinned_to(target, "worker");
+        let mut placement = Placement::new(Some(target.clone()));
+        let mut transfers = Waiting::default();
+        let tables = [
+            ids[..5].to_vec(),
+            ids.clone(),
+            ids[2..].to_vec(),
+            vec![ids[2].clone(), ids[5].clone()],
+        ];
+
+        for table in tables {
+            placement.update(&alive(&table), &counts(), &mut transfers);
+
+            assert_eq!(
+                placement.replicas(ACTOR, &key, &counts(), &transfers),
+                vec![target.clone()]
+            );
+            assert_eq!(
+                placement.owner(ACTOR, &key, &counts(), &transfers),
+                Some(target.clone())
+            );
+        }
+        // The ring moved and the transfers never finished, so the key was answered for in the middle of every walk.
+        assert!(
+            !transfers.0.is_empty(),
+            "no step was held back, so nothing was walked"
+        );
+    }
+
+    #[test]
+    fn a_pinned_key_has_no_owner_while_its_node_is_down_or_absent() {
+        let ids = Rolls::seeded(59).nodes(4);
+        let key = pinned_to(&ids[1], "worker");
+        let mut placement = Placement::new(Some(ids[0].clone()));
+        let mut transfers = Direct::default();
+
+        for status in [Status::Dead, Status::Leaving] {
+            let mut members = alive(&ids);
+            members[1].status = status;
+            placement.update(&members, &counts(), &mut transfers);
+            // It is still the node that keeps the key: no other one takes it over.
+            assert_eq!(
+                placement.replicas(ACTOR, &key, &counts(), &transfers),
+                vec![ids[1].clone()]
+            );
+            assert_eq!(placement.owner(ACTOR, &key, &counts(), &transfers), None);
+        }
+
+        let others: Vec<NodeId> = ids
+            .iter()
+            .filter(|node| **node != ids[1])
+            .cloned()
+            .collect();
+        placement.update(&alive(&others), &counts(), &mut transfers);
+        assert!(
+            placement
+                .replicas(ACTOR, &key, &counts(), &transfers)
+                .is_empty()
+        );
+        assert_eq!(placement.owner(ACTOR, &key, &counts(), &transfers), None);
+        // An address no member ever advertised is the same case.
+        let nowhere = pin("10.9.9.9:7400", "worker");
+        assert_eq!(
+            placement.owner(ACTOR, &nowhere, &counts(), &transfers),
+            None
+        );
+    }
+
+    #[test]
+    fn a_node_restarted_on_its_address_owns_the_keys_pinned_to_it() {
+        let ids = Rolls::seeded(60).nodes(3);
+        let restarted = NodeId::fresh(ids[1].address.clone());
+        let key = pinned_to(&ids[1], "worker");
+        let mut placement = Placement::new(Some(ids[0].clone()));
+        let mut transfers = Direct::default();
+
+        // The incarnation that went down stays in the table beside the new one until the join that replaced it is known.
+        for status in [Status::Suspect, Status::Dead] {
+            let mut members = alive(&ids);
+            members[1].status = status;
+            members.push(member(&restarted, Status::Alive));
+            placement.update(&members, &counts(), &mut transfers);
+            assert_eq!(
+                placement.owner(ACTOR, &key, &counts(), &transfers),
+                Some(restarted.clone())
+            );
+        }
+
+        let now = [ids[0].clone(), restarted.clone(), ids[2].clone()];
+        placement.update(&alive(&now), &counts(), &mut transfers);
+        assert_eq!(
+            placement.replicas(ACTOR, &key, &counts(), &transfers),
+            vec![restarted.clone()]
+        );
+        assert_eq!(
+            placement.owner(ACTOR, &key, &counts(), &transfers),
+            Some(restarted)
+        );
     }
 }

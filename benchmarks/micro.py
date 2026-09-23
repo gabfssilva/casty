@@ -2,7 +2,9 @@
 
 `benchmarks/performance.py` times a whole `ask`, where serialization and scheduling are mixed with the transport, the
 replication and the network. These two are what the core changes on its own, so they are measured apart and compared
-before and after the port.
+before and after the port. A whole `ask` on one node, with neither transport nor replicas, is measured too: it is what
+the bookkeeping of the core around every message, such as the chain of an `ask`, adds to. So is an `ask` that starts and
+ends an activation, which is what the reports of a node to its observer are frequent enough to weigh on.
 
 Run from the repository root:
 
@@ -16,11 +18,11 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from benchmarks.actors import Increment, counter
-from casty import ActorSystem
+from benchmarks.actors import Increment, Read, counter
+from casty import ActorSystem, Ref
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,35 @@ async def measure_hop(name: str, /, *, duration: float) -> Measurement:
     return Measurement.of(name, hops, elapsed)
 
 
+async def measure_ask(name: str, ref: Ref[Read], /, *, duration: float, batch: int = 100) -> Measurement:
+    """A whole `ask` of a key on this node from outside any body, one after the other."""
+    started = time.perf_counter()
+    deadline = started + duration
+    asks = 0
+    while time.perf_counter() < deadline:
+        for _ in range(batch):
+            await ref.ask(Read, b"")
+        asks += batch
+    return Measurement.of(name, asks, time.perf_counter() - started)
+
+
+async def measure_activation(name: str, /, *, duration: float, batch: int = 100) -> Measurement:
+    """A whole `ask` of a key that never ran, on a system whose keys idle out at once, with the default observer.
+
+    Every one starts an activation and ends it: the two events a node reports most often. The default observer takes
+    them only when the `casty` logger takes debug records, which it does not here.
+    """
+    async with ActorSystem(idle_after=timedelta(0)) as system:
+        started = time.perf_counter()
+        deadline = started + duration
+        asks = 0
+        while time.perf_counter() < deadline:
+            for index in range(asks, asks + batch):
+                await system.ref(counter, f"k-{index}").ask(Read, b"")
+            asks += batch
+        return Measurement.of(name, asks, time.perf_counter() - started)
+
+
 async def run(*, duration: float) -> tuple[Measurement, ...]:
     async with ActorSystem() as system:
         # A ref of a running node, which is what a message that carries a `reply_to` holds.
@@ -111,6 +142,8 @@ async def run(*, duration: float) -> tuple[Measurement, ...]:
             measure("decode-message-1kib", lambda: decode(messages, wire["message-1kib"]), duration=duration),
             measure("decode-state", lambda: decode(states, wire["state"]), duration=duration),
             await measure_hop("loop-hop", duration=duration),
+            await measure_ask("ask", ref, duration=duration),
+            await measure_activation("activate", duration=duration),
         )
 
 

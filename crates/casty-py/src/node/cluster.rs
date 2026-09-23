@@ -10,23 +10,27 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use casty_core::mailbox::{Backoff, Command};
+use casty_core::mailbox::Command;
 use casty_core::membership::views::Overlay;
-use casty_core::node::NodeId;
+use casty_core::node::{NodeId, Target};
 use casty_core::outcome::Outcome;
 use casty_core::store::{Held, Pages};
 use casty_net::compress::Name;
 use casty_net::limits::Limits;
 use casty_net::pool::AddressMap;
 use casty_net::tls::Tls;
+use casty_node::events::Event;
 pub use casty_node::membership::runner::Cluster as Settings;
 use casty_node::membership::service::{Member, Timings};
-use casty_node::node::{Host, Kind, Node as Cluster, Running};
-use casty_node::replication::service::Failure;
+use casty_node::node::{Host, Kind, Node as Cluster, Placed, Running};
+use casty_node::replication::service::{Failure, Storing};
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use super::Node;
+use super::observe::{self, Observed};
+use crate::actor::period;
+use crate::lock::Locked;
 
 pyo3::create_exception!(
     _casty,
@@ -79,6 +83,8 @@ impl Joined {
         let host: Arc<dyn Host> = Arc::new(Bridge {
             node: Arc::downgrade(node),
             running_loop: running_loop.clone_ref(py),
+            observer: node.observer(py),
+            store: node.storage(py),
         });
         let addresses = match map {
             None => None,
@@ -108,7 +114,8 @@ impl Joined {
             } else {
                 Running::client(settings, host, types).await
             };
-            Python::attach(|py| {
+            // An interpreter on its way out has no loop to hear of the join.
+            let _ = Python::try_attach(|py| {
                 let call = Bound::new(
                     py,
                     Entering {
@@ -132,10 +139,13 @@ impl Joined {
         Ok(joined)
     }
 
-    /// Whether this node is in the cluster: until then there is nothing to route through.
+    /// The cluster this is, once the node has joined it: until then there is nothing to route through.
     #[must_use]
-    pub fn ready(&self) -> bool {
-        self.node.get().is_some()
+    pub fn entered(self: &Arc<Self>) -> Option<Entered> {
+        self.node.get().map(|node| Entered {
+            joined: Arc::clone(self),
+            node: node.clone(),
+        })
     }
 
     /// Let the threads of the transport go without waiting for them.
@@ -143,12 +153,7 @@ impl Joined {
     /// They are given up rather than joined: a dial of theirs may be waiting for the loop, and this runs on the loop,
     /// so waiting here is waiting for something that is waiting for this.
     pub fn shutdown(&self) {
-        if let Some(runtime) = self
-            .runtime
-            .lock()
-            .expect("the cluster lock is never poisoned")
-            .take()
-        {
+        if let Some(runtime) = self.runtime.locked().take() {
             runtime.shutdown_background();
         }
     }
@@ -165,19 +170,77 @@ impl Joined {
         addresses.learn(py, &seen)
     }
 
+    /// Say goodbye, give away what this node keeps, and stop the transport. `gone` is resolved once it is over.
+    ///
+    /// `abort` is the process going away: its sockets close where they are and nothing is handed over, which is what
+    /// the other nodes see as a machine that disappeared.
+    ///
+    /// Like the join, this talks to the other nodes and the loop is what answers them, so it runs on the threads of
+    /// the transport and comes back when it is done.
+    pub fn leave(joined: &Arc<Self>, py: Python<'_>, node: &Arc<Node>, abort: bool, then: Ending) {
+        let Some(running) = joined.running.locked().take() else {
+            Departed::of(joined, node, then).settle(py);
+            return;
+        };
+        let running_loop = joined.running_loop.clone_ref(py);
+        let node = Arc::clone(node);
+        let joined = Arc::clone(joined);
+        joined.threads.clone().spawn(async move {
+            if abort {
+                running.crash().await;
+            } else {
+                // What it went without, the node has already reported to the observer.
+                running.leave().await;
+            }
+            let _ = Python::try_attach(|py| {
+                let call = Bound::new(py, Departed { joined, node, then });
+                match call {
+                    Ok(call) => {
+                        let _ = running_loop
+                            .bind(py)
+                            .call_method1("call_soon_threadsafe", (call,));
+                    }
+                    Err(failed) => failed.restore(py),
+                }
+            });
+        });
+    }
+}
+
+impl Drop for Joined {
+    // A cluster the loop never let go of ends where its last holder does, which can be a task on one of its own
+    // threads: a runtime dropped there panics, one given up does not.
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// A cluster this node is in: the node it joined as, with the transport it runs on.
+#[derive(Debug, Clone)]
+pub struct Entered {
+    joined: Arc<Joined>,
+    node: Cluster,
+}
+
+impl Entered {
     #[must_use]
-    pub fn id(&self) -> &NodeId {
-        self.node().id()
+    pub fn node(&self) -> &Cluster {
+        &self.node
     }
 
     #[must_use]
-    pub fn node(&self) -> &Cluster {
-        self.node.get().expect("the node has joined a cluster")
+    pub fn id(&self) -> &NodeId {
+        self.node.id()
     }
 
     #[must_use]
     pub fn members(&self) -> Vec<Member> {
-        self.node().members()
+        self.node.members()
+    }
+
+    /// Ask for the address of every member here, on the loop, so that a dial finds it without waiting.
+    pub fn learn(&self, py: Python<'_>, members: &[Member]) -> PyResult<()> {
+        self.joined.learn(py, members)
     }
 
     /// Take the key over, resolving `answer` on the loop with what the replicas hold.
@@ -189,80 +252,74 @@ impl Joined {
         initial: Option<Pages>,
         answer: Py<PyAny>,
     ) {
-        let node = self.node().clone();
-        let running_loop = self.running_loop.clone_ref(py);
+        let node = self.node.clone();
+        let running_loop = self.joined.running_loop.clone_ref(py);
         let (actor, key) = (actor.to_owned(), key.to_owned());
-        self.threads.spawn(async move {
+        self.joined.threads.spawn(async move {
             let held = node.activate(&actor, &key, initial).await;
             settle(&running_loop, Landed::Taken(held), answer);
         });
     }
 
     /// Write the state of the key, resolving `answer` on the loop once the replicas confirmed it.
+    #[allow(clippy::too_many_arguments)]
     pub fn commit(
         &self,
         py: Python<'_>,
         actor: &str,
         key: &str,
+        lease: u64,
         pages: Pages,
         active: bool,
         answer: Py<PyAny>,
     ) {
-        let node = self.node().clone();
-        let running_loop = self.running_loop.clone_ref(py);
+        let node = self.node.clone();
+        let running_loop = self.joined.running_loop.clone_ref(py);
         let (actor, key) = (actor.to_owned(), key.to_owned());
-        self.threads.spawn(async move {
-            let written = node.commit(&actor, &key, pages, active).await;
+        self.joined.threads.spawn(async move {
+            let written = node.commit(&actor, &key, lease, pages, active).await;
             settle(&running_loop, Landed::Written(written), answer);
         });
     }
 
-    /// Say goodbye, give away what this node keeps, and stop the transport. `gone` is resolved once it is over.
-    ///
-    /// `abort` is the process going away: its sockets close where they are and nothing is handed over, which is what
-    /// the other nodes see as a machine that disappeared.
-    ///
-    /// Like the join, this talks to the other nodes and the loop is what answers them, so it runs on the threads of
-    /// the transport and comes back when it is done.
-    pub fn leave(joined: &Arc<Self>, py: Python<'_>, node: &Arc<Node>, abort: bool, then: Ending) {
-        let Some(running) = joined
-            .running
-            .lock()
-            .expect("the cluster lock is never poisoned")
-            .take()
-        else {
-            Departed::of(joined, node, then).settle(py);
-            return;
-        };
-        let running_loop = joined.running_loop.clone_ref(py);
-        let node = Arc::clone(node);
-        let joined = Arc::clone(joined);
-        joined.threads.clone().spawn(async move {
-            let owed = if abort {
-                running.crash().await;
-                Vec::new()
-            } else {
-                running.leave().await
-            };
-            Python::attach(|py| {
-                let call = Bound::new(
-                    py,
-                    Departed {
-                        owed: Mutex::new(Some(owed)),
-                        joined,
-                        node,
-                        then,
-                    },
-                );
-                match call {
-                    Ok(call) => {
-                        let _ = running_loop
-                            .bind(py)
-                            .call_method1("call_soon_threadsafe", (call,));
-                    }
-                    Err(failed) => failed.restore(py),
-                }
-            });
+    /// Delete the state of the key, resolving `answer` on the loop once the replicas confirmed it. Without `active`
+    /// the key lets go with it.
+    pub fn delete(
+        &self,
+        py: Python<'_>,
+        actor: &str,
+        key: &str,
+        lease: u64,
+        active: bool,
+        answer: Py<PyAny>,
+    ) {
+        let node = self.node.clone();
+        let running_loop = self.joined.running_loop.clone_ref(py);
+        let (actor, key) = (actor.to_owned(), key.to_owned());
+        self.joined.threads.spawn(async move {
+            let deleted = node.delete(&actor, &key, lease, active).await;
+            settle(&running_loop, Landed::Written(deleted), answer);
+        });
+    }
+
+    /// Resolve `answer` on the loop with where `(actor, key)` is as this node sees it, as a `casty.Placement`.
+    pub fn placed(&self, py: Python<'_>, actor: &str, key: &str, answer: Py<PyAny>) {
+        let node = self.node.clone();
+        let running_loop = self.joined.running_loop.clone_ref(py);
+        let (actor, key) = (actor.to_owned(), key.to_owned());
+        self.joined.threads.spawn(async move {
+            let placed = node.placed(&actor, &key).await;
+            settle(&running_loop, Landed::Placed(placed), answer);
+        });
+    }
+
+    /// Resolve `answer` on the loop with every key the replica of this node keeps, as `(actor, key, deleted)`.
+    pub fn stored(&self, py: Python<'_>, answer: Py<PyAny>) {
+        let node = self.node.clone();
+        let running_loop = self.joined.running_loop.clone_ref(py);
+        self.joined.threads.spawn(async move {
+            let stored = node.stored().await;
+            settle(&running_loop, Landed::Stored(stored), answer);
         });
     }
 }
@@ -281,12 +338,7 @@ struct Entering {
 #[pymethods]
 impl Entering {
     fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(started) = self
-            .started
-            .lock()
-            .expect("the join lock is never poisoned")
-            .take()
-        else {
+        let Some(started) = self.started.locked().take() else {
             return Ok(());
         };
         let entered = self.entered.bind(py);
@@ -301,13 +353,13 @@ impl Entering {
                 return Ok(());
             }
         };
+        let cluster = Entered {
+            joined: Arc::clone(&self.joined),
+            node: running.node.clone(),
+        };
         let _ = self.joined.node.set(running.node.clone());
-        *self
-            .joined
-            .running
-            .lock()
-            .expect("the cluster lock is never poisoned") = Some(running);
-        self.node.entered(py, &self.joined);
+        *self.joined.running.locked() = Some(running);
+        self.node.entered(py, &cluster);
         entered.call_method1("set_result", (self.system.bind(py),))?;
         Ok(())
     }
@@ -317,7 +369,6 @@ impl Entering {
 #[pyclass(frozen, module = "casty._casty")]
 #[derive(Debug)]
 struct Departed {
-    owed: Mutex<Option<Vec<(String, String)>>>,
     /// The cluster this ends. An identity that was removed has already been replaced by another one here.
     joined: Arc<Joined>,
     node: Arc<Node>,
@@ -337,7 +388,6 @@ pub enum Ending {
 impl Departed {
     fn of(joined: &Arc<Joined>, node: &Arc<Node>, then: Ending) -> Self {
         Self {
-            owed: Mutex::new(None),
             joined: Arc::clone(joined),
             node: Arc::clone(node),
             then,
@@ -373,14 +423,6 @@ impl Departed {
 #[pymethods]
 impl Departed {
     fn __call__(&self, py: Python<'_>) {
-        let owed = self
-            .owed
-            .lock()
-            .expect("the leave lock is never poisoned")
-            .take();
-        for (actor, key) in owed.into_iter().flatten() {
-            let _ = super::log(py, format!("left without handing over {actor}/{key}"));
-        }
         self.settle(py);
     }
 }
@@ -390,11 +432,14 @@ impl Departed {
 enum Landed {
     Taken(Result<Option<Held>, Failure>),
     Written(Result<(), Failure>),
+    Stored(Vec<(String, String, bool)>),
+    Placed(Placed),
 }
 
-/// Hand the answer to the loop, which resolves the future the body is waiting on.
+/// Hand the answer to the loop, which resolves the future the body is waiting on. An interpreter on its way out has
+/// no loop left to hand it to.
 fn settle(running_loop: &Py<PyAny>, landed: Landed, answer: Py<PyAny>) {
-    Python::attach(|py| {
+    let _ = Python::try_attach(|py| {
         let call = match Bound::new(
             py,
             Settling {
@@ -426,12 +471,7 @@ struct Settling {
 #[pymethods]
 impl Settling {
     fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(landed) = self
-            .landed
-            .lock()
-            .expect("the answer lock is never poisoned")
-            .take()
-        else {
+        let Some(landed) = self.landed.locked().take() else {
             return Ok(());
         };
         let answer = self.answer.bind(py);
@@ -445,6 +485,12 @@ impl Settling {
             }
             Landed::Written(Ok(())) => {
                 answer.call_method1("set_result", (py.None(),))?;
+            }
+            Landed::Stored(stored) => {
+                answer.call_method1("set_result", (stored,))?;
+            }
+            Landed::Placed(placed) => {
+                answer.call_method1("set_result", (super::located(py, &placed)?,))?;
             }
             Landed::Taken(Err(failure)) | Landed::Written(Err(failure)) => {
                 answer.call_method1("set_exception", (raised(py, &failure),))?;
@@ -468,10 +514,7 @@ impl Taken {
     /// What was taken over, read once by the activation that asked for it.
     #[must_use]
     pub fn held(&self) -> Option<Held> {
-        self.0
-            .lock()
-            .expect("the answer lock is never poisoned")
-            .take()
+        self.0.locked().take()
     }
 }
 
@@ -483,7 +526,7 @@ fn raised<'py>(py: Python<'py>, failure: &Failure) -> Bound<'py, PyAny> {
     let held = match failure {
         Failure::Unavailable(why) => crate::errors::Unavailable::new_err(why.clone()),
         Failure::Fencing(why) => Fencing::new_err(why.clone()),
-        Failure::TooLarge(why) => PyValueError::new_err(why.clone()),
+        Failure::TooLarge(why) => crate::errors::MessageTooLarge::new_err(why.clone()),
     };
     held.into_value(py).into_bound(py).into_any()
 }
@@ -492,6 +535,10 @@ fn raised<'py>(py: Python<'py>, failure: &Failure) -> Bound<'py, PyAny> {
 struct Bridge {
     node: Weak<Node>,
     running_loop: Py<PyAny>,
+    /// What the system reports to.
+    observer: Py<PyAny>,
+    /// What keeps the state of the durable types, when the system was built with a store.
+    store: Option<Py<PyAny>>,
 }
 
 impl core::fmt::Debug for Bridge {
@@ -501,9 +548,10 @@ impl core::fmt::Debug for Bridge {
 }
 
 impl Bridge {
-    /// Queue `work` on the loop. It is dropped if the loop is gone, which is a process on its way out.
+    /// Queue `work` on the loop. It is dropped if the loop or the interpreter is gone, which is a process on its way
+    /// out.
     fn hand_over(&self, work: Arriving) {
-        Python::attach(|py| {
+        let _ = Python::try_attach(|py| {
             let Some(node) = self.node.upgrade() else {
                 return;
             };
@@ -559,8 +607,45 @@ impl Host for Bridge {
         });
     }
 
+    fn cancel(&self, actor: &str, key: &str, request: &Target) {
+        self.hand_over(Arriving::Cancel {
+            actor: actor.to_owned(),
+            key: key.to_owned(),
+            request: request.clone(),
+        });
+    }
+
     fn removed(&self) {
         self.hand_over(Arriving::Removed);
+    }
+
+    fn observe(&self, event: Event) {
+        let event = Observed::Cluster(event);
+        // Decided before the interpreter is reached: what the observer does not take costs the node task nothing.
+        if !self
+            .node
+            .upgrade()
+            .is_some_and(|node| node.takes(event.kind()))
+        {
+            return;
+        }
+        let _ = Python::try_attach(|py| {
+            observe::deliver(py, self.running_loop.bind(py), &self.observer, event, true);
+        });
+    }
+
+    fn store(&self, node: &Cluster, request: Storing) {
+        let Some(store) = &self.store else {
+            node.from_store(request.id, Err(super::storage::NO_STORE.to_owned()));
+            return;
+        };
+        let id = request.id;
+        let handed = Python::try_attach(|py| {
+            super::storage::hand(py, self.running_loop.bind(py), store, node, request);
+        });
+        if handed.is_none() {
+            node.from_store(id, Err("the interpreter is shutting down".to_owned()));
+        }
     }
 }
 
@@ -568,11 +653,25 @@ impl Host for Bridge {
 #[derive(Debug)]
 enum Arriving {
     Hand(Command),
-    Settle { id: i64, outcome: Outcome },
+    Settle {
+        id: i64,
+        outcome: Outcome,
+    },
     Members(Vec<Member>),
     Meet(String),
-    Attach { actor: String, key: String },
-    Release { actor: String, key: String },
+    Attach {
+        actor: String,
+        key: String,
+    },
+    Release {
+        actor: String,
+        key: String,
+    },
+    Cancel {
+        actor: String,
+        key: String,
+        request: Target,
+    },
     Removed,
 }
 
@@ -587,12 +686,7 @@ struct Arrived {
 #[pymethods]
 impl Arrived {
     fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(work) = self
-            .work
-            .lock()
-            .expect("the work lock is never poisoned")
-            .take()
-        else {
+        let Some(work) = self.work.locked().take() else {
             return Ok(());
         };
         match work {
@@ -606,8 +700,15 @@ impl Arrived {
                 self.node.met(py, &actor);
                 Ok(())
             }
+            // A leaving node takes no key back, whatever asked for it before it started leaving.
+            Arriving::Attach { .. } if self.node.draining() => Ok(()),
             Arriving::Attach { actor, key } => self.node.attach(py, &actor, &key).map(|_| ()),
             Arriving::Release { actor, key } => self.node.relinquish(py, &actor, &key),
+            Arriving::Cancel {
+                actor,
+                key,
+                request,
+            } => self.node.cancelled(py, &actor, &key, &request),
             Arriving::Removed => self.node.removed(py),
         }
     }
@@ -646,18 +747,11 @@ impl Mapping {
     }
 
     fn held(&self, address: &str) -> Option<String> {
-        self.known
-            .lock()
-            .expect("the address lock is never poisoned")
-            .get(address)
-            .cloned()
+        self.known.locked().get(address).cloned()
     }
 
     fn took(&self, address: &str, dialed: String) {
-        self.known
-            .lock()
-            .expect("the address lock is never poisoned")
-            .insert(address.to_owned(), dialed);
+        self.known.locked().insert(address.to_owned(), dialed);
     }
 
     /// The address to dial, asked of the loop when this is the first time it comes up.
@@ -670,7 +764,7 @@ impl Mapping {
             return found;
         }
         let (answer, answered) = channel();
-        let asked = Python::attach(|py| -> PyResult<()> {
+        let asked = Python::try_attach(|py| -> PyResult<()> {
             let call = Bound::new(
                 py,
                 Asking {
@@ -684,7 +778,7 @@ impl Mapping {
                 .call_method1("call_soon_threadsafe", (call,))?;
             Ok(())
         });
-        if asked.is_err() {
+        if !matches!(asked, Some(Ok(()))) {
             return address.to_owned();
         }
         let dialed = tokio::task::block_in_place(|| answered.recv_timeout(ASKING))
@@ -706,12 +800,7 @@ struct Asking {
 #[pymethods]
 impl Asking {
     fn __call__(&self, py: Python<'_>) {
-        let Some(answer) = self
-            .answer
-            .lock()
-            .expect("the address lock is never poisoned")
-            .take()
-        else {
+        let Some(answer) = self.answer.locked().take() else {
             return;
         };
         let dialed = self
@@ -727,30 +816,26 @@ impl Asking {
 /// How long a dial waits for the loop to say where the address goes.
 const ASKING: Duration = Duration::from_secs(5);
 
-/// Read the `Cluster` of the public API into what the node takes.
-pub fn settings(
-    cluster: &Bound<'_, PyAny>,
-    write_timeout: f64,
-    leave_timeout: f64,
-    backoff: Backoff,
-) -> PyResult<Settings> {
+/// Read the `Cluster` of the public API into what the node takes, with the timings of the system it belongs to.
+pub fn settings(cluster: &Bound<'_, PyAny>, system: &super::Settings) -> PyResult<Settings> {
     let overlay = cluster.getattr("overlay")?;
+    let compression = cluster.getattr("compression")?;
     Ok(Settings {
         bind: cluster.getattr("bind")?.extract()?,
         advertise: cluster.getattr("advertise")?.extract()?,
         seeds: cluster.getattr("seeds")?.extract()?,
         name: cluster.getattr("name")?.extract()?,
         timings: Timings {
-            heartbeat: span(&cluster.getattr("heartbeat")?)?,
-            suspect_after: span(&cluster.getattr("suspect_after")?)?,
-            dead_after: span(&cluster.getattr("dead_after")?)?,
+            heartbeat: every("heartbeat", &cluster.getattr("heartbeat")?)?,
+            suspect_after: period("suspect_after", &cluster.getattr("suspect_after")?)?,
+            dead_after: period("dead_after", &cluster.getattr("dead_after")?)?,
             remove_after: match cluster.getattr("remove_after")? {
                 held if held.is_none() => None,
-                held => Some(span(&held)?),
+                held => Some(period("remove_after", &held)?),
             },
-            anti_entropy: span(&cluster.getattr("anti_entropy")?)?,
-            graft_after: span(&overlay.getattr("graft_after")?)?,
-            shuffle_every: span(&overlay.getattr("shuffle_every")?)?,
+            anti_entropy: every("anti_entropy", &cluster.getattr("anti_entropy")?)?,
+            graft_after: every("overlay.graft_after", &overlay.getattr("graft_after")?)?,
+            shuffle_every: every("overlay.shuffle_every", &overlay.getattr("shuffle_every")?)?,
         },
         overlay: Overlay {
             active: overlay.getattr("active")?.extract()?,
@@ -759,12 +844,13 @@ pub fn settings(
             passive_walk: overlay.getattr("passive_walk")?.extract()?,
         },
         tls: tls(&cluster.getattr("tls")?)?,
-        compression: compressed(&cluster.getattr("compression")?)?,
+        compression: compressed(&compression)?,
+        min_compressed: compression.getattr("min_bytes")?.extract()?,
         address_map: None,
-        limits: Limits::default(),
-        write_timeout: core::time::Duration::from_secs_f64(write_timeout),
-        leave_timeout: core::time::Duration::from_secs_f64(leave_timeout),
-        backoff,
+        limits: limits(&cluster.getattr("limits")?)?,
+        write_timeout: system.write_timeout,
+        leave_timeout: system.leave_timeout,
+        backoff: system.backoff,
     })
 }
 
@@ -774,6 +860,7 @@ pub fn dialling(
     name: String,
     tls_of: &Bound<'_, PyAny>,
     compression: &Bound<'_, PyAny>,
+    limits_of: &Bound<'_, PyAny>,
     sync_every: core::time::Duration,
 ) -> PyResult<Settings> {
     Ok(Settings {
@@ -781,6 +868,8 @@ pub fn dialling(
         name,
         tls: tls(tls_of)?,
         compression: compressed(compression)?,
+        min_compressed: compression.getattr("min_bytes")?.extract()?,
+        limits: limits(limits_of)?,
         // A client asks for the whole table on this period, which is the only clock it has.
         timings: Timings {
             anti_entropy: sync_every,
@@ -803,6 +892,16 @@ fn tls(held: &Bound<'_, PyAny>) -> PyResult<Option<Tls>> {
     }))
 }
 
+/// The sizes of a connection, as the `Limits` of the public API has them. The periods stay those of the transport.
+fn limits(held: &Bound<'_, PyAny>) -> PyResult<Limits> {
+    Ok(Limits {
+        frame: held.getattr("frame")?.extract()?,
+        message: held.getattr("message")?.extract()?,
+        window: held.getattr("window")?.extract()?,
+        ..Limits::default()
+    })
+}
+
 /// The compressors offered, in the order they are preferred. Nothing means every one this build has.
 fn compressed(compression: &Bound<'_, PyAny>) -> PyResult<Option<Vec<Name>>> {
     let codecs: Option<Vec<String>> = compression.getattr("codecs")?.extract()?;
@@ -822,8 +921,13 @@ fn compressed(compression: &Bound<'_, PyAny>) -> PyResult<Option<Vec<Name>>> {
         .transpose()
 }
 
-/// A `timedelta` as a duration.
-fn span(held: &Bound<'_, PyAny>) -> PyResult<core::time::Duration> {
-    let seconds: f64 = held.call_method0("total_seconds")?.extract()?;
-    Ok(core::time::Duration::from_secs_f64(seconds))
+/// The period the transport repeats something on, which cannot be zero: it would never wait between two rounds.
+pub fn every(name: &str, held: &Bound<'_, PyAny>) -> PyResult<Duration> {
+    let every = period(name, held)?;
+    if every.is_zero() {
+        return Err(PyValueError::new_err(format!(
+            "{name} is {held}, and a period of zero would never wait between two rounds"
+        )));
+    }
+    Ok(every)
 }

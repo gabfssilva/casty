@@ -17,7 +17,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
 
 use crate::compress::Name;
-use crate::connection::{Broken, Connection, Greeting, Incoming, Socket};
+use crate::connection::{Broken, Bytes, Connection, Greeting, Incoming, Socket};
 use crate::handshake::{Hello, Message, Reject, Rejection, answer};
 use crate::limits::Limits;
 use crate::tls::Identity;
@@ -43,6 +43,9 @@ type Queued = (Target, String, Vec<u8>);
 
 /// What turns an advertised address into the one that is dialed: a tunnel, a NAT, or a proxy of a test.
 pub type AddressMap = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
+/// What hears of a connection to a peer that ended while this node was running, called from the task that saw it end.
+pub type Lost = Arc<dyn Fn(&NodeId) + Send + Sync>;
 
 /// How a peer is reached, and which side opened it.
 #[derive(Debug)]
@@ -81,6 +84,7 @@ pub struct Settings {
     pub min_compressed: usize,
     pub tls: Option<Identity>,
     pub address_map: Option<AddressMap>,
+    pub lost: Option<Lost>,
 }
 
 impl core::fmt::Debug for Settings {
@@ -93,6 +97,17 @@ impl core::fmt::Debug for Settings {
     }
 }
 
+/// What a transport holds and carried, read at one moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Traffic {
+    /// Connections to peers that are open now.
+    pub connections: usize,
+    /// Bytes written to the sockets of every connection since the transport started, handshakes included.
+    pub sent: u64,
+    /// Bytes read from them.
+    pub received: u64,
+}
+
 #[derive(Debug)]
 pub struct Pool {
     settings: Settings,
@@ -100,6 +115,8 @@ pub struct Pool {
     state: Mutex<State>,
     /// Woken when the pool closes, which is what ends a handshake that is still in the air.
     closing: Arc<Notify>,
+    /// What every connection of the pool counts its bytes in.
+    bytes: Arc<Bytes>,
 }
 
 impl Pool {
@@ -110,7 +127,24 @@ impl Pool {
             inbound,
             state: Mutex::new(State::default()),
             closing: Arc::new(Notify::new()),
+            bytes: Arc::new(Bytes::default()),
         })
+    }
+
+    /// The connections open now, and the bytes every connection of the pool carried so far.
+    #[must_use]
+    pub fn traffic(&self) -> Traffic {
+        let connections = self
+            .held()
+            .links
+            .values()
+            .filter(|link| link.connection.alive())
+            .count();
+        Traffic {
+            connections,
+            sent: self.bytes.sent(),
+            received: self.bytes.received(),
+        }
     }
 
     /// Queue an envelope for `target`, opening the connection it needs when there is none.
@@ -194,8 +228,12 @@ impl Pool {
         let pool = Arc::clone(self);
         let closing = Arc::clone(&self.closing);
         tokio::spawn(async move {
-            let greeting =
-                Greeting::new(socket, pool.settings.limits, pool.settings.min_compressed);
+            let greeting = Greeting::new(
+                socket,
+                pool.settings.limits,
+                pool.settings.min_compressed,
+                Arc::clone(&pool.bytes),
+            );
             tokio::select! {
                 () = pool.greet(greeting) => {}
                 () = closing.notified() => {}
@@ -335,8 +373,12 @@ impl Pool {
                 Box::new(stream)
             }
         };
-        let mut greeting =
-            Greeting::new(socket, self.settings.limits, self.settings.min_compressed);
+        let mut greeting = Greeting::new(
+            socket,
+            self.settings.limits,
+            self.settings.min_compressed,
+            Arc::clone(&self.bytes),
+        );
         let said = async {
             greeting
                 .say(&Message::Hello(self.settings.local.clone()))
@@ -427,17 +469,24 @@ impl Pool {
     }
 
     fn forget(&self, peer: &NodeId, connection: &Arc<Connection>) {
-        let mut state = self.held();
-        if state
-            .links
-            .get(peer)
-            .is_some_and(|link| Arc::ptr_eq(&link.connection, connection))
-        {
-            state.links.remove(peer);
+        let lost = {
+            let mut state = self.held();
+            let current = state
+                .links
+                .get(peer)
+                .is_some_and(|link| Arc::ptr_eq(&link.connection, connection));
+            if current {
+                state.links.remove(peer);
+            }
+            state
+                .addresses
+                .retain(|_, held| !Arc::ptr_eq(held, connection));
+            // A connection another one replaced reaches the peer still, and one this node is closing is not lost.
+            current && !state.closed
+        };
+        if lost && let Some(report) = &self.settings.lost {
+            report(peer);
         }
-        state
-            .addresses
-            .retain(|_, held| !Arc::ptr_eq(held, connection));
     }
 
     fn fail(&self, address: &str) {
