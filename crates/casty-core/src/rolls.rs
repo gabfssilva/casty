@@ -33,7 +33,7 @@ impl Rolls {
         }
     }
 
-    #[cfg(test)]
+    /// A number in `low..=high`.
     pub fn between(&mut self, low: usize, high: usize) -> usize {
         low + self.upto(high - low + 1)
     }
