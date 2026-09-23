@@ -12,7 +12,7 @@ pub mod naming;
 pub mod values;
 
 use casty_core::schema::ir::{NodeRef, Tree};
-use casty_core::schema::{Reader, SchemaError};
+use casty_core::schema::Reader;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyType};
 
@@ -153,7 +153,7 @@ impl Schema {
     ) -> failure::Outcome<Bound<'py, PyAny>> {
         let mut reader = Reader::new(data);
         let value = load::load(slf, at, &mut reader, node)?;
-        reader.finish().map_err(SchemaError::from)?;
+        reader.finish()?;
         Ok(value)
     }
 

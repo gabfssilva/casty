@@ -1,6 +1,6 @@
 //! What a compilation or a walk can end with, and how it reaches Python.
 
-use casty_core::schema::SchemaError;
+use casty_core::schema::{Malformed, SchemaError};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 
@@ -30,6 +30,12 @@ impl Failure {
 impl From<SchemaError> for Failure {
     fn from(error: SchemaError) -> Self {
         Self::Schema(error)
+    }
+}
+
+impl From<Malformed> for Failure {
+    fn from(malformed: Malformed) -> Self {
+        Self::Schema(malformed.into())
     }
 }
 

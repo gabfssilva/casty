@@ -45,10 +45,7 @@ pub fn from_pages<'py>(
         let raw: Vec<u8> = page.extract()?;
         let mut reader = Reader::new(&raw);
         let value = loader.read(tree.root(), &mut reader)?;
-        reader
-            .finish()
-            .map_err(SchemaError::from)
-            .map_err(Failure::from)?;
+        reader.finish().map_err(Failure::from)?;
         return Ok(value);
     };
     let mut found: Vec<Option<Bound<'py, PyAny>>> = vec![None; dataclass.fields.len()];
@@ -62,10 +59,7 @@ pub fn from_pages<'py>(
             .read(field.node, &mut reader)
             .map_err(|failure| failure.under(&field.name))?;
         found[at] = Some(read);
-        reader
-            .finish()
-            .map_err(SchemaError::from)
-            .map_err(Failure::from)?;
+        reader.finish().map_err(Failure::from)?;
     }
     Ok(loader.build(dataclass, found)?)
 }
@@ -82,7 +76,7 @@ impl<'py> Loader<'_, 'py> {
 
     fn read(&self, at: NodeRef, reader: &mut Reader<'_>) -> Outcome<Bound<'py, PyAny>> {
         let py = self.schema.py();
-        let kind = reader.kind().map_err(SchemaError::from)?;
+        let kind = reader.kind()?;
         Ok(match self.tree().node(at) {
             Node::Never => {
                 return Err(SchemaError::new(format!(
@@ -117,7 +111,7 @@ impl<'py> Loader<'_, 'py> {
                 let Kind::Bytes = kind else {
                     return Err(wrong("UUID", kind));
                 };
-                let raw = reader.read_bin().map_err(SchemaError::from)?;
+                let raw = reader.read_bin()?;
                 if raw.len() != 16 {
                     return Err(wrong("UUID", kind));
                 }
@@ -138,7 +132,7 @@ impl<'py> Loader<'_, 'py> {
                 let Kind::List = kind else {
                     return Err(wrong(&expected, kind));
                 };
-                let len = reader.read_array_len().map_err(SchemaError::from)?;
+                let len = reader.read_array_len()?;
                 if len != items.len() {
                     return Err(wrong(&expected, kind));
                 }
@@ -171,36 +165,36 @@ impl<'py> Loader<'_, 'py> {
         let py = self.schema.py();
         Ok(match (native, kind) {
             (Native::None, Kind::None) => {
-                reader.read_nil().map_err(SchemaError::from)?;
+                reader.read_nil()?;
                 py.None().into_bound(py)
             }
             // A payload that holds a bool under an `int` annotation stays a bool, as it does when it is written.
             (Native::Bool | Native::Int, Kind::Bool) => {
-                let value = reader.read_bool().map_err(SchemaError::from)?;
+                let value = reader.read_bool()?;
                 PyBool::new(py, value).to_owned().into_any()
             }
-            (Native::Int, Kind::Int) => match reader.read_int().map_err(SchemaError::from)? {
+            (Native::Int, Kind::Int) => match reader.read_int()? {
                 Int::Unsigned(value) => value.into_pyobject(py)?.into_any(),
                 Int::Signed(value) => value.into_pyobject(py)?.into_any(),
             },
             (Native::Float, Kind::Float) => {
-                let value = reader.read_f64().map_err(SchemaError::from)?;
+                let value = reader.read_f64()?;
                 value.into_pyobject(py)?.into_any()
             }
             (Native::Float, Kind::Int) => {
-                let value = reader.read_int().map_err(SchemaError::from)?;
+                let value = reader.read_int()?;
                 value.as_f64().into_pyobject(py)?.into_any()
             }
             (Native::Float, Kind::Bool) => {
-                let value = reader.read_bool().map_err(SchemaError::from)?;
+                let value = reader.read_bool()?;
                 f64::from(u8::from(value)).into_pyobject(py)?.into_any()
             }
             (Native::Str, Kind::Str) => {
-                let value = reader.read_str().map_err(SchemaError::from)?;
+                let value = reader.read_str()?;
                 PyString::new(py, value).into_any()
             }
             (Native::Bytes, Kind::Bytes) => {
-                let value = reader.read_bin().map_err(SchemaError::from)?;
+                let value = reader.read_bin()?;
                 PyBytes::new(py, value).into_any()
             }
             _ => return Err(wrong(native.name(), kind)),
@@ -215,19 +209,15 @@ impl<'py> Loader<'_, 'py> {
     ) -> Outcome<Bound<'py, PyAny>> {
         let py = self.schema.py();
         let read = match kind {
-            Kind::Bool => Some(Literal::Bool(
-                reader.read_bool().map_err(SchemaError::from)?,
-            )),
-            Kind::Int => match reader.read_int().map_err(SchemaError::from)? {
+            Kind::Bool => Some(Literal::Bool(reader.read_bool()?)),
+            Kind::Int => match reader.read_int()? {
                 Int::Signed(value) => Some(Literal::Int(value)),
                 Int::Unsigned(value) => i64::try_from(value).ok().map(Literal::Int),
             },
-            Kind::Str => Some(Literal::Str(
-                reader.read_str().map_err(SchemaError::from)?.to_owned(),
-            )),
+            Kind::Str => Some(Literal::Str(reader.read_str()?.to_owned())),
             _ => {
                 let mut skipped = reader.clone();
-                skipped.skip().map_err(SchemaError::from)?;
+                skipped.skip()?;
                 None
             }
         };
@@ -261,18 +251,18 @@ impl<'py> Loader<'_, 'py> {
             return Err(wrong(expected, kind));
         };
         let mut pair = reader.clone();
-        let len = pair.read_array_len().map_err(SchemaError::from)?;
-        let two = len == 2 && matches!(pair.kind().map_err(SchemaError::from)?, Kind::Int) && {
-            pair.read_int().map_err(SchemaError::from)?;
-            matches!(pair.kind().map_err(SchemaError::from)?, Kind::Int)
+        let len = pair.read_array_len()?;
+        let two = len == 2 && matches!(pair.kind()?, Kind::Int) && {
+            pair.read_int()?;
+            matches!(pair.kind()?, Kind::Int)
         };
         if !two {
-            reader.skip().map_err(SchemaError::from)?;
+            reader.skip()?;
             return Err(wrong(expected, kind));
         }
-        reader.read_array_len().map_err(SchemaError::from)?;
-        let micros = reader.read_int().map_err(SchemaError::from)?;
-        let offset = reader.read_int().map_err(SchemaError::from)?;
+        reader.read_array_len()?;
+        let micros = reader.read_int()?;
+        let offset = reader.read_int()?;
         let micros = micros.as_i64().ok_or_else(|| wrong(expected, kind))?;
         let offset = offset.as_i64().ok_or_else(|| wrong(expected, kind))?;
         #[allow(clippy::cast_possible_truncation)]
@@ -284,7 +274,7 @@ impl<'py> Loader<'_, 'py> {
         let Kind::Int = kind else {
             return Err(wrong(expected, kind));
         };
-        let read = reader.read_int().map_err(SchemaError::from)?;
+        let read = reader.read_int()?;
         read.as_i64().ok_or_else(|| wrong(expected, kind))
     }
 
@@ -293,7 +283,7 @@ impl<'py> Loader<'_, 'py> {
         let Kind::Str = kind else {
             return Err(wrong("Decimal", kind));
         };
-        let text = reader.read_str().map_err(SchemaError::from)?;
+        let text = reader.read_str()?;
         match self.schema.get().values().decimal.bind(py).call1((text,)) {
             Ok(number) => Ok(number),
             // `InvalidOperation`, which is what a string that is not a number raises.
@@ -314,7 +304,7 @@ impl<'py> Loader<'_, 'py> {
         let Kind::Str = kind else {
             return Err(wrong(&enumeration.qualname, kind));
         };
-        let name = reader.read_str().map_err(SchemaError::from)?;
+        let name = reader.read_str()?;
         if !enumeration.has(name) {
             let why = format!("{} has no member {name}", enumeration.qualname);
             return Err(SchemaError::new(why).into());
@@ -338,7 +328,7 @@ impl<'py> Loader<'_, 'py> {
         let Kind::Str = kind else {
             return Err(wrong(&qualname(class)?, kind));
         };
-        let text = reader.read_str().map_err(SchemaError::from)?;
+        let text = reader.read_str()?;
         Ok(class.call1((text,))?)
     }
 
@@ -353,7 +343,7 @@ impl<'py> Loader<'_, 'py> {
         let Kind::Bytes = kind else {
             return Err(wrong(&opaque.name, kind));
         };
-        let raw = reader.read_bin().map_err(SchemaError::from)?;
+        let raw = reader.read_bin()?;
         let decode = self.schema.get().codec(opaque.codec).decode.bind(py);
         Ok(decode.call1((PyBytes::new(py, raw),))?)
     }
@@ -369,7 +359,7 @@ impl<'py> Loader<'_, 'py> {
         let Kind::List = kind else {
             return Err(wrong(container.name(), kind));
         };
-        let len = reader.read_array_len().map_err(SchemaError::from)?;
+        let len = reader.read_array_len()?;
         let mut built = Vec::with_capacity(len);
         for _ in 0..len {
             built.push(self.read(item, reader)?);
@@ -391,14 +381,14 @@ impl<'py> Loader<'_, 'py> {
         let Kind::List = kind else {
             return Err(wrong("Mapping", kind));
         };
-        let len = reader.read_array_len().map_err(SchemaError::from)?;
+        let len = reader.read_array_len()?;
         let built = PyDict::new(py);
         for _ in 0..len {
-            let entry = reader.kind().map_err(SchemaError::from)?;
+            let entry = reader.kind()?;
             let Kind::List = entry else {
                 return Err(wrong("pair", entry));
             };
-            let pair = reader.read_array_len().map_err(SchemaError::from)?;
+            let pair = reader.read_array_len()?;
             if pair != 2 {
                 return Err(wrong("pair", entry));
             }
@@ -409,10 +399,10 @@ impl<'py> Loader<'_, 'py> {
 
     /// The fields of a dataclass from a map, where a name this version does not know is stepped over.
     fn fields(&self, dataclass: &Dataclass, reader: &mut Reader<'_>) -> Outcome<Bound<'py, PyAny>> {
-        let len = reader.read_map_len().map_err(SchemaError::from)?;
+        let len = reader.read_map_len()?;
         let mut found: Vec<Option<Bound<'py, PyAny>>> = vec![None; dataclass.fields.len()];
         for _ in 0..len {
-            let name = reader.read_str().map_err(SchemaError::from)?.to_owned();
+            let name = reader.read_str()?.to_owned();
             match dataclass.position(&name) {
                 Some(at) => {
                     let read = self
@@ -420,7 +410,7 @@ impl<'py> Loader<'_, 'py> {
                         .map_err(|failure| failure.under(&name))?;
                     found[at] = Some(read);
                 }
-                None => reader.skip().map_err(SchemaError::from)?,
+                None => reader.skip()?,
             }
         }
         self.build(dataclass, found)
@@ -494,14 +484,14 @@ impl<'py> Loader<'_, 'py> {
             return Ok(None);
         }
         let mut ahead = reader.clone();
-        if ahead.read_array_len().map_err(SchemaError::from)? != 2 {
+        if ahead.read_array_len()? != 2 {
             return Ok(None);
         }
-        if ahead.kind().map_err(SchemaError::from)? != Kind::Str {
+        if ahead.kind()? != Kind::Str {
             return Ok(None);
         }
-        let name = ahead.read_str().map_err(SchemaError::from)?.to_owned();
-        if ahead.kind().map_err(SchemaError::from)? != Kind::Map {
+        let name = ahead.read_str()?.to_owned();
+        if ahead.kind()? != Kind::Map {
             return Ok(None);
         }
         *reader = ahead;
@@ -518,27 +508,27 @@ impl<'py> Loader<'_, 'py> {
         let Kind::List = kind else {
             return Err(wrong("ref", kind));
         };
-        let len = reader.read_array_len().map_err(SchemaError::from)?;
-        let tag = reader.read_str().map_err(SchemaError::from)?;
+        let len = reader.read_array_len()?;
+        let tag = reader.read_str()?;
         let target = match (tag, len) {
             ("e", 3) => Target::Entity {
-                actor: reader.read_str().map_err(SchemaError::from)?.to_owned(),
-                key: reader.read_str().map_err(SchemaError::from)?.to_owned(),
+                actor: reader.read_str()?.to_owned(),
+                key: reader.read_str()?.to_owned(),
             },
             ("r", 4) => {
-                let address = match reader.kind().map_err(SchemaError::from)? {
+                let address = match reader.kind()? {
                     Kind::None => {
-                        reader.read_nil().map_err(SchemaError::from)?;
+                        reader.read_nil()?;
                         None
                     }
-                    Kind::Str => Some(reader.read_str().map_err(SchemaError::from)?.to_owned()),
+                    Kind::Str => Some(reader.read_str()?.to_owned()),
                     _ => return Err(wrong("ref", kind)),
                 };
-                let raw = reader.read_bin().map_err(SchemaError::from)?;
+                let raw = reader.read_bin()?;
                 let Ok(incarnation) = <[u8; 16]>::try_from(raw) else {
                     return Err(wrong("ref", kind));
                 };
-                let id = reader.read_int().map_err(SchemaError::from)?;
+                let id = reader.read_int()?;
                 let Some(id) = id.as_i64() else {
                     return Err(wrong("ref", kind));
                 };
