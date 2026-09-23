@@ -16,6 +16,13 @@ pub enum Target {
     Reply { node: NodeId, id: i64 },
 }
 
+/// A message the caller of a protocol core must send to `to`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Send<M> {
+    pub to: NodeId,
+    pub message: M,
+}
+
 impl NodeId {
     /// An incarnation nothing else has: a process restarted on the same address is another node.
     #[must_use]

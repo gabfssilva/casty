@@ -8,15 +8,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use super::messages::{ACTIVE, DELETED, Epoch, Reply, Request, Stamp, Write, tombstone};
 use super::parts::{append, cost, split};
-use crate::node::NodeId;
+use crate::node::{NodeId, Send};
 use crate::store::{Durable, Pages, Storage, Stored};
-
-/// A request the caller must send to `to`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Send {
-    pub to: NodeId,
-    pub message: Request,
-}
 
 /// How an operation ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +37,7 @@ pub enum Outcome {
 /// outcome of a write the store is to keep: never a write the replicas refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
-    pub sends: Vec<Send>,
+    pub sends: Vec<Send<Request>>,
     pub outcome: Option<Outcome>,
     pub store: Option<Storage>,
 }
@@ -54,7 +47,7 @@ impl Step {
         Self::sending(Vec::new())
     }
 
-    fn sending(sends: Vec<Send>) -> Self {
+    fn sending(sends: Vec<Send<Request>>) -> Self {
         Self {
             sends,
             outcome: None,
@@ -249,7 +242,7 @@ impl Owner {
         &mut self,
         initial: Option<Pages>,
         wanted: usize,
-    ) -> Result<Vec<Send>, TooLarge> {
+    ) -> Result<Vec<Send<Request>>, TooLarge> {
         self.check(initial.as_ref().unwrap_or(&Pages::new()))?;
         self.moved = None;
         Ok(self.prepare(initial, wanted, Lookup::Unasked, None))
@@ -262,7 +255,7 @@ impl Owner {
         wanted: usize,
         store: Lookup,
         pending: Option<Pending>,
-    ) -> Vec<Send> {
+    ) -> Vec<Send<Request>> {
         self.round += 1;
         self.epoch = Epoch {
             round: self.round,
@@ -359,7 +352,7 @@ impl Owner {
 
     /// Ask the replicas the key moved to again for the promise a write waits on: one that was still receiving its
     /// range answers for the quorum only once it has it.
-    pub fn again(&mut self) -> Vec<Send> {
+    pub fn again(&mut self) -> Vec<Send<Request>> {
         let Some(Phase::Preparing {
             pending: pending @ Some(_),
             wanted,
@@ -373,7 +366,7 @@ impl Owner {
     }
 
     /// Write `state` as a delta against the last confirmed write.
-    pub fn save(&mut self, state: Pages) -> Result<Vec<Send>, TooLarge> {
+    pub fn save(&mut self, state: Pages) -> Result<Vec<Send<Request>>, TooLarge> {
         let mut marked = state;
         marked.insert(ACTIVE.to_owned(), Vec::new());
         self.next(marked)
@@ -382,7 +375,7 @@ impl Owner {
     /// Write `state` without the active mark, which is how a key that stopped being active lets go.
     ///
     /// Every other write carries the mark, so dropping it is an operation of its own and not a plain save.
-    pub fn release(&mut self, state: Pages) -> Result<Vec<Send>, TooLarge> {
+    pub fn release(&mut self, state: Pages) -> Result<Vec<Send<Request>>, TooLarge> {
         self.next(state)
     }
 
@@ -390,7 +383,7 @@ impl Owner {
     ///
     /// It goes whole, with no base, so that a replica whatever it holds ends up with the tombstone and nothing else;
     /// and it carries no mark, so that nothing brings the key back. `Saved` is how it ends when it is confirmed.
-    pub fn delete(&mut self) -> Vec<Send> {
+    pub fn delete(&mut self) -> Vec<Send<Request>> {
         if let Some(wanted) = self.moved.take() {
             return self.prepare(None, wanted, Lookup::Answered(None), Some(Pending::Delete));
         }
@@ -445,7 +438,7 @@ impl Owner {
         }
     }
 
-    fn next(&mut self, state: Pages) -> Result<Vec<Send>, TooLarge> {
+    fn next(&mut self, state: Pages) -> Result<Vec<Send<Request>>, TooLarge> {
         self.check(&state)?;
         if let Some(wanted) = self.moved.take() {
             return Ok(self.prepare(
@@ -459,7 +452,7 @@ impl Owner {
     }
 
     /// Write `state` as a delta against the last confirmed write.
-    fn following(&mut self, state: Pages) -> Vec<Send> {
+    fn following(&mut self, state: Pages) -> Vec<Send<Request>> {
         let confirmed = self
             .confirmed
             .clone()
@@ -633,7 +626,7 @@ impl Owner {
     ///
     /// One part at a time: the replica cuts them the same way on every request, and a part that went missing ends the
     /// wait at the deadline of the operation instead of leaving a page with a hole in it.
-    fn fetch(&self) -> Vec<Send> {
+    fn fetch(&self) -> Vec<Send<Request>> {
         let Some(Phase::Fetching {
             source,
             names,
@@ -776,7 +769,7 @@ impl Owner {
         before: &Pages,
         created: Option<bool>,
         save: bool,
-    ) -> Vec<Send> {
+    ) -> Vec<Send<Request>> {
         let changed: Pages = state
             .iter()
             .filter(|(name, data)| before.get(*name) != Some(*data))
@@ -893,8 +886,8 @@ mod tests {
     use super::super::messages::{ACTIVE, Epoch, Reply, Request, Stamp, Write, tombstone};
     use super::super::parts::{append, cost, packed};
     use super::super::replica::{Arriving, Replica};
-    use super::{Outcome, Owner, Send, Step};
-    use crate::node::NodeId;
+    use super::{Outcome, Owner, Step};
+    use crate::node::{NodeId, Send};
     use crate::rolls::Rolls;
     use crate::store::{Durable, Pages, Storage, Stored};
 
@@ -984,7 +977,7 @@ mod tests {
         ///
         /// Everything is delivered even after the outcome is known: the quorum is what the owner waits for, and the
         /// replicas outside it still take the write. No message on the way carries more pages than fit in one.
-        fn run(&mut self, owner: &mut Owner, sends: Vec<Send>) -> Option<Outcome> {
+        fn run(&mut self, owner: &mut Owner, sends: Vec<Send<Request>>) -> Option<Outcome> {
             self.kept(owner, sends, &mut Kept::default())
         }
 
@@ -992,7 +985,7 @@ mod tests {
         fn kept(
             &mut self,
             owner: &mut Owner,
-            sends: Vec<Send>,
+            sends: Vec<Send<Request>>,
             store: &mut Kept,
         ) -> Option<Outcome> {
             let mut pending = sends;
@@ -1318,7 +1311,7 @@ mod tests {
 
         // The write reaches the majority that confirms it, the first and the third node, and not the second.
         let sends = before.save(pages(&[("entries", b"two")])).expect("it fits");
-        let reaching: Vec<Send> = sends
+        let reaching: Vec<Send<Request>> = sends
             .into_iter()
             .filter(|send| send.to != cluster.ids[1])
             .collect();
@@ -1459,7 +1452,7 @@ mod tests {
             let taking = second.activate(None, 3).expect("nothing to fit");
             let writing = first.save(pages(&[("balance", b"2")])).expect("it fits");
             let mut rolls = Rolls::seeded(seed.wrapping_mul(977));
-            let mut pending: Vec<(bool, Send)> = taking
+            let mut pending: Vec<(bool, Send<Request>)> = taking
                 .into_iter()
                 .map(|send| (false, send))
                 .chain(writing.into_iter().map(|send| (true, send)))
@@ -1653,7 +1646,7 @@ mod tests {
 
         // The deletion reaches the majority that confirms it, and not the third replica, which keeps the state.
         let missed = cluster.ids[2].clone();
-        let reaching: Vec<Send> = first
+        let reaching: Vec<Send<Request>> = first
             .delete()
             .into_iter()
             .filter(|send| send.to != missed)
@@ -1703,7 +1696,7 @@ mod tests {
         let mut cluster = Cluster::new(4, 53);
         let mut first = written(&mut cluster, 0, b"1", b"7");
         let missed = cluster.ids[2].clone();
-        let reaching: Vec<Send> = first
+        let reaching: Vec<Send<Request>> = first
             .delete()
             .into_iter()
             .filter(|send| send.to != missed)
@@ -1850,7 +1843,7 @@ mod tests {
         let mut store = Kept::default();
         let mut first = durably_written(&mut cluster, &mut store, b"0", b"1");
         let behind = cluster.ids[2].clone();
-        let reaching: Vec<Send> = first
+        let reaching: Vec<Send<Request>> = first
             .save(balance(b"2"))
             .expect("it fits")
             .into_iter()

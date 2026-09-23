@@ -20,9 +20,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use casty_core::node::NodeId;
+use casty_core::node::{NodeId, Send};
 use casty_core::replication::messages::{Reply, Request, Stamp, Write};
-use casty_core::replication::owner::{Outcome, Owner, Send, Step, TooLarge};
+use casty_core::replication::owner::{Outcome, Owner, Step, TooLarge};
 use casty_core::replication::replica::Replica;
 use casty_core::store::{Durable, Held, Pages, Storage, Stored};
 use tokio::sync::oneshot;
@@ -709,7 +709,7 @@ impl Replication {
         answer: oneshot::Sender<Result<(), Failure>>,
         now: Instant,
         ending: bool,
-        started: impl FnOnce(&mut Owner) -> Result<Vec<Send>, TooLarge>,
+        started: impl FnOnce(&mut Owner) -> Result<Vec<Send<Request>>, TooLarge>,
     ) {
         let Some(owner) = self.owners.get_mut(entity) else {
             let failure = Failure::Unavailable(format!(
@@ -1062,7 +1062,7 @@ impl Replication {
     }
 
     /// Send what the core asked for, or end the operation on a state no message can carry.
-    fn start(&mut self, entity: &Entity, started: Result<Vec<Send>, TooLarge>) {
+    fn start(&mut self, entity: &Entity, started: Result<Vec<Send<Request>>, TooLarge>) {
         match started {
             Ok(sends) => self.queue(sends),
             Err(TooLarge(reason)) => self.abort(entity, Failure::TooLarge(reason)),
@@ -1162,7 +1162,7 @@ impl Replication {
         }
     }
 
-    fn queue(&mut self, sends: Vec<Send>) {
+    fn queue(&mut self, sends: Vec<Send<Request>>) {
         self.sends.extend(sends.into_iter().map(|send| Outgoing {
             to: send.to,
             message: Message::Request(send.message),

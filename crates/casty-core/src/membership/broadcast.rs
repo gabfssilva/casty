@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use super::table::Record;
-use crate::node::NodeId;
+use crate::node::{NodeId, Send};
 
 /// An event forgotten a minute after it was seen.
 const FORGET_AFTER: f64 = 60.0;
@@ -25,13 +25,6 @@ pub enum Broadcast {
     IHave(EventId),
     Graft(EventId),
     Prune,
-}
-
-/// A message the caller must send to `to`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Send<M> {
-    pub to: NodeId,
-    pub message: M,
 }
 
 /// The record to apply, on the first sighting of an event, and the messages to send.
@@ -246,8 +239,8 @@ mod tests {
     use std::collections::{BTreeSet, HashMap, VecDeque};
 
     use super::super::table::{Record, Status};
-    use super::{Broadcast, Broadcaster, EventId, Send};
-    use crate::node::NodeId;
+    use super::{Broadcast, Broadcaster, EventId};
+    use crate::node::{NodeId, Send};
     use crate::rolls::Rolls;
 
     const GRAFT_AFTER: f64 = 0.5;

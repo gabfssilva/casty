@@ -3,7 +3,7 @@
 //! Links are logical, so both sides add each other: a neighbor request is accepted with a reply, and a seed answers
 //! a join with an accepting reply, because the joining node dialed an address and does not know the seed's identity.
 
-use crate::node::NodeId;
+use crate::node::{NodeId, Send};
 use crate::rolls::Rolls;
 
 const SHUFFLE_ACTIVE: usize = 3;
@@ -37,7 +37,7 @@ pub enum View {
 /// What the caller must do after a message: send something, or note a change of the active view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
-    Send { to: NodeId, message: View },
+    Send(Send<View>),
     NeighborUp(NodeId),
     NeighborDown(NodeId),
 }
@@ -121,19 +121,21 @@ impl Views {
             .active
             .iter()
             .filter(|node| *node != sender)
-            .map(|node| Effect::Send {
-                to: node.clone(),
-                message: View::ForwardJoin {
-                    joiner: sender.clone(),
-                    ttl: self.overlay.join_walk,
-                },
+            .map(|node| {
+                Effect::Send(Send {
+                    to: node.clone(),
+                    message: View::ForwardJoin {
+                        joiner: sender.clone(),
+                        ttl: self.overlay.join_walk,
+                    },
+                })
             })
             .collect();
         let mut effects = self.add_active(sender);
-        effects.push(Effect::Send {
+        effects.push(Effect::Send(Send {
             to: sender.clone(),
             message: View::NeighborReply { accepted: true },
-        });
+        }));
         effects.extend(forwards);
         effects
     }
@@ -150,36 +152,36 @@ impl Views {
             .cloned()
             .collect();
         if ttl == 0 || others.is_empty() {
-            return vec![Effect::Send {
+            return vec![Effect::Send(Send {
                 to: joiner,
                 message: View::Neighbor { priority: false },
-            }];
+            })];
         }
         if ttl == self.overlay.passive_walk {
             self.add_passive(&joiner);
         }
         let next = self.rolls.pick(&others).clone();
-        vec![Effect::Send {
+        vec![Effect::Send(Send {
             to: next,
             message: View::ForwardJoin {
                 joiner,
                 ttl: ttl - 1,
             },
-        }]
+        })]
     }
 
     fn asked(&mut self, sender: &NodeId, priority: bool) -> Vec<Effect> {
         if !priority && !self.active.contains(sender) && self.active.len() >= self.overlay.active {
-            return vec![Effect::Send {
+            return vec![Effect::Send(Send {
                 to: sender.clone(),
                 message: View::NeighborReply { accepted: false },
-            }];
+            })];
         }
         let mut effects = self.add_active(sender);
-        effects.push(Effect::Send {
+        effects.push(Effect::Send(Send {
             to: sender.clone(),
             message: View::NeighborReply { accepted: true },
-        });
+        }));
         effects
     }
 
@@ -199,14 +201,14 @@ impl Views {
             .collect();
         if ttl > 0 && !others.is_empty() {
             let next = self.rolls.pick(&others).clone();
-            return vec![Effect::Send {
+            return vec![Effect::Send(Send {
                 to: next,
                 message: View::Shuffle {
                     origin,
                     sample,
                     ttl: ttl - 1,
                 },
-            }];
+            })];
         }
         let reply = View::ShuffleReply {
             sample: self.sample(&self.passive.clone(), sample.len()),
@@ -215,10 +217,10 @@ impl Views {
         for node in &sample {
             self.add_passive(node);
         }
-        vec![Effect::Send {
+        vec![Effect::Send(Send {
             to: origin,
             message: reply,
-        }]
+        })]
     }
 
     /// Take `node` out of the views, keeping it in the passive view with `to_passive`, and fill the vacancy.
@@ -253,9 +255,11 @@ impl Views {
         let priority = self.active.is_empty();
         self.sample(&self.passive.clone(), vacancies)
             .into_iter()
-            .map(|node| Effect::Send {
-                to: node,
-                message: View::Neighbor { priority },
+            .map(|node| {
+                Effect::Send(Send {
+                    to: node,
+                    message: View::Neighbor { priority },
+                })
             })
             .collect()
     }
@@ -275,14 +279,14 @@ impl Views {
         let mut sample = self.sample(&self.active.clone(), SHUFFLE_ACTIVE);
         sample.extend(self.sample(&self.passive.clone(), SHUFFLE_PASSIVE));
         let target = self.rolls.pick(&self.active.clone()).clone();
-        vec![Effect::Send {
+        vec![Effect::Send(Send {
             to: target,
             message: View::Shuffle {
                 origin: self.node.clone(),
                 sample,
                 ttl: self.overlay.passive_walk,
             },
-        }]
+        })]
     }
 
     fn add_active(&mut self, node: &NodeId) -> Vec<Effect> {
@@ -294,10 +298,10 @@ impl Views {
             let evicted = self.rolls.pick(&self.active.clone()).clone();
             self.active.retain(|held| *held != evicted);
             self.add_passive(&evicted);
-            effects.push(Effect::Send {
+            effects.push(Effect::Send(Send {
                 to: evicted.clone(),
                 message: View::Disconnect,
-            });
+            }));
             effects.push(Effect::NeighborDown(evicted));
         }
         self.passive.retain(|held| held != node);
@@ -329,7 +333,7 @@ mod tests {
     use std::collections::{BTreeSet, VecDeque};
 
     use super::{Effect, Overlay, View, Views};
-    use crate::node::NodeId;
+    use crate::node::{NodeId, Send};
     use crate::rolls::Rolls;
 
     /// Every node's views, with the messages between them delivered in the order they were sent.
@@ -371,7 +375,7 @@ mod tests {
 
         fn apply(&mut self, from: usize, effects: Vec<Effect>) {
             for effect in effects {
-                if let Effect::Send { to, message } = effect {
+                if let Effect::Send(Send { to, message }) = effect {
                     let to = self.at(&to);
                     self.pending.push_back((from, to, message));
                 }
@@ -448,7 +452,7 @@ mod tests {
 
         assert_eq!(filled.len(), 2, "it asked for one neighbor per vacancy");
         for effect in filled {
-            let Effect::Send { to, .. } = effect else {
+            let Effect::Send(Send { to, .. }) = effect else {
                 panic!("a promotion is a request");
             };
             views.receive(&to, View::NeighborReply { accepted: true });
@@ -462,10 +466,10 @@ mod tests {
         assert!(
             effects.iter().any(|effect| matches!(
                 effect,
-                Effect::Send {
+                Effect::Send(Send {
                     message: View::Neighbor { .. },
                     ..
-                }
+                })
             )),
             "the vacancy was not filled"
         );
@@ -487,10 +491,10 @@ mod tests {
         let refused = views.receive(&ids[2], View::Neighbor { priority: false });
         assert_eq!(
             refused,
-            vec![Effect::Send {
+            vec![Effect::Send(Send {
                 to: ids[2].clone(),
                 message: View::NeighborReply { accepted: false }
-            }]
+            })]
         );
 
         // With priority the request is never refused: the asker has no neighbor at all.

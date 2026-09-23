@@ -6,10 +6,10 @@
 use core::time::Duration;
 use std::collections::{BTreeSet, HashMap};
 
-use casty_core::membership::broadcast::{Broadcast, Broadcaster, Send as Pushed};
+use casty_core::membership::broadcast::{Broadcast, Broadcaster};
 use casty_core::membership::table::{MemberTable, Record, Status, Transition};
 use casty_core::membership::views::{Effect, Overlay, View, Views};
-use casty_core::node::NodeId;
+use casty_core::node::{NodeId, Send as Pushed};
 use casty_core::rolls::Rolls;
 use casty_net::pool::Target;
 
@@ -376,7 +376,9 @@ impl Membership {
     fn apply(&mut self, effects: Vec<Effect>, now: f64) {
         for effect in effects {
             match effect {
-                Effect::Send { to, message } => self.send(Target::Node(to), Body::View(message)),
+                Effect::Send(Pushed { to, message }) => {
+                    self.send(Target::Node(to), Body::View(message));
+                }
                 Effect::NeighborUp(node) => {
                     self.seen.entry(node.clone()).or_insert(now);
                     self.broadcast.neighbor_up(node.clone());
