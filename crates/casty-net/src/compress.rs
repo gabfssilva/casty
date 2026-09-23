@@ -1,7 +1,7 @@
 //! The compressors a connection may negotiate, compiled into the wheel.
 //!
-//! Each one writes the format the Python implementation writes with `zstandard`, `lz4.frame` and `zlib`, so a node
-//! of either side reads what the other compressed.
+//! Each one writes the standard format of its algorithm, a zstd frame, an LZ4 frame or a zlib stream, and that is
+//! what a compressed frame carries on the wire.
 
 use std::io::{Read, Write};
 

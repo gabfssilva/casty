@@ -1,7 +1,7 @@
 //! The wire between nodes: frames, streams, the handshake and the compression they negotiate.
 //!
-//! Nothing here knows what an envelope carries. The format is the one the Python implementation writes, because a
-//! node of each forms one cluster while the port lasts.
+//! Nothing here knows what an envelope carries. The frames, the envelopes inside them and the handshake are the wire
+//! format, which every node of a cluster writes the same way.
 
 pub mod compress;
 pub mod connection;

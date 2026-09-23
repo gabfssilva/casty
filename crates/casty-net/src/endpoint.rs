@@ -198,7 +198,8 @@ impl Endpoint {
         }
     }
 
-    /// Stop listening and let the connections go. Leaving by an exception aborts them instead of saying goodbye.
+    /// Stop listening and let the connections go. With `abort` they end at once, instead of writing what the peers'
+    /// credit allows and saying goodbye.
     pub async fn close(mut self, abort: bool) {
         if let Some(listening) = self.listening.take() {
             listening.abort();

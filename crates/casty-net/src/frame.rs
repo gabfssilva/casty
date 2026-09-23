@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_the_header_the_other_implementation_reads() {
+    fn writes_each_frame_as_the_wire_format_lays_it_out() {
         let data = Frame::Data {
             stream: 3,
             payload: b"hi".to_vec(),
