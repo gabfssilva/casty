@@ -933,7 +933,7 @@ impl Node {
         id
     }
 
-    pub fn deadline(&self, py: Python<'_>, id: i64, timer: &Bound<'_, PyAny>) {
+    pub fn deadline(&self, id: i64, timer: &Bound<'_, PyAny>) {
         let mut replies = self.replies.locked();
         if let Some(waiting) = replies.forget(id) {
             replies.wait(
@@ -944,7 +944,6 @@ impl Node {
                 },
             );
         }
-        let _ = py;
     }
 
     pub fn forget(&self, id: i64) -> Option<Waiting> {
@@ -1617,7 +1616,7 @@ pub fn armed(py: Python<'_>, node: &Arc<Node>, id: i64, within: f64) -> PyResult
         },
     )?;
     let timer = node.later(py, within, expire.into_any())?;
-    node.deadline(py, id, &timer);
+    node.deadline(id, &timer);
     Ok(())
 }
 
@@ -1654,7 +1653,6 @@ impl Expire {
     }
 }
 
-/// `NodeId` as the facade still declares it, built from what the core holds.
 /// A `NodeId` as the core holds it, read from the value the facade hands around.
 pub fn read_identity(value: &Bound<'_, PyAny>) -> PyResult<NodeId> {
     let incarnation: Vec<u8> = value.getattr("incarnation")?.getattr("bytes")?.extract()?;
@@ -1688,6 +1686,7 @@ pub fn replicas(
         .collect()
 }
 
+/// `NodeId` as the facade declares it, built from what the core holds.
 pub fn identity(py: Python<'_>, id: &NodeId) -> PyResult<Py<PyAny>> {
     let class = py.import("casty")?.getattr("NodeId")?;
     let uuid = py.import("uuid")?.getattr("UUID")?;
