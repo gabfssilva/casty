@@ -23,7 +23,7 @@ jobs:
       - run: uv sync --only-dev
       # A docstring griffe cannot parse is a warning, and strict mode fails the build on any warning.
       - run: uv run --no-sync mkdocs build --strict
-      - run: uv run --no-sync python docs/check_reference.py site
+      - run: uv run --no-sync python docs/check_reference.py
       - uses: actions/upload-pages-artifact@v5
         if: github.event_name != 'pull_request'
         with:
