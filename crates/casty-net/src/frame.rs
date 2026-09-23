@@ -5,7 +5,8 @@
 
 use core::fmt;
 
-pub const VERSION: u8 = 1;
+// 2: the handshake became positional arrays and ping/pong lost their payload, so a version 1 node is refused here.
+pub const VERSION: u8 = 2;
 
 const DATA: u8 = 0;
 const WINDOW_UPDATE: u8 = 1;
