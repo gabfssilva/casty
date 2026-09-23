@@ -8,7 +8,7 @@ run in the core; what is here builds their messages and reads their answers.
 import asyncio
 import math
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Hashable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
@@ -567,20 +567,16 @@ class Binding:
     def shard(self, key: bytes) -> int:
         return int.from_bytes(blake2b(key, digest_size=8).digest()) % self.shards
 
-    async def each[T](self, operation: Callable[[int], Awaitable[T]]) -> list[T]:
+    async def each[T](self, operation: Callable[[int], Coroutine[object, object, T]]) -> list[T]:
         await self.ready()
         return await _each(operation, range(self.shards))
 
 
-async def _each[I, T](operation: Callable[[I], Awaitable[T]], among: Iterable[I]) -> list[T]:
+async def _each[I, T](operation: Callable[[I], Coroutine[object, object, T]], among: Iterable[I]) -> list[T]:
     """`operation` on each of `among` at once, answered in their order."""
     async with asyncio.TaskGroup() as group:
-        tasks = [group.create_task(_run(operation, at)) for at in among]
+        tasks = [group.create_task(operation(at)) for at in among]
     return [task.result() for task in tasks]
-
-
-async def _run[I, T](operation: Callable[[I], Awaitable[T]], at: I) -> T:
-    return await operation(at)
 
 
 _PROBES = 64
@@ -757,7 +753,9 @@ class _Index:
             yield listed
             position = _after(position, modulus)
 
-    async def walk[R](self, visit: Callable[[Ref[table_segment.Message]], Awaitable[tuple[int, R]]]) -> list[R]:
+    async def walk[R](
+        self, visit: Callable[[Ref[table_segment.Message]], Coroutine[object, object, tuple[int, R]]]
+    ) -> list[R]:
         """What `visit` answers at every segment of every shard, the shards at once and the segments of each at once.
 
         Not a snapshot: a key written meanwhile may be seen or not, and one a split moves meanwhile is seen once.
@@ -767,7 +765,7 @@ class _Index:
         return [answer for shard in shards for answer in shard]
 
     async def _walk[R](
-        self, shard: int, visit: Callable[[Ref[table_segment.Message]], Awaitable[tuple[int, R]]]
+        self, shard: int, visit: Callable[[Ref[table_segment.Message]], Coroutine[object, object, tuple[int, R]]]
     ) -> list[R]:
         count = await self._count(shard)
         visited = await _each(lambda at: visit(self._segment(shard, at)), range(count))
