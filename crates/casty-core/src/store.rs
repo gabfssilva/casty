@@ -96,22 +96,20 @@ impl Stored {
 }
 
 fn stamp(version: &[u8]) -> Result<Stamp, Malformed> {
-    if version.len() != VERSION {
-        return Err(Malformed::Truncated);
-    }
-    let field = |from: usize, to: usize| version.get(from..to).ok_or(Malformed::Truncated);
-    let round = <[u8; 8]>::try_from(field(0, 8)?).map_err(|_| Malformed::Truncated)?;
-    let incarnation = <[u8; 16]>::try_from(field(8, 24)?).map_err(|_| Malformed::Truncated)?;
-    let written = <[u8; 8]>::try_from(field(24, VERSION)?).map_err(|_| Malformed::Truncated)?;
+    let (round, rest) = version
+        .split_first_chunk::<8>()
+        .ok_or(Malformed::Truncated)?;
+    let (incarnation, written) = rest.split_first_chunk::<16>().ok_or(Malformed::Truncated)?;
+    let written = <&[u8; 8]>::try_from(written).map_err(|_| Malformed::Truncated)?;
     Ok(Stamp {
         epoch: Epoch {
-            round: u64::from_be_bytes(round),
+            round: u64::from_be_bytes(*round),
             node: NodeId {
                 address: None,
-                incarnation,
+                incarnation: *incarnation,
             },
         },
-        version: u64::from_be_bytes(written),
+        version: u64::from_be_bytes(*written),
     })
 }
 
@@ -207,33 +205,7 @@ impl LocalStore {
     ///
     /// A key kept as the tombstone of its deletion starts from `initial` too, its writes going on above the deletion.
     pub fn activate(&mut self, actor: &str, key: &str, initial: Option<Pages>) -> Option<Held> {
-        let at = (actor.to_owned(), key.to_owned());
-        if let Some(entry) = self.keys.get_mut(&at) {
-            if !entry.deleted {
-                entry.active = true;
-                return Some(Held {
-                    pages: entry.pages.clone(),
-                    created: false,
-                    lease: 0,
-                });
-            }
-            let pages = initial?;
-            entry.pages = pages.clone();
-            entry.active = true;
-            entry.deleted = false;
-            return Some(Held {
-                pages,
-                created: true,
-                lease: 0,
-            });
-        }
-        let pages = initial?;
-        self.keys.insert(at, Entry::new(pages.clone(), 1));
-        Some(Held {
-            pages,
-            created: true,
-            lease: 0,
-        })
+        self.restore(actor, key, None, initial)
     }
 
     /// Whether this node has `key`: its state, or the tombstone of its deletion. Every write of a key this node has was
@@ -246,6 +218,9 @@ impl LocalStore {
     /// Take `key` over from the record the store of the system keeps, when this node does not have it: its state, or
     /// `initial` when the store keeps nothing or a deletion. The writes of the key from here on are in a round above
     /// the record's, so that the store keeps them.
+    ///
+    /// A key this node has, its tombstone included, is taken as `activate` takes it: what it has is later than the
+    /// record.
     pub fn restore(
         &mut self,
         actor: &str,
@@ -253,18 +228,24 @@ impl LocalStore {
         stored: Option<Stored>,
         initial: Option<Pages>,
     ) -> Option<Held> {
-        if self.knows(actor, key) {
-            return self.activate(actor, key, initial);
-        }
-        let round = stored.as_ref().map_or(0, |record| record.stamp.epoch.round) + 1;
-        let (pages, created) = match stored.and_then(|record| record.pages) {
-            Some(pages) => (pages, false),
-            None => (initial?, true),
+        let at = (actor.to_owned(), key.to_owned());
+        let (pages, created) = if let Some(entry) = self.keys.get_mut(&at) {
+            let created = entry.deleted;
+            if created {
+                entry.pages = initial?;
+                entry.deleted = false;
+            }
+            entry.active = true;
+            (entry.pages.clone(), created)
+        } else {
+            let round = stored.as_ref().map_or(0, |record| record.stamp.epoch.round) + 1;
+            let (pages, created) = match stored.and_then(|record| record.pages) {
+                Some(pages) => (pages, false),
+                None => (initial?, true),
+            };
+            self.keys.insert(at, Entry::new(pages.clone(), round));
+            (pages, created)
         };
-        self.keys.insert(
-            (actor.to_owned(), key.to_owned()),
-            Entry::new(pages.clone(), round),
-        );
         Some(Held {
             pages,
             created,
@@ -274,15 +255,7 @@ impl LocalStore {
 
     /// Write `key`, giving back the stamp of the write: the version the store of the system keeps it under.
     pub fn commit(&mut self, actor: &str, key: &str, pages: Pages, active: bool) -> Stamp {
-        let entry = self
-            .keys
-            .entry((actor.to_owned(), key.to_owned()))
-            .or_insert_with(|| Entry::new(Pages::new(), 1));
-        entry.pages = pages;
-        entry.active = active;
-        entry.deleted = false;
-        entry.version += 1;
-        entry.stamp()
+        self.write(actor, key, pages, active, false)
     }
 
     /// Forget `key` and its state.
@@ -298,13 +271,24 @@ impl LocalStore {
     /// A durable key is deleted this way: the store of the system may keep its state until it is told to forget the
     /// deletion, and an activation meanwhile starts from `initial` without asking the store.
     pub fn tombstone(&mut self, actor: &str, key: &str) -> Stamp {
+        self.write(actor, key, Pages::new(), false, true)
+    }
+
+    fn write(
+        &mut self,
+        actor: &str,
+        key: &str,
+        pages: Pages,
+        active: bool,
+        deleted: bool,
+    ) -> Stamp {
         let entry = self
             .keys
             .entry((actor.to_owned(), key.to_owned()))
             .or_insert_with(|| Entry::new(Pages::new(), 1));
-        entry.pages = Pages::new();
-        entry.active = false;
-        entry.deleted = true;
+        entry.pages = pages;
+        entry.active = active;
+        entry.deleted = deleted;
         entry.version += 1;
         entry.stamp()
     }
