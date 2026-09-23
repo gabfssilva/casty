@@ -1,6 +1,5 @@
 //! What TLS adds: the certificate authority is what says who is a member of the cluster.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use casty_net::compress::Name;
@@ -14,7 +13,6 @@ const WITHIN: Duration = Duration::from_secs(20);
 
 /// A certificate authority and the files of a node it signed for.
 struct Authority {
-    certificate: String,
     key: KeyPair,
     params: CertificateParams,
     written: String,
@@ -36,7 +34,6 @@ impl Authority {
             .into_owned();
         std::fs::write(&written, &certificate).unwrap();
         Self {
-            certificate,
             key,
             params,
             written,
@@ -64,7 +61,6 @@ impl Authority {
             .into_owned();
         std::fs::write(&cert, &certificate).unwrap();
         std::fs::write(&secret, key.serialize_pem()).unwrap();
-        let _ = &self.certificate;
         Tls {
             cert,
             key: secret,
@@ -180,7 +176,6 @@ async fn without_a_client_certificate_the_server_still_answers_when_it_does_not_
     let other = Endpoint::start(secured(authority.node("open-b", &at, false), None))
         .await
         .unwrap();
-    let _ = Arc::new(());
 
     other
         .send(&Target::Seed(address), "actors", b"hello")

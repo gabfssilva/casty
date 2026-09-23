@@ -1,7 +1,4 @@
 //! What the transport promises, over real sockets on the loopback interface.
-//!
-//! These are the guarantees `tests/test_transport.py` checks of the implementation being replaced, with the ones it
-//! could not reach through the public protocol added: a peer that breaks the wire, and a frame past the limit.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +13,7 @@ use casty_net::limits::Limits;
 use casty_net::pool::{Heard, Peer, Target, Traffic};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 const WITHIN: Duration = Duration::from_secs(20);
 
@@ -189,14 +187,9 @@ async fn it_drops_envelopes_for_the_old_incarnation_and_delivers_to_a_seed() {
     second.close(true).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn it_reports_a_seed_that_belongs_to_another_cluster() {
-    let other = Endpoint::start(Config {
-        cluster: "another".to_owned(),
-        ..config(Some("127.0.0.1:0"))
-    })
-    .await
-    .unwrap();
+/// What a node that sends to a seed started from `seed` is refused with.
+async fn refusal(seed: Config) -> String {
+    let other = Endpoint::start(seed).await.unwrap();
     let address = other.node().address.clone().unwrap();
     let mut joining = node().await;
 
@@ -208,36 +201,32 @@ async fn it_reports_a_seed_that_belongs_to_another_cluster() {
     let Some(Err(reason)) = refused else {
         panic!("the seed did not refuse: {refused:?}");
     };
-    assert!(reason.contains("another"), "{reason}");
     other.close(true).await;
     joining.close(true).await;
+    reason
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_reports_a_seed_that_belongs_to_another_cluster() {
+    let reason = refusal(Config {
+        cluster: "another".to_owned(),
+        ..config(Some("127.0.0.1:0"))
+    })
+    .await;
+    assert!(reason.contains("another"), "{reason}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn it_reports_a_seed_whose_limits_differ() {
-    let other = Endpoint::start(Config {
+    let reason = refusal(Config {
         limits: Limits {
             message: 8 * 1024 * 1024,
             ..Limits::default()
         },
         ..config(Some("127.0.0.1:0"))
     })
-    .await
-    .unwrap();
-    let address = other.node().address.clone().unwrap();
-    let mut joining = node().await;
-
-    joining
-        .send(&Target::Seed(address), "actors", b"hello")
-        .unwrap();
-
-    let refused = tokio::time::timeout(WITHIN, joining.recv()).await.unwrap();
-    let Some(Err(reason)) = refused else {
-        panic!("the seed did not refuse: {refused:?}");
-    };
+    .await;
     assert!(reason.contains("8388608"), "{reason}");
-    other.close(true).await;
-    joining.close(true).await;
 }
 
 /// The hello names the cluster, the node, its role, the compressors and the limits, and no payload format: there is
@@ -509,14 +498,13 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
                         Some(casty_net::handshake::decode(&record.name, &record.payload).unwrap());
                 }
             }
-            if let Some(casty_net::handshake::Message::Hello(hello)) = said {
+            if let Some(casty_net::handshake::Message::Hello(_)) = said {
                 let ack = casty_net::handshake::Message::Ack(casty_net::handshake::Ack {
                     version: 1,
                     node: casty_core::node::NodeId::fresh(Some(listening.clone())),
                     role: casty_net::handshake::Role::Member,
                     compression: None,
                 });
-                let _ = hello;
                 let (name, payload) = casty_net::handshake::encode(&ack);
                 mux.send(casty_net::mux::CONTROL, name, &payload);
                 let out = mux.output();
@@ -544,18 +532,24 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
     talker.close(true).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn it_reports_the_peer_of_a_connection_that_ended() {
-    let (lost, mut heard) = tokio::sync::mpsc::unbounded_channel();
+/// A node that tells what it hears of its peers to the receiver it comes with.
+async fn reporting(bind: Option<&str>) -> (Endpoint, UnboundedReceiver<Peer>) {
+    let (told, heard) = unbounded_channel();
     let reporting: Heard = Arc::new(move |peer: Peer| {
-        let _ = lost.send(peer);
+        let _ = told.send(peer);
     });
-    let mut watching = Endpoint::start(Config {
+    let endpoint = Endpoint::start(Config {
         heard: Some(reporting),
-        ..config(Some("127.0.0.1:0"))
+        ..config(bind)
     })
     .await
     .unwrap();
+    (endpoint, heard)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_reports_the_peer_of_a_connection_that_ended() {
+    let (mut watching, mut heard) = reporting(Some("127.0.0.1:0")).await;
     let peer = node().await;
     let gone = peer.node().clone();
     peer.send(&Target::Node(watching.node().clone()), "actors", b"hello")
@@ -575,16 +569,7 @@ async fn it_reports_the_peer_of_a_connection_that_ended() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn it_reports_a_peer_whose_address_no_longer_answers() {
-    let (unreached, mut heard) = tokio::sync::mpsc::unbounded_channel();
-    let reporting: Heard = Arc::new(move |peer: Peer| {
-        let _ = unreached.send(peer);
-    });
-    let watching = Endpoint::start(Config {
-        heard: Some(reporting),
-        ..config(None)
-    })
-    .await
-    .unwrap();
+    let (watching, mut heard) = reporting(None).await;
     let peer = node().await;
     let gone = peer.node().clone();
     peer.close(true).await;
