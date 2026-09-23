@@ -602,12 +602,19 @@ def _duration(value: float, name: str, *, zero: bool = False) -> None:
         raise ValueError(f"{name} must be {'nonnegative' if zero else 'positive'} and finite")
 
 
+_INTEREST = 30.0
+"""Seconds the owner keeps a wait after its last ask, which is how long an abandoned one lingers."""
+
+_REASK = 10.0
+"""Seconds one ask of a wait gets before it is sent again: well within `_INTEREST`, so the owner never drops it."""
+
+
 async def _wait[T](request: Callable[[float], Awaitable[T]]) -> T:
     """Ask again while the interest lasts: a lost reply is reattached, not turned into a second arrival."""
     while True:
-        until = time.time() + 30.0
+        until = time.time() + _INTEREST
         try:
-            async with asyncio.timeout(10.0):
+            async with asyncio.timeout(_REASK):
                 return await request(until)
         except TimeoutError:
             if time.time() >= until:
