@@ -1395,12 +1395,13 @@ fn referenced(
     let key = placed(py, &definition, key, at)?;
     node.learn(actor, &definition);
     let state = definition.state.bind(py);
+    let sent = state.get().tree().sent();
     let written: Option<Vec<u8>> = match (initial, &definition.initial) {
-        (Some(initial), _) => Some(state.call_method1("dump", (initial,))?.extract()?),
+        (Some(initial), _) => Some(Schema::write(state, sent, initial)?),
         (None, Some(_)) => None,
         // A type without a default starts from nothing, which only a state that can be `None` allows.
-        (None, None) => match state.call_method1("dump", (py.None(),)) {
-            Ok(nothing) => Some(nothing.extract()?),
+        (None, None) => match Schema::write(state, sent, &py.None().into_bound(py)) {
+            Ok(nothing) => Some(nothing),
             Err(_) => {
                 return Err(pyo3::exceptions::PyTypeError::new_err(format!(
                     "{} has no default initial state, and its state cannot be None: pass initial=",
