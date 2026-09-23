@@ -529,6 +529,55 @@ async fn it_reports_a_peer_whose_address_no_longer_answers() {
     watching.close(true).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_endpoint_dropped_without_closing_ends_everything_it_started() {
+    let alive = || {
+        tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks()
+    };
+    let (mut watching, mut heard) = reporting(Some("127.0.0.1:0")).await;
+    let before = alive();
+    let mut peer = node().await;
+    let gone = peer.node().clone();
+    let address = gone
+        .address
+        .clone()
+        .expect("a node that listens has an address");
+    let released = peer.released().expect("a node that listens has a listener");
+    peer.send(&Target::Node(watching.node().clone()), "actors", b"hello")
+        .unwrap();
+    take(&mut watching, 1).await;
+    assert!(alive() > before);
+
+    drop(peer);
+
+    tokio::time::timeout(WITHIN, released.wait())
+        .await
+        .expect("the listener let its address go");
+    TcpListener::bind(&address)
+        .await
+        .expect("the address is free to bind again");
+    let reported = tokio::time::timeout(WITHIN, heard.recv()).await;
+    assert_eq!(
+        reported,
+        Ok(Some(Peer::Lost(gone))),
+        "the peer did not see the connection end"
+    );
+    let settled = tokio::time::timeout(WITHIN, async {
+        while alive() != before {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "{} tasks outlived the endpoint, where {before} ran before it",
+        alive()
+    );
+    watching.close(true).await;
+}
+
 /// What `endpoint` counts once `holds` says yes of it, or what it counted last when that never happens.
 async fn counted(endpoint: &Endpoint, holds: impl Fn(&Traffic) -> bool) -> Traffic {
     let deadline = tokio::time::Instant::now() + WITHIN;

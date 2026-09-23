@@ -430,6 +430,17 @@ async with ActorSystem(cluster=cluster) as system:
   with status `alive`, `leaving`, `suspect` or `dead`.
 - Nodes with a different cluster `name` or different [`Limits`](#limits) are refused with `Refused`.
 - Several `ActorSystem`s can run in one process, each on its own port.
+- The transport of each `ActorSystem` in a cluster and of each `Client` runs on a thread per core of its own. Systems
+  given the same `Runtime` share its threads instead, which is what a process holding many clients wants:
+
+  ```python
+  runtime = Runtime(threads=4)
+  async with Client(seeds=seeds, runtime=runtime) as one, Client(seeds=others, runtime=runtime) as two:
+      ...
+  ```
+
+  A system that ends, orderly or by a crash, stops its node, its listener and its connections and leaves the runtime
+  running for the others; the threads go when nothing holds the runtime.
 
 ### Replication and write levels
 

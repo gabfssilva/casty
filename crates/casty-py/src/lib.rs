@@ -8,6 +8,7 @@ mod generic;
 mod lock;
 mod node;
 mod refs;
+mod runtime;
 mod schema;
 
 use pyo3::prelude::*;
@@ -29,6 +30,7 @@ fn _casty(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<node::context::Context>()?;
     module.add_class::<node::context::State>()?;
     module.add_class::<refs::Ref>()?;
+    module.add_class::<runtime::Runtime>()?;
     module.add_class::<schema::Schema>()?;
     module.add_function(wrap_pyfunction!(actor::actor, module)?)?;
     module.add_function(wrap_pyfunction!(node::replicas, module)?)?;

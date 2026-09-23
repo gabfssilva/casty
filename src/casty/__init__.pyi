@@ -370,6 +370,22 @@ def actor[S, M](
     durable: Durable | None = None,
 ) -> Callable[[Body[S, M]], DefaultedActor[S, M]]: ...
 
+class Runtime:
+    """Threads for the transport of the systems and clients given it.
+
+    Without one, each `ActorSystem` in a cluster and each `Client` starts a thread per core of its own. Given the same
+    `Runtime`, they share its threads, and a system that ends stops only its node, its listener and its connections;
+    the threads go when nothing holds the runtime any more.
+
+    Parameters
+    ----------
+    threads
+        How many threads carry the transport. Zero raises `ValueError`.
+    """
+
+    def __init__(self, *, threads: int) -> None: ...
+    def _tasks(self) -> int: ...
+
 class ActorSystem:
     """A node. It hosts every actor type it meets: the ones this process uses, and the ones the cluster tells it of.
 
@@ -403,6 +419,9 @@ class ActorSystem:
         What the events of this node are reported to. `None` is a `LoggingObserver`.
     store
         Where the state of the durable types outlives every node.
+    runtime
+        The threads the transport of the node runs on, shared with the other systems given the same one. `None` starts
+        a thread per core for this node alone. A system without `cluster` has no transport and uses none.
     """
 
     def __init__(
@@ -416,6 +435,7 @@ class ActorSystem:
         leave_timeout: timedelta = timedelta(seconds=30),
         observer: Observer | None = None,
         store: Store | None = None,
+        runtime: Runtime | None = None,
     ) -> None: ...
     async def __aenter__(self) -> Self: ...
     async def __aexit__(self, *exc: object) -> None: ...
@@ -528,6 +548,9 @@ class Client:
         `ValueError`.
     observer
         What the events of this client are reported to. `None` is a `LoggingObserver`.
+    runtime
+        The threads the transport of the client runs on, shared with the other systems given the same one. `None`
+        starts a thread per core for this client alone.
     """
 
     def __init__(
@@ -542,6 +565,7 @@ class Client:
         ask_timeout: timedelta = timedelta(seconds=10),
         sync_every: timedelta = timedelta(seconds=5),
         observer: Observer | None = None,
+        runtime: Runtime | None = None,
     ) -> None: ...
     async def __aenter__(self) -> Self: ...
     async def __aexit__(self, *exc: object) -> None: ...
@@ -634,6 +658,7 @@ __all__ = [
     "ReentrancyError",
     "Ref",
     "Refused",
+    "Runtime",
     "SchemaError",
     "State",
     "Stats",

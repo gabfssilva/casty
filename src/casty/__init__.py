@@ -48,6 +48,7 @@ Client = _core.Client
 Context = _core.Context
 DefaultedActor = _core.DefaultedActor
 Ref = _core.Ref
+Runtime = _core.Runtime
 State = _core.State
 actor = _core.actor
 
@@ -115,6 +116,7 @@ __all__ = [
     "ReentrancyError",
     "Ref",
     "Refused",
+    "Runtime",
     "SchemaError",
     "State",
     "Stats",

@@ -22,7 +22,7 @@ use casty_core::placement::pinned;
 use casty_core::replication::messages::Write;
 use casty_core::store::{Durable, Held as State, Pages};
 use casty_net::compress::Name;
-use casty_net::endpoint::{Config, Endpoint, Meter, Sender, TooLarge};
+use casty_net::endpoint::{Config, Endpoint, Meter, Released, Sender, TooLarge};
 use casty_net::limits::Limits;
 use casty_net::pool::{AddressMap, Heard, Peer, Target as Destination};
 use casty_net::tls::Tls;
@@ -561,13 +561,16 @@ fn stopped<T>(
     })
 }
 
-/// A node that is running, and the handle that stops it.
+/// A node that is running, and the handle that stops it. Dropped without `leave` or `crash`, it crashes: the task of the
+/// node ends, and the transport with it, whatever runtime they run on.
 #[derive(Debug)]
 pub struct Running {
     pub node: Node,
     task: JoinHandle<()>,
     /// How long leaving waits for the nodes that replicate its keys now to take them.
     handover: core::time::Duration,
+    /// What says the address of the node is free again, which a node binding it next waits for.
+    released: Option<Released>,
 }
 
 impl Running {
@@ -605,7 +608,7 @@ impl Running {
                 let _ = asks.send(Ask::Heard(peer));
             }
         });
-        let endpoint = Endpoint::start(Config {
+        let mut endpoint = Endpoint::start(Config {
             bind: member.then(|| cluster.bind.clone()),
             advertise: cluster.advertise.clone(),
             cluster: cluster.name.clone(),
@@ -618,6 +621,7 @@ impl Running {
         })
         .await?;
         let id = endpoint.node().clone();
+        let released = endpoint.released();
         let mut counts = Counts::default();
         for kind in &types {
             counts.learn(&kind.actor, kind.replicas);
@@ -691,6 +695,7 @@ impl Running {
                 node,
                 task,
                 handover: cluster.leave_timeout,
+                released,
             }),
             Ok(Err(refused)) => Err(io::Error::other(refused)),
             Err(_) => Err(io::Error::other("the node stopped before it joined")),
@@ -700,14 +705,14 @@ impl Running {
     /// Say goodbye and wait for the node to be out, giving away what it keeps first.
     ///
     /// The keys it gives back are the ones it left behind: nobody took them in time, so they stay where they were.
-    pub async fn leave(self) -> Vec<Entity> {
+    pub async fn leave(mut self) -> Vec<Entity> {
         // `leaving` takes the node out of the choice of owner, so nothing new is routed here. `left` takes it out of
         // the ring, which is what makes the keys it keeps belong to other nodes, and only then is there a handover.
         self.node.ask(Ask::Leave);
         self.node.ask(Ask::Depart);
         let owed = self.handed().await;
         self.node.ask(Ask::Stop);
-        let _ = self.task.await;
+        let _ = (&mut self.task).await;
         owed
     }
 
@@ -724,10 +729,20 @@ impl Running {
         answered.await.unwrap_or_default()
     }
 
-    /// Stop without a word, which is what a machine going away looks like to the others.
-    pub async fn crash(self) {
+    /// Stop without a word, which is what a machine going away looks like to the others, and return once the address
+    /// of the node is free for whatever binds it next.
+    pub async fn crash(mut self) {
         self.task.abort();
-        let _ = self.task.await;
+        let _ = (&mut self.task).await;
+        if let Some(released) = self.released.take() {
+            released.wait().await;
+        }
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 

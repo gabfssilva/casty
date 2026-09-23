@@ -10,6 +10,7 @@ use casty_core::membership::table::Status;
 use casty_core::replication::messages::Write;
 use casty_node::membership::service::Member;
 use casty_node::node::{Cluster, Running};
+use tokio::net::TcpListener;
 
 use common::{ACTOR, Idle, WITHIN, cluster, kind, until};
 
@@ -165,5 +166,66 @@ async fn a_node_that_says_goodbye_leaves_the_cluster_at_once() {
     // An orderly exit does not wait for the failure detector: the node says it is gone.
     assert!(noticed.is_ok(), "the goodbye was not heard");
 
+    common::crash(nodes).await;
+}
+
+/// Threads for one node alone, so that what it leaves behind is counted apart from the other nodes.
+fn apart() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_that_ends_frees_its_address_and_leaves_no_task_on_its_threads() {
+    let first = start(cluster(&[])).await.expect("a free port");
+    let seed = first.node.id().address.clone().expect("an address");
+    let mut nodes = vec![first];
+    nodes.push(
+        start(cluster(std::slice::from_ref(&seed)))
+            .await
+            .expect("it joined"),
+    );
+    for crashing in [true, false] {
+        let threads = apart();
+        let running = threads
+            .spawn(start(cluster(std::slice::from_ref(&seed))))
+            .await
+            .expect("the join ran")
+            .expect("it joined");
+        let address = running.node.id().address.clone().expect("an address");
+        converged(&nodes, 3).await;
+        assert!(threads.metrics().num_alive_tasks() > 0);
+
+        threads
+            .spawn(async move {
+                if crashing {
+                    running.crash().await;
+                } else {
+                    running.leave().await;
+                }
+            })
+            .await
+            .expect("it ended");
+
+        TcpListener::bind(&address)
+            .await
+            .expect("the address is free as soon as the node is gone");
+        let quiet = tokio::time::timeout(WITHIN, async {
+            while threads.metrics().num_alive_tasks() > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            quiet.is_ok(),
+            "{} tasks outlived a node that {}",
+            threads.metrics().num_alive_tasks(),
+            if crashing { "crashed" } else { "left" }
+        );
+        threads.shutdown_background();
+    }
     common::crash(nodes).await;
 }

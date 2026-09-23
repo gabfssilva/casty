@@ -2,13 +2,17 @@
 //!
 //! Without `bind` this is a client: no listener, and a node without an address, reachable only through the
 //! connections it opens.
+//!
+//! Everything it starts ends with it. `close` lets the connections finish what they are writing; an endpoint dropped
+//! without it, as the task of a node that crashed drops it, stops listening and ends its connections where they are,
+//! so that a runtime other systems go on running on keeps neither its port nor its peers.
 
 use std::io;
 use std::sync::Arc;
 
 use casty_core::node::NodeId;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::compress::{Name, PREFERENCE};
@@ -80,7 +84,24 @@ pub struct Endpoint {
     sender: Sender,
     inbound: mpsc::UnboundedReceiver<Incoming>,
     listening: Option<JoinHandle<()>>,
+    released: Option<oneshot::Receiver<()>>,
     limits: Limits,
+}
+
+/// What resolves once the listener of an endpoint has let its address go, however it went.
+#[derive(Debug)]
+pub struct Released(oneshot::Receiver<()>);
+
+impl Released {
+    pub async fn wait(self) {
+        let _ = self.0.await;
+    }
+}
+
+/// The listener, and the word that it is gone. Fields drop in their order: the port is free before anyone hears.
+struct Bound {
+    listener: TcpListener,
+    _freed: oneshot::Sender<()>,
 }
 
 impl Endpoint {
@@ -130,12 +151,20 @@ impl Endpoint {
             },
             inbound.clone(),
         );
+        let (freed, released) = oneshot::channel();
         let listening = listener.map(|listener| {
             let pool = Arc::clone(&pool);
             let identity = identity.clone();
             let handshake = config.limits.handshake;
+            let bound = Bound {
+                listener,
+                _freed: freed,
+            };
             tokio::spawn(async move {
-                while let Ok((socket, _)) = listener.accept().await {
+                // Taken whole: a block that named only the listener would capture only it, and the word that it is
+                // gone would be dropped here, before it is.
+                let bound = bound;
+                while let Ok((socket, _)) = bound.listener.accept().await {
                     socket.set_nodelay(true).ok();
                     take(&pool, socket, identity.clone(), handshake);
                 }
@@ -149,9 +178,16 @@ impl Endpoint {
                 message: config.limits.message,
             },
             inbound: receiver,
+            released: listening.is_some().then_some(released),
             listening,
             limits: config.limits,
         })
+    }
+
+    /// What says the address this endpoint listens on is free again, taken once: what binds it next waits for it.
+    /// Nothing for a client, which listens on none.
+    pub fn released(&mut self) -> Option<Released> {
+        self.released.take().map(Released)
     }
 
     #[must_use]
@@ -215,6 +251,16 @@ impl Endpoint {
         while !self.sender.pool.idle() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(core::time::Duration::from_millis(5)).await;
         }
+    }
+}
+
+impl Drop for Endpoint {
+    // After `close` this ends what outlived its deadline; without it, everything the endpoint started.
+    fn drop(&mut self) {
+        if let Some(listening) = self.listening.take() {
+            listening.abort();
+        }
+        self.sender.pool.close(true);
     }
 }
 

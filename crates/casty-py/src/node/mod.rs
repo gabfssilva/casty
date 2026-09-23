@@ -30,6 +30,7 @@ use crate::actor::Definition;
 use crate::awaited::Awaited;
 use crate::lock::Locked;
 use crate::refs::Ref;
+use crate::runtime::{Runtime, Threads};
 use crate::schema::Schema;
 use activation::Activation;
 use catalog::Catalog;
@@ -106,6 +107,8 @@ pub struct Node {
     /// The writes of the store of a node running alone, which are confirmed as they are made. In a cluster the
     /// replication counts them.
     saved: AtomicU64,
+    /// The runtime the transport of this node shares with other systems, when it was given one.
+    threads: Option<Arc<Threads>>,
 }
 
 impl Node {
@@ -114,11 +117,13 @@ impl Node {
         id: NodeId,
         observer: Py<PyAny>,
         storage: Option<Py<PyAny>>,
+        threads: Option<Arc<Threads>>,
     ) -> Self {
         Self {
             settings,
             observer,
             storage,
+            threads,
             wanted: Wanted::default(),
             saved: AtomicU64::new(0),
             id: Mutex::new(id),
@@ -281,6 +286,7 @@ impl Node {
             entered.clone().unbind(),
             system.clone().unbind(),
             member,
+            self.threads.clone(),
         )?;
         *self.joined.locked() = Some(joined);
         Ok(())
@@ -1165,6 +1171,7 @@ system_methods!(ActorSystem {
         leave_timeout = None,
         observer = None,
         store = None,
+        runtime = None,
     ))]
     fn new(
         py: Python<'_>,
@@ -1178,6 +1185,7 @@ system_methods!(ActorSystem {
         leave_timeout: Option<&Bound<'_, PyAny>>,
         observer: Option<&Bound<'_, PyAny>>,
         store: Option<&Bound<'_, PyAny>>,
+        runtime: Option<&Bound<'_, Runtime>>,
     ) -> PyResult<Self> {
         let settings = Settings {
             idle_after: timing("idle_after", idle_after, Duration::from_secs(60))?,
@@ -1196,6 +1204,7 @@ system_methods!(ActorSystem {
                 id,
                 observing(py, observer)?,
                 storage::storing(store)?,
+                runtime.map(|runtime| runtime.get().threads()),
             )),
             cluster: match cluster {
                 Some(cluster) if !cluster.is_none() => Some(cluster.clone().unbind()),
@@ -1665,6 +1674,7 @@ system_methods!(Client {
         ask_timeout = None,
         sync_every = None,
         observer = None,
+        runtime = None,
     ))]
     fn new(
         py: Python<'_>,
@@ -1678,6 +1688,7 @@ system_methods!(Client {
         ask_timeout: Option<&Bound<'_, PyAny>>,
         sync_every: Option<&Bound<'_, PyAny>>,
         observer: Option<&Bound<'_, PyAny>>,
+        runtime: Option<&Bound<'_, Runtime>>,
     ) -> PyResult<Self> {
         if seeds.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1726,6 +1737,7 @@ system_methods!(Client {
                 },
                 observing(py, observer)?,
                 None,
+                runtime.map(|runtime| runtime.get().threads()),
             )),
             settings,
             map: match address_map {

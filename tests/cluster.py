@@ -8,7 +8,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import timedelta
 
-from casty import ActorDefinition, ActorSystem, Client, Cluster, Compression, Limits, Observer, Overlay, Store
+from casty import ActorDefinition, ActorSystem, Client, Cluster, Compression, Limits, Observer, Overlay, Runtime, Store
 from tests.support import eventually
 
 
@@ -67,11 +67,13 @@ class Harness:
         compression: Compression = COMPRESSION,
         observer: Callable[[int], Observer] | None = None,
         store: Store | None = None,
+        runtime: Runtime | None = None,
     ) -> AsyncGenerator["Harness"]:
         """Start `count` nodes at once and wait until they all see each other.
 
         `observer` gives the observer of each node, from the `id` of the node, the ones added later included. `store`
-        is the store of every node, the ones added later included.
+        is the store of every node, the ones added later included. `runtime` carries the transport of every node and
+        client, unless `add` gives a node another; without one, each starts its own.
         """
         async with asyncio.TaskGroup() as tasks:
             harness = cls(
@@ -82,6 +84,7 @@ class Harness:
                 compression=compression,
                 observer=observer,
                 store=store,
+                runtime=runtime,
             )
             try:
                 addresses = tuple(harness._address() for _ in range(count))
@@ -89,7 +92,7 @@ class Harness:
                     for address in addresses:
                         seeds = _seeds(addresses, address)
                         harness._ids += 1
-                        starting.create_task(harness._start(harness._ids, address, seeds, (), "casty"))
+                        starting.create_task(harness._start(harness._ids, address, seeds, (), "casty", runtime))
                 await harness._converged()
                 yield harness
             finally:
@@ -106,6 +109,7 @@ class Harness:
         compression: Compression,
         observer: Callable[[int], Observer] | None = None,
         store: Store | None = None,
+        runtime: Runtime | None = None,
     ) -> None:
         self._tasks = tasks
         self._timing = timing
@@ -114,6 +118,7 @@ class Harness:
         self._compression = compression
         self._observer = observer
         self._store = store
+        self._runtime = runtime
         self._clients = AsyncExitStack()
         self._nodes: list[Node] = []
         self._proxies: dict[tuple[int, str], Proxy] = {}
@@ -139,18 +144,20 @@ class Harness:
         name: str = "casty",
         address: str | None = None,
         cut_off: Iterable[Node] = (),
+        runtime: Runtime | None = None,
     ) -> Node:
         """Start one more node, seeded with the nodes that are running, on `address` or on a free port.
 
         It never exchanges bytes with `cut_off`, from before it starts: a node blocked only once it is up has already
-        talked to everyone, which is too late for a test about what it does before it has heard from them.
+        talked to everyone, which is too late for a test about what it does before it has heard from them. `runtime`
+        carries its transport instead of the one of the harness.
         """
         seeds = _seeds(tuple(node.address for node in self._nodes), address)
         where = address or self._address()
         self._ids += 1
         source = self._ids
         self._block(pair for other in cut_off for pair in ((other.id, where), (source, other.address)))
-        return await self._start(source, where, seeds, version, name)
+        return await self._start(source, where, seeds, version, name, runtime or self._runtime)
 
     async def client(self, *, name: str = "casty") -> Client:
         """Start a client of the cluster, reaching it through proxies of its own, closed when the harness closes."""
@@ -164,6 +171,7 @@ class Harness:
             compression=self._compression,
             ask_timeout=self._timing.ask_timeout,
             sync_every=self._timing.sync_every,
+            runtime=self._runtime,
         )
         # A client that never gets the table is a failed test, not a test that hangs.
         async with asyncio.timeout(_JOIN.total_seconds()):
@@ -204,7 +212,13 @@ class Harness:
         self._refresh()
 
     async def _start(
-        self, source: int, address: str, seeds: tuple[str, ...], version: Sequence[ActorDefinition], name: str
+        self,
+        source: int,
+        address: str,
+        seeds: tuple[str, ...],
+        version: Sequence[ActorDefinition],
+        name: str,
+        runtime: Runtime | None,
     ) -> Node:
         cluster = Cluster(
             bind=address,
@@ -231,6 +245,7 @@ class Harness:
             leave_timeout=self._timing.leave_timeout,
             observer=None if self._observer is None else self._observer(source),
             store=self._store,
+            runtime=runtime,
         )
         started: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         stop = asyncio.Event()
@@ -338,6 +353,7 @@ class Versioned(ActorSystem):
         leave_timeout: timedelta,
         observer: Observer | None = None,
         store: Store | None = None,
+        runtime: Runtime | None = None,
     ) -> None:
         super().__init__(
             cluster=cluster,
@@ -347,6 +363,7 @@ class Versioned(ActorSystem):
             leave_timeout=leave_timeout,
             observer=observer,
             store=store,
+            runtime=runtime,
         )
         for definition in version:
             self._learn(definition)

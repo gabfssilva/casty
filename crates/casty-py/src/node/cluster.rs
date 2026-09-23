@@ -24,7 +24,7 @@ use casty_node::membership::service::{Member, Timings};
 pub use casty_node::node::Cluster as Settings;
 use casty_node::node::{Host, Kind, Node as Cluster, Placed, Running};
 use casty_node::replication::service::{Failure, Storing};
-use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 
 use super::callback;
@@ -32,6 +32,7 @@ use super::observe::{self, Observed};
 use super::{Node, Op};
 use crate::actor::period;
 use crate::lock::Locked;
+use crate::runtime::Threads;
 
 pyo3::create_exception!(
     _casty,
@@ -43,10 +44,10 @@ pyo3::create_exception!(
 /// A node of a cluster, with the runtime its threads belong to.
 #[derive(Debug)]
 pub struct Joined {
-    /// The threads of the transport. They are let go of without waiting: what runs on them may be waiting for the
-    /// loop, and the loop is what lets them go.
-    runtime: Mutex<Option<tokio::runtime::Runtime>>,
-    /// How work is put on those threads, which outlives taking the runtime out to end it.
+    /// The threads of the transport: its own, or a runtime it shares with other systems. Its own are let go of without
+    /// waiting, since what runs on them may be waiting for the loop, and the loop is what lets them go.
+    runtime: Mutex<Option<Arc<Threads>>>,
+    /// How work is put on those threads, which outlives letting the runtime go.
     threads: tokio::runtime::Handle,
     running: Mutex<Option<Running>>,
     /// The node of the cluster, from the moment it has joined one.
@@ -73,13 +74,12 @@ impl Joined {
         entered: Py<PyAny>,
         system: Py<PyAny>,
         member: bool,
+        shared: Option<Arc<Threads>>,
     ) -> PyResult<Arc<Self>> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|failed| {
-                PyRuntimeError::new_err(format!("the transport did not start: {failed}"))
-            })?;
+        let runtime = match shared {
+            Some(shared) => shared,
+            None => Threads::start(None)?,
+        };
         let host: Arc<dyn Host> = Arc::new(Bridge {
             node: Arc::downgrade(node),
             running_loop: running_loop.clone_ref(py),
@@ -130,14 +130,13 @@ impl Joined {
         })
     }
 
-    /// Let the threads of the transport go without waiting for them.
+    /// Let the threads of the transport go: a runtime of its own ends here, without waiting for them, and a shared one
+    /// goes on for the systems that still hold it.
     ///
     /// They are given up rather than joined: a dial of theirs may be waiting for the loop, and this runs on the loop,
     /// so waiting here is waiting for something that is waiting for this.
     pub fn shutdown(&self) {
-        if let Some(runtime) = self.runtime.locked().take() {
-            runtime.shutdown_background();
-        }
+        drop(self.runtime.locked().take());
     }
 
     /// Ask for the address of every member here, on the loop, so that a dial finds it without waiting.
