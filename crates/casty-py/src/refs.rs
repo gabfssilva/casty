@@ -4,10 +4,9 @@ use std::sync::Arc;
 
 use casty_core::chain::Chain;
 use casty_core::mailbox::{Command, Deliver};
-use casty_core::node::{NodeId, Target};
+use casty_core::node::Target;
 use casty_core::outcome::Outcome;
 use casty_core::schema::ir::NodeRef;
-use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple, PyType};
 
@@ -21,7 +20,7 @@ use crate::schema::Schema;
 ///
 /// Two refs to the same target are equal: what a ref carries besides it is the way to reach it from here. The schema
 /// it holds is the one its messages are written with, and `messages` is the node of that tree they travel as.
-#[pyclass(frozen, module = "casty._casty")]
+#[pyclass(frozen, eq, hash, module = "casty._casty")]
 #[derive(Debug)]
 pub struct Ref {
     target: Target,
@@ -105,25 +104,20 @@ impl Ref {
     }
 }
 
+impl PartialEq for Ref {
+    fn eq(&self, other: &Self) -> bool {
+        self.target == other.target
+    }
+}
+
+impl core::hash::Hash for Ref {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.target.hash(state);
+    }
+}
+
 #[pymethods]
 impl Ref {
-    /// The ref of the entity `(actor, key)`, whose messages `schema` was compiled from.
-    #[staticmethod]
-    fn entity(schema: Py<Schema>, actor: String, key: String) -> Self {
-        Self::entity_of(schema, actor, key, None)
-    }
-
-    /// The ref of whoever waits, on a node, for the answer of the `ask` numbered `id`.
-    #[staticmethod]
-    fn reply(schema: Py<Schema>, address: Option<String>, incarnation: [u8; 16], id: i64) -> Self {
-        let messages = schema.get().tree().sent();
-        let node = NodeId {
-            address,
-            incarnation,
-        };
-        Self::new(Target::Reply { node, id }, schema, messages, None)
-    }
-
     /// Send `msg` without waiting. Delivery is at most once.
     fn tell(&self, py: Python<'_>, msg: &Bound<'_, PyAny>) -> PyResult<()> {
         let node = self.reachable()?;
@@ -169,28 +163,6 @@ impl Ref {
         item: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         alias(class, &subscript(item))
-    }
-
-    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<Py<PyAny>> {
-        let py = other.py();
-        let same = other
-            .cast_exact::<Ref>()
-            .ok()
-            .map(|other| self.target == other.get().target);
-        Ok(match (op, same) {
-            (CompareOp::Eq, Some(same)) => same.into_pyobject(py)?.to_owned().into_any().unbind(),
-            (CompareOp::Ne, Some(same)) => {
-                (!same).into_pyobject(py)?.to_owned().into_any().unbind()
-            }
-            _ => py.NotImplemented(),
-        })
-    }
-
-    fn __hash__(&self) -> u64 {
-        use std::hash::{DefaultHasher, Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        self.target.hash(&mut hasher);
-        hasher.finish()
     }
 
     fn __repr__(&self) -> String {
