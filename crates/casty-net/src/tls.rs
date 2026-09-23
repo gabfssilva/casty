@@ -7,6 +7,7 @@ use std::io;
 use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::pem::{self, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig, SignatureScheme};
@@ -82,8 +83,9 @@ impl Tls {
 
 fn certificates(path: &str) -> io::Result<Vec<CertificateDer<'static>>> {
     let raw = std::fs::read(path)?;
-    let found: Result<Vec<_>, _> = rustls_pemfile::certs(&mut raw.as_slice()).collect();
-    let found = found.map_err(|error| io::Error::other(format!("{path}: {error}")))?;
+    let found = CertificateDer::pem_slice_iter(&raw)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| io::Error::other(format!("{path}: {error}")))?;
     if found.is_empty() {
         return Err(io::Error::other(format!("{path} holds no certificate")));
     }
@@ -92,8 +94,10 @@ fn certificates(path: &str) -> io::Result<Vec<CertificateDer<'static>>> {
 
 fn private_key(path: &str) -> io::Result<PrivateKeyDer<'static>> {
     let raw = std::fs::read(path)?;
-    rustls_pemfile::private_key(&mut raw.as_slice())?
-        .ok_or_else(|| io::Error::other(format!("{path} holds no private key")))
+    PrivateKeyDer::from_pem_slice(&raw).map_err(|error| match error {
+        pem::Error::NoItemsFound => io::Error::other(format!("{path} holds no private key")),
+        error => io::Error::other(format!("{path}: {error}")),
+    })
 }
 
 /// A certificate the authority signed, whatever name it carries.
