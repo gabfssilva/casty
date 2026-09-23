@@ -20,43 +20,6 @@ pub enum Message {
 }
 
 #[must_use]
-pub fn actor_of(reply: &Reply) -> &str {
-    match reply {
-        Reply::Promise { actor, .. }
-        | Reply::Rejected { actor, .. }
-        | Reply::Pages { actor, .. }
-        | Reply::Accepted { actor, .. }
-        | Reply::NeedFull { actor, .. }
-        | Reply::Buried { actor, .. } => actor,
-    }
-}
-
-#[must_use]
-pub fn key_of(reply: &Reply) -> &str {
-    match reply {
-        Reply::Promise { key, .. }
-        | Reply::Rejected { key, .. }
-        | Reply::Pages { key, .. }
-        | Reply::Accepted { key, .. }
-        | Reply::NeedFull { key, .. }
-        | Reply::Buried { key, .. } => key,
-    }
-}
-
-/// The replica a reply came from, which is how an owner counts the answers to a round.
-#[must_use]
-pub fn replica_of(reply: &Reply) -> &NodeId {
-    match reply {
-        Reply::Promise { replica, .. }
-        | Reply::Rejected { replica, .. }
-        | Reply::Accepted { replica, .. }
-        | Reply::NeedFull { replica, .. }
-        | Reply::Buried { replica, .. } => replica,
-        Reply::Pages { epoch, .. } => &epoch.node,
-    }
-}
-
-#[must_use]
 pub fn encode(message: &Message) -> Vec<u8> {
     let mut writer = Writer::new();
     match message {

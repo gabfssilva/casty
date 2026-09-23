@@ -222,3 +222,29 @@ pub enum Reply {
         receiving: bool,
     },
 }
+
+impl Reply {
+    #[must_use]
+    pub fn actor(&self) -> &str {
+        match self {
+            Self::Promise { actor, .. }
+            | Self::Rejected { actor, .. }
+            | Self::Pages { actor, .. }
+            | Self::Accepted { actor, .. }
+            | Self::NeedFull { actor, .. }
+            | Self::Buried { actor, .. } => actor,
+        }
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &str {
+        match self {
+            Self::Promise { key, .. }
+            | Self::Rejected { key, .. }
+            | Self::Pages { key, .. }
+            | Self::Accepted { key, .. }
+            | Self::NeedFull { key, .. }
+            | Self::Buried { key, .. } => key,
+        }
+    }
+}

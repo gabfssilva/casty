@@ -28,7 +28,7 @@ use casty_core::store::{Durable, Held, Pages, Storage, Stored};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-use super::wire::{Message, actor_of, key_of};
+use super::wire::Message;
 use crate::events::{self, Event};
 
 /// A key, by the type it belongs to and its name.
@@ -771,7 +771,7 @@ impl Replication {
         {
             // Only a write from another node: this one's own write is the activation already running here.
             self.arrived
-                .push((actor_of(&reply).to_owned(), key_of(&reply).to_owned()));
+                .push((reply.actor().to_owned(), reply.key().to_owned()));
         }
         self.sends.push(Outgoing {
             to: owner,
@@ -792,7 +792,7 @@ impl Replication {
             self.buried(&(actor, key), &stamp, replica, receiving);
             return;
         }
-        let entity = (actor_of(&reply).to_owned(), key_of(&reply).to_owned());
+        let entity = (reply.actor().to_owned(), reply.key().to_owned());
         let Some(owner) = self.owners.get_mut(&entity) else {
             return;
         };

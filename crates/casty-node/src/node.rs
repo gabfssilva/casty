@@ -1501,7 +1501,7 @@ fn flush(
 fn message_actor(message: &replication::Message) -> &str {
     match message {
         replication::Message::Request(request) => request.actor(),
-        replication::Message::Reply(reply) => replication::actor_of(reply),
+        replication::Message::Reply(reply) => reply.actor(),
         replication::Message::Pull(pull) => pull.actor(),
     }
 }
