@@ -629,7 +629,7 @@ impl Running {
         let membership: Box<dyn Members> = if member {
             Box::new(Membership::new(
                 id.clone(),
-                counts.known(),
+                counts.known().map(str::to_owned).collect(),
                 cluster.seeds.clone(),
                 cluster.timings,
                 cluster.overlay,
@@ -680,8 +680,8 @@ impl Running {
                 told: false,
                 standing: Standing::new(cluster.timings.dead_after / 2),
                 toward: HashMap::new(),
-                timings: cluster.timings,
             },
+            cluster.timings,
             members,
             taking,
             entered,
@@ -753,7 +753,6 @@ struct Held {
     standing: Standing,
     /// The node each request went to, and how it ends if that node never answers.
     toward: HashMap<i64, (NodeId, Outcome)>,
-    timings: Timings,
 }
 
 /// Whether a node acts as the owner of the keys the ring gives it: it does while it sees a majority of the members
@@ -1012,13 +1011,13 @@ impl Held {
 async fn run(
     mut endpoint: Endpoint,
     mut held: Held,
+    timings: Timings,
     members: watch::Sender<Vec<Member>>,
     mut asks: mpsc::UnboundedReceiver<Ask>,
     entered: oneshot::Sender<Result<(), String>>,
 ) {
     let started = tokio::time::Instant::now();
     let now = move || started.elapsed().as_secs_f64();
-    let timings = held.timings;
     let mut heartbeat = tokio::time::interval(timings.heartbeat);
     let mut graft = tokio::time::interval(timings.graft_after);
     let mut shuffle = tokio::time::interval(timings.shuffle_every);
@@ -1355,7 +1354,6 @@ fn swept(held: &mut Held) {
     let kept: Vec<Kept> = held
         .counts
         .known()
-        .iter()
         .flat_map(|actor| {
             held.replication
                 .replica()
@@ -1363,7 +1361,7 @@ fn swept(held: &mut Held) {
                 .into_iter()
                 .map(|key| Kept {
                     active: held.replication.replica().marked(actor, &key),
-                    actor: actor.clone(),
+                    actor: actor.to_owned(),
                     key,
                 })
         })

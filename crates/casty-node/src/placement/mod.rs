@@ -53,7 +53,7 @@ impl Transfers for Direct {
 /// it: the node that receives the message answers that it is not the owner unless it is, and there the count is
 /// known.
 #[derive(Debug, Default)]
-pub struct Counts(HashMap<String, Option<usize>>);
+pub struct Counts(BTreeMap<String, Option<usize>>);
 
 impl Counts {
     pub fn learn(&mut self, actor: &str, replicas: usize) {
@@ -64,9 +64,9 @@ impl Counts {
         self.0.entry(actor.to_owned()).or_insert(None);
     }
 
-    #[must_use]
-    pub fn known(&self) -> BTreeSet<String> {
-        self.0.keys().cloned().collect()
+    /// Every type this process met, in order: the ones it has and the ones it gave up on.
+    pub fn known(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
     }
 
     #[must_use]
@@ -218,7 +218,7 @@ impl Placement {
         }
         let mut taken = Vec::new();
         for name in counts.known() {
-            taken.extend(self.advance(&name, counts));
+            taken.extend(self.advance(name, counts));
         }
         self.entered = self.entered || nodes.len() > 1;
         taken

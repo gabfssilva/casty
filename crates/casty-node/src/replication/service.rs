@@ -204,17 +204,10 @@ impl Waiting {
                     "{actor}/{key}: too few replicas confirmed the write"
                 ))))
             }
-            // An activation cannot end in a plain save, and a write cannot end in an activation.
+            // A fenced activation starts again in `apply` and never ends here; an activation cannot end in a plain
+            // save, and a write cannot end in an activation.
             (waiting, outcome) => {
-                debug_assert!(
-                    matches!(
-                        (&waiting, &outcome),
-                        (Waiting::Activate { .. }, Outcome::Fenced)
-                    ),
-                    "{actor}/{key}: {outcome:?} is not an outcome of this operation"
-                );
-                let _ = (waiting, outcome);
-                None
+                unreachable!("{actor}/{key}: {outcome:?} is not an outcome of {waiting:?}")
             }
         }
     }
