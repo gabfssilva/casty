@@ -48,7 +48,7 @@
 ::: casty.collections.Semaphore
     options:
       merge_init_into_class: false
-      filters: ["!^_[^_]", "!^__init__$", "!^ref$"]
+      filters: ["!^_[^_]", "!^__init__$"]
 
 ::: casty.collections.Lock
     options:

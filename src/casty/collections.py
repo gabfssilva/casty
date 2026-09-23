@@ -1195,14 +1195,14 @@ class Lease:
     """Time-limited permits. The protected resource must reject older fencing tokens."""
 
     token: int
-    _semaphore: "Semaphore"
+    _ref: Ref[semaphore.Message]
 
     async def renew(self, ttl: float = 30.0) -> bool:
         _duration(ttl, "ttl")
-        return await self._semaphore.ref.ask(semaphore.Renew, self.token, ttl)
+        return await self._ref.ask(semaphore.Renew, self.token, ttl)
 
     async def release(self) -> bool:
-        return await self._semaphore.ref.ask(semaphore.Release, self.token)
+        return await self._ref.ask(semaphore.Release, self.token)
 
     async def __aenter__(self) -> "Lease":
         return self
@@ -1221,7 +1221,7 @@ class Semaphore:
     def __init__(self, binding: Binding, capacity: int) -> None:
         self._binding = binding
         self._capacity = capacity
-        self.ref = binding.ref(semaphore.actor)
+        self._ref = binding.ref(semaphore.actor)
 
     def _validate(self, n: int, ttl: float) -> None:
         if not 1 <= n <= self._capacity:
@@ -1231,8 +1231,8 @@ class Semaphore:
     async def try_acquire(self, n: int = 1, *, ttl: float = 30.0) -> Lease | None:
         self._validate(n, ttl)
         await self._binding.ready()
-        token = await self.ref.ask(semaphore.Request, uuid4(), n, ttl, self._capacity, None)
-        return None if token is None else Lease(token, self)
+        token = await self._ref.ask(semaphore.Request, uuid4(), n, ttl, self._capacity, None)
+        return None if token is None else Lease(token, self._ref)
 
     async def acquire(self, n: int = 1, *, ttl: float = 30.0) -> Lease:
         """Wait for permits; use asyncio.timeout to bound the wait."""
@@ -1240,17 +1240,17 @@ class Semaphore:
         await self._binding.ready()
         id = uuid4()
         try:
-            token = await _wait(lambda until: self.ref.ask(semaphore.Request, id, n, ttl, self._capacity, until))
+            token = await _wait(lambda until: self._ref.ask(semaphore.Request, id, n, ttl, self._capacity, until))
             if token is None:
                 raise TimeoutError("semaphore acquisition timed out")
-            return Lease(token, self)
+            return Lease(token, self._ref)
         except BaseException:
-            await _withdraw(self.ref.ask(semaphore.Cancel, id), None)
+            await _withdraw(self._ref.ask(semaphore.Cancel, id), None)
             raise
 
     async def available(self) -> int:
         await self._binding.ready()
-        return await self.ref.ask(semaphore.Available, self._capacity)
+        return await self._ref.ask(semaphore.Available, self._capacity)
 
 
 class Lock:
