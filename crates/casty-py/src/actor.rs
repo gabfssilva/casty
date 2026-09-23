@@ -320,7 +320,7 @@ macro_rules! definition_methods {
                 class: &Bound<'py, PyType>,
                 item: &Bound<'py, PyAny>,
             ) -> PyResult<Bound<'py, PyAny>> {
-                crate::generic::alias(class, &crate::generic::subscript(item))
+                crate::generic::alias(class, item)
             }
 
             /// The same type under another name, with the replicas and write level of a configured collection.

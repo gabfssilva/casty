@@ -3,8 +3,16 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyTuple, PyType};
 
-/// `types.GenericAlias(class, args)`, which `typing.get_origin` and `get_args` take apart again.
+/// `class[item]`, as the `types.GenericAlias` that `typing.get_origin` and `get_args` take apart again.
 pub fn alias<'py>(
+    class: &Bound<'py, PyType>,
+    item: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    aliased(class, &subscript(item))
+}
+
+/// `types.GenericAlias(class, args)`.
+pub fn aliased<'py>(
     class: &Bound<'py, PyType>,
     args: &[Bound<'py, PyAny>],
 ) -> PyResult<Bound<'py, PyAny>> {

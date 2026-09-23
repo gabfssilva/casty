@@ -11,7 +11,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple, PyType};
 
 use crate::awaited::Awaited;
-use crate::generic::{alias, subscript};
 use crate::node::Node;
 use crate::node::context::stopped;
 use crate::schema::Schema;
@@ -162,7 +161,7 @@ impl Ref {
         class: &Bound<'py, PyType>,
         item: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        alias(class, &subscript(item))
+        crate::generic::alias(class, item)
     }
 
     fn __repr__(&self) -> String {

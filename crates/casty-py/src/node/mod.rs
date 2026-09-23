@@ -1085,28 +1085,108 @@ fn listed<'py>(node: &Arc<Node>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>
     Ok(PyTuple::new(py, members)?.into_any())
 }
 
-/// What a collection stores: the value in the canonical order its schema was compiled in.
-fn encoded<'py>(
-    py: Python<'py>,
-    schema: &Bound<'py, Schema>,
-    value: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let written = Schema::write(schema, schema.get().tree().sent(), value)?;
-    Ok(PyBytes::new(py, &written))
-}
+/// The methods of `$class`, which is `ActorSystem` or `Client`, and those the two share over the node each holds.
+///
+/// pyo3 takes one `#[pymethods]` block per class, so what is the class's own goes in here as well.
+macro_rules! system_methods {
+    ($class:ident { $($own:tt)* }) => {
+        #[pymethods]
+        impl $class {
+            /// The members of the cluster as this sees them: a node lists itself among them, and a client the members
+            /// it last heard of.
+            #[getter]
+            fn members<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+                listed(&self.node, py)
+            }
 
-/// What a collection stored, with every ref in it bound to the node that can reach what it points at.
-fn decoded<'py>(
-    node: &Arc<Node>,
-    schema: &Bound<'py, Schema>,
-    data: &[u8],
-) -> PyResult<Bound<'py, PyAny>> {
-    Ok(Schema::read(
-        schema,
-        schema.get().tree().sent(),
-        data,
-        Some(node),
-    )?)
+            /// What this counts now: the activations of a node by type and the writes of its keys, the answers it
+            /// waits for, and its connections and what they carried.
+            fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+                stats::snapshot(&self.node, py)
+            }
+
+            /// Where the key a ref of `actor` goes to is, as this sees it: the owner a message to it is sent to, and
+            /// the nodes that keep it.
+            #[pyo3(signature = (actor, key, /, *, at = None))]
+            fn placement<'py>(
+                &self,
+                py: Python<'py>,
+                actor: &Bound<'py, PyAny>,
+                key: &str,
+                at: Option<&Bound<'py, PyAny>>,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                whereabouts(&self.node, py, actor, key, at)
+            }
+
+            /// Reference to the entity `(actor, key)`, wherever it is placed, or on the node `at` names for a pinned
+            /// type. It creates the key if it has to, and activates it.
+            #[pyo3(name = "ref", signature = (actor, key, /, *, initial = None, at = None))]
+            fn reference(
+                &self,
+                py: Python<'_>,
+                actor: &Bound<'_, PyAny>,
+                key: &str,
+                initial: Option<&Bound<'_, PyAny>>,
+                at: Option<&Bound<'_, PyAny>>,
+            ) -> PyResult<Ref> {
+                referenced(&self.node, py, actor, key, initial, at)
+            }
+
+            #[getter]
+            fn node(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+                self.node.started(py)?;
+                identity(py, &self.node.id())
+            }
+
+            /// `annotation` compiled in the canonical order a stored value is compared in.
+            #[pyo3(name = "_schema")]
+            #[allow(clippy::unused_self)]
+            fn compiled(&self, py: Python<'_>, annotation: &Bound<'_, PyAny>) -> PyResult<Schema> {
+                Ok(Schema::of(py, annotation, true)?)
+            }
+
+            /// The type called `name`, imported from where it lives. Nothing when this process does not have it.
+            ///
+            /// A test hook, not part of the API: it is how a test sees what a node finds when a name reaches it.
+            #[pyo3(name = "_resolve")]
+            fn resolved(&self, py: Python<'_>, name: &str) -> Option<Py<PyAny>> {
+                self.node.resolve(py, name).map(|behavior| behavior.held(py))
+            }
+
+            /// `value` as the bytes a collection stores: the value in the canonical order its schema was compiled in.
+            #[pyo3(name = "_encode")]
+            #[allow(clippy::unused_self)]
+            fn encoded<'py>(
+                &self,
+                py: Python<'py>,
+                schema: &Bound<'py, Schema>,
+                value: &Bound<'py, PyAny>,
+            ) -> PyResult<Bound<'py, PyBytes>> {
+                let written = Schema::write(schema, schema.get().tree().sent(), value)?;
+                Ok(PyBytes::new(py, &written))
+            }
+
+            /// The value `data` holds, with every ref in it bound to the node of this system or client.
+            #[pyo3(name = "_decode")]
+            fn decoded<'py>(
+                &self,
+                schema: &Bound<'py, Schema>,
+                data: &[u8],
+            ) -> PyResult<Bound<'py, PyAny>> {
+                Ok(Schema::read(schema, schema.get().tree().sent(), data, Some(&self.node))?)
+            }
+
+            #[classmethod]
+            fn __class_getitem__<'py>(
+                class: &Bound<'py, PyType>,
+                item: &Bound<'py, PyAny>,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                crate::generic::alias(class, item)
+            }
+
+            $($own)*
+        }
+    };
 }
 
 /// A node. It hosts every actor type it meets: the ones this process uses, and the ones the cluster tells it of.
@@ -1118,8 +1198,7 @@ pub struct ActorSystem {
     cluster: Option<Py<PyAny>>,
 }
 
-#[pymethods]
-impl ActorSystem {
+system_methods!(ActorSystem {
     #[new]
     // The settings of a system, which is what the constructor takes.
     #[allow(clippy::too_many_arguments)]
@@ -1233,33 +1312,9 @@ impl ActorSystem {
         Ok(Bound::new(py, Awaited::of(gone))?.into_any())
     }
 
-    /// The members of the cluster as this node sees them, itself included.
-    #[getter]
-    fn members<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        listed(&self.node, py)
-    }
-
-    /// What this node counts now: its activations by type, the answers it waits for, the writes of its keys, and its
-    /// connections and what they carried.
-    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        stats::snapshot(&self.node, py)
-    }
-
     /// The keys active on this node now, each with its type, when it became active and what waits in its mailbox.
     fn activations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         stats::listing(&self.node, py)
-    }
-
-    /// Where the key a ref of `actor` goes to is, as this node sees it: its owner and the nodes that keep it.
-    #[pyo3(signature = (actor, key, /, *, at = None))]
-    fn placement<'py>(
-        &self,
-        py: Python<'py>,
-        actor: &Bound<'py, PyAny>,
-        key: &str,
-        at: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        whereabouts(&self.node, py, actor, key, at)
     }
 
     /// Let the key go on purpose, as if its activation here idled out now, answering whether there was one once it
@@ -1284,23 +1339,6 @@ impl ActorSystem {
     fn learned(&self, py: Python<'_>, actor: &Bound<'_, PyAny>) -> PyResult<()> {
         self.node.learn(py, &Behavior::of(actor)?);
         Ok(())
-    }
-
-    /// `annotation` compiled in the canonical order a stored value is compared in.
-    #[pyo3(name = "_schema")]
-    #[allow(clippy::unused_self)]
-    fn compiled(&self, py: Python<'_>, annotation: &Bound<'_, PyAny>) -> PyResult<Schema> {
-        Ok(Schema::of(py, annotation, true)?)
-    }
-
-    /// The type called `name`, imported from where it lives. Nothing when this process does not have it.
-    ///
-    /// A test hook, not part of the API: it is how a test sees what a node finds when a name reaches it.
-    #[pyo3(name = "_resolve")]
-    fn resolved(&self, py: Python<'_>, name: &str) -> Option<Py<PyAny>> {
-        self.node
-            .resolve(py, name)
-            .map(|behavior| behavior.held(py))
     }
 
     /// Every key whose state this node keeps, as `(actor, key, deleted)`: `deleted` says what it keeps is the
@@ -1387,111 +1425,61 @@ impl ActorSystem {
         *self.node.writes.locked() = Some(writes.clone_ref(py));
         Ok(writes)
     }
-
-    /// `value` as the bytes a collection stores.
-    #[pyo3(name = "_encode")]
-    #[allow(clippy::unused_self)]
-    fn encoded<'py>(
-        &self,
-        py: Python<'py>,
-        schema: &Bound<'py, Schema>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyBytes>> {
-        encoded(py, schema, value)
-    }
-
-    /// The value `data` holds, with every ref in it bound to this system.
-    #[pyo3(name = "_decode")]
-    fn decoded<'py>(
-        &self,
-        schema: &Bound<'py, Schema>,
-        data: &[u8],
-    ) -> PyResult<Bound<'py, PyAny>> {
-        decoded(&self.node, schema, data)
-    }
-
-    /// Reference to the entity `(actor, key)`, wherever it is placed, or on the node `at` names for a pinned type. It
-    /// creates the key if it has to, and activates it.
-    #[pyo3(name = "ref", signature = (actor, key, /, *, initial = None, at = None))]
-    fn reference(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        actor: &Bound<'_, PyAny>,
-        key: &str,
-        initial: Option<&Bound<'_, PyAny>>,
-        at: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Ref> {
-        Self::referenced(&slf.get().node, py, actor, key, initial, at)
-    }
-
-    #[getter]
-    fn node(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.node.started(py)?;
-        identity(py, &self.node.id())
-    }
-
-    #[classmethod]
-    fn __class_getitem__<'py>(
-        class: &Bound<'py, PyType>,
-        item: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        crate::generic::alias(class, &crate::generic::subscript(item))
-    }
-}
+});
 
 impl ActorSystem {
     #[must_use]
     pub fn node_of(&self) -> &Arc<Node> {
         &self.node
     }
+}
 
-    /// Reference to the entity `(actor, key)`, which is the same from a node of the cluster and from a client.
-    ///
-    /// Obtaining it asks the owner to create the key, if it does not exist, and to activate it. Nobody waits for
-    /// that: what goes wrong with it shows in the first `ask`.
-    fn referenced(
-        node: &Arc<Node>,
-        py: Python<'_>,
-        actor: &Bound<'_, PyAny>,
-        key: &str,
-        initial: Option<&Bound<'_, PyAny>>,
-        at: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Ref> {
-        node.started(py)?;
-        let behavior = Behavior::of(actor)?;
-        let definition = behavior.definition();
-        let key = placed(py, definition, key, at)?;
-        node.learn(py, &behavior);
-        let state = definition.state.bind(py);
-        let written: Option<Vec<u8>> = match (initial, &definition.initial) {
-            (Some(initial), _) => Some(state.call_method1("dump", (initial,))?.extract()?),
-            (None, Some(_)) => None,
-            // A type without a default starts from nothing, which only a state that can be `None` allows.
-            (None, None) => match state.call_method1("dump", (py.None(),)) {
-                Ok(nothing) => Some(nothing.extract()?),
-                Err(_) => {
-                    return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                        "{} has no default initial state, and its state cannot be None: pass initial=",
-                        definition.name
-                    )));
-                }
-            },
-        };
-        node.hand(
-            py,
-            casty_core::mailbox::Command::Start(Start {
-                actor: definition.name.clone(),
-                key: key.clone(),
-                state: written,
-            }),
-        )?;
-        Ok(Ref::entity_of(
-            definition.messages.clone_ref(py),
-            definition.name.clone(),
-            key,
-            Some(node.clone()),
-        ))
-    }
+/// Reference to the entity `(actor, key)`, which is the same from a node of the cluster and from a client.
+///
+/// Obtaining it asks the owner to create the key, if it does not exist, and to activate it. Nobody waits for that:
+/// what goes wrong with it shows in the first `ask`.
+fn referenced(
+    node: &Arc<Node>,
+    py: Python<'_>,
+    actor: &Bound<'_, PyAny>,
+    key: &str,
+    initial: Option<&Bound<'_, PyAny>>,
+    at: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Ref> {
+    node.started(py)?;
+    let behavior = Behavior::of(actor)?;
+    let definition = behavior.definition();
+    let key = placed(py, definition, key, at)?;
+    node.learn(py, &behavior);
+    let state = definition.state.bind(py);
+    let written: Option<Vec<u8>> = match (initial, &definition.initial) {
+        (Some(initial), _) => Some(state.call_method1("dump", (initial,))?.extract()?),
+        (None, Some(_)) => None,
+        // A type without a default starts from nothing, which only a state that can be `None` allows.
+        (None, None) => match state.call_method1("dump", (py.None(),)) {
+            Ok(nothing) => Some(nothing.extract()?),
+            Err(_) => {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "{} has no default initial state, and its state cannot be None: pass initial=",
+                    definition.name
+                )));
+            }
+        },
+    };
+    node.hand(
+        py,
+        casty_core::mailbox::Command::Start(Start {
+            actor: definition.name.clone(),
+            key: key.clone(),
+            state: written,
+        }),
+    )?;
+    Ok(Ref::entity_of(
+        definition.messages.clone_ref(py),
+        definition.name.clone(),
+        key,
+        Some(node.clone()),
+    ))
 }
 
 /// The key a ref of `definition` goes to: `key` itself, which the ring places, or `key` pinned to the node `at` names.
@@ -1771,8 +1759,7 @@ pub struct Client {
     map: Option<Py<PyAny>>,
 }
 
-#[pymethods]
-impl Client {
+system_methods!(Client {
     #[new]
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
@@ -1895,98 +1882,7 @@ impl Client {
         node.departed(py, true, &gone);
         Ok(Bound::new(py, Awaited::of(gone))?.into_any())
     }
-
-    /// Reference to the entity `(actor, key)`, wherever it is placed, or on the node `at` names for a pinned type. It
-    /// creates the key if it has to, and activates it.
-    #[pyo3(name = "ref", signature = (actor, key, /, *, initial = None, at = None))]
-    fn reference(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        actor: &Bound<'_, PyAny>,
-        key: &str,
-        initial: Option<&Bound<'_, PyAny>>,
-        at: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Ref> {
-        ActorSystem::referenced(&slf.get().node, py, actor, key, initial, at)
-    }
-
-    /// `annotation` compiled in the canonical order a stored value is compared in.
-    #[pyo3(name = "_schema")]
-    #[allow(clippy::unused_self)]
-    fn compiled(&self, py: Python<'_>, annotation: &Bound<'_, PyAny>) -> PyResult<Schema> {
-        Ok(Schema::of(py, annotation, true)?)
-    }
-
-    /// The type called `name`, imported from where it lives. Nothing when this process does not have it.
-    ///
-    /// A test hook, not part of the API: it is how a test sees what a node finds when a name reaches it.
-    #[pyo3(name = "_resolve")]
-    fn resolved(&self, py: Python<'_>, name: &str) -> Option<Py<PyAny>> {
-        self.node
-            .resolve(py, name)
-            .map(|behavior| behavior.held(py))
-    }
-
-    /// `value` as the bytes a collection stores.
-    #[pyo3(name = "_encode")]
-    #[allow(clippy::unused_self)]
-    fn encoded<'py>(
-        &self,
-        py: Python<'py>,
-        schema: &Bound<'py, Schema>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyBytes>> {
-        encoded(py, schema, value)
-    }
-
-    /// The value `data` holds, with every ref in it bound to this client.
-    #[pyo3(name = "_decode")]
-    fn decoded<'py>(
-        &self,
-        schema: &Bound<'py, Schema>,
-        data: &[u8],
-    ) -> PyResult<Bound<'py, PyAny>> {
-        decoded(&self.node, schema, data)
-    }
-
-    /// The members of the cluster as this client last heard of them.
-    #[getter]
-    fn members<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        listed(&self.node, py)
-    }
-
-    /// What this client counts now: the answers it waits for, and its connections and what they carried.
-    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        stats::snapshot(&self.node, py)
-    }
-
-    /// Where the key a ref of `actor` goes to is, as this client sees it: the node it sends to and the nodes that keep
-    /// the key.
-    #[pyo3(signature = (actor, key, /, *, at = None))]
-    fn placement<'py>(
-        &self,
-        py: Python<'py>,
-        actor: &Bound<'py, PyAny>,
-        key: &str,
-        at: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        whereabouts(&self.node, py, actor, key, at)
-    }
-
-    #[getter]
-    fn node(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.node.started(py)?;
-        identity(py, &self.node.id())
-    }
-
-    #[classmethod]
-    fn __class_getitem__<'py>(
-        class: &Bound<'py, PyType>,
-        item: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        crate::generic::alias(class, &crate::generic::subscript(item))
-    }
-}
+});
 
 /// The pages this node writes, for a test that has to see them.
 ///

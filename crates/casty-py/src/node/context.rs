@@ -44,7 +44,7 @@ impl Context {
         if args.len() == 1 {
             args.push(class.py().import("typing")?.getattr("Never")?);
         }
-        crate::generic::alias(class, &args)
+        crate::generic::aliased(class, &args)
     }
 
     #[getter]
@@ -128,7 +128,7 @@ impl State {
         class: &Bound<'py, PyType>,
         item: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        crate::generic::alias(class, &crate::generic::subscript(item))
+        crate::generic::alias(class, item)
     }
 
     /// The last saved state.
