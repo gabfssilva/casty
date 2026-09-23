@@ -11,10 +11,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
+use casty_core::backoff::Backoff;
 use casty_core::handoff::messages::Pull;
 use casty_core::handoff::ranges::{Transfer, overlap};
 use casty_core::handoff::sweep::Handover;
-use casty_core::mailbox::Backoff;
 use casty_core::node::NodeId;
 use casty_core::placement::{pinned, token};
 use casty_core::replication::messages::{Copy, Stamp, Write};
@@ -662,8 +662,8 @@ fn reconcile(
 
 #[cfg(test)]
 mod tests {
+    use casty_core::backoff::Backoff;
     use casty_core::handoff::messages::Pull;
-    use casty_core::mailbox::Backoff;
     use casty_core::replication::messages::{ACTIVE, Copy, Epoch, Stamp, Write};
     use casty_core::replication::parts::append;
     use casty_core::replication::replica::Replica;

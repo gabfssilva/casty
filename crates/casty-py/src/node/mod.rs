@@ -15,8 +15,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use casty_core::backoff::Backoff;
 use casty_core::chain::Chain;
-use casty_core::mailbox::{Backoff, Start};
+use casty_core::mailbox::Start;
 use casty_core::node::{NodeId, Target};
 use casty_core::outcome::Outcome;
 use casty_core::store::{LocalStore, Pages};

@@ -2,7 +2,8 @@
 
 use core::time::Duration;
 
-use casty_core::mailbox::{Backoff, OnFull};
+use casty_core::backoff::Backoff;
+use casty_core::mailbox::OnFull;
 use casty_core::replication::messages::Write;
 use casty_core::schema::SchemaError;
 use casty_core::store::Durable;

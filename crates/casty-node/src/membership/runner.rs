@@ -8,7 +8,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use casty_core::mailbox::Backoff;
+use casty_core::backoff::Backoff;
 use casty_core::membership::views::Overlay;
 use casty_core::node::NodeId;
 use casty_net::compress::Name;
