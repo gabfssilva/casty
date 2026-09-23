@@ -13,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc, watch};
 
 use crate::compress::Name;
-use crate::frame::{Decoder, Frame, ProtocolError};
+use crate::frame::{Decoder, Frame, GOODBYE, ProtocolError};
 use crate::handshake::{self, Message};
 use crate::limits::Limits;
 use crate::mux::{CONTROL, MESSAGES, Mux, REPLICATION, Record};
@@ -145,7 +145,7 @@ impl Greeting {
     /// Write a rejection and go away, which is the last thing this connection does.
     pub async fn reject(mut self, message: &Message) {
         let _ = self.say(message).await;
-        let _ = self.socket.write_all(&Frame::GoAway.encoded()).await;
+        let _ = self.socket.write_all(&GOODBYE).await;
         let _ = self.socket.shutdown().await;
     }
 
@@ -300,7 +300,7 @@ impl Connection {
                 self.bytes.wrote(out.len());
             }
             if self.closing.load(Ordering::SeqCst) {
-                let _ = writer.write_all(&Frame::GoAway.encoded()).await;
+                let _ = writer.write_all(&GOODBYE).await;
                 let _ = writer.shutdown().await;
                 return;
             }

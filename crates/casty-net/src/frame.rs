@@ -16,6 +16,9 @@ const COMPRESSED: u16 = 0x10;
 const HEADER: usize = 12;
 const OPAQUE: [u8; 8] = [0; 8];
 
+/// `Frame::GoAway` as written, which is the last thing a connection writes.
+pub const GOODBYE: [u8; HEADER] = [VERSION, GO_AWAY, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
 /// The peer broke the wire protocol, so the connection closes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolError(String);
@@ -75,15 +78,8 @@ impl Frame {
                 header(out, PING, ACK, 0, length(OPAQUE.len()));
                 out.extend_from_slice(&OPAQUE);
             }
-            Self::GoAway => header(out, GO_AWAY, 0, 0, 0),
+            Self::GoAway => out.extend_from_slice(&GOODBYE),
         }
-    }
-
-    #[must_use]
-    pub fn encoded(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        self.write(&mut out);
-        out
     }
 }
 
@@ -198,6 +194,12 @@ impl Decoder {
 mod tests {
     use super::{Decoder, Frame, ProtocolError, VERSION};
 
+    fn encoded(frame: &Frame) -> Vec<u8> {
+        let mut out = Vec::new();
+        frame.write(&mut out);
+        out
+    }
+
     #[test]
     fn writes_the_header_the_other_implementation_reads() {
         let data = Frame::Data {
@@ -206,30 +208,28 @@ mod tests {
             compressed: false,
         };
         assert_eq!(
-            data.encoded(),
+            encoded(&data),
             [VERSION, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 2, b'h', b'i']
         );
         assert_eq!(
-            Frame::WindowUpdate {
+            encoded(&Frame::WindowUpdate {
                 stream: 5,
                 credit: 256,
-            }
-            .encoded(),
+            }),
             [VERSION, 1, 0, 0, 0, 0, 0, 5, 0, 0, 1, 0]
         );
-        assert_eq!(Frame::Ping.encoded()[..4], [VERSION, 2, 0, 0]);
-        assert_eq!(Frame::Pong.encoded()[..4], [VERSION, 2, 0, 2]);
+        assert_eq!(encoded(&Frame::Ping)[..4], [VERSION, 2, 0, 0]);
+        assert_eq!(encoded(&Frame::Pong)[..4], [VERSION, 2, 0, 2]);
         assert_eq!(
-            Frame::GoAway.encoded(),
+            encoded(&Frame::GoAway),
             [VERSION, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         );
         assert_eq!(
-            Frame::Data {
+            encoded(&Frame::Data {
                 stream: 1,
                 payload: b"z".to_vec(),
                 compressed: true,
-            }
-            .encoded()[..4],
+            })[..4],
             [VERSION, 0, 0, 0x10]
         );
     }
@@ -295,12 +295,11 @@ mod tests {
     fn a_frame_that_has_not_arrived_whole_waits_for_the_rest() {
         let mut decoder = Decoder::new(1024);
         decoder.feed(
-            &Frame::Data {
+            &encoded(&Frame::Data {
                 stream: 3,
                 payload: vec![1, 2, 3],
                 compressed: false,
-            }
-            .encoded()[..13],
+            })[..13],
         );
         assert_eq!(decoder.frame(), Ok(None));
         decoder.feed(&[2, 3]);

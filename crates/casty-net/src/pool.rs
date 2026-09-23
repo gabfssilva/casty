@@ -8,11 +8,12 @@
 //! When two nodes dial each other at once, both keep the connection opened by the smaller incarnation: that node
 //! rejects the other hello as duplicate, and the other node hands the queue of its dial to the connection it accepts.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use casty_core::node::NodeId;
+use casty_core::rolls::Rolls;
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
 
@@ -454,10 +455,12 @@ impl Pool {
             );
             // Queued under the same lock that made the connection reachable: a send that arrives in between would
             // otherwise go out ahead of what was waiting for the dial to finish.
-            let mut replaced = Vec::new();
+            let mut replaced = BTreeSet::new();
             for (target, name, payload) in queue {
                 match target {
-                    Target::Node(node) if node != *peer => replaced.push(node),
+                    Target::Node(node) if node != *peer => {
+                        replaced.insert(node);
+                    }
                     _ => connection.send(&name, &payload),
                 }
             }
@@ -466,7 +469,7 @@ impl Pool {
         if let Some(previous) = previous {
             previous.connection.end();
         }
-        for node in unique(replaced) {
+        for node in replaced {
             self.tell(Peer::Unreached(node));
         }
         let pool = Arc::clone(self);
@@ -507,55 +510,38 @@ impl Pool {
 
     /// Give up a dial that reached no node, and tell of the nodes whose envelopes it drops.
     fn unreached(&self, address: &str) {
-        for node in unique(self.fail(address)) {
+        for node in self.fail(address) {
             self.tell(Peer::Unreached(node));
         }
     }
 
     /// Give up a dial, and answer the nodes its queue held envelopes for.
-    fn fail(&self, address: &str) -> Vec<NodeId> {
+    fn fail(&self, address: &str) -> BTreeSet<NodeId> {
         let mut state = self.held();
-        let dropped = state.dials.remove(address).map_or_else(Vec::new, |dial| {
-            dial.queue
-                .into_iter()
-                .filter_map(|(target, _, _)| match target {
-                    Target::Node(node) => Some(node),
-                    Target::Seed(_) => None,
-                })
-                .collect()
-        });
+        let dropped = state
+            .dials
+            .remove(address)
+            .map_or_else(BTreeSet::new, |dial| {
+                dial.queue
+                    .into_iter()
+                    .filter_map(|(target, _, _)| match target {
+                        Target::Node(node) => Some(node),
+                        Target::Seed(_) => None,
+                    })
+                    .collect()
+            });
         let previous = state.backoff.get(address).copied();
         let first = self.settings.limits.backoff_first;
         let limit = self.settings.limits.backoff_limit;
         let delay = previous.map_or(first, |backoff| (backoff.delay * 2).min(limit));
-        let jitter = 0.75 + spread() * 0.5;
+        let jitter = u32::try_from(Rolls::fresh().between(750, 1250)).expect("at most 1250");
         state.backoff.insert(
             address.to_owned(),
             Backoff {
                 delay,
-                retry_at: Instant::now() + delay.mul_f64(jitter),
+                retry_at: Instant::now() + delay * jitter / 1000,
             },
         );
         dropped
-    }
-}
-
-/// `nodes` without repeats, in the order they first appear.
-fn unique(nodes: Vec<NodeId>) -> Vec<NodeId> {
-    let mut seen = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        if !seen.contains(&node) {
-            seen.push(node);
-        }
-    }
-    seen
-}
-
-/// A number in `[0, 1)`, which is all the jitter of a retry needs.
-fn spread() -> f64 {
-    use std::hash::{BuildHasher, RandomState};
-    #[allow(clippy::cast_precision_loss)]
-    {
-        (RandomState::new().hash_one(0_u8) >> 11) as f64 / (1_u64 << 53) as f64
     }
 }
