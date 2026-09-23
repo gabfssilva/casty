@@ -235,7 +235,7 @@ async fn it_reports_a_seed_whose_limits_differ() {
     let Some(Err(reason)) = refused else {
         panic!("the seed did not refuse: {refused:?}");
     };
-    assert!(reason.contains("message=8388608"), "{reason}");
+    assert!(reason.contains("8388608"), "{reason}");
     other.close(true).await;
     joining.close(true).await;
 }

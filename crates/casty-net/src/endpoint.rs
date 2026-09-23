@@ -122,7 +122,11 @@ impl Endpoint {
                 .into_iter()
                 .map(|name| name.name().to_owned())
                 .collect(),
-            sizes: config.limits.into(),
+            sizes: [
+                config.limits.frame,
+                config.limits.message,
+                config.limits.window,
+            ],
         };
         let pool = Pool::new(
             Settings {

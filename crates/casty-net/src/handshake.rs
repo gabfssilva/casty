@@ -8,7 +8,6 @@ use casty_core::schema::msgpack::{self, Int, Kind, Reader};
 
 use crate::compress::Name;
 use crate::frame::ProtocolError;
-use crate::limits::Limits;
 
 /// The versions of the wire protocol this build speaks.
 pub const VERSIONS: [i64; 1] = [1];
@@ -55,36 +54,10 @@ pub struct Hello {
     pub node: NodeId,
     pub role: Role,
     pub compression: Vec<String>,
-    pub sizes: Sizes,
-}
-
-/// The sizes of `Limits` a node bounds what it receives by. Each side sends by its own, so a peer with other sizes
-/// would break the connection at the first frame, envelope or window past them: the handshake refuses it instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sizes {
-    pub frame: usize,
-    pub message: usize,
-    pub window: usize,
-}
-
-impl From<Limits> for Sizes {
-    fn from(limits: Limits) -> Self {
-        Self {
-            frame: limits.frame,
-            message: limits.message,
-            window: limits.window,
-        }
-    }
-}
-
-impl core::fmt::Display for Sizes {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            formatter,
-            "frame={}, message={}, window={}",
-            self.frame, self.message, self.window
-        )
-    }
+    /// `frame`, `message` and `window` of `Limits`, which a node bounds what it receives by. Each side sends by its
+    /// own, so a peer with other sizes would break the connection at the first frame, envelope or window past them:
+    /// the handshake refuses it instead.
+    pub sizes: [usize; 3],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +92,10 @@ pub fn answer(hello: &Hello, local: &Hello, ours: &[Name]) -> Result<Ack, Reject
     if hello.sizes != local.sizes {
         return Err(Reject {
             code: Rejection::Limits as i64,
-            reason: format!("limits {} are not {}", hello.sizes, local.sizes),
+            reason: format!(
+                "limits (frame, message, window) {:?} are not {:?}",
+                hello.sizes, local.sizes
+            ),
         });
     }
     let common = hello
@@ -172,11 +148,7 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
             for name in &hello.compression {
                 msgpack::write_str(&mut out, name);
             }
-            for (name, size) in [
-                ("frame", hello.sizes.frame),
-                ("message", hello.sizes.message),
-                ("window", hello.sizes.window),
-            ] {
+            for (name, size) in ["frame", "message", "window"].into_iter().zip(hello.sizes) {
                 key(&mut out, name);
                 msgpack::write_int(&mut out, Int::Unsigned(size as u64));
             }
@@ -220,11 +192,11 @@ pub fn decode(name: &str, payload: &[u8]) -> Result<Message, ProtocolError> {
             node: fields.node().ok_or_else(malformed)?,
             role: Role::of(&fields.text("role").ok_or_else(malformed)?).ok_or_else(malformed)?,
             compression: fields.texts("compression").ok_or_else(malformed)?,
-            sizes: Sizes {
-                frame: fields.size("frame").ok_or_else(malformed)?,
-                message: fields.size("message").ok_or_else(malformed)?,
-                window: fields.size("window").ok_or_else(malformed)?,
-            },
+            sizes: [
+                fields.size("frame").ok_or_else(malformed)?,
+                fields.size("message").ok_or_else(malformed)?,
+                fields.size("window").ok_or_else(malformed)?,
+            ],
         })),
         "hello-ack" => {
             let compression = match fields.take("compression") {
@@ -381,9 +353,7 @@ fn value(reader: &mut Reader<'_>) -> Option<Value> {
 mod tests {
     use casty_core::node::NodeId;
 
-    use super::{
-        Ack, Hello, Message, Reject, Rejection, Role, Sizes, VERSIONS, answer, decode, encode,
-    };
+    use super::{Ack, Hello, Message, Reject, Rejection, Role, VERSIONS, answer, decode, encode};
     use crate::compress::{Name, PREFERENCE};
     use crate::limits::Limits;
 
@@ -395,6 +365,7 @@ mod tests {
     }
 
     fn hello(cluster: &str, node: NodeId) -> Hello {
+        let limits = Limits::default();
         Hello {
             versions: VERSIONS.to_vec(),
             cluster: cluster.to_owned(),
@@ -404,7 +375,7 @@ mod tests {
                 .iter()
                 .map(|name| name.name().to_owned())
                 .collect(),
-            sizes: Sizes::from(Limits::default()),
+            sizes: [limits.frame, limits.message, limits.window],
         }
     }
 
@@ -454,7 +425,7 @@ mod tests {
         let mut other = hello("other", node(Some("b:1"), 2));
         assert_eq!(refused(other.clone()), Rejection::Cluster as i64);
         other = hello("casty", node(Some("b:1"), 2));
-        other.sizes.message *= 8;
+        other.sizes[1] *= 8;
         assert_eq!(refused(other.clone()), Rejection::Limits as i64);
         other = hello("casty", node(Some("b:1"), 2));
         other.versions = vec![99];
