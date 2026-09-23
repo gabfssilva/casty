@@ -188,11 +188,6 @@ enum Ask {
         target: Target,
         outcome: Outcome,
     },
-    Toward {
-        id: i64,
-        node: NodeId,
-        failure: Outcome,
-    },
     Cancel(Cancel),
     Learn(Kind),
     GaveUp(String),
@@ -405,11 +400,6 @@ impl Node {
                 self.inner.message
             ))
         })
-    }
-
-    /// Note the node a request went to, and how it ends if that node never answers.
-    pub fn toward(&self, id: i64, node: NodeId, failure: Outcome) {
-        self.ask(Ask::Toward { id, node, failure });
     }
 
     /// Stop waiting for the answer of `request`, and tell the key `(actor, key)` it was sent to that nobody waits for
@@ -1133,9 +1123,6 @@ fn asked(sender: &Sender, held: &mut Held, ask: Ask, now: f64) -> bool {
     match ask {
         Ask::Route(command) => held.route(sender, command),
         Ask::Answer { target, outcome } => held.answer(sender, &target, outcome),
-        Ask::Toward { id, node, failure } => {
-            held.toward.insert(id, (node, failure));
-        }
         Ask::Cancel(cancel) => held.cancel(sender, cancel),
         Ask::Learn(kind) => held.learn(kind, now),
         Ask::GaveUp(actor) => held.counts.give_up(&actor),

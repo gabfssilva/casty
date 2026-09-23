@@ -3,7 +3,7 @@
 //! Nothing here does I/O either: it decides where a command goes and what answers the ones that will not arrive.
 
 use casty_core::mailbox::Command;
-use casty_core::node::{NodeId, Target};
+use casty_core::node::NodeId;
 use casty_core::outcome::Outcome;
 use casty_net::pool::Target as Destination;
 
@@ -119,12 +119,6 @@ impl Routing {
             owner,
         )
     }
-}
-
-/// Where the answer of a refused command goes, if anyone waits for it.
-#[must_use]
-pub fn waiting(command: &Command) -> Option<&Target> {
-    command.reply()
 }
 
 /// Where the cancellation of a request goes: the owner of its key in this node's view, which is where the request

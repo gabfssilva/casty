@@ -328,11 +328,6 @@ impl Replication {
         }
     }
 
-    #[must_use]
-    pub fn name() -> &'static str {
-        "replication"
-    }
-
     /// The copies this node keeps, which a range transfer reads from and fills.
     #[must_use]
     pub fn replica(&self) -> &Replica {
@@ -762,7 +757,7 @@ impl Replication {
     ///
     /// `receiving` says a range this node is still filling holds the key, which keeps the reply out of the quorums.
     pub fn request(&mut self, request: Request, receiving: bool) {
-        let owner = owner_of(&request).clone();
+        let owner = request.owner().clone();
         let Some(reply) = self.replica.receive(request, receiving) else {
             return;
         };
@@ -1167,14 +1162,6 @@ impl Replication {
             to: send.to,
             message: Message::Request(send.message),
         }));
-    }
-}
-
-fn owner_of(request: &Request) -> &NodeId {
-    match request {
-        Request::Prepare { epoch, .. } | Request::FetchPages { epoch, .. } => &epoch.node,
-        Request::Accept { stamp, .. } => &stamp.epoch.node,
-        Request::Bury { node, .. } => node,
     }
 }
 
