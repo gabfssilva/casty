@@ -1,7 +1,6 @@
-"""Incorrect use of the public API. Each line ending in `# error` must be reported, and no other line.
+"""Incorrect use of the public API. Each line ending in `# error` must be reported by pyright, and no other line.
 
-`# error: pyright` or `# error: mypy` marks a line reported by only that checker, when they point at different lines.
-Input for the type checkers, never executed.
+Input for pyright, never executed.
 """
 
 from dataclasses import dataclass

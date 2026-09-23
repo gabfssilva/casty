@@ -1,4 +1,4 @@
-"""Correct use of the public API. Input for the type checkers, never executed."""
+"""Correct use of the public API. Input for pyright, never executed."""
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace

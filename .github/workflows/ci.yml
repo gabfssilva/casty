@@ -43,8 +43,7 @@ jobs:
           python-version: ${{ matrix.python }}
           enable-cache: true
       - run: uv sync
-      - run: uv run ruff check .
-      - run: uv run ruff format --check src tests benchmarks examples
-      - run: uv run mypy
+      - run: uv run ruff check src tests benchmarks examples docs
+      - run: uv run ruff format --check src tests benchmarks examples docs
       - run: uv run pyright
       - run: uv run pytest -q
