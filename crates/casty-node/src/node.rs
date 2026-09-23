@@ -514,7 +514,6 @@ fn stopped<T>(
 #[derive(Debug)]
 pub struct Running {
     pub node: Node,
-    members: watch::Receiver<Vec<Member>>,
     task: JoinHandle<()>,
     /// How long leaving waits for the nodes that replicate its keys now to take them.
     handover: core::time::Duration,
@@ -600,7 +599,7 @@ impl Running {
                 id,
                 asks,
                 ids: AtomicI64::new(0),
-                members: watching.clone(),
+                members: watching,
                 message: cluster.limits.message,
                 meter: endpoint.meter(),
                 written: replication.written(),
@@ -639,24 +638,11 @@ impl Running {
         match joining.await {
             Ok(Ok(())) => Ok(Self {
                 node,
-                members: watching,
                 task,
                 handover: cluster.leave_timeout,
             }),
             Ok(Err(refused)) => Err(io::Error::other(refused)),
             Err(_) => Err(io::Error::other("the node stopped before it joined")),
-        }
-    }
-
-    /// Wait until what this node sees satisfies `settled`, or until it stops.
-    pub async fn until(&mut self, settled: impl Fn(&[Member]) -> bool) {
-        loop {
-            if settled(&self.members.borrow_and_update()) {
-                return;
-            }
-            if self.members.changed().await.is_err() {
-                return;
-            }
         }
     }
 

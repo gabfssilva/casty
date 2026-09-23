@@ -1,36 +1,17 @@
 //! Nodes of this core forming one cluster over real sockets.
 
-use core::time::Duration;
+mod common;
+
 use std::collections::BTreeSet;
 
 use casty_core::membership::table::Status;
 use casty_node::membership::runner::{Cluster, Joined};
-use casty_node::membership::service::{Member, Timings};
+use casty_node::membership::service::Member;
 
-const WITHIN: Duration = Duration::from_secs(30);
-
-fn quick() -> Timings {
-    Timings {
-        heartbeat: Duration::from_millis(50),
-        suspect_after: Duration::from_millis(500),
-        dead_after: Duration::from_millis(500),
-        remove_after: Some(Duration::from_secs(1)),
-        anti_entropy: Duration::from_millis(250),
-        graft_after: Duration::from_millis(100),
-        shuffle_every: Duration::from_millis(500),
-    }
-}
+use common::{ACTOR, WITHIN, cluster};
 
 fn types() -> BTreeSet<String> {
-    BTreeSet::from(["tests.app:account".to_owned()])
-}
-
-fn cluster(seeds: &[String]) -> Cluster {
-    Cluster {
-        seeds: seeds.to_vec(),
-        timings: quick(),
-        ..Cluster::at("127.0.0.1:0")
-    }
+    BTreeSet::from([ACTOR.to_owned()])
 }
 
 fn alive(members: &[Member]) -> usize {

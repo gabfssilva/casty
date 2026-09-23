@@ -3,7 +3,8 @@
 //! The host here is a stub: it keeps a counter per key instead of running a body, which is enough to say that the
 //! message reached exactly one node and that the answer came back to the one that asked.
 
-use core::time::Duration;
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
@@ -16,34 +17,13 @@ use casty_core::wire::Writer;
 use casty_net::endpoint::{Config, Endpoint, TooLarge};
 use casty_net::pool::Target as Address;
 use casty_node::membership::runner::Cluster;
-use casty_node::membership::service::Timings;
-use casty_node::node::{Host, Kind, Node, Running};
+use casty_node::node::{Host, Node, Running};
 use casty_node::routing::wire::{Answer, Message, Routed, decode_answer, encode};
 use tokio::sync::{Notify, oneshot};
 
-const ACTOR: &str = "tests.app:account";
+use common::{ACTOR, WITHIN, cluster, kind};
+
 const REPLICAS: usize = 3;
-const WITHIN: Duration = Duration::from_secs(30);
-
-fn quick() -> Timings {
-    Timings {
-        heartbeat: Duration::from_millis(50),
-        suspect_after: Duration::from_millis(500),
-        dead_after: Duration::from_millis(500),
-        remove_after: Some(Duration::from_secs(1)),
-        anti_entropy: Duration::from_millis(250),
-        graft_after: Duration::from_millis(100),
-        shuffle_every: Duration::from_millis(500),
-    }
-}
-
-fn cluster(seeds: &[String]) -> Cluster {
-    Cluster {
-        seeds: seeds.to_vec(),
-        timings: quick(),
-        ..Cluster::at("127.0.0.1:0")
-    }
-}
 
 /// A host that answers every message with the number of messages that key has taken here.
 #[derive(Debug, Default)]
@@ -114,14 +94,7 @@ struct World {
 
 impl World {
     async fn start(size: usize) -> Self {
-        let types = vec![Kind {
-            actor: ACTOR.to_owned(),
-            replicas: REPLICAS,
-            write: Write::Majority,
-            write_timeout: None,
-            pinned: false,
-            durable: None,
-        }];
+        let types = vec![kind(REPLICAS, Write::Majority)];
         let mut nodes = Vec::new();
         let mut hosts = Vec::new();
         let mut seed = None;
@@ -138,39 +111,8 @@ impl World {
         Self { nodes, hosts }
     }
 
-    async fn converged(&mut self, count: usize) {
-        let waiting = tokio::time::timeout(WITHIN, async {
-            for node in &mut self.nodes {
-                node.until(|members| members.len() == count).await;
-            }
-        })
-        .await;
-        assert!(waiting.is_ok(), "they never agreed on {count} members");
-        let settling = tokio::time::timeout(WITHIN, self.settled(count.min(REPLICAS))).await;
-        assert!(settling.is_ok(), "they never agreed on where the keys are");
-    }
-
-    /// Wait until every node places the keys of the tests on the same `replicas` nodes.
-    ///
-    /// A node that joined holds the keys of the ranges it gained on the ring before it until they have arrived, so
-    /// agreeing on the members is not yet agreeing on the owners.
-    async fn settled(&self, replicas: usize) {
-        loop {
-            let mut agreed = true;
-            for index in 0..200 {
-                let key = format!("acc-{index}");
-                let mut seen = Vec::new();
-                for running in &self.nodes {
-                    seen.push(running.node.placed(ACTOR, &key).await);
-                }
-                agreed &= seen.windows(2).all(|pair| pair[0] == pair[1])
-                    && seen.iter().all(|placed| placed.replicas.len() == replicas);
-            }
-            if agreed {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    async fn converged(&self, count: usize) {
+        common::converged(&self.nodes, count, REPLICAS).await;
     }
 
     /// Ask `key` from the node `at`, and wait for the answer.
@@ -212,15 +154,13 @@ impl World {
     }
 
     async fn stop(self) {
-        for node in self.nodes {
-            node.crash().await;
-        }
+        common::crash(self.nodes).await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_key_is_reached_from_every_node_and_lives_on_one_of_them() {
-    let mut world = World::start(3).await;
+    let world = World::start(3).await;
     world.converged(3).await;
     let keys: Vec<String> = (0..12).map(|index| format!("acc-{index}")).collect();
 
@@ -299,7 +239,7 @@ async fn an_ask_to_a_node_that_died_fails_instead_of_waiting_for_the_deadline() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cancellation_reaches_the_node_that_took_the_request_and_no_other() {
-    let mut world = World::start(3).await;
+    let world = World::start(3).await;
     world.converged(3).await;
     // A key another node took, so that the cancellation crosses the network the way the request did.
     let asker = world.nodes[0].node.id().clone();
@@ -343,7 +283,7 @@ async fn a_cancellation_reaches_the_node_that_took_the_request_and_no_other() {
 /// drops, and the connection it came on goes on carrying the rest.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_message_of_a_kind_the_node_does_not_know_is_dropped_and_what_follows_it_is_answered() {
-    let mut world = World::start(1).await;
+    let world = World::start(1).await;
     world.converged(1).await;
     let mut peer = Endpoint::start(Config::default())
         .await
@@ -392,7 +332,7 @@ async fn a_message_of_a_kind_the_node_does_not_know_is_dropped_and_what_follows_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_node_alone_takes_its_own_messages() {
-    let mut world = World::start(1).await;
+    let world = World::start(1).await;
     world.converged(1).await;
 
     let first = world.ask(0, "only").await;
@@ -405,7 +345,7 @@ async fn a_node_alone_takes_its_own_messages() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn what_does_not_fit_in_one_message_is_refused_even_when_the_key_is_here() {
-    let mut world = World::start(1).await;
+    let world = World::start(1).await;
     world.converged(1).await;
     let node = &world.nodes[0].node;
     let limit = Cluster::at("127.0.0.1:0").limits.message;
@@ -445,7 +385,7 @@ async fn what_does_not_fit_in_one_message_is_refused_even_when_the_key_is_here()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_node_places_a_key_where_its_messages_land() {
-    let mut world = World::start(3).await;
+    let world = World::start(3).await;
     world.converged(3).await;
 
     for index in 0..12 {

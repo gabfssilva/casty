@@ -3,6 +3,8 @@
 //! No host runs here: the node is driven through `activate` and `commit` directly, which is what an activation does
 //! once the body side of it exists.
 
+mod common;
+
 use core::time::Duration;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -13,34 +15,12 @@ use casty_core::replication::messages::Write;
 use casty_core::store::{Durable, Held, Pages, Storage, Stored, version};
 use casty_net::limits::Limits;
 use casty_node::membership::runner::Cluster;
-use casty_node::membership::service::Timings;
 use casty_node::node::{Host, Kind, Node, Running};
 use casty_node::replication::service::{Failure, Storing};
 
-const ACTOR: &str = "tests.app:account";
-const WITHIN: Duration = Duration::from_secs(30);
+use common::{ACTOR, Idle, WITHIN, cluster, kind};
+
 const MIB: usize = 1024 * 1024;
-
-fn quick() -> Timings {
-    Timings {
-        heartbeat: Duration::from_millis(50),
-        suspect_after: Duration::from_millis(500),
-        dead_after: Duration::from_millis(500),
-        remove_after: Some(Duration::from_secs(1)),
-        anti_entropy: Duration::from_millis(250),
-        graft_after: Duration::from_millis(100),
-        shuffle_every: Duration::from_millis(500),
-    }
-}
-
-/// A host with no bodies: nothing in these tests routes a message.
-#[derive(Debug)]
-struct Idle;
-
-impl Host for Idle {
-    fn hand(&self, _: &Node, _: Command) {}
-    fn settle(&self, _: i64, _: Outcome) {}
-}
 
 /// A host with no bodies whose store every node given it shares, the way the nodes of a cluster share a database: one
 /// record per key, kept as a store must.
@@ -138,26 +118,14 @@ impl World {
         timeout: Duration,
         limits: Limits,
     ) -> Self {
-        let kind = Kind {
-            actor: ACTOR.to_owned(),
-            replicas,
-            write,
-            write_timeout: None,
-            pinned: false,
-            durable: None,
-        };
-        Self::of(size, kind, timeout, limits, Arc::new(Idle)).await
+        Self::of(size, kind(replicas, write), timeout, limits, Arc::new(Idle)).await
     }
 
     /// Nodes of a type whose every write `store` keeps, which each node is given as the store of its cluster.
     async fn stored(size: usize, replicas: usize, store: &Arc<Records>) -> Self {
         let kind = Kind {
-            actor: ACTOR.to_owned(),
-            replicas,
-            write: Write::Majority,
-            write_timeout: None,
-            pinned: false,
             durable: Some(Durable::Write),
+            ..kind(replicas, Write::Majority)
         };
         let host: Arc<dyn Host> = store.clone();
         Self::of(size, kind, Duration::from_secs(5), Limits::default(), host).await
@@ -188,12 +156,11 @@ impl World {
 
     /// Bring one more node in through the seed, and wait until every node sees it.
     async fn join(&mut self) {
+        let seeds: Vec<String> = self.seed.clone().into_iter().collect();
         let cluster = Cluster {
-            seeds: self.seed.clone().into_iter().collect(),
-            timings: quick(),
             write_timeout: self.timeout,
             limits: self.limits,
-            ..Cluster::at("127.0.0.1:0")
+            ..cluster(&seeds)
         };
         let node = Running::start(cluster, Arc::clone(&self.host), vec![self.kind.clone()])
             .await
@@ -202,40 +169,8 @@ impl World {
         self.nodes.push(node);
     }
 
-    async fn converged(&mut self, count: usize) {
-        let waiting = tokio::time::timeout(WITHIN, async {
-            for node in &mut self.nodes {
-                node.until(|members| members.len() == count).await;
-            }
-        })
-        .await;
-        assert!(waiting.is_ok(), "they never agreed on {count} members");
-        let settling =
-            tokio::time::timeout(WITHIN, self.settled(count.min(self.kind.replicas))).await;
-        assert!(settling.is_ok(), "they never agreed on where the keys are");
-    }
-
-    /// Wait until every node places a sample of keys on the same `replicas` nodes.
-    ///
-    /// A node that joined holds the keys of the ranges it gained on the ring before it until they have arrived, so
-    /// agreeing on the members is not yet agreeing on the owners.
-    async fn settled(&self, replicas: usize) {
-        loop {
-            let mut agreed = true;
-            for index in 0..200 {
-                let key = format!("probe-{index}");
-                let mut seen = Vec::new();
-                for running in &self.nodes {
-                    seen.push(running.node.placed(ACTOR, &key).await);
-                }
-                agreed &= seen.windows(2).all(|pair| pair[0] == pair[1])
-                    && seen.iter().all(|placed| placed.replicas.len() == replicas);
-            }
-            if agreed {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    async fn converged(&self, count: usize) {
+        common::converged(&self.nodes, count, self.kind.replicas).await;
     }
 
     fn at(&self, index: usize) -> &Node {
