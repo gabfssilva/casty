@@ -11,7 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::compress::{Name, offered};
+use crate::compress::{Name, PREFERENCE};
 use crate::connection::{Incoming, Socket};
 use crate::frame::VERSION;
 use crate::handshake::{Hello, Role, VERSIONS};
@@ -118,10 +118,10 @@ impl Endpoint {
             } else {
                 Role::Member
             },
-            compression: offered(config.compression.as_deref())
-                .into_iter()
-                .map(|name| name.name().to_owned())
-                .collect(),
+            compression: config
+                .compression
+                .clone()
+                .unwrap_or_else(|| PREFERENCE.to_vec()),
             sizes: [
                 config.limits.frame,
                 config.limits.message,
@@ -131,7 +131,6 @@ impl Endpoint {
         let pool = Pool::new(
             Settings {
                 local,
-                ours: offered(config.compression.as_deref()),
                 limits: config.limits,
                 min_compressed: config.min_compressed,
                 tls: identity.clone(),

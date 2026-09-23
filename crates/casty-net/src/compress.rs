@@ -112,28 +112,13 @@ fn bounded(
 
 /// The first compressor of the peer's offer that this side also offers.
 #[must_use]
-pub fn chosen(offer: &[String], ours: &[Name]) -> Option<Name> {
-    offer
-        .iter()
-        .find_map(|wanted| ours.iter().copied().find(|name| name.name() == wanted))
-}
-
-/// The compressors allowed by a configuration, in its order of preference.
-#[must_use]
-pub fn offered(allowed: Option<&[Name]>) -> Vec<Name> {
-    match allowed {
-        None => PREFERENCE.to_vec(),
-        Some(allowed) => allowed
-            .iter()
-            .copied()
-            .filter(|name| PREFERENCE.contains(name))
-            .collect(),
-    }
+pub fn chosen(offer: &[Name], ours: &[Name]) -> Option<Name> {
+    offer.iter().copied().find(|name| ours.contains(name))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Name, PREFERENCE, chosen, offered};
+    use super::{Name, PREFERENCE, chosen};
 
     fn payload() -> Vec<u8> {
         b"the same line over and over, which is what makes a payload worth compressing. "
@@ -182,15 +167,10 @@ mod tests {
 
     #[test]
     fn the_peers_first_common_choice_wins() {
-        let offer = ["lz4".to_owned(), "zstd".to_owned()];
+        let offer = [Name::Lz4, Name::Zstd];
         assert_eq!(chosen(&offer, &PREFERENCE), Some(Name::Lz4));
         assert_eq!(chosen(&offer, &[Name::Zstd]), Some(Name::Zstd));
         assert_eq!(chosen(&offer, &[Name::Zlib]), None);
         assert_eq!(chosen(&[], &PREFERENCE), None);
-        assert_eq!(offered(None), PREFERENCE.to_vec());
-        assert_eq!(
-            offered(Some(&[Name::Zlib, Name::Zstd])),
-            vec![Name::Zlib, Name::Zstd]
-        );
     }
 }

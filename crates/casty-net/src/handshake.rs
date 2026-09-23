@@ -53,7 +53,7 @@ pub struct Hello {
     pub cluster: String,
     pub node: NodeId,
     pub role: Role,
-    pub compression: Vec<String>,
+    pub compression: Vec<Name>,
     /// `frame`, `message` and `window` of `Limits`, which a node bounds what it receives by. Each side sends by its
     /// own, so a peer with other sizes would break the connection at the first frame, envelope or window past them:
     /// the handshake refuses it instead.
@@ -82,7 +82,7 @@ pub enum Message {
 }
 
 /// The reply to `hello` from the node described by `local`, before duplicate connections are considered.
-pub fn answer(hello: &Hello, local: &Hello, ours: &[Name]) -> Result<Ack, Reject> {
+pub fn answer(hello: &Hello, local: &Hello) -> Result<Ack, Reject> {
     if hello.cluster != local.cluster {
         return Err(Reject {
             code: Rejection::Cluster as i64,
@@ -119,7 +119,7 @@ pub fn answer(hello: &Hello, local: &Hello, ours: &[Name]) -> Result<Ack, Reject
         version: *version,
         node: local.node.clone(),
         role: local.role,
-        compression: crate::compress::chosen(&hello.compression, ours),
+        compression: crate::compress::chosen(&hello.compression, &local.compression),
     })
 }
 
@@ -146,7 +146,7 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
             key(&mut out, "compression");
             msgpack::write_array_len(&mut out, hello.compression.len());
             for name in &hello.compression {
-                msgpack::write_str(&mut out, name);
+                msgpack::write_str(&mut out, name.name());
             }
             for (name, size) in ["frame", "message", "window"].into_iter().zip(hello.sizes) {
                 key(&mut out, name);
@@ -191,7 +191,13 @@ pub fn decode(name: &str, payload: &[u8]) -> Result<Message, ProtocolError> {
             cluster: fields.text("cluster").ok_or_else(malformed)?,
             node: fields.node().ok_or_else(malformed)?,
             role: Role::of(&fields.text("role").ok_or_else(malformed)?).ok_or_else(malformed)?,
-            compression: fields.texts("compression").ok_or_else(malformed)?,
+            // A compressor this build does not have is one it cannot choose.
+            compression: fields
+                .texts("compression")
+                .ok_or_else(malformed)?
+                .iter()
+                .filter_map(|name| Name::of(name))
+                .collect(),
             sizes: [
                 fields.size("frame").ok_or_else(malformed)?,
                 fields.size("message").ok_or_else(malformed)?,
@@ -371,10 +377,7 @@ mod tests {
             cluster: cluster.to_owned(),
             node,
             role: Role::Member,
-            compression: PREFERENCE
-                .iter()
-                .map(|name| name.name().to_owned())
-                .collect(),
+            compression: PREFERENCE.to_vec(),
             sizes: [limits.frame, limits.message, limits.window],
         }
     }
@@ -410,7 +413,7 @@ mod tests {
     #[test]
     fn it_answers_a_hello_it_can_speak_to() {
         let local = hello("casty", node(Some("a:1"), 1));
-        let ack = answer(&hello("casty", node(Some("b:1"), 2)), &local, &PREFERENCE).unwrap();
+        let ack = answer(&hello("casty", node(Some("b:1"), 2)), &local).unwrap();
 
         assert_eq!(ack.version, 1);
         assert_eq!(ack.node, local.node);
@@ -420,7 +423,7 @@ mod tests {
     #[test]
     fn it_rejects_what_it_cannot_speak_to() {
         let local = hello("casty", node(Some("a:1"), 1));
-        let refused = |theirs: Hello| answer(&theirs, &local, &PREFERENCE).unwrap_err().code;
+        let refused = |theirs: Hello| answer(&theirs, &local).unwrap_err().code;
 
         let mut other = hello("other", node(Some("b:1"), 2));
         assert_eq!(refused(other.clone()), Rejection::Cluster as i64);

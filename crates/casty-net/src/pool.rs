@@ -16,7 +16,6 @@ use casty_core::node::NodeId;
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
 
-use crate::compress::Name;
 use crate::connection::{Broken, Bytes, Connection, Greeting, Incoming, Socket};
 use crate::handshake::{Hello, Message, Reject, Rejection, answer};
 use crate::limits::Limits;
@@ -88,7 +87,6 @@ struct State {
 #[derive(Clone)]
 pub struct Settings {
     pub local: Hello,
-    pub ours: Vec<Name>,
     pub limits: Limits,
     pub min_compressed: usize,
     pub tls: Option<Identity>,
@@ -101,7 +99,6 @@ impl core::fmt::Debug for Settings {
         formatter
             .debug_struct("Settings")
             .field("local", &self.local)
-            .field("ours", &self.ours)
             .finish_non_exhaustive()
     }
 }
@@ -290,7 +287,7 @@ impl Pool {
         let Ok(Ok(Message::Hello(hello))) = heard else {
             return;
         };
-        let reply = match answer(&hello, &self.settings.local, &self.settings.ours) {
+        let reply = match answer(&hello, &self.settings.local) {
             Err(reject) => Err(reject),
             Ok(_) if self.keeps_own(&hello.node) => Err(Reject {
                 code: Rejection::Duplicate as i64,
