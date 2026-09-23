@@ -48,22 +48,17 @@ pub struct Answer {
 pub fn encode(message: &Message) -> Vec<u8> {
     let mut writer = Writer::new();
     match message {
-        Message::Routed(routed) => {
-            writer.tagged("Routed", 3);
-            routed_fields(&mut writer, routed);
+        Message::Routed(held) => {
+            writer.tag("Routed");
+            routed(&mut writer, held);
         }
-        Message::WrongOwner(routed) => {
+        Message::WrongOwner(held) => {
             writer.tagged("WrongOwner", 1);
             writer.name("routed");
-            writer.fields(3);
-            routed_fields(&mut writer, routed);
+            routed(&mut writer, held);
         }
         Message::Cancel(cancel) => {
-            writer.tagged("Cancel", 3);
-            writer.name("actor");
-            writer.text(&cancel.actor);
-            writer.name("key");
-            writer.text(&cancel.key);
+            writer.entity("Cancel", 3, &cancel.actor, &cancel.key);
             writer.name("request");
             writer.target(&cancel.request);
         }
@@ -73,18 +68,15 @@ pub fn encode(message: &Message) -> Vec<u8> {
 
 pub fn decode(payload: &[u8]) -> Result<Message> {
     let mut reading = Reading::new(payload);
-    let (tag, fields) = reading.tagged()?;
-    match tag.as_str() {
-        "Routed" => Ok(Message::Routed(read_routed_fields(&mut reading, fields)?)),
-        "Cancel" => Ok(Message::Cancel(read_cancel_fields(&mut reading, fields)?)),
+    match reading.tag()? {
+        "Routed" => Ok(Message::Routed(read_routed(&mut reading)?)),
+        "Cancel" => Ok(Message::Cancel(read_cancel(&mut reading)?)),
         "WrongOwner" => {
+            let fields = reading.fields()?;
             let mut held = None;
             for _ in 0..fields {
                 match reading.name()? {
-                    "routed" => {
-                        let inner = reading.fields()?;
-                        held = Some(read_routed_fields(&mut reading, inner)?);
-                    }
+                    "routed" => held = Some(read_routed(&mut reading)?),
                     _ => reading.skip()?,
                 }
             }
@@ -185,13 +177,14 @@ fn grown(len: usize) -> usize {
     len + length - 1
 }
 
-fn routed_fields(writer: &mut Writer, routed: &Routed) {
+fn routed(writer: &mut Writer, held: &Routed) {
+    writer.fields(3);
     writer.name("command");
-    command(writer, &routed.command);
+    command(writer, &held.command);
     writer.name("origin");
-    writer.node(&routed.origin);
+    writer.node(&held.origin);
     writer.name("attempt");
-    writer.unsigned(u64::from(routed.attempt));
+    writer.unsigned(u64::from(held.attempt));
 }
 
 fn command(writer: &mut Writer, held: &Command) {
@@ -199,30 +192,19 @@ fn command(writer: &mut Writer, held: &Command) {
         Command::Deliver(deliver) => {
             // A message that keeps nobody waiting, every `tell` and every `ask` from outside a body, carries no chain.
             let chained = !deliver.chain.is_empty();
-            writer.tagged("Deliver", if chained { 5 } else { 4 });
-            writer.name("actor");
-            writer.text(&deliver.actor);
-            writer.name("key");
-            writer.text(&deliver.key);
+            let fields = if chained { 5 } else { 4 };
+            writer.entity("Deliver", fields, &deliver.actor, &deliver.key);
             writer.name("message");
             writer.bytes(&deliver.message);
             writer.name("reply");
-            match &deliver.reply {
-                // `ReplyTarget | None` is a union, so the target travels under its tag.
-                Some(target) => tagged_reply(writer, target),
-                None => writer.nil(),
-            }
+            writer.optional("ReplyTarget", deliver.reply.as_ref(), reply_target);
             if chained {
                 writer.name("chain");
                 chain(writer, &deliver.chain);
             }
         }
         Command::Start(start) => {
-            writer.tagged("Start", 3);
-            writer.name("actor");
-            writer.text(&start.actor);
-            writer.name("key");
-            writer.text(&start.key);
+            writer.entity("Start", 3, &start.actor, &start.key);
             writer.name("state");
             match &start.state {
                 Some(state) => writer.bytes(state),
@@ -245,12 +227,12 @@ fn chain(writer: &mut Writer, held: &Chain) {
     }
 }
 
-/// Whoever waits, on a node, for the answer of the request numbered `id`: an alternative of a union, so tagged.
-fn tagged_reply(writer: &mut Writer, target: &Target) {
-    writer.tagged("ReplyTarget", 2);
+/// Whoever waits, on a node, for the answer of the request numbered `id`.
+fn reply_target(writer: &mut Writer, target: &Target) {
     let Target::Reply { node, id } = target else {
         unreachable!("a command answers a request, never an entity");
     };
+    writer.fields(2);
     writer.name("node");
     writer.node(node);
     writer.name("id");
@@ -270,20 +252,16 @@ fn outcome(writer: &mut Writer, held: &Outcome) {
             error,
             message,
         } => {
-            writer.tagged("Failed", 4);
-            writer.name("actor");
-            writer.text(actor);
-            writer.name("key");
-            writer.text(key);
+            writer.entity("Failed", 4, actor, key);
             writer.name("error");
             writer.text(error);
             writer.name("message");
             writer.text(message);
         }
-        Outcome::Missing { actor, key } => named(writer, "Missing", actor, key),
-        Outcome::Full { actor, key } => named(writer, "Full", actor, key),
-        Outcome::Unreached { actor, key } => named(writer, "Unreached", actor, key),
-        Outcome::Unknown { actor, key } => named(writer, "Unknown", actor, key),
+        Outcome::Missing { actor, key } => writer.entity("Missing", 2, actor, key),
+        Outcome::Full { actor, key } => writer.entity("Full", 2, actor, key),
+        Outcome::Unreached { actor, key } => writer.entity("Unreached", 2, actor, key),
+        Outcome::Unknown { actor, key } => writer.entity("Unknown", 2, actor, key),
         Outcome::TooLarge(why) => {
             writer.tagged("TooLarge", 1);
             writer.name("message");
@@ -297,15 +275,8 @@ fn outcome(writer: &mut Writer, held: &Outcome) {
     }
 }
 
-fn named(writer: &mut Writer, tag: &str, actor: &str, key: &str) {
-    writer.tagged(tag, 2);
-    writer.name("actor");
-    writer.text(actor);
-    writer.name("key");
-    writer.text(key);
-}
-
-fn read_routed_fields(reading: &mut Reading<'_>, fields: usize) -> Result<Routed> {
+fn read_routed(reading: &mut Reading<'_>) -> Result<Routed> {
+    let fields = reading.fields()?;
     let mut held = None;
     let mut origin = None;
     let mut attempt = None;
@@ -327,7 +298,8 @@ fn read_routed_fields(reading: &mut Reading<'_>, fields: usize) -> Result<Routed
     })
 }
 
-fn read_cancel_fields(reading: &mut Reading<'_>, fields: usize) -> Result<Cancel> {
+fn read_cancel(reading: &mut Reading<'_>) -> Result<Cancel> {
+    let fields = reading.fields()?;
     let mut actor = None;
     let mut key = None;
     let mut request = None;
@@ -364,7 +336,7 @@ fn read_command(reading: &mut Reading<'_>) -> Result<Command> {
                     state = Some(reading.bytes()?);
                 }
             }
-            "reply" => target = read_reply(reading)?,
+            "reply" => target = reading.optional(read_reply_target)?,
             "chain" => chain = read_chain(reading)?,
             _ => reading.skip()?,
         }
@@ -410,12 +382,8 @@ fn read_chain(reading: &mut Reading<'_>) -> Result<Chain> {
     Ok(Chain::of(links))
 }
 
-fn read_reply(reading: &mut Reading<'_>) -> Result<Option<Target>> {
-    if reading.nil()? {
-        return Ok(None);
-    }
-    // The target is an alternative of a union, so it carries its tag.
-    let fields = reading.tagged()?.1;
+fn read_reply_target(reading: &mut Reading<'_>) -> Result<Target> {
+    let fields = reading.fields()?;
     let mut node = None;
     let mut id = None;
     for _ in 0..fields {
@@ -425,10 +393,10 @@ fn read_reply(reading: &mut Reading<'_>) -> Result<Option<Target>> {
             _ => reading.skip()?,
         }
     }
-    Ok(Some(Target::Reply {
+    Ok(Target::Reply {
         node: node.ok_or(Malformed::Truncated)?,
         id: id.ok_or(Malformed::Truncated)?,
-    }))
+    })
 }
 
 fn read_outcome(reading: &mut Reading<'_>) -> Result<Outcome> {
