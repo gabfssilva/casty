@@ -14,6 +14,9 @@ from uuid import UUID
 
 if TYPE_CHECKING:
     from casty import Actor, Context, DefaultedActor, Ref
+else:
+    # The extension has no stub, and `casty` is still importing this module.
+    from casty._casty import Actor, Context, DefaultedActor, Ref
 
 
 @dataclass(frozen=True)
