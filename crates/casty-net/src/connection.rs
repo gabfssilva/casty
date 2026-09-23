@@ -21,9 +21,9 @@ use crate::mux::{CONTROL, MESSAGES, Mux, REPLICATION, Record};
 const CHUNK: usize = 256 * 1024;
 
 /// A socket, with or without TLS on top of it.
-pub trait Socket: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
+pub trait Socket: AsyncRead + AsyncWrite + Unpin + Send + core::fmt::Debug + 'static {}
 
-impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Socket for T {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + core::fmt::Debug + 'static> Socket for T {}
 
 /// What went wrong on a connection. All of them end it.
 #[derive(Debug)]
@@ -106,8 +106,8 @@ pub enum Incoming {
 
 /// A socket that has not shaken hands yet, or has just done so.
 #[derive(Debug)]
-pub struct Greeting<S: Socket> {
-    socket: S,
+pub struct Greeting {
+    socket: Box<dyn Socket>,
     mux: Mux,
     frames: Decoder,
     limits: Limits,
@@ -115,9 +115,14 @@ pub struct Greeting<S: Socket> {
     bytes: Arc<Bytes>,
 }
 
-impl<S: Socket> Greeting<S> {
+impl Greeting {
     #[must_use]
-    pub fn new(socket: S, limits: Limits, min_compressed: usize, bytes: Arc<Bytes>) -> Self {
+    pub fn new(
+        socket: Box<dyn Socket>,
+        limits: Limits,
+        min_compressed: usize,
+        bytes: Arc<Bytes>,
+    ) -> Self {
         Self {
             socket,
             mux: Mux::new(limits, min_compressed),

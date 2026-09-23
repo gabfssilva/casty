@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::compress::{Name, PREFERENCE};
-use crate::connection::{Incoming, Socket};
+use crate::connection::Incoming;
 use crate::frame::VERSION;
 use crate::handshake::{Hello, Role, VERSIONS};
 use crate::limits::Limits;
@@ -234,15 +234,14 @@ fn take(
     handshake: core::time::Duration,
 ) {
     let Some(identity) = identity else {
-        pool.accept(socket);
+        pool.accept(Box::new(socket));
         return;
     };
     let pool = Arc::clone(pool);
     tokio::spawn(async move {
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&identity.server));
         if let Ok(Ok(stream)) = tokio::time::timeout(handshake, acceptor.accept(socket)).await {
-            let stream: Box<dyn Socket> = Box::new(stream);
-            pool.accept(stream);
+            pool.accept(Box::new(stream));
         }
     });
 }

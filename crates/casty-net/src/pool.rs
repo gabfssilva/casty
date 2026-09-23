@@ -229,7 +229,7 @@ impl Pool {
     }
 
     /// Take a connection the listener accepted, and answer its hello.
-    pub fn accept<S: Socket>(self: &Arc<Self>, socket: S) {
+    pub fn accept(self: &Arc<Self>, socket: Box<dyn Socket>) {
         if self.held().closed {
             return;
         }
@@ -282,7 +282,7 @@ impl Pool {
         self.state.lock().expect("the pool lock is never poisoned")
     }
 
-    async fn greet<S: Socket>(self: Arc<Self>, mut greeting: Greeting<S>) {
+    async fn greet(self: Arc<Self>, mut greeting: Greeting) {
         let heard = tokio::time::timeout(self.settings.limits.handshake, greeting.hear()).await;
         let Ok(Ok(Message::Hello(hello))) = heard else {
             return;
@@ -353,10 +353,7 @@ impl Pool {
         }
     }
 
-    async fn initiate(
-        &self,
-        address: &str,
-    ) -> Result<(Greeting<Box<dyn Socket>>, Message), Broken> {
+    async fn initiate(&self, address: &str) -> Result<(Greeting, Message), Broken> {
         let dialed = match &self.settings.address_map {
             None => address.to_owned(),
             Some(map) => map(address),
