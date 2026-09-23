@@ -2,8 +2,8 @@
 //!
 //! The body runs again from the start after it fails, after `become`, after it returns leaving messages behind, and
 //! after the caller of the message it is on cancels it. Only the last saved state survives, so a restart never sees
-//! the local variables of the previous run. A type with `concurrency=n` has up to n runs of its body reading the same
-//! mailbox, each known by the message it took last; its state is read-only, so no run writes under another.
+//! the local variables of the previous run. One run of the body reads the mailbox at a time, known by the message it
+//! took last.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
@@ -47,14 +47,12 @@ struct State {
     /// Who waits for this activation to be over: the releases of its key.
     ends: Vec<Py<PyAny>>,
     switching: bool,
-    /// Whether the body on the loop runs, so that a message finding every run of it busy can start another.
-    live: bool,
     pages: Pages,
     /// The activation the node took the key for, which every write of this one carries.
     lease: u64,
     value: Option<Py<PyAny>>,
-    /// The runs of the body on the loop, at most `concurrency` of them. A native body has none.
-    runs: Vec<Run>,
+    /// The run of the body on the loop. A native body has none.
+    run: Option<Run>,
     /// The id of the last run started.
     started: u64,
     /// The writes of the body on the loop that have not landed. A run that ends meanwhile waits for them.
@@ -89,12 +87,12 @@ impl State {
     }
 
     fn run(&mut self, id: u64) -> Option<&mut Run> {
-        self.runs.iter_mut().find(|run| run.id == id)
+        self.run.as_mut().filter(|run| run.id == id)
     }
 
-    /// Whether any run of the body has a task that has not ended.
+    /// Whether the run of the body has a task that has not ended.
     fn running(&self) -> bool {
-        self.runs.iter().any(|run| run.task.is_some())
+        self.run.as_ref().is_some_and(|run| run.task.is_some())
     }
 
     /// The behavior the state names: the type the key started as, unless it became another.
@@ -192,11 +190,10 @@ impl Activation {
                 releasing: false,
                 ends: Vec::new(),
                 switching: false,
-                live: false,
                 pages: Pages::new(),
                 lease: 0,
                 value: None,
-                runs: Vec::new(),
+                run: None,
                 started: 0,
                 writes: 0,
                 finished: false,
@@ -342,8 +339,9 @@ impl Activation {
             let state = slf.get().held();
             (Arc::clone(&state.behavior), state.offered.clone())
         };
-        // A native body says what its keys start from, without a value of the interpreter in between.
-        if let (None, Some(native)) = (&pending, &definition.native) {
+        // A native body says what its keys start from, without a value of the interpreter in between, when its type
+        // has a default; one without, as any other type, starts from the `initial` of a ref or not at all.
+        if let (None, Some(native), Some(_)) = (&pending, &definition.native, &definition.initial) {
             return Ok(Some(native.initial()));
         }
         let state = match (pending, &definition.initial) {
@@ -426,7 +424,7 @@ impl Activation {
         Self::resume(slf, py)
     }
 
-    /// Start the body of the behavior the key runs: its native loop, or `concurrency` runs of it on the loop.
+    /// Start the body of the behavior the key runs: its native loop, or a run of it on the loop.
     ///
     /// A key let go before its body started, or while it became another behavior, lets go with what it holds instead.
     fn attempt(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
@@ -436,10 +434,10 @@ impl Activation {
             (
                 Arc::clone(&state.behavior),
                 state.releasing,
-                core::mem::take(&mut state.runs),
+                state.run.take(),
             )
         };
-        for run in ended {
+        if let Some(run) = ended {
             forsaken(py, &slf.get().node, run)?;
         }
         if releasing {
@@ -448,15 +446,11 @@ impl Activation {
         if let Some(native) = behavior.native.clone() {
             return Self::stepping(slf, py, &native);
         }
-        slf.get().held().live = true;
-        for _ in 0..behavior.settings.concurrency {
-            Self::start(slf, py, None)?;
-        }
-        Ok(())
+        Self::start(slf, py)
     }
 
-    /// Start a run of the body, in place of the run `replacing` when there is one, whose failures it keeps.
-    fn start(slf: &Bound<'_, Self>, py: Python<'_>, replacing: Option<u64>) -> PyResult<()> {
+    /// Start a run of the body in place of the one there is, whose failures it keeps.
+    fn start(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
         let hold = slf.get().node.runs.hold();
         let (id, behavior, replaced) = {
             let mut state = slf.get().held();
@@ -465,10 +459,8 @@ impl Activation {
             }
             state.started += 1;
             let id = state.started;
-            let replaced = replacing
-                .and_then(|old| state.runs.iter().position(|run| run.id == old))
-                .map(|at| state.runs.remove(at));
-            state.runs.push(Run {
+            let replaced = state.run.take();
+            state.run = Some(Run {
                 id,
                 hold,
                 failures: replaced.as_ref().map_or(0, |old| old.failures),
@@ -553,7 +545,7 @@ impl Activation {
     }
 
     /// What a run that ended does next, with no write of the body in flight: wait out its failure, take the next
-    /// message, hand the key to another behavior, or let the key go when it was the last run.
+    /// message, hand the key to another behavior, or let the key go.
     fn after(slf: &Bound<'_, Self>, py: Python<'_>, id: u64, exit: Exit) -> PyResult<()> {
         if slf.get().held().ending() {
             return Self::wound_down(slf, py);
@@ -567,7 +559,7 @@ impl Activation {
             }
         }
         let entry = &slf.get().entry;
-        let (switching, moved, again, gone, alone) = {
+        let (switching, moved, again, gone) = {
             let mut state = slf.get().held();
             let moved = state.named(entry) != state.behavior.name;
             let switching = state.switching;
@@ -578,12 +570,12 @@ impl Activation {
             };
             run.current = None;
             let again = !releasing && (run.cancelled || (run.read && !empty));
-            let mut gone = None;
-            if !switching && !again {
-                let at = state.runs.iter().position(|run| run.id == id);
-                gone = at.map(|at| state.runs.remove(at));
-            }
-            (switching, moved, again, gone, state.runs.is_empty())
+            let gone = if switching || again {
+                None
+            } else {
+                state.run.take()
+            };
+            (switching, moved, again, gone)
         };
         if let Some(gone) = gone {
             forsaken(py, &slf.get().node, gone)?;
@@ -596,12 +588,9 @@ impl Activation {
             return Self::attempt(slf, py);
         }
         if again {
-            return Self::start(slf, py, Some(id));
+            return Self::start(slf, py);
         }
-        if alone {
-            return Self::deactivate(slf, py);
-        }
-        Ok(())
+        Self::deactivate(slf, py)
     }
 
     /// The backoff of a run that failed is over: it starts again, unless the activation is ending meanwhile, or the key
@@ -617,25 +606,24 @@ impl Activation {
         if releasing {
             return Self::after(slf, py, id, Exit::Returned);
         }
-        Self::start(slf, py, Some(id))
+        Self::start(slf, py)
     }
 
-    /// The last write of the body in flight landed: the runs that ended meanwhile go on.
+    /// The last write of the body in flight landed: a run that ended meanwhile goes on.
     fn settled(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
-        let ended: Vec<(u64, Exit)> = slf
+        let ended = slf
             .get()
             .held()
-            .runs
-            .iter_mut()
-            .filter_map(|run| run.settling.take().map(|exit| (run.id, exit)))
-            .collect();
-        for (id, exit) in ended {
-            Self::after(slf, py, id, exit)?;
+            .run
+            .as_mut()
+            .and_then(|run| run.settling.take().map(|exit| (run.id, exit)));
+        match ended {
+            Some((id, exit)) => Self::after(slf, py, id, exit),
+            None => Ok(()),
         }
-        Ok(())
     }
 
-    /// End an activation that is ending, once no run of its body is left running. Only the first call does it.
+    /// End an activation that is ending, once its body is no longer running. Only the first call does it.
     fn wound_down(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
         {
             let state = slf.get().held();
@@ -719,11 +707,7 @@ impl Activation {
     /// meanwhile queues behind what was there, and goes on once a new activation would no longer race that write.
     fn deactivate(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
         let this = slf.get();
-        let releasing = {
-            let mut state = this.held();
-            state.live = false;
-            state.releasing
-        };
+        let releasing = this.held().releasing;
         if !releasing {
             this.node.vacate(slf);
             Self::refuse_waiting(
@@ -801,7 +785,7 @@ impl Activation {
             let mut state = slf.get().held();
             let mut in_hand: Vec<Deliver> = Vec::new();
             let mut pending: Vec<Py<PyAny>> = Vec::new();
-            for run in &mut state.runs {
+            if let Some(run) = state.run.as_mut() {
                 let answered = run.answered;
                 in_hand.extend(run.current.take().filter(|_| !answered));
                 pending.extend(run.item.take());
@@ -967,29 +951,26 @@ impl Activation {
 
     /// End the activation because the key is not this node's any more.
     pub fn release(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
-        let (tasks, native, waiting) = {
+        let (task, native, waiting) = {
             let mut state = slf.get().held();
             state.fenced = true;
-            let tasks: Vec<Py<PyAny>> = state
-                .runs
-                .iter()
-                .filter_map(|run| run.task.as_ref().map(|task| task.clone_ref(py)))
-                .collect();
+            let task = state
+                .run
+                .as_ref()
+                .and_then(|run| run.task.as_ref().map(|task| task.clone_ref(py)));
             (
-                tasks,
+                task,
                 state.behavior.native.is_some(),
                 state.awaiting.is_some() || state.writing.is_some(),
             )
         };
-        if !tasks.is_empty() {
-            for task in tasks {
-                task.bind(py).call_method0("cancel")?;
-            }
+        if let Some(task) = task {
+            task.bind(py).call_method0("cancel")?;
             return Ok(());
         }
         // A native body has no task to cancel: its loop is what ends it, and this takes the loop up. One that is
-        // waiting for a write or for an answer ends on the callback of what it is waiting for. So does a run of the
-        // body on the loop that has no task, waiting out a backoff or a write.
+        // waiting for a write or for an answer ends on the callback of what it is waiting for. So does the run of the
+        // body on the loop when it has no task, waiting out a backoff or a write.
         if native && !waiting {
             return Self::again(slf, py);
         }
@@ -1004,24 +985,23 @@ impl Activation {
 
     /// Let the key go on purpose, as if it idled out now, and resolve `over` with `True` once the activation is over.
     ///
-    /// Nothing is cut short. Each run of the body ends at its next read, after the message it is on, and a run that
-    /// ends with a write in flight waits for it to land, as any run does; a run waiting out a failure ends when the
-    /// wait is over. A collection ends after the message it is on, and one with a deadline pending once it has none,
+    /// Nothing is cut short. The body ends at its next read, after the message it is on, and a run that ends with a
+    /// write in flight waits for it to land, as any run does; a run waiting out a failure ends when the wait is over. A collection ends after the message it is on, and one with a deadline pending once it has none,
     /// since that is when it could idle out. The key then lets go with its last write, and what reached it meanwhile
     /// goes on once that write is out.
     pub fn retire(slf: &Bound<'_, Self>, py: Python<'_>, over: &Bound<'_, PyAny>) -> PyResult<()> {
-        let (reads, timers, resting) = {
+        let (read, timers, resting) = {
             let mut state = slf.get().held();
             state.ends.push(over.clone().unbind());
             if state.releasing || state.ending() {
                 return Ok(());
             }
             state.releasing = true;
-            let mut reads: Vec<Py<PyAny>> = Vec::new();
+            let mut read = None;
             let mut timers: Vec<Py<PyAny>> = Vec::new();
-            for run in &mut state.runs {
+            if let Some(run) = state.run.as_mut() {
                 run.deadline = None;
-                reads.extend(run.waiting.take());
+                read = run.waiting.take();
                 timers.extend(run.idle.take());
             }
             let resting = state.behavior.native.is_some() && state.resting && state.alarm.is_none();
@@ -1030,12 +1010,12 @@ impl Activation {
                 state.deadline = None;
                 timers.extend(state.idle.take());
             }
-            (reads, timers, resting)
+            (read, timers, resting)
         };
         for timer in timers {
             timer.bind(py).call_method0("cancel")?;
         }
-        for read in reads {
+        if let Some(read) = read {
             let read = read.bind(py);
             if !read.call_method0("done")?.is_truthy()? {
                 read.call_method1("set_exception", (ended(),))?;
@@ -1050,8 +1030,8 @@ impl Activation {
     /// The caller of `request` stopped waiting for its answer. Answers whether the request was found here.
     ///
     /// Queued, the request goes, and the place it leaves goes to a caller held for room; held for room, its caller
-    /// goes. In the hands of a run of the body on the loop, that run is cancelled at the `await` it is on and starts
-    /// again for the next message, from the last state written, unless it has told the request its answer: then the
+    /// goes. In the hands of the body on the loop, its run is cancelled at the `await` it is on and starts again for
+    /// the next message, from the last state written, unless it has told the request its answer: then the
     /// caller stopped waiting for an answer already on its way, and the run goes on with what it does after it. A
     /// native body finishes it: its keys are ordered by the messages it takes one at a time, and an answer nobody waits
     /// for is dropped by the caller's node. A request not found was answered already, or has not arrived.
@@ -1072,7 +1052,7 @@ impl Activation {
             if asked(&state.current) {
                 return Ok(true);
             }
-            let Some(run) = state.runs.iter_mut().find(|run| asked(&run.current)) else {
+            let Some(run) = state.run.as_mut().filter(|run| asked(&run.current)) else {
                 return Ok(false);
             };
             if run.answered {
@@ -1093,7 +1073,7 @@ impl Activation {
     #[must_use]
     pub fn chain(&self, id: u64) -> Chain {
         let state = self.held();
-        let Some(run) = state.runs.iter().find(|run| run.id == id) else {
+        let Some(run) = state.run.as_ref().filter(|run| run.id == id) else {
             return Chain::default();
         };
         let link = Link {
@@ -1119,7 +1099,7 @@ impl Activation {
         }
     }
 
-    /// The cycle `deliver` closes here, when every run the body may have is waiting, down its chain, for its answer.
+    /// The cycle `deliver` closes here, when the body is waiting, down its chain, for its answer.
     ///
     /// A run waits from its read until the next, except while it is reading; a native body waits while an answer is
     /// out, holding its mailbox.
@@ -1128,27 +1108,19 @@ impl Activation {
             return None;
         }
         let state = self.held();
-        let definition = &state.behavior;
-        let (holding, concurrency): (Vec<u64>, usize) = if definition.native.is_some() {
-            (state.awaiting.iter().map(|_| state.hold).collect(), 1)
+        let holding = if state.behavior.native.is_some() {
+            state.awaiting.as_ref().map(|_| state.hold)
         } else {
-            (
-                state
-                    .runs
-                    .iter()
-                    .filter(|run| run.task.is_some() && run.waiting.is_none())
-                    .map(|run| run.hold)
-                    .collect(),
-                definition.settings.concurrency,
-            )
+            state
+                .run
+                .as_ref()
+                .filter(|run| run.task.is_some() && run.waiting.is_none())
+                .map(|run| run.hold)
         };
-        deliver
-            .chain
-            .closed(&self.entry, &self.key, &holding, concurrency)
+        deliver.chain.closed(&self.entry, &self.key, holding)
     }
 
-    /// Hand the waiting reads what arrived, or end them because nothing else will. With no read waiting, a body that
-    /// runs fewer runs than its `concurrency` starts one more for what arrived.
+    /// Hand the waiting read what arrived, or end it because nothing else will.
     ///
     /// A read whose deadline has passed ends even though a message is there: the body stops reading at `idle_after`,
     /// and what arrived after that waits in the mailbox for the run that reads next.
@@ -1157,30 +1129,26 @@ impl Activation {
         if slf.get().held().behavior.native.is_some() {
             return Self::stirred(slf, py);
         }
-        loop {
-            let first = slf
-                .get()
-                .held()
-                .runs
-                .iter()
-                .find(|run| run.waiting.is_some())
-                .map(|run| (run.id, run.deadline));
-            let Some((id, deadline)) = first else {
-                return Self::widen(slf, py);
-            };
-            if !Self::woken(slf, py, id, deadline)? {
-                return Ok(());
-            }
+        let reading = slf
+            .get()
+            .held()
+            .run
+            .as_ref()
+            .filter(|run| run.waiting.is_some())
+            .map(|run| (run.id, run.deadline));
+        match reading {
+            Some((id, deadline)) => Self::woken(slf, py, id, deadline),
+            None => Ok(()),
         }
     }
 
-    /// Wake the read the run `id` waits on. `false` says it goes on waiting: there is nothing to hand it.
+    /// Wake the read the run `id` waits on, unless there is nothing to hand it and it goes on waiting.
     fn woken(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         id: u64,
         deadline: Option<f64>,
-    ) -> PyResult<bool> {
+    ) -> PyResult<()> {
         let expired = match deadline {
             None => false,
             Some(deadline) => slf.get().node.now(py)? >= deadline,
@@ -1189,7 +1157,7 @@ impl Activation {
             let mut state = slf.get().held();
             let draining = state.draining;
             let Some(waiting) = state.run(id).and_then(|run| run.waiting.take()) else {
-                return Ok(true);
+                return Ok(());
             };
             (waiting, draining)
         };
@@ -1202,7 +1170,7 @@ impl Activation {
             if let Some(idle) = idle {
                 idle.bind(py).call_method0("cancel")?;
             }
-            return Ok(true);
+            return Ok(());
         }
         // The read leaves the run before the take: a caller called back from inside it sends again at once, and that
         // message is to be queued, not handed to this read in place of the one taken.
@@ -1222,11 +1190,11 @@ impl Activation {
         let idle = {
             let mut state = slf.get().held();
             let Some(run) = state.run(id) else {
-                return Ok(true);
+                return Ok(());
             };
             if deliver.is_none() && !draining && !expired {
                 run.waiting = Some(waiting);
-                return Ok(false);
+                return Ok(());
             }
             run.deadline = None;
             if let Some(deliver) = &deliver {
@@ -1240,28 +1208,12 @@ impl Activation {
         let waiting = waiting.bind(py);
         let Some(deliver) = deliver else {
             waiting.call_method1("set_exception", (ended(),))?;
-            return Ok(true);
+            return Ok(());
         };
         match Self::opened(slf, py, &deliver) {
             Ok(msg) => waiting.call_method1("set_result", (msg,))?,
             Err(error) => waiting.call_method1("set_exception", (error,))?,
         };
-        Ok(true)
-    }
-
-    /// Start one more run of the body for a message that finds every run busy, up to its `concurrency`.
-    fn widen(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
-        let wanted = {
-            let state = slf.get().held();
-            state.live
-                && !state.ending()
-                && !state.releasing
-                && !state.mailbox.empty()
-                && state.runs.len() < state.behavior.settings.concurrency
-        };
-        if wanted {
-            return Self::start(slf, py, None);
-        }
         Ok(())
     }
 
@@ -1490,7 +1442,6 @@ impl Activation {
         py: Python<'py>,
         value: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        Self::writable(slf)?;
         let written = Self::stored(slf, py, value, false)?;
         Ok(Bound::new(py, Awaited::of(written))?.into_any())
     }
@@ -1504,7 +1455,6 @@ impl Activation {
         py: Python<'py>,
         change: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        Self::writable(slf)?;
         let current = slf.get().value(py)?;
         let changed = change.call1((current,))?;
         let awaitable: bool = py
@@ -1601,7 +1551,6 @@ impl Activation {
         definition: &Arc<Definition>,
         value: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        Self::writable(slf)?;
         slf.get().node.learn(actor, definition);
         let mut pages = match value {
             None => slf
@@ -1672,7 +1621,6 @@ impl Activation {
     /// a type without one has no state to read until the next `set`. A body that ends without writing again leaves
     /// nothing of the key behind.
     pub fn delete<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        Self::writable(slf)?;
         if slf.get().held().switching {
             let Self { entry, key, .. } = slf.get();
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -1697,21 +1645,6 @@ impl Activation {
         let written = Self::write(slf, py, wrote)?;
         Ok(Bound::new(py, Awaited::of(written))?.into_any())
     }
-
-    /// Refuse a write of the state from a type whose body handles several messages at once: two runs writing it is the
-    /// race the mailbox of one key exists to prevent.
-    fn writable(slf: &Bound<'_, Self>) -> PyResult<()> {
-        let concurrency = slf.get().held().behavior.settings.concurrency;
-        if concurrency > 1 {
-            let entry = &slf.get().entry;
-            let key = &slf.get().key;
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "{entry}/{key} handles {concurrency} messages at once (concurrency={concurrency}), so its state is \
-                 read-only"
-            )));
-        }
-        Ok(())
-    }
 }
 
 /// A write of the body on its way to the replicas, and what it changes here once they have it.
@@ -1729,7 +1662,7 @@ struct Wrote {
 
 impl Wrote {
     /// The write landed, or did not, and `written`, which the body waits on, hears which. Once no write of the body is
-    /// in flight, the runs that ended meanwhile go on.
+    /// in flight, a run that ended meanwhile goes on.
     fn landed(
         self,
         activation: &Bound<'_, Activation>,
@@ -2116,15 +2049,30 @@ impl Activation {
         Ok(())
     }
 
+    /// Tell each answer of a native body to whom it goes, as `Ref.tell` does: the caller of an `ask` settles, and an
+    /// entity reads it from its mailbox, as a message nobody waits on.
     fn answer_all(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         replies: Vec<(Target, Vec<u8>)>,
     ) -> PyResult<()> {
+        let node = &slf.get().node;
         for (target, answer) in replies {
-            slf.get()
-                .node
-                .answer(py, &target, &Outcome::Value(answer))?;
+            match target {
+                Target::Entity { actor, key } => node.hand(
+                    py,
+                    Command::Deliver(Deliver {
+                        actor,
+                        key,
+                        message: answer,
+                        reply: None,
+                        chain: Chain::default(),
+                    }),
+                )?,
+                reply @ Target::Reply { .. } => {
+                    node.answer(py, &reply, &Outcome::Value(answer))?;
+                }
+            }
         }
         Ok(())
     }

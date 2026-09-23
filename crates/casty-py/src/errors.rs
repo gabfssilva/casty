@@ -64,8 +64,7 @@ pyo3::create_exception!(
     pyo3::exceptions::PyException,
     "`ask` to a key whose body is waiting, down the chain of asks this one belongs to, for its answer: the key would \
      never read the message. The message names the cycle.\n\n\
-     Raised at once, where waiting would end only at the deadline. A key of a type with `concurrency` above 1 takes \
-     the message while it has a run that is not waiting down the chain."
+     Raised at once, where waiting would end only at the deadline."
 );
 
 pyo3::create_exception!(

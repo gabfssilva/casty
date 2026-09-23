@@ -35,7 +35,6 @@ INVALID: list[tuple[Callable[[], object], str]] = [
     (lambda: actor(initial=0, replicas=0)(counter), "replicas"),
     (lambda: actor(initial=0, mailbox=0)(counter), "mailbox"),
     (lambda: actor(initial=0, on_full="wait")(counter), "on_full"),
-    (lambda: actor(initial=0, concurrency=0)(counter), "concurrency"),
     (lambda: actor(initial=0, ask_timeout=timedelta(seconds=-1))(counter), "ask_timeout"),
     (lambda: actor(initial=0, backoff=Backoff(first=timedelta(seconds=-1)))(counter), "backoff.first"),
     (lambda: Client(seeds=()), "seeds"),

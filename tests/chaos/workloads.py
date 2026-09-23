@@ -758,14 +758,8 @@ class Locks:
             self._grants[name].append(grant)
         await asyncio.sleep(rng.uniform(0.0, 0.05))
         release = grant.released = journal.begin(self.name, name, "release", lease.token)
-        try:
-            released = await lease.release()
-        except Exception as error:
-            if not ambiguous(error):
-                raise
-            journal.fail(release, error)
-            return
-        journal.confirm(release, released)
+        lease.release()
+        journal.confirm(release)
 
     def outage(self, dead: float, /) -> None:
         self._eras.append(self._grants)

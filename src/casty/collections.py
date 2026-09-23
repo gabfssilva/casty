@@ -23,14 +23,28 @@ from typing import Concatenate, cast
 from uuid import UUID, uuid4
 from weakref import WeakKeyDictionary, WeakValueDictionary
 
-from casty import ActorDefinition, ActorFailed, Context, DefaultedActor, Ref, System, Unavailable, Write, actor
+from casty import (
+    Actor,
+    ActorDefinition,
+    ActorFailed,
+    Context,
+    DefaultedActor,
+    NotStarted,
+    Ref,
+    System,
+    Unavailable,
+    Write,
+    actor,
+)
 
 __all__ = [
     "MISSING",
+    "Acquired",
     "Barrier",
     "Collections",
     "ConfigurationError",
     "Counter",
+    "Denied",
     "Dict",
     "Lease",
     "Lock",
@@ -39,7 +53,10 @@ __all__ = [
     "Queue",
     "Register",
     "Semaphore",
+    "SemaphoreState",
     "Set",
+    "Status",
+    "semaphore",
 ]
 
 
@@ -80,10 +97,38 @@ class EntryState:
 
 
 @dataclass(frozen=True)
-class Permit:
-    """A held permit: who holds it, the token it fences with, how much it takes and when it runs out."""
+class Acquired:
+    """The permits of the request `lease_id` were granted, under the fencing `token` of the grant.
 
-    id: UUID
+    Each grant of a semaphore has a larger token than every grant before it, so a resource that remembers the largest
+    token it has seen can refuse a holder whose lease ran out.
+    """
+
+    lease_id: str
+    token: int
+
+
+@dataclass(frozen=True)
+class Denied:
+    """The request `lease_id` was not granted: its `wait` ran out, or it asked for more than the capacity."""
+
+    lease_id: str
+
+
+@dataclass(frozen=True)
+class Status:
+    """How a semaphore stands: its capacity, the permits nobody holds, and the requests waiting in line."""
+
+    capacity: int
+    available: int
+    waiting: int
+
+
+@dataclass(frozen=True)
+class Permit:
+    """A held lease: its id, the token it fences with, how many permits it takes and when it runs out."""
+
+    lease_id: str
     token: int
     count: int
     expires: float
@@ -91,18 +136,20 @@ class Permit:
 
 @dataclass(frozen=True)
 class Waiter:
-    """A request waiting for permits, which is granted in order or times out where it is."""
+    """A request waiting for permits, which is granted in order or denied when its wait, if it has one, runs out."""
 
-    id: UUID
-    reply_to: Ref[int | None]
+    lease_id: str
+    reply_to: Ref[Acquired | Denied]
     count: int
     ttl: float
-    until: float
+    until: float | None
 
 
 @dataclass(frozen=True)
 class SemaphoreState:
-    capacity: int = 0
+    """The state of a semaphore, which a ref to one is obtained with: `SemaphoreState(capacity=n)`."""
+
+    capacity: int
     next_token: int = 1
     held: tuple[Permit, ...] = ()
     pending: tuple[Waiter, ...] = ()
@@ -395,41 +442,55 @@ class queue_segment:
 
 
 class semaphore:
-    """Leases over a capacity, granted in order, renewed while they are held, expired when they are not."""
+    """A semaphore as an actor: leases over the capacity of its state, granted in order, held until they are released
+    or their TTL runs out.
+
+    A key starts from the capacity its ref is obtained with, `system.ref(semaphore.actor, name,
+    initial=SemaphoreState(capacity=n))`, and takes these messages. `Acquire` is answered with `Acquired` or `Denied`,
+    which are messages: an actor can `tell` it with `reply_to=ctx.self` and read the answer from its inbox, instead of
+    holding up its key while it waits. `Collections.semaphore` and `Collections.lock` are this actor behind `ask`.
+    Times are seconds, and TTLs use wall clocks, which must be synchronized across nodes.
+    """
 
     @dataclass(frozen=True)
-    class Request:
-        reply_to: Ref[int | None]
-        id: UUID
-        count: int
-        ttl: float
-        capacity: int
-        until: float | None
+    class Acquire:
+        """Ask for `n` permits, held for `ttl` seconds once granted.
 
-    @dataclass(frozen=True)
-    class Cancel:
-        reply_to: Ref[None]
-        id: UUID
+        `wait` is how long the request stays in line before it is denied: `None` waits until it is granted, and `0`
+        takes the permits only if they are free now and nobody waits before it. `lease_id` names the lease, and the
+        semaphore names one when it is `None`. Sent again under the same `lease_id`, a request keeps its place in line,
+        and once granted it is answered with the same grant.
+        """
+
+        reply_to: Ref[Acquired | Denied]
+        n: int = 1
+        ttl: float = 30.0
+        wait: float | None = None
+        lease_id: str | None = None
 
     @dataclass(frozen=True)
     class Release:
-        reply_to: Ref[bool]
-        token: int
+        """Give back the permits of `lease_id`, or withdraw its request while it waits. Nothing answers it."""
+
+        lease_id: str
 
     @dataclass(frozen=True)
     class Renew:
+        """Hold the lease `lease_id` for `ttl` seconds from now, answering whether it was still held."""
+
         reply_to: Ref[bool]
-        token: int
-        ttl: float
+        lease_id: str
+        ttl: float = 30.0
 
     @dataclass(frozen=True)
-    class Available:
-        reply_to: Ref[int]
-        capacity: int
+    class Get:
+        """Ask how the semaphore stands."""
 
-    type Message = Request | Cancel | Release | Renew | Available
+        reply_to: Ref[Status]
 
-    @actor(initial=SemaphoreState())
+    type Message = Acquire | Release | Renew | Get
+
+    @actor
     async def actor(ctx: Context[SemaphoreState, Message]) -> None:
         """The body runs in the core."""
 
@@ -566,8 +627,14 @@ class Binding:
             self.confirmed = True
 
     def ref[S, M](self, definition: DefaultedActor[S, M], shard: int | str = 0) -> Ref[M]:
-        key = f"{self.kind}:{len(self.name)}:{self.name}:{shard}"
-        return self.system.ref(configured(definition, self.replicas, self.write), key)
+        return self.system.ref(configured(definition, self.replicas, self.write), self._key(shard))
+
+    def started[S, M](self, definition: Actor[S, M], initial: S) -> Ref[M]:
+        """The ref of the key of a type without a default, which starts from `initial` when nothing wrote it."""
+        return self.system.ref(configured(definition, self.replicas, self.write), self._key(0), initial=initial)
+
+    def _key(self, shard: int | str) -> str:
+        return f"{self.kind}:{len(self.name)}:{self.name}:{shard}"
 
     def shard(self, key: bytes) -> int:
         return int.from_bytes(blake2b(key, digest_size=8).digest()) % self.shards
@@ -1192,27 +1259,35 @@ class Queue[T]:
 
 @dataclass(frozen=True)
 class Lease:
-    """Time-limited permits. The protected resource must reject older fencing tokens."""
+    """Permits held until `release`, or until their TTL runs out. The protected resource must reject older fencing
+    tokens."""
 
+    id: str
     token: int
     _ref: Ref[semaphore.Message]
 
     async def renew(self, ttl: float = 30.0) -> bool:
         _duration(ttl, "ttl")
-        return await self._ref.ask(semaphore.Renew, self.token, ttl)
+        try:
+            return await self._ref.ask(semaphore.Renew, self.id, ttl)
+        except NotStarted:
+            # Every replica of the semaphore was lost, and its leases with them.
+            return False
 
-    async def release(self) -> bool:
-        return await self._ref.ask(semaphore.Release, self.token)
+    def release(self) -> None:
+        """Give the permits back. Nothing answers: a release that is lost leaves them held until the TTL runs out."""
+        self._ref.tell(semaphore.Release(self.id))
 
     async def __aenter__(self) -> "Lease":
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        await self.release()
+        self.release()
 
 
 class Semaphore:
-    """FIFO waiters and renewable leases. TTLs use wall clocks, which must be synchronized across nodes.
+    """FIFO waiters and renewable leases, over the actor `semaphore`. TTLs use wall clocks, which must be synchronized
+    across nodes.
 
     Times are seconds. A transport failure aborts a wait; abandoned requests expire within 30 seconds.
     Existing leases retain their expiry on failover. No automatic renewal is performed.
@@ -1221,7 +1296,19 @@ class Semaphore:
     def __init__(self, binding: Binding, capacity: int) -> None:
         self._binding = binding
         self._capacity = capacity
-        self._ref = binding.ref(semaphore.actor)
+        self._ref = binding.started(semaphore.actor, SemaphoreState(capacity))
+
+    async def _asked[T](self, ask: Callable[[Ref[semaphore.Message]], Awaitable[T]]) -> T:
+        """`ask` on the semaphore, created again from its capacity when every replica of it was lost.
+
+        The collections are not durable, and a semaphore has no default: the key a lost one leaves is not started
+        until a ref brings its capacity again.
+        """
+        try:
+            return await ask(self._ref)
+        except NotStarted:
+            self._ref = self._binding.started(semaphore.actor, SemaphoreState(self._capacity))
+            return await ask(self._ref)
 
     def _validate(self, n: int, ttl: float) -> None:
         if not 1 <= n <= self._capacity:
@@ -1231,26 +1318,44 @@ class Semaphore:
     async def try_acquire(self, n: int = 1, *, ttl: float = 30.0) -> Lease | None:
         self._validate(n, ttl)
         await self._binding.ready()
-        token = await self._ref.ask(semaphore.Request, uuid4(), n, ttl, self._capacity, None)
-        return None if token is None else Lease(token, self._ref)
+        lease_id = str(uuid4())
+        try:
+            answer = await self._asked(lambda ref: ref.ask(semaphore.Acquire, n, ttl, 0.0, lease_id))
+        except BaseException:
+            self._ref.tell(semaphore.Release(lease_id))
+            raise
+        match answer:
+            case Acquired(granted, token):
+                return Lease(granted, token, self._ref)
+            case Denied():
+                return None
 
     async def acquire(self, n: int = 1, *, ttl: float = 30.0) -> Lease:
         """Wait for permits; use asyncio.timeout to bound the wait."""
         self._validate(n, ttl)
         await self._binding.ready()
-        id = uuid4()
+        lease_id = str(uuid4())
+
+        def acquiring(_: float) -> Awaitable[Acquired | Denied]:
+            return self._asked(lambda ref: ref.ask(semaphore.Acquire, n, ttl, _INTEREST, lease_id))
+
         try:
-            token = await _wait(lambda until: self._ref.ask(semaphore.Request, id, n, ttl, self._capacity, until))
-            if token is None:
-                raise TimeoutError("semaphore acquisition timed out")
-            return Lease(token, self._ref)
+            while True:
+                # Each ask renews the wait before it runs out, so the request keeps its place in line.
+                match await _wait(acquiring):
+                    case Acquired(granted, token):
+                        return Lease(granted, token, self._ref)
+                    case Denied():
+                        # The wait ran out while no ask reached the owner: back in line, at its end.
+                        pass
         except BaseException:
-            await _withdraw(self._ref.ask(semaphore.Cancel, id), None)
+            self._ref.tell(semaphore.Release(lease_id))
             raise
 
     async def available(self) -> int:
         await self._binding.ready()
-        return await self._ref.ask(semaphore.Available, self._capacity)
+        status = await self._asked(lambda ref: ref.ask(semaphore.Get))
+        return status.available
 
 
 class Lock:
@@ -1290,7 +1395,7 @@ class Lock:
         if held is None or held[0] is not asyncio.current_task():
             raise RuntimeError("lock context was not entered")
         self._held.set(None)
-        await held[1].release()
+        held[1].release()
 
 
 class Barrier:

@@ -125,12 +125,11 @@ def describe_distributed_collections() -> None:
                 assert await lock.try_lock() is None
 
             await eventually(all_confirmed_state_survives, timedelta(seconds=15))
-            assert await held.release()
+            held.release()
             successor = await lock.acquire()
             assert successor.token > held.token
             assert not await held.renew()
-            assert not await held.release()
-            await successor.release()
+            successor.release()
             assert await queue.drain(30) == list(range(24))
 
     async def it_refuses_minority_grants_and_keeps_majority_lease_ownership() -> None:
@@ -156,13 +155,13 @@ def describe_distributed_collections() -> None:
             harness.heal()
 
             async def release_after_healing() -> None:
-                await held.release()
+                held.release()
                 assert not await majority.locked()
 
             await eventually(release_after_healing, timedelta(seconds=15))
             successor = await majority.acquire()
             assert successor.token > held.token
-            await successor.release()
+            successor.release()
 
     async def it_coordinates_clients_and_rejects_conflicting_capacity_and_parties() -> None:
         async with Harness.start(3) as harness:
@@ -175,8 +174,8 @@ def describe_distributed_collections() -> None:
                 await right.semaphore("capacity", capacity=2).available()
             async with asyncio.timeout(5), asyncio.TaskGroup() as group:
                 pending = group.create_task(semaphore_right.acquire())
-                await held.release()
-            await pending.result().release()
+                held.release()
+            pending.result().release()
 
             first = left.barrier("round", parties=2)
             second = right.barrier("round", parties=2)

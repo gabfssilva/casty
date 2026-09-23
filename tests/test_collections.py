@@ -13,14 +13,18 @@ from uuid import uuid4
 
 import pytest
 
-from casty import ActorSystem, Collections, Ref
+from casty import ActorSystem, Collections, Context, Ref, actor
 from casty import collections as kinds
 from casty.collections import (
     MISSING,
+    Acquired,
     Binding,
     ConfigurationError,
     Counter,
+    Denied,
     Queue,
+    SemaphoreState,
+    Status,
     _after,  # pyright: ignore[reportPrivateUsage]
     _place,  # pyright: ignore[reportPrivateUsage]
     barrier,
@@ -46,6 +50,34 @@ class Index:
     labels: frozenset[str] = frozenset()
 
 
+@dataclass(frozen=True)
+class Take:
+    """Ask the pool for a permit under the key's name, answered to the key itself."""
+
+    wait: float | None
+
+
+@dataclass(frozen=True)
+class Heard:
+    reply_to: Ref[tuple[str, ...]]
+
+
+@actor(initial=0)
+async def worker(ctx: Context[int, Take | Heard | Acquired | Denied]) -> None:
+    pool = ctx.system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=1))
+    heard: list[str] = []
+    async for msg in ctx.inbox:
+        match msg:
+            case Take(wait):
+                pool.tell(semaphore.Acquire(ctx.self, wait=wait, lease_id=ctx.key))
+            case Acquired(lease_id, _):
+                heard.append(f"acquired {lease_id}")
+            case Denied(lease_id):
+                heard.append(f"denied {lease_id}")
+            case Heard(reply_to):
+                reply_to.tell(tuple(heard))
+
+
 def describe_counter_actor() -> None:
     async def it_serializes_additions_and_resets_the_named_counter() -> None:
         async with ActorSystem() as system:
@@ -61,6 +93,51 @@ def describe_counter_actor() -> None:
             assert await system.ref(counter.actor, "other").ask(counter.Get) == 0
             await ref.ask(counter.Reset)
             assert await ref.ask(counter.Get) == 0
+
+
+def describe_semaphore_actor() -> None:
+    async def it_tells_an_actor_its_grant_while_the_actor_goes_on_reading() -> None:
+        async with ActorSystem() as system:
+            pool = system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=1))
+            held = await pool.ask(semaphore.Acquire)
+            assert isinstance(held, Acquired)
+            first = system.ref(worker, "first")
+            first.tell(Take(None))
+            assert await first.ask(Heard) == ()
+            second = system.ref(worker, "second")
+            second.tell(Take(0.0))
+
+            async def second_is_denied() -> None:
+                assert await second.ask(Heard) == ("denied second",)
+
+            await eventually(second_is_denied)
+            assert await pool.ask(semaphore.Get) == Status(capacity=1, available=0, waiting=1)
+            pool.tell(semaphore.Release(held.lease_id))
+
+            async def first_acquires() -> None:
+                assert await first.ask(Heard) == ("acquired first",)
+
+            await eventually(first_acquires)
+            assert await pool.ask(semaphore.Get) == Status(capacity=1, available=0, waiting=0)
+
+    async def it_names_a_lease_nobody_named_and_answers_a_request_sent_again_with_its_grant() -> None:
+        async with ActorSystem() as system:
+            pool = system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=2))
+            named = await pool.ask(semaphore.Acquire)
+            chosen = await pool.ask(semaphore.Acquire, lease_id="mine")
+            assert isinstance(named, Acquired)
+            assert chosen == Acquired("mine", named.token + 1)
+            assert named.lease_id != "mine"
+            assert await pool.ask(semaphore.Acquire, lease_id="mine") == chosen
+            denied = await pool.ask(semaphore.Acquire, wait=0)
+            assert isinstance(denied, Denied)
+            assert denied.lease_id not in {named.lease_id, "mine"}
+
+    async def it_starts_from_the_capacity_its_first_ref_gave_it() -> None:
+        async with ActorSystem() as system:
+            system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=1))
+            again = system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=5))
+            assert await again.ask(semaphore.Get) == Status(capacity=1, available=1, waiting=0)
 
 
 def describe_register_actor() -> None:
@@ -564,9 +641,7 @@ print(system._encode(schema, values).hex())
                 second = await semaphore.acquire(2)
             assert second.token > first.token
             assert not await first.renew()
-            assert not await first.release()
-            assert await second.release()
-            assert not await second.release()
+            second.release()
             assert await semaphore.available() == 2
             with pytest.raises(ValueError):
                 await semaphore.acquire(3)
@@ -582,7 +657,7 @@ print(system._encode(schema, values).hex())
                     await semaphore.acquire()
             async with asyncio.TaskGroup() as group:
                 waiting = group.create_task(semaphore.acquire())
-                await first.release()
+                first.release()
             assert await semaphore.available() == 0
             held = waiting.result()
             task = asyncio.create_task(semaphore.acquire())
@@ -590,7 +665,7 @@ print(system._encode(schema, values).hex())
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-            await held.release()
+            held.release()
             async with await semaphore.acquire():
                 assert await semaphore.available() == 0
             assert await semaphore.available() == 1
@@ -618,7 +693,7 @@ print(system._encode(schema, values).hex())
             first = await lock.try_lock()
             assert first is not None
             assert await lock.try_lock() is None
-            await first.release()
+            first.release()
 
     async def it_reuses_barrier_generations_and_withdraws_timed_out_arrivals() -> None:
         async with ActorSystem() as system:
@@ -673,10 +748,10 @@ print(system._encode(schema, values).hex())
             async with asyncio.timeout(2), asyncio.TaskGroup() as group:
                 pending = group.create_task(semaphore.acquire())
                 await asyncio.sleep(0.07)
-                await lease.release()
+                lease.release()
             granted = pending.result()
             assert granted.token == lease.token + 1
-            await granted.release()
+            granted.release()
             assert await semaphore.available() == 1
 
     async def it_withdraws_only_the_cancelled_barrier_participant() -> None:
@@ -701,19 +776,19 @@ print(system._encode(schema, values).hex())
 
     async def it_expires_abandoned_requests_without_granting_or_counting_them() -> None:
         async with ActorSystem() as system:
-            permits = system.ref(semaphore.actor, "raw")
-            held = await permits.ask(semaphore.Request, uuid4(), 1, 30.0, 1, None)
-            assert held is not None
+            permits = system.ref(semaphore.actor, "raw", initial=SemaphoreState(capacity=1))
+            held = await permits.ask(semaphore.Acquire)
+            assert isinstance(held, Acquired)
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(0.005):
-                    await permits.ask(semaphore.Request, uuid4(), 1, 30.0, 1, time.time() + 0.02)
+                    await permits.ask(semaphore.Acquire, wait=0.02)
             round = system.ref(barrier.actor, "raw")
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(0.005):
                     await round.ask(barrier.Arrive, uuid4(), 2, time.time() + 0.02)
             await asyncio.sleep(0.04)
-            assert await permits.ask(semaphore.Release, held)
-            assert await permits.ask(semaphore.Available, 1) == 1
+            permits.tell(semaphore.Release(held.lease_id))
+            assert await permits.ask(semaphore.Get) == Status(capacity=1, available=1, waiting=0)
             assert await round.ask(barrier.Waiting) == 0
 
     async def it_does_not_replay_queue_removals_after_a_local_timeout() -> None:

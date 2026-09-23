@@ -35,8 +35,10 @@ from casty import (
 )
 from casty.collections import (
     MISSING,
+    Acquired,
     Barrier,
     Counter,
+    Denied,
     Dict,
     Lease,
     Lock,
@@ -45,7 +47,10 @@ from casty.collections import (
     Queue,
     Register,
     Semaphore,
+    SemaphoreState,
     Set,
+    Status,
+    semaphore,
 )
 
 
@@ -153,15 +158,6 @@ async def consumer(ctx: Context[Offset]) -> None:
 
 
 assert_type(consumer.on_full, OnFull)
-
-
-@actor(initial=Account(), concurrency=8)
-async def statement(ctx: Context[Account, Withdraw]) -> None:
-    async for msg in ctx.inbox:
-        msg.reply_to.tell(msg.amount <= ctx.state.value.balance)
-
-
-assert_type(statement.concurrency, int)
 
 
 @actor(
@@ -340,12 +336,31 @@ async def collection_types(system: System) -> None:
     semaphore = collections.semaphore("workers", capacity=3)
     assert_type(semaphore, Semaphore)
     assert_type(await semaphore.try_acquire(), Lease | None)
-    assert_type(await semaphore.acquire(), Lease)
+    lease = await semaphore.acquire()
+    assert_type(lease, Lease)
+    assert_type(lease.release(), None)
     assert_type(collections.lock("resource"), Lock)
     assert_type(collections.barrier("round", parties=3), Barrier)
 
     async with Client(seeds=("10.0.0.4:7400",), limits=Limits(message=32 * 1024 * 1024)) as client:
         assert_type(await client.ref(account, "acc-1").ask(Withdraw, 30), bool)
+
+
+@actor(initial=0)
+async def pooled(ctx: Context[int, Deposit | Acquired | Denied]) -> None:
+    pool = ctx.system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=4))
+    async for msg in ctx.inbox:
+        match msg:
+            case Deposit():
+                pool.tell(semaphore.Acquire(ctx.self, n=2, ttl=10.0, wait=5.0))
+            case Acquired(lease_id, token):
+                assert_type(token, int)
+                pool.tell(semaphore.Release(lease_id))
+            case Denied():
+                pass
+    assert_type(await pool.ask(semaphore.Acquire, lease_id="mine"), Acquired | Denied)
+    assert_type(await pool.ask(semaphore.Renew, "mine", 10.0), bool)
+    assert_type(await pool.ask(semaphore.Get), Status)
 
 
 def packed(numbers: list[int]) -> bytes:

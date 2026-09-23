@@ -159,13 +159,22 @@ fn collection(name: &str) -> Option<&str> {
 pub const WHOLE: &str = ".";
 
 /// A message as it travels: its name within its type, who it answers, and every other field, which `field` reads by
-/// its name or steps over. Nothing when the message is not one.
-///
-/// The name within the type is the last part of the qualname the message travels under.
+/// its name or steps over. Nothing when the message is not one, or answers no one.
 fn fields(
     message: &[u8],
-    mut field: impl FnMut(&str, &mut Reading<'_>) -> Result<()>,
+    field: impl FnMut(&str, &mut Reading<'_>) -> Result<()>,
 ) -> Option<(&str, Target)> {
+    let (tag, reply) = told(message, field)?;
+    Some((tag, reply?))
+}
+
+/// A message as `fields` reads it, where one without `reply_to` is a `tell` that answers no one.
+///
+/// The name within the type is the last part of the qualname the message travels under.
+fn told(
+    message: &[u8],
+    mut field: impl FnMut(&str, &mut Reading<'_>) -> Result<()>,
+) -> Option<(&str, Option<Target>)> {
     let mut reading = Reading::new(message);
     let tag = reading.tag().ok()?;
     let len = reading.fields().ok()?;
@@ -176,7 +185,7 @@ fn fields(
             name => field(name, &mut reading).ok()?,
         }
     }
-    Some((&tag[tag.rfind('.').map_or(0, |dot| dot + 1)..], reply?))
+    Some((&tag[tag.rfind('.').map_or(0, |dot| dot + 1)..], reply))
 }
 
 /// `int`, as an answer or a page.

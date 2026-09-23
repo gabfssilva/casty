@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Annotated, assert_never
 
 from casty import ActorSystem, Client, Collections, Context, Opaque, Ref, actor
+from casty.collections import SemaphoreState, semaphore
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,12 @@ async def invalid_collection_types(system: ActorSystem) -> None:
     await collections.counter("visits").add("one")  # error
     await collections.set("names", value=str).add(1)  # error
     await collections.multimap("names", key=str, value=int).put("one", "two")  # error
+    system.ref(semaphore.actor, "pool")  # error
+
+
+async def answers_the_semaphore_cannot_tell(ctx: Context[Account, Deposit]) -> None:
+    pool = ctx.system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=1))
+    pool.tell(semaphore.Acquire(ctx.self))  # error
 
 
 def packed(numbers: list[int]) -> bytes:

@@ -382,17 +382,6 @@ class ActorDefinition(Protocol):
         ...
 
     @property
-    def concurrency(self) -> int:
-        """How many messages of one key the body handles at once, 1 by default.
-
-        Above 1, up to that many runs of the body read the same `inbox`, each taking the next message as it reads,
-        so an `ask` or any other `await` in one run no longer holds up the others. The state is then read-only:
-        `state.set`, `state.update` and `become` raise `RuntimeError`, since two runs writing it is the race one
-        mailbox per key exists to prevent. The types of the collections take one message at a time and refuse it.
-        """
-        ...
-
-    @property
     def idle_after(self) -> timedelta | None:
         """Time without messages after which `inbox` ends. `None` is the system's."""
         ...

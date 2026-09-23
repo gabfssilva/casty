@@ -33,7 +33,7 @@ pub enum Outcome {
     },
     /// The answer does not fit in one message between two nodes. It says how large it is and what the limit is.
     TooLarge(String),
-    /// The `ask` closes a cycle: every run of the key it went to waits, down its chain, for its answer. It names the
+    /// The `ask` closes a cycle: the body of the key it went to waits, down its chain, for its answer. It names the
     /// cycle, `actor/key` by `actor/key`.
     Cycle(String),
 }

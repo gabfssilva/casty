@@ -85,8 +85,7 @@ class ReentrancyError(Exception):
 
     The key would never read the message: its body reads the next message only once the `ask` it awaits is answered.
     Raised at once, where waiting would end only at the deadline, and the message names the cycle, `actor/key` by
-    `actor/key`. A key whose type has a `concurrency` above 1 takes the message as long as one of its runs is not
-    waiting down the chain.
+    `actor/key`.
     """
 
 class ActorFailed(Exception):
@@ -129,8 +128,8 @@ class Ref[M](Protocol):
 
         Made by a body, from the task that read its message, an `ask` carries the keys whose bodies wait for its
         answer: those waiting on that message, and the body itself, until it reads again. The key it goes to raises
-        `ReentrancyError` here at once when it is one of them and none of its runs is free to read it: a body asking
-        its own key, or two keys asking each other. The chain names at most 16 keys, the most recent, so a longer
+        `ReentrancyError` here at once when it is one of them: a body asking its own key, or two keys asking each
+        other. The chain names at most 16 keys, the most recent, so a longer
         cycle ends at the deadline. A `tell`, an `ask` from outside a body, and one from a task the body started
         beside it keep nobody waiting.
         """
@@ -155,17 +154,15 @@ class State(Protocol[_T]):
     async def set(self, state: _T, /) -> None:
         """Store `state` on the replicas and return once the type's write level confirms it.
 
-        `value` changes only after the confirmation. Raises `RuntimeError` in a type whose `concurrency` is above 1,
-        whose state is read-only.
+        `value` changes only after the confirmation.
         """
 
     @overload
     async def update(self, change: Callable[[_T], Awaitable[_T]], /) -> _T:
         """Store what `change` makes of the last saved state, and answer it once it is confirmed.
 
-        `change` answers the new state or an awaitable of it. A type of `concurrency=1` handles one message at a
-        time, so nothing else writes the state in between; above 1 the state is read-only, and this raises
-        `RuntimeError`.
+        `change` answers the new state or an awaitable of it. A key handles one message at a time, so nothing else
+        writes the state in between.
         """
 
     @overload
@@ -176,8 +173,7 @@ class State(Protocol[_T]):
         The key is then one nothing wrote: activated again, it starts from `initial`. The body goes on from the default
         of its type, which `value` reads from here on; a type without a default has no state to read until the next
         `set`, which writes the key again. A body that ends without writing again leaves nothing of the key on any
-        replica. Raises `Unavailable` when too few replicas confirm it, as `set` does, and `RuntimeError` in a type
-        whose `concurrency` is above 1.
+        replica. Raises `Unavailable` when too few replicas confirm it, as `set` does.
         """
 
 @runtime_checkable
@@ -197,7 +193,7 @@ class Context[S, M = Never](Protocol):
         """Messages in arrival order. Ends after `idle_after` without messages: the type's, or the system's.
 
         Reading the next message is what ends the one before, so everything a body awaits in between, an `ask`
-        included, holds up the messages of the key, unless the type declares a `concurrency` above 1.
+        included, holds up the messages of the key.
         """
 
     @property
@@ -215,8 +211,7 @@ class Context[S, M = Never](Protocol):
         `behavior` takes the same messages, so every ref to the key stays good, and the key stays what it was: the
         type it started as, and `key`. The change is saved with the state, so it survives the node. The code after
         `become` still runs, which is where the message in hand is answered; `state.set` after it raises, because the
-        state is no longer of this type. Raises `RuntimeError` in a type whose `concurrency` is above 1, whose other
-        runs are in the middle of their messages.
+        state is no longer of this type.
         """
 
     @overload
@@ -253,8 +248,6 @@ class Actor(Generic[_S, _M]):  # noqa: UP046
     @property
     def on_full(self) -> OnFull: ...
     @property
-    def concurrency(self) -> int: ...
-    @property
     def idle_after(self) -> timedelta | None: ...
     @property
     def ask_timeout(self) -> timedelta | None: ...
@@ -283,8 +276,6 @@ class DefaultedActor(Generic[_S, _M]):  # noqa: UP046
     def mailbox(self) -> int | None: ...
     @property
     def on_full(self) -> OnFull: ...
-    @property
-    def concurrency(self) -> int: ...
     @property
     def idle_after(self) -> timedelta | None: ...
     @property
@@ -327,8 +318,6 @@ def actor[S, M](body: Body[S, M], /) -> Actor[S, M]:
         How many messages wait for a key before its mailbox is full. `None` does not bound it.
     on_full
         What an `ask` that finds the mailbox full meets. `"wait"` takes a `mailbox`.
-    concurrency
-        How many messages of one key the body handles at once. Above 1, the state is read-only.
     idle_after
         Time without messages after which `ctx.inbox` ends. `None` is the system's.
     ask_timeout
@@ -345,8 +334,8 @@ def actor[S, M](body: Body[S, M], /) -> Actor[S, M]:
     SchemaError
         The state or a message type of the body cannot be serialized.
     ValueError
-        `replicas`, `mailbox` or `concurrency` is 0, a pinned type has more than one replica, `on_full="wait"` has no
-        `mailbox`, a period is negative, or `write`, `on_full` or `durable` is a string it does not take.
+        `replicas` or `mailbox` is 0, a pinned type has more than one replica, `on_full="wait"` has no `mailbox`, a
+        period is negative, or `write`, `on_full` or `durable` is a string it does not take.
     TypeError
         `durable` is neither `"write"`, a `timedelta` nor `None`.
     """
@@ -359,7 +348,6 @@ def actor[S, M](
     write: Write = "majority",
     mailbox: int | None = None,
     on_full: OnFull = "refuse",
-    concurrency: int = 1,
     idle_after: timedelta | None = None,
     ask_timeout: timedelta | None = None,
     write_timeout: timedelta | None = None,
@@ -375,7 +363,6 @@ def actor[S, M](
     write: Write = "majority",
     mailbox: int | None = None,
     on_full: OnFull = "refuse",
-    concurrency: int = 1,
     idle_after: timedelta | None = None,
     ask_timeout: timedelta | None = None,
     write_timeout: timedelta | None = None,

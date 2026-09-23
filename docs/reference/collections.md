@@ -65,6 +65,20 @@
       merge_init_into_class: false
       filters: ["!^_[^_]", "!^__init__$"]
 
+## The semaphore as an actor
+
+::: casty.collections.semaphore
+    options:
+      members: ["Acquire", "Release", "Renew", "Get", "actor"]
+
+::: casty.collections.SemaphoreState
+
+::: casty.collections.Acquired
+
+::: casty.collections.Denied
+
+::: casty.collections.Status
+
 ## Absent values and errors
 
 ::: casty.collections.Missing

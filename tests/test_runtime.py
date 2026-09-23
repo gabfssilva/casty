@@ -9,7 +9,6 @@ from uuid import UUID
 import pytest
 
 from casty import ActorFailed, ActorSystem, Backoff, Context, DefaultedActor, MailboxFull, ReentrancyError, Ref, actor
-from casty.collections import counter
 from tests.app import Account, Balance, Deposit, Order, Paid, Pay, Pending, account
 from tests.support import eventually
 
@@ -164,12 +163,6 @@ class Relay:
 @dataclass(frozen=True)
 class Note:
     text: str
-
-
-@dataclass(frozen=True)
-class Bounce:
-    reply_to: Ref[str]
-    hops: int
 
 
 @dataclass(frozen=True)
@@ -796,64 +789,8 @@ def describe_actor_system() -> None:
                     await asleep.stopped.wait()
                     assert await system.ref(sleeper, "k").ask(Balance) == 0
 
-    def when_a_type_handles_several_messages_at_once() -> None:
-        async def it_overlaps_up_to_its_concurrency_on_one_key_over_a_state_it_only_reads() -> None:
-            inside = 0
-            most = 0
-            full = asyncio.Event()
-            release = asyncio.Event()
-
-            @actor(initial=Account(balance=7), concurrency=4)
-            async def lookup(ctx: Context[Account, Balance]) -> None:
-                nonlocal inside, most
-                async for msg in ctx.inbox:
-                    inside += 1
-                    most = max(most, inside)
-                    if inside == 4:
-                        full.set()
-                    await release.wait()
-                    inside -= 1
-                    msg.reply_to.tell(ctx.state.value.balance)
-
-            assert lookup.concurrency == 4
-            async with ActorSystem() as system:
-                ref = system.ref(lookup, "l-1")
-                answers = [asyncio.ensure_future(ref.ask(Balance)) for _ in range(10)]
-                async with asyncio.timeout(1):
-                    await full.wait()
-                await asyncio.sleep(0.05)
-
-                # Four messages of one key in hand at once, and the other six queued behind them.
-                assert (inside, system._queued(lookup, "l-1")) == (4, 6)
-                release.set()
-                assert await asyncio.gather(*answers) == [7] * 10
-            assert most == 4
-
-        async def it_refuses_every_write_of_the_state() -> None:
-            @actor(initial=Account(balance=3), concurrency=2)
-            async def reader(ctx: Context[Account, Change]) -> None:
-                async for msg in ctx.inbox:
-                    match msg.how:
-                        case "add":
-                            await ctx.state.set(Account(ctx.state.value.balance + 1))
-                        case "double":
-                            await ctx.state.update(lambda current: Account(current.balance * 2))
-                        case "break":
-                            await ctx.become(reader)
-                        case "read":
-                            pass
-                    msg.reply_to.tell(ctx.state.value.balance)
-
-            writes: tuple[Literal["add", "double", "break"], ...] = ("add", "double", "break")
-            async with ActorSystem(backoff=Backoff(first=timedelta(milliseconds=10))) as system:
-                ref = system.ref(reader, "r-1")
-                for how in writes:
-                    with pytest.raises(ActorFailed, match="read-only"):
-                        await ref.ask(Change, how)
-
-                assert await ref.ask(Change, "read") == 3
-
-        async def it_keeps_one_message_at_a_time_by_default() -> None:
+    def when_several_messages_reach_one_key_at_once() -> None:
+        async def it_handles_them_one_at_a_time() -> None:
             inside = 0
             most = 0
 
@@ -867,15 +804,10 @@ def describe_actor_system() -> None:
                     inside -= 1
                     msg.reply_to.tell(ctx.state.value.balance)
 
-            assert single.concurrency == 1
             async with ActorSystem() as system:
                 ref = system.ref(single, "s-1")
                 assert await asyncio.gather(*(ref.ask(Balance) for _ in range(5))) == [0] * 5
             assert most == 1
-
-        def it_is_refused_for_the_body_of_a_collection() -> None:
-            with pytest.raises(ValueError, match="concurrency"):
-                actor(initial=0, concurrency=2)(counter.actor.body)
 
     def when_asks_come_back_to_a_key_that_waits() -> None:
         async def it_raises_reentrancy_error_naming_both_keys_when_two_actors_ask_each_other() -> None:
@@ -1010,31 +942,3 @@ def describe_actor_system() -> None:
                     assert answers == ["caller"]
 
                 await eventually(asked_back)
-
-        async def it_takes_a_cycle_into_a_free_run_and_refuses_it_once_every_run_waits() -> None:
-            async def bounced(to: Ref[Bounce], hops: int) -> str:
-                if hops == 0:
-                    return "landed"
-                try:
-                    return await to.ask(Bounce, hops - 1)
-                except ReentrancyError as error:
-                    return str(error)
-
-            @actor(initial=Account(), concurrency=2)
-            async def there(ctx: Context[Account, Bounce]) -> None:
-                async for msg in ctx.inbox:
-                    msg.reply_to.tell(await bounced(ctx.system.ref(back, ctx.key), msg.hops))
-
-            @actor(initial=Account(), concurrency=2)
-            async def back(ctx: Context[Account, Bounce]) -> None:
-                async for msg in ctx.inbox:
-                    msg.reply_to.tell(await bounced(ctx.system.ref(there, ctx.key), msg.hops))
-
-            async with ActorSystem() as system:
-                async with asyncio.timeout(2):
-                    # There, back, and there again: the second run of `there` takes it.
-                    assert await system.ref(there, "a").ask(Bounce, 2) == "landed"
-                    # Twice round, both runs of each key wait down the chain, and the fifth hop has none to read it.
-                    refused = await system.ref(there, "b").ask(Bounce, 4)
-
-            assert f"{there.name}/b -> {back.name}/b -> {there.name}/b -> {back.name}/b -> {there.name}/b" in refused

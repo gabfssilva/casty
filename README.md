@@ -90,8 +90,7 @@ activates it again from the saved state.
 - Only active keys use a task and memory for a body.
 - Local variables do not survive deactivation, a restart or a move to another node. What must survive goes in the
   state.
-- A key handles one message at a time, so a body needs no locks. A type can take more at once with `concurrency` (see
-  [Concurrency](#concurrency)).
+- A key handles one message at a time, so a body needs no locks.
 
 ### tell and ask
 
@@ -268,24 +267,15 @@ async def teller(ctx: Context[int, Transfer]) -> None:
 
 An `ask` made by a body carries the keys whose bodies wait for its answer: those waiting on the message the body is on,
 and the body itself until it reads again. One that comes back to such a key raises `ReentrancyError` at once, naming
-the cycle, instead of waiting for the deadline: a body asking its own key, or two keys asking each other. A type with
-`concurrency` above 1 takes it into another run while it has one free. The chain names the 16 most recent keys and only
-the task that read the message adds to it, so a longer cycle, one through a task the body started, and two requests
-that each hold a key the other asks still end in `TimeoutError`.
+the cycle, instead of waiting for the deadline: a body asking its own key, or two keys asking each other. The chain
+names the 16 most recent keys and only the task that read the message adds to it, so a longer cycle, one through a task
+the body started, and two requests that each hold a key the other asks still end in `TimeoutError`.
 
-### Concurrency
+### What holds up a key
 
 A body takes its next message when it reads `inbox` again, so everything it awaits in between holds up the messages of
 its key: a `state.set` until the write level confirms it, an `ask` until its answer or deadline, a sleep, any I/O.
 Messages keep queuing meanwhile, up to `mailbox`. Nothing else blocks it: a task the body starts runs beside it.
-
-To handle several messages of one key at once, declare `@actor(concurrency=n)` rather than handing messages to tasks of
-the body's own, which would write the state from several of them at once. Up to `n` runs of the body read the same
-`inbox`, each taking the next message as it reads, and each fails, backs off and is cancelled on its own.
-
-- The state is read-only above 1: `state.set`, `update`, `delete` and `become` raise `RuntimeError`. A type that must
-  write asks a key of a type with `concurrency=1`.
-- The collection types refuse it.
 
 ### Cancellation
 
@@ -628,11 +618,44 @@ barriers always use `"majority"`.
 - `Queue` keeps its items in segments of up to 1024 items or 64 KiB under keys of their own, so an operation writes
   one segment and the queue has no size ceiling. A segment drained for good is deleted once it idles. A lost `poll`
   or `drain` answer loses the removed items.
-- `Semaphore` and `Lock` grant a `Lease` with a TTL in seconds, renewed only by `lease.renew(ttl)`. Expiry uses wall
-  clocks, which must be synchronized. Waiters are served in order. A lease can expire under a slow holder, so the
+- `Semaphore` and `Lock` grant a `Lease` with a TTL in seconds, renewed only by `lease.renew(ttl)` and given back by
+  `lease.release()`, which nothing answers: a lost release leaves the permits held until the TTL runs out. Expiry uses
+  wall clocks, which must be synchronized. Waiters are served in order. A lease can expire under a slow holder, so the
   protected resource must reject tokens older than the newest it has seen.
 - `acquire` and `Barrier.wait` wait indefinitely; bound them with `asyncio.timeout`. `async with lock` is not
   reentrant.
+
+`Semaphore` and `Lock` are the actor `casty.collections.semaphore` behind `ask`, and a body can use that actor without
+waiting on it. A key takes its capacity from the `initial` its first ref is obtained with, and answers `Acquire` with
+`Acquired` or `Denied`, which are messages: told to `ctx.self`, the answer arrives in the inbox, and the body goes on
+reading meanwhile.
+
+```python
+from casty.collections import Acquired, Denied, SemaphoreState, semaphore
+
+
+@actor(initial=0)
+async def crawler(ctx: Context[int, Crawl | Acquired | Denied]) -> None:
+    fetches = ctx.system.ref(semaphore.actor, "fetches", initial=SemaphoreState(capacity=8))
+    async for msg in ctx.inbox:
+        match msg:
+            case Crawl(url):
+                fetches.tell(semaphore.Acquire(ctx.self, ttl=60, lease_id=url))
+            case Acquired(url, _):
+                await fetch(url)  # at most 8 at once, across every key of every crawler
+                fetches.tell(semaphore.Release(url))
+            case Denied():
+                pass
+```
+
+- `Acquire(reply_to, n=1, ttl=30.0, wait=None, lease_id=None)`. `wait` is how long the request stays in line: `None`
+  for as long as it takes, `0` for now or never. The semaphore names the lease when `lease_id` is `None`. Sent again
+  under the same `lease_id`, a request keeps its place in line, and a granted one hears its grant again.
+- `Release(lease_id)` gives the permits back, or withdraws a request still waiting, and answers nothing.
+  `Renew(reply_to, lease_id, ttl)` answers whether the lease was still held, and `Get(reply_to)` answers a `Status`.
+- The capacity is the one of the ref that created the key; the `initial` of a later ref is ignored. A ref to a key
+  nobody created, received in a message, meets `NotStarted`, and so does one to a key lost with every replica, since
+  the collections are not durable, until a ref brings its capacity again. `Semaphore` and `Lock` do that themselves.
 
 ## Observing a node
 
@@ -738,7 +761,6 @@ The API reference, generated from the docstrings, is at <https://gabfssilva.gith
 | `pinned` | `False` | Each key runs on the node its ref names with `at=`; one copy |
 | `mailbox` | `None` | Mailbox capacity; `None` is unbounded |
 | `on_full` | `"refuse"` | What an `ask` meets at a full bounded mailbox: `"refuse"` raises `MailboxFull`, `"wait"` waits for room within `ask_timeout`; needs `mailbox` |
-| `concurrency` | `1` | How many messages of one key the body handles at once. Above 1 the state is read-only: `state.set`, `update`, `delete` and `become` raise `RuntimeError`. The collection types refuse it. |
 | `durable` | `None` | `"write"` saves every confirmed write to the system's store before `state.set` returns; a `timedelta` saves the latest confirmed write at most that long after it, and the last write of an activation and deletions at once. `None` keeps the state in memory only. |
 | `idle_after` | the system's | Time without messages after which `inbox` ends |
 | `ask_timeout` | the system's | Deadline of an `ask` to this type |
@@ -855,8 +877,7 @@ schema together and writes msgpack directly.
    queues what arrives and asks the replicas for the state.
 2. If no replica has one, and for a durable type the store has none either, the key starts from the `initial` the ref
    offered, or from the default of the type.
-3. The node writes the state back with an `@active` page, and creates the body task, or `concurrency` of them, once
-   that write is confirmed.
+3. The node writes the state back with an `@active` page, and creates the body task once that write is confirmed.
 4. `ctx.inbox` yields messages in arrival order and ends after `idle_after` without any.
 5. When the body returns, it runs again if messages arrived and it had read at least one. Otherwise the node clears
    `@active` and drops the activation. The read condition keeps a body that never reads its inbox from spinning. A key

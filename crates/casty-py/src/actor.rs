@@ -101,8 +101,6 @@ pub struct Settings {
     /// What a full mailbox does with a message, which the caller reads from its own copy of the definition too: an
     /// `ask` that is held keeps its message to send again.
     pub on_full: OnFull,
-    /// How many runs of the body read the mailbox at once. Above one, the state is read-only.
-    pub concurrency: usize,
     pub idle_after: Option<Duration>,
     /// The deadline of an `ask` to the type, which the caller reads from its own copy of the definition.
     pub ask_timeout: Option<Duration>,
@@ -183,19 +181,7 @@ impl Definition {
                 "{name}: on_full is 'wait', and a mailbox without a bound is never full; set mailbox"
             )));
         }
-        if settings.concurrency == 0 {
-            return Err(PyValueError::new_err(format!(
-                "{name}: concurrency is 0, so no message would be read"
-            )));
-        }
         let native = crate::collections::native(&name);
-        // The protocols of the collections rely on their body taking one message at a time.
-        if native.is_some() && settings.concurrency > 1 {
-            return Err(PyValueError::new_err(format!(
-                "{name}: concurrency is {}, and the body of a collection takes one message at a time",
-                settings.concurrency
-            )));
-        }
         let (state, messages) = schemas(py, body, &name)?;
         Ok(Self {
             native,
@@ -295,11 +281,6 @@ macro_rules! definition_methods {
             }
 
             #[getter]
-            fn concurrency(&self) -> usize {
-                self.0.settings.concurrency
-            }
-
-            #[getter]
             fn idle_after(&self) -> Option<Duration> {
                 self.0.settings.idle_after
             }
@@ -393,7 +374,6 @@ definition_methods!(DefaultedActor
     write = "majority",
     mailbox = None,
     on_full = "refuse",
-    concurrency = 1,
     idle_after = None,
     ask_timeout = None,
     write_timeout = None,
@@ -409,7 +389,6 @@ pub fn actor(
     write: &str,
     mailbox: Option<usize>,
     on_full: &str,
-    concurrency: usize,
     idle_after: Option<&Bound<'_, PyAny>>,
     ask_timeout: Option<&Bound<'_, PyAny>>,
     write_timeout: Option<&Bound<'_, PyAny>>,
@@ -422,7 +401,6 @@ pub fn actor(
         write: written(write)?,
         mailbox,
         on_full: when_full(on_full)?,
-        concurrency,
         idle_after: idle_after
             .map(|value| period("idle_after", value))
             .transpose()?,

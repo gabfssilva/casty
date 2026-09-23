@@ -53,35 +53,19 @@ impl Chain {
         Self(links)
     }
 
-    /// The cycle a message of this chain closes at `(actor, key)`, named hop by hop, when no run of that key would
-    /// ever read it.
+    /// The cycle a message of this chain closes at `(actor, key)`, named hop by hop, when the body of that key would
+    /// never read it.
     ///
-    /// `holding` is the stretch each run of the key is on while it is not reading. The message is never read when the
-    /// key has all the runs it may have, `concurrency` of them, and each is on a stretch that asked down this chain:
-    /// each waits for an answer that waits for this message. A key with a run reading, or with room for another run,
-    /// reads it.
+    /// `holding` is the stretch the body of the key is on while it is not reading. The message is never read when
+    /// that stretch asked down this chain: the body waits for an answer that waits for this message. A body that is
+    /// reading reads it.
     #[must_use]
-    pub fn closed(
-        &self,
-        actor: &str,
-        key: &str,
-        holding: &[u64],
-        concurrency: usize,
-    ) -> Option<String> {
-        let waiting =
-            |link: &Link| link.actor == actor && link.key == key && holding.contains(&link.hold);
-        let blocked = holding
+    pub fn closed(&self, actor: &str, key: &str, holding: Option<u64>) -> Option<String> {
+        let hold = holding?;
+        let first = self
+            .0
             .iter()
-            .filter(|hold| {
-                self.0
-                    .iter()
-                    .any(|link| link.hold == **hold && waiting(link))
-            })
-            .count();
-        if blocked < concurrency {
-            return None;
-        }
-        let first = self.0.iter().position(waiting)?;
+            .position(|link| link.actor == actor && link.key == key && link.hold == hold)?;
         let mut hops: Vec<String> = self.0[first..]
             .iter()
             .map(|link| format!("{}/{}", link.actor, link.key))
@@ -113,7 +97,7 @@ mod tests {
     fn a_key_asking_itself_closes_a_cycle_of_one() {
         let asked = chain(&[link("a", "k", 1)]);
         assert_eq!(
-            asked.closed("a", "k", &[1], 1),
+            asked.closed("a", "k", Some(1)),
             Some("a/k -> a/k".to_owned())
         );
     }
@@ -122,7 +106,7 @@ mod tests {
     fn two_keys_asking_each_other_close_a_cycle_naming_both() {
         let asked = chain(&[link("a", "k", 1), link("b", "k", 7)]);
         assert_eq!(
-            asked.closed("a", "k", &[1], 1),
+            asked.closed("a", "k", Some(1)),
             Some("a/k -> b/k -> a/k".to_owned())
         );
     }
@@ -131,38 +115,17 @@ mod tests {
     fn a_run_that_has_read_since_is_not_waiting_on_the_chain() {
         // The body asked without waiting and went on to its next message, or is reading.
         let asked = chain(&[link("a", "k", 1), link("b", "k", 7)]);
-        assert_eq!(asked.closed("a", "k", &[2], 1), None);
-        assert_eq!(asked.closed("a", "k", &[], 1), None);
+        assert_eq!(asked.closed("a", "k", Some(2)), None);
+        assert_eq!(asked.closed("a", "k", None), None);
     }
 
     #[test]
     fn a_key_the_chain_does_not_name_is_not_reentered() {
         let asked = chain(&[link("a", "k", 1), link("b", "k", 7)]);
-        assert_eq!(asked.closed("c", "k", &[1], 1), None);
-        assert_eq!(asked.closed("a", "other", &[1], 1), None);
+        assert_eq!(asked.closed("c", "k", Some(1)), None);
+        assert_eq!(asked.closed("a", "other", Some(1)), None);
         // Another type under the same key is another key.
-        assert_eq!(asked.closed("b", "k", &[1], 1), None);
-    }
-
-    #[test]
-    fn a_key_with_a_run_free_or_room_for_one_reads_the_message() {
-        let once = chain(&[link("a", "k", 1), link("b", "k", 7)]);
-        // One run waits down the chain, and the other is on something else.
-        assert_eq!(once.closed("a", "k", &[1, 2], 2), None);
-        // One run waits down the chain, and there is room for a second.
-        assert_eq!(once.closed("a", "k", &[1], 2), None);
-
-        // Both runs asked down the chain: neither will read it.
-        let twice = chain(&[
-            link("a", "k", 1),
-            link("b", "k", 7),
-            link("a", "k", 2),
-            link("b", "k", 8),
-        ]);
-        assert_eq!(
-            twice.closed("a", "k", &[1, 2], 2),
-            Some("a/k -> b/k -> a/k -> b/k -> a/k".to_owned())
-        );
+        assert_eq!(asked.closed("b", "k", Some(1)), None);
     }
 
     #[test]
@@ -184,12 +147,12 @@ mod tests {
         deep.push(link("a", "k", 100));
         deep.push(link("b", "k", 101));
         assert_eq!(
-            chain(&deep).closed("a", "k", &[100], 1),
+            chain(&deep).closed("a", "k", Some(100)),
             Some("a/k -> b/k -> a/k".to_owned())
         );
         // A cycle longer than the bound has lost its first caller, and ends at the deadline instead.
         let mut long = vec![link("a", "k", 100)];
         long.extend((0..BOUND).map(|hop| link("hop", &hop.to_string(), 0)));
-        assert_eq!(chain(&long).closed("a", "k", &[100], 1), None);
+        assert_eq!(chain(&long).closed("a", "k", Some(100)), None);
     }
 }
