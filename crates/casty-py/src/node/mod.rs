@@ -26,7 +26,7 @@ use casty_net::endpoint::TooLarge;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple, PyType};
 
-use crate::actor::Behavior;
+use crate::actor::Definition;
 use crate::awaited::Awaited;
 use crate::lock::Locked;
 use crate::refs::Ref;
@@ -453,20 +453,21 @@ impl Node {
         callback::later(&self.running(py)?, delay, call)
     }
 
-    pub fn learn(&self, py: Python<'_>, behavior: &Behavior) {
-        self.catalog.locked().learn(behavior, py);
+    /// Meet the type `actor` defines, which is the one this system runs under its name unless it met another first.
+    pub fn learn(&self, actor: &Bound<'_, PyAny>, definition: &Arc<Definition>) {
+        self.catalog.locked().learn(actor, definition);
         if let Some(cluster) = self.cluster() {
-            cluster.node().learn(behavior.definition().kind());
+            cluster.node().learn(definition.kind());
         }
     }
 
     /// The type called `name`, imported when this system has not met it yet.
     #[must_use]
-    pub fn resolve(&self, py: Python<'_>, name: &str) -> Option<Behavior> {
+    pub fn resolve(&self, py: Python<'_>, name: &str) -> Option<Arc<Definition>> {
         {
             let catalog = self.catalog.locked();
             if let Some(known) = catalog.known(name) {
-                return Some(known.clone_ref(py));
+                return Some(Arc::clone(known));
             }
             if catalog.gave_up(name) {
                 return None;
@@ -475,7 +476,7 @@ impl Node {
         // The import runs without the lock: it is arbitrary Python, and it can reach back into this node.
         let found = catalog::imported(py, name);
         let mut catalog = self.catalog.locked();
-        let Some(behavior) = found else {
+        let Some((actor, definition)) = found else {
             catalog.give_up(name);
             drop(catalog);
             if let Some(cluster) = self.cluster() {
@@ -483,13 +484,13 @@ impl Node {
             }
             return None;
         };
-        catalog.learn(&behavior, py);
+        catalog.learn(&actor, &definition);
         drop(catalog);
         // A type met by importing it is one this node hosts, so the cluster and the rings hear of it too.
         if let Some(cluster) = self.cluster() {
-            cluster.node().learn(behavior.definition().kind());
+            cluster.node().learn(definition.kind());
         }
-        Some(behavior)
+        Some(definition)
     }
 
     pub fn store(&self) -> std::sync::MutexGuard<'_, LocalStore> {
@@ -703,10 +704,10 @@ impl Node {
                 return Ok(Some(found.clone_ref(py)));
             }
         }
-        let Some(behavior) = self.resolve(py, actor) else {
+        let Some(definition) = self.resolve(py, actor) else {
             return Ok(None);
         };
-        let started = Activation::new(py, self, &behavior, actor, key)?;
+        let started = Activation::new(py, self, &definition, actor, key)?;
         let held = {
             let mut activations = self.activations.locked();
             activations
@@ -1101,7 +1102,8 @@ macro_rules! system_methods {
             /// A test hook, not part of the API: it is how a test sees what a node finds when a name reaches it.
             #[pyo3(name = "_resolve")]
             fn resolved(&self, py: Python<'_>, name: &str) -> Option<Py<PyAny>> {
-                self.node.resolve(py, name).map(|behavior| behavior.held(py))
+                self.node.resolve(py, name)?;
+                self.node.catalog.locked().object(py, name)
             }
 
             /// `value` as the bytes a collection stores: the value in the canonical order its schema was compiled in.
@@ -1276,8 +1278,8 @@ system_methods!(ActorSystem {
         key: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         self.node.started(py)?;
-        let name = Behavior::of(actor)?.definition().name.clone();
-        let over = self.node.retire(py, &name, key)?;
+        let definition = Definition::of(actor)?;
+        let over = self.node.retire(py, &definition.name, key)?;
         Ok(Bound::new(py, Awaited::of(over))?.into_any())
     }
 
@@ -1285,8 +1287,8 @@ system_methods!(ActorSystem {
     ///
     /// A test hook, not part of the API: it is how a node of another deploy is built inside one process.
     #[pyo3(name = "_learn")]
-    fn learned(&self, py: Python<'_>, actor: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.node.learn(py, &Behavior::of(actor)?);
+    fn learned(&self, actor: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.node.learn(actor, &Definition::of(actor)?);
         Ok(())
     }
 
@@ -1316,8 +1318,8 @@ system_methods!(ActorSystem {
         actor: &Bound<'_, PyAny>,
         key: &str,
     ) -> PyResult<Option<usize>> {
-        let behavior = Behavior::of(actor)?;
-        let held = self.node.activation(py, &behavior.definition().name, key);
+        let definition = Definition::of(actor)?;
+        let held = self.node.activation(py, &definition.name, key);
         Ok(held.map(|activation| activation.bind(py).get().queued()))
     }
 
@@ -1346,8 +1348,9 @@ system_methods!(ActorSystem {
         key: &str,
         reply_to: &Bound<'_, Ref>,
     ) -> PyResult<()> {
-        let name = Behavior::of(actor)?.definition().name.clone();
-        self.node.cancelled(py, &name, key, reply_to.get().target())
+        let definition = Definition::of(actor)?;
+        self.node
+            .cancelled(py, &definition.name, key, reply_to.get().target())
     }
 
     /// Watch the pages this node writes from here on.
@@ -1388,10 +1391,9 @@ fn referenced(
     at: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Ref> {
     node.started(py)?;
-    let behavior = Behavior::of(actor)?;
-    let definition = behavior.definition();
-    let key = placed(py, definition, key, at)?;
-    node.learn(py, &behavior);
+    let definition = Definition::of(actor)?;
+    let key = placed(py, &definition, key, at)?;
+    node.learn(actor, &definition);
     let state = definition.state.bind(py);
     let written: Option<Vec<u8>> = match (initial, &definition.initial) {
         (Some(initial), _) => Some(state.call_method1("dump", (initial,))?.extract()?),
@@ -1429,7 +1431,7 @@ fn referenced(
 /// reads the form alone, so either would be sent where the type does not belong.
 fn placed(
     py: Python<'_>,
-    definition: &crate::actor::Definition,
+    definition: &Definition,
     key: &str,
     at: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<String> {
@@ -1493,17 +1495,12 @@ fn whereabouts<'py>(
     at: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     node.started(py)?;
-    let behavior = Behavior::of(actor)?;
-    let key = placed(py, behavior.definition(), key, at)?;
-    node.learn(py, &behavior);
+    let definition = Definition::of(actor)?;
+    let key = placed(py, &definition, key, at)?;
+    node.learn(actor, &definition);
     let answer = node.future(py)?;
     if let Some(cluster) = node.cluster() {
-        cluster.placed(
-            py,
-            &behavior.definition().name,
-            &key,
-            answer.clone().unbind(),
-        );
+        cluster.placed(py, &definition.name, &key, answer.clone().unbind());
     } else {
         let alone = node.id();
         let placement = casty_node::node::Placed {

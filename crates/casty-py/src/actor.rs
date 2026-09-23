@@ -1,6 +1,7 @@
 //! An actor type, which is a body and what the system needs to know about it.
 
 use core::time::Duration;
+use std::sync::Arc;
 
 use casty_core::backoff::Backoff;
 use casty_core::mailbox::OnFull;
@@ -132,7 +133,7 @@ pub struct Definition {
     pub name: String,
     pub body: Py<PyAny>,
     /// The body in Rust, for the types this process has one for. Nothing means the body on the loop runs.
-    pub native: Option<std::sync::Arc<dyn crate::collections::Native>>,
+    pub native: Option<Arc<dyn crate::collections::Native>>,
     pub settings: Settings,
     pub state: Py<Schema>,
     pub messages: Py<Schema>,
@@ -207,6 +208,29 @@ impl Definition {
         })
     }
 
+    /// The definition `value` stands for, whichever of the two classes of an actor type it is.
+    pub fn of(value: &Bound<'_, PyAny>) -> PyResult<Arc<Self>> {
+        if let Ok(plain) = value.cast::<Actor>() {
+            return Ok(Arc::clone(&plain.get().0));
+        }
+        if let Ok(defaulted) = value.cast::<DefaultedActor>() {
+            return Ok(Arc::clone(&defaulted.get().0));
+        }
+        Err(PyTypeError::new_err(format!(
+            "{} is not an actor type; decorate its body with @actor",
+            value.get_type().name()?
+        )))
+    }
+
+    /// The type as Python holds it: one with a default `initial` is a `DefaultedActor`.
+    fn object(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let defined = Arc::new(self);
+        Ok(match defined.initial {
+            None => Bound::new(py, Actor(defined))?.into_any().unbind(),
+            Some(_) => Bound::new(py, DefaultedActor(defined))?.into_any().unbind(),
+        })
+    }
+
     /// What a node of a cluster needs of the type to place its keys and write their state.
     #[must_use]
     pub fn kind(&self) -> casty_node::node::Kind {
@@ -224,12 +248,12 @@ impl Definition {
 /// An actor type whose keys are created only by `start`.
 #[pyclass(frozen, module = "casty._casty")]
 #[derive(Debug)]
-pub struct Actor(pub Definition);
+pub struct Actor(Arc<Definition>);
 
 /// An actor type whose keys are created on demand with `initial`.
 #[pyclass(frozen, module = "casty._casty")]
 #[derive(Debug)]
-pub struct DefaultedActor(pub Definition);
+pub struct DefaultedActor(Arc<Definition>);
 
 macro_rules! definition_methods {
     ($class:ident $($extra:tt)*) => {
@@ -333,7 +357,7 @@ macro_rules! definition_methods {
             ) -> PyResult<Self> {
                 let configured = self.0.configured(py, name, replicas, written(write)?);
                 single_copy(&configured.name, &configured.settings)?;
-                Ok(Self(configured))
+                Ok(Self(Arc::new(configured)))
             }
 
             fn __repr__(&self) -> String {
@@ -352,61 +376,6 @@ definition_methods!(DefaultedActor
         self.0.initial.as_ref()
     }
 );
-
-/// An actor type as a system holds it, whichever of the two classes it is.
-#[derive(Debug)]
-pub enum Behavior {
-    Plain(Py<Actor>),
-    Defaulted(Py<DefaultedActor>),
-}
-
-impl Behavior {
-    pub fn of(value: &Bound<'_, PyAny>) -> PyResult<Self> {
-        if let Ok(plain) = value.cast::<Actor>() {
-            return Ok(Self::Plain(plain.clone().unbind()));
-        }
-        if let Ok(defaulted) = value.cast::<DefaultedActor>() {
-            return Ok(Self::Defaulted(defaulted.clone().unbind()));
-        }
-        Err(PyTypeError::new_err(format!(
-            "{} is not an actor type; decorate its body with @actor",
-            value.get_type().name()?
-        )))
-    }
-
-    /// The type as Python holds it, which is one of the two classes.
-    #[must_use]
-    pub fn held(&self, py: Python<'_>) -> Py<PyAny> {
-        match self {
-            Self::Plain(actor) => actor.clone_ref(py).into_any(),
-            Self::Defaulted(actor) => actor.clone_ref(py).into_any(),
-        }
-    }
-
-    #[must_use]
-    pub fn definition(&self) -> &Definition {
-        match self {
-            Self::Plain(actor) => &actor.get().0,
-            Self::Defaulted(actor) => &actor.get().0,
-        }
-    }
-
-    #[must_use]
-    pub fn clone_ref(&self, py: Python<'_>) -> Self {
-        match self {
-            Self::Plain(actor) => Self::Plain(actor.clone_ref(py)),
-            Self::Defaulted(actor) => Self::Defaulted(actor.clone_ref(py)),
-        }
-    }
-
-    #[must_use]
-    pub fn object<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
-        match self {
-            Self::Plain(actor) => actor.bind(py).clone().into_any(),
-            Self::Defaulted(actor) => actor.bind(py).clone().into_any(),
-        }
-    }
-}
 
 /// Define an actor type from its body.
 ///
@@ -470,8 +439,7 @@ pub fn actor(
             .transpose()?,
     };
     if let Some(body) = body {
-        let defined = Actor(Definition::new(py, body, settings, None)?);
-        return Ok(Bound::new(py, defined)?.into_any().unbind());
+        return Definition::new(py, body, settings, None)?.object(py);
     }
     let decorator = Decorator {
         initial: match initial {
@@ -510,11 +478,7 @@ struct Decorator {
 impl Decorator {
     fn __call__(&self, py: Python<'_>, body: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let initial = self.initial.as_ref().map(|value| value.clone_ref(py));
-        let defined = Definition::new(py, body, self.settings, initial)?;
-        Ok(match self.initial {
-            None => Bound::new(py, Actor(defined))?.into_any().unbind(),
-            Some(_) => Bound::new(py, DefaultedActor(defined))?.into_any().unbind(),
-        })
+        Definition::new(py, body, self.settings, initial)?.object(py)
     }
 }
 

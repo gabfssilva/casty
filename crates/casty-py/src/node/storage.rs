@@ -204,7 +204,7 @@ impl Node {
     /// keep.
     #[must_use]
     pub fn durability(&self, py: Python<'_>, actor: &str) -> Option<Durability> {
-        let settings = self.resolve(py, actor)?.definition().settings;
+        let settings = self.resolve(py, actor)?.settings;
         Some(Durability {
             durable: settings.durable?,
             within: settings.over(&self.settings).write_timeout.as_secs_f64(),

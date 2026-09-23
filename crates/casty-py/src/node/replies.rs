@@ -31,7 +31,7 @@ pub struct Waiting {
 /// The caller reads it from its own copy of the type, as it does the deadline: every member runs the same code.
 pub fn waits(py: Python<'_>, node: &super::Node, actor: &str) -> bool {
     node.resolve(py, actor)
-        .is_some_and(|behavior| behavior.definition().settings.on_full == OnFull::Wait)
+        .is_some_and(|definition| definition.settings.on_full == OnFull::Wait)
 }
 
 /// How long a request to `target` waits for its answer, in seconds.
@@ -41,16 +41,11 @@ pub fn waits(py: Python<'_>, node: &super::Node, actor: &str) -> bool {
 /// definition found here is the one the owner runs, and nothing has to be routed before the deadline is known.
 pub fn timeout(py: Python<'_>, node: &super::Node, target: &casty_core::node::Target) -> f64 {
     let within = match target {
-        casty_core::node::Target::Entity { actor, .. } => {
-            node.resolve(py, actor)
-                .map_or(node.settings.ask_timeout, |behavior| {
-                    behavior
-                        .definition()
-                        .settings
-                        .over(&node.settings)
-                        .ask_timeout
-                })
-        }
+        casty_core::node::Target::Entity { actor, .. } => node
+            .resolve(py, actor)
+            .map_or(node.settings.ask_timeout, |definition| {
+                definition.settings.over(&node.settings).ask_timeout
+            }),
         casty_core::node::Target::Reply { .. } => node.settings.ask_timeout,
     };
     within.as_secs_f64()

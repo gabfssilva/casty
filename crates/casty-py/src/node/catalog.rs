@@ -1,10 +1,11 @@
 //! The actor types one system has met, by name. Nothing is listed beforehand.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 
-use crate::actor::Behavior;
+use crate::actor::Definition;
 
 /// A type is met when this process uses it, or when its name arrives from another node.
 ///
@@ -13,24 +14,31 @@ use crate::actor::Behavior;
 /// node does not have yet.
 #[derive(Debug, Default)]
 pub struct Catalog {
-    known: HashMap<String, Behavior>,
+    /// Each type met, with the object of the `actor` decorator it was met as.
+    known: HashMap<String, (Py<PyAny>, Arc<Definition>)>,
     unknown: HashSet<String>,
 }
 
 impl Catalog {
-    /// Meet a type this process holds. The first definition under a name is the one this system runs.
-    pub fn learn(&mut self, behavior: &Behavior, py: Python<'_>) {
-        let name = behavior.definition().name.clone();
-        if self.known.contains_key(&name) {
+    /// Meet the type `actor` defines. The first definition under a name is the one this system runs.
+    pub fn learn(&mut self, actor: &Bound<'_, PyAny>, definition: &Arc<Definition>) {
+        if self.known.contains_key(&definition.name) {
             return;
         }
-        self.unknown.remove(&name);
-        self.known.insert(name, behavior.clone_ref(py));
+        self.unknown.remove(&definition.name);
+        let held = (actor.clone().unbind(), Arc::clone(definition));
+        self.known.insert(definition.name.clone(), held);
     }
 
     #[must_use]
-    pub fn known(&self, name: &str) -> Option<&Behavior> {
-        self.known.get(name)
+    pub fn known(&self, name: &str) -> Option<&Arc<Definition>> {
+        self.known.get(name).map(|(_, definition)| definition)
+    }
+
+    /// The object the type called `name` was met as.
+    #[must_use]
+    pub fn object(&self, py: Python<'_>, name: &str) -> Option<Py<PyAny>> {
+        self.known.get(name).map(|(actor, _)| actor.clone_ref(py))
     }
 
     /// Every type this process holds, as a node of a cluster needs it.
@@ -38,7 +46,7 @@ impl Catalog {
     pub fn kinds(&self) -> Vec<casty_node::node::Kind> {
         self.known
             .values()
-            .map(|behavior| behavior.definition().kind())
+            .map(|(_, definition)| definition.kind())
             .collect()
     }
 
@@ -52,14 +60,14 @@ impl Catalog {
     }
 }
 
-/// Import the type called `name`, which is `module:qualname`.
+/// Import the type called `name`, which is `module:qualname`: the object found there, and what it defines.
 #[must_use]
-pub fn imported(py: Python<'_>, name: &str) -> Option<Behavior> {
+pub fn imported<'py>(py: Python<'py>, name: &str) -> Option<(Bound<'py, PyAny>, Arc<Definition>)> {
     let (module, qualname) = name.split_once(':')?;
     let mut found = py.import(module).ok()?.into_any();
     for part in qualname.split('.') {
         found = found.getattr(part).ok()?;
     }
-    let behavior = Behavior::of(&found).ok()?;
-    (behavior.definition().name == name).then_some(behavior)
+    let definition = Definition::of(&found).ok()?;
+    (definition.name == name).then_some((found, definition))
 }

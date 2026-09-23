@@ -8,7 +8,7 @@ use pyo3::types::PyType;
 
 use super::Node;
 use super::activation::Activation;
-use crate::actor::Behavior;
+use crate::actor::Definition;
 use crate::refs::Ref;
 
 /// The context of one run of the body of an activation: its key, its state, and the messages that reach it.
@@ -97,8 +97,8 @@ impl Context {
         behavior: &Bound<'py, PyAny>,
         state: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let behavior = Behavior::of(behavior)?;
-        Activation::become_another(self.activation.bind(py), py, &behavior, state)
+        let definition = Definition::of(behavior)?;
+        Activation::become_another(self.activation.bind(py), py, behavior, &definition, state)
     }
 
     /// Messages and items of `source` in arrival order, until `source` ends.

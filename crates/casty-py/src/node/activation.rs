@@ -22,7 +22,7 @@ use super::cluster::{Fencing, Taken};
 use super::context::{Context, ended};
 use super::observe::Observed;
 use super::{Node, Op};
-use crate::actor::Behavior;
+use crate::actor::Definition;
 use crate::awaited::Awaited;
 use crate::lock::Locked;
 use crate::schema::Schema;
@@ -34,7 +34,8 @@ const BEHAVIOR: &str = "@behavior";
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 struct State {
-    behavior: Behavior,
+    /// The type the key runs now: the one it started as, unless it became another.
+    behavior: Arc<Definition>,
     mailbox: Mailbox,
     /// The state the first `Start` to arrive offered, which the key takes if no replica has one.
     offered: Option<Vec<u8>>,
@@ -171,18 +172,18 @@ impl Activation {
     pub fn new(
         py: Python<'_>,
         node: &Arc<Node>,
-        behavior: &Behavior,
+        behavior: &Arc<Definition>,
         entry: &str,
         key: &str,
     ) -> PyResult<Py<Self>> {
-        let settings = behavior.definition().settings;
+        let settings = behavior.settings;
         let activation = Self {
             node: node.clone(),
             entry: entry.to_owned(),
             key: key.to_owned(),
             since: SystemTime::now(),
             inner: Mutex::new(State {
-                behavior: behavior.clone_ref(py),
+                behavior: Arc::clone(behavior),
                 mailbox: Mailbox::new(settings.mailbox, settings.on_full),
                 offered: None,
                 exists: false,
@@ -238,7 +239,7 @@ impl Activation {
 
     #[must_use]
     pub fn messages(&self, py: Python<'_>) -> Py<Schema> {
-        self.held().behavior.definition().messages.clone_ref(py)
+        self.held().behavior.messages.clone_ref(py)
     }
 
     pub fn value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -261,11 +262,7 @@ impl Activation {
 
     /// What this activation goes by: the settings of the behavior it runs, over the system's.
     fn settings(&self) -> super::Settings {
-        self.held()
-            .behavior
-            .definition()
-            .settings
-            .over(&self.node.settings)
+        self.held().behavior.settings.over(&self.node.settings)
     }
 
     /// Take the key over on the next turn of the loop, after whatever brought it here has been queued.
@@ -341,11 +338,10 @@ impl Activation {
 
     /// The pages a key that nothing has starts from: what a `Start` offered, or the default of the type.
     fn initial(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<Option<Pages>> {
-        let (behavior, pending) = {
+        let (definition, pending) = {
             let state = slf.get().held();
-            (state.behavior.clone_ref(py), state.offered.clone())
+            (Arc::clone(&state.behavior), state.offered.clone())
         };
-        let definition = behavior.definition();
         // A native body says what its keys start from, without a value of the interpreter in between.
         if let (None, Some(native)) = (&pending, &definition.native) {
             return Ok(Some(native.initial()));
@@ -363,16 +359,15 @@ impl Activation {
             (None, Some(default)) => default.bind(py).clone(),
             (None, None) => return Ok(None),
         };
-        Ok(Some(Self::pages_of(slf, py, &behavior, &state)?))
+        Ok(Some(Self::pages_of(slf, py, &definition, &state)?))
     }
 
     fn pages_of(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
-        behavior: &Behavior,
+        definition: &Definition,
         state: &Bound<'_, PyAny>,
     ) -> PyResult<Pages> {
-        let definition = behavior.definition();
         let mut pages = Schema::write_pages(definition.state.bind(py), state)?;
         if definition.name != slf.get().entry {
             pages.insert(BEHAVIOR.to_owned(), definition.name.clone().into_bytes());
@@ -392,19 +387,19 @@ impl Activation {
         let (behavior, named, pages) = {
             let state = slf.get().held();
             (
-                state.behavior.clone_ref(py),
+                Arc::clone(&state.behavior),
                 state.named(&slf.get().entry),
                 state.pages.clone(),
             )
         };
-        if named != behavior.definition().name {
+        if named != behavior.name {
             return Self::successor(slf, py, &named);
         }
         let without: Pages = pages
             .into_iter()
             .filter(|(name, _)| name != BEHAVIOR)
             .collect();
-        let schema = behavior.definition().state.bind(py);
+        let schema = behavior.state.bind(py);
         let value = Schema::read_pages(schema, &without, Some(&slf.get().node))?;
         slf.get().held().value = Some(value.unbind());
         Self::attempt(slf, py)
@@ -439,7 +434,7 @@ impl Activation {
             let mut state = slf.get().held();
             state.switching = false;
             (
-                state.behavior.clone_ref(py),
+                Arc::clone(&state.behavior),
                 state.releasing,
                 core::mem::take(&mut state.runs),
             )
@@ -450,11 +445,11 @@ impl Activation {
         if releasing {
             return Self::deactivate(slf, py);
         }
-        if let Some(native) = behavior.definition().native.clone() {
+        if let Some(native) = behavior.native.clone() {
             return Self::stepping(slf, py, &native);
         }
         slf.get().held().live = true;
-        for _ in 0..behavior.definition().settings.concurrency {
+        for _ in 0..behavior.settings.concurrency {
             Self::start(slf, py, None)?;
         }
         Ok(())
@@ -479,7 +474,7 @@ impl Activation {
                 failures: replaced.as_ref().map_or(0, |old| old.failures),
                 ..Run::default()
             });
-            (id, state.behavior.clone_ref(py), replaced)
+            (id, Arc::clone(&state.behavior), replaced)
         };
         if let Some(replaced) = replaced {
             forsaken(py, &slf.get().node, replaced)?;
@@ -488,7 +483,7 @@ impl Activation {
             py,
             Context::new(slf.clone().unbind(), slf.get().node.clone(), id),
         )?;
-        let body = behavior.definition().body.bind(py).call1((context,))?;
+        let body = behavior.body.bind(py).call1((context,))?;
         let task = slf
             .get()
             .node
@@ -574,7 +569,7 @@ impl Activation {
         let entry = &slf.get().entry;
         let (switching, moved, again, gone, alone) = {
             let mut state = slf.get().held();
-            let moved = state.named(entry) != state.behavior.definition().name;
+            let moved = state.named(entry) != state.behavior.name;
             let switching = state.switching;
             let empty = state.mailbox.empty();
             let releasing = state.releasing;
@@ -743,7 +738,7 @@ impl Activation {
             (
                 state.pages.clone(),
                 state.deleted,
-                state.behavior.definition().native.clone(),
+                state.behavior.native.clone(),
                 state.lease,
             )
         };
@@ -982,7 +977,7 @@ impl Activation {
                 .collect();
             (
                 tasks,
-                state.behavior.definition().native.is_some(),
+                state.behavior.native.is_some(),
                 state.awaiting.is_some() || state.writing.is_some(),
             )
         };
@@ -1029,9 +1024,7 @@ impl Activation {
                 reads.extend(run.waiting.take());
                 timers.extend(run.idle.take());
             }
-            let resting = state.behavior.definition().native.is_some()
-                && state.resting
-                && state.alarm.is_none();
+            let resting = state.behavior.native.is_some() && state.resting && state.alarm.is_none();
             if resting {
                 state.resting = false;
                 state.deadline = None;
@@ -1135,7 +1128,7 @@ impl Activation {
             return None;
         }
         let state = self.held();
-        let definition = state.behavior.definition();
+        let definition = &state.behavior;
         let (holding, concurrency): (Vec<u64>, usize) = if definition.native.is_some() {
             (state.awaiting.iter().map(|_| state.hold).collect(), 1)
         } else {
@@ -1161,7 +1154,7 @@ impl Activation {
     /// and what arrived after that waits in the mailbox for the run that reads next.
     fn wake(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
         // A native body is not parked on a future: it is resting on the idle timer, and this takes it up again.
-        if slf.get().held().behavior.definition().native.is_some() {
+        if slf.get().held().behavior.native.is_some() {
             return Self::stirred(slf, py);
         }
         loop {
@@ -1264,7 +1257,7 @@ impl Activation {
                 && !state.ending()
                 && !state.releasing
                 && !state.mailbox.empty()
-                && state.runs.len() < state.behavior.definition().settings.concurrency
+                && state.runs.len() < state.behavior.settings.concurrency
         };
         if wanted {
             return Self::start(slf, py, None);
@@ -1277,8 +1270,8 @@ impl Activation {
         py: Python<'py>,
         deliver: &Deliver,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let behavior = slf.get().held().behavior.clone_ref(py);
-        let schema = behavior.definition().messages.bind(py);
+        let behavior = Arc::clone(&slf.get().held().behavior);
+        let schema = behavior.messages.bind(py);
         Ok(Schema::read(
             schema,
             schema.get().tree().sent(),
@@ -1588,7 +1581,7 @@ impl Activation {
                 "{entry}/{key} became another behavior, which owns the state now"
             )));
         }
-        let behavior = slf.get().held().behavior.clone_ref(py);
+        let behavior = Arc::clone(&slf.get().held().behavior);
         let pages = Self::pages_of(slf, py, &behavior, value)?;
         let wrote = Wrote {
             pages,
@@ -1604,12 +1597,12 @@ impl Activation {
     pub fn become_another<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
-        behavior: &Behavior,
+        actor: &Bound<'py, PyAny>,
+        definition: &Arc<Definition>,
         value: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         Self::writable(slf)?;
-        slf.get().node.learn(py, behavior);
-        let definition = behavior.definition();
+        slf.get().node.learn(actor, definition);
         let mut pages = match value {
             None => slf
                 .get()
@@ -1686,8 +1679,8 @@ impl Activation {
                 "{entry}/{key} became another behavior, which owns the state now"
             )));
         }
-        let behavior = slf.get().held().behavior.clone_ref(py);
-        let (pages, value) = match &behavior.definition().initial {
+        let behavior = Arc::clone(&slf.get().held().behavior);
+        let (pages, value) = match &behavior.initial {
             Some(default) => (
                 Self::pages_of(slf, py, &behavior, default.bind(py))?,
                 Some(default.clone_ref(py)),
@@ -1708,7 +1701,7 @@ impl Activation {
     /// Refuse a write of the state from a type whose body handles several messages at once: two runs writing it is the
     /// race the mailbox of one key exists to prevent.
     fn writable(slf: &Bound<'_, Self>) -> PyResult<()> {
-        let concurrency = slf.get().held().behavior.definition().settings.concurrency;
+        let concurrency = slf.get().held().behavior.settings.concurrency;
         if concurrency > 1 {
             let entry = &slf.get().entry;
             let key = &slf.get().key;
@@ -1875,7 +1868,7 @@ impl Activation {
         let deleting = turn.delete;
         let pages = if deleting {
             // The body goes on from where a key nothing wrote starts.
-            let native = slf.get().held().behavior.definition().native.clone();
+            let native = slf.get().held().behavior.native.clone();
             native.map_or_else(Pages::new, |native| native.initial())
         } else {
             let Some(pages) = turn.save else {
@@ -1996,8 +1989,7 @@ impl Activation {
         let Some((message, _)) = awaiting else {
             return Ok(());
         };
-        let behavior = slf.get().held().behavior.clone_ref(py);
-        let Some(native) = behavior.definition().native.clone() else {
+        let Some(native) = slf.get().held().behavior.native.clone() else {
             return Ok(());
         };
         let held = match answer.call_method0("result") {
@@ -2034,8 +2026,7 @@ impl Activation {
             state.alarm = None;
             state.resting = false;
         }
-        let behavior = slf.get().held().behavior.clone_ref(py);
-        let Some(native) = behavior.definition().native.clone() else {
+        let Some(native) = slf.get().held().behavior.native.clone() else {
             return Ok(());
         };
         let turn = {
@@ -2104,8 +2095,7 @@ impl Activation {
 
     /// Take the reading up again, from wherever the body left off.
     fn again(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
-        let behavior = slf.get().held().behavior.clone_ref(py);
-        let Some(native) = behavior.definition().native.clone() else {
+        let Some(native) = slf.get().held().behavior.native.clone() else {
             return Ok(());
         };
         Self::stepping(slf, py, &native)
