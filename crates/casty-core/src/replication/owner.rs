@@ -294,35 +294,26 @@ impl Owner {
     /// A record written in a round this owner has not passed makes it promise again above that round, the record kept:
     /// the store keeps no write older than its record, so every write of this owner has to come after it.
     pub fn loaded(&mut self, stored: Option<Stored>) -> Step {
-        if !matches!(
-            &self.phase,
-            Some(Phase::Preparing {
-                store: Lookup::Asked,
-                ..
-            })
-        ) {
+        let Some(Phase::Preparing {
+            initial,
+            wanted,
+            store: store @ Lookup::Asked,
+            pending,
+            ..
+        }) = &mut self.phase
+        else {
             return Step::waiting();
-        }
+        };
         let above = stored
             .as_ref()
             .filter(|record| !record.stamp.epoch.before(&self.epoch))
             .map(|record| record.stamp.epoch.round);
         if let Some(round) = above {
-            let Some(Phase::Preparing {
-                initial,
-                wanted,
-                pending,
-                ..
-            }) = self.phase.take()
-            else {
-                unreachable!("the phase was just matched");
-            };
+            let (initial, wanted, pending) = (initial.take(), *wanted, pending.take());
             self.round = self.round.max(round);
             return Step::sending(self.prepare(initial, wanted, Lookup::Answered(stored), pending));
         }
-        if let Some(Phase::Preparing { store, .. }) = &mut self.phase {
-            *store = Lookup::Answered(stored);
-        }
+        *store = Lookup::Answered(stored);
         self.decide(false)
     }
 
@@ -370,17 +361,14 @@ impl Owner {
     /// range answers for the quorum only once it has it.
     pub fn again(&mut self) -> Vec<Send> {
         let Some(Phase::Preparing {
-            pending: Some(_),
+            pending: pending @ Some(_),
             wanted,
             ..
-        }) = &self.phase
+        }) = &mut self.phase
         else {
             return Vec::new();
         };
-        let wanted = *wanted;
-        let Some(Phase::Preparing { pending, .. }) = self.phase.take() else {
-            unreachable!("the phase was just matched");
-        };
+        let (wanted, pending) = (*wanted, pending.take());
         self.prepare(None, wanted, Lookup::Answered(None), pending)
     }
 
@@ -516,19 +504,17 @@ impl Owner {
     }
 
     fn promised(&mut self, epoch: &Epoch, promise: Promised) -> Step {
-        let wanted = match &mut self.phase {
-            Some(Phase::Preparing {
-                wanted, promises, ..
-            }) if *epoch == self.epoch => {
-                promises.insert(promise.replica.clone(), promise);
-                (*wanted).min(self.replicas.len())
-            }
-            _ => return Step::waiting(),
+        let Some(Phase::Preparing {
+            wanted, promises, ..
+        }) = &mut self.phase
+        else {
+            return Step::waiting();
         };
-        let Some(Phase::Preparing { promises, .. }) = &self.phase else {
-            unreachable!("the phase was just matched");
-        };
-        if promises.len() < wanted {
+        if *epoch != self.epoch {
+            return Step::waiting();
+        }
+        promises.insert(promise.replica.clone(), promise);
+        if promises.len() < (*wanted).min(self.replicas.len()) {
             return Step::waiting();
         }
         self.decide(false)
