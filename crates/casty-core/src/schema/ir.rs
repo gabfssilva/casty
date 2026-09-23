@@ -249,11 +249,6 @@ impl Kinds {
     pub fn intersects(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
-
-    #[must_use]
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
-    }
 }
 
 /// A compiled annotation: the arena, the node the annotation itself is, and the node it travels as.

@@ -87,8 +87,6 @@ pub enum Malformed {
     Marker(u8),
     /// A string that is not UTF-8, which `unpackb` would refuse as well.
     Utf8,
-    /// A map key that is not a string.
-    Key(Kind),
     /// Bytes left over after the value, which means the payload is not one value.
     Trailing,
 }
@@ -102,7 +100,6 @@ impl fmt::Display for Malformed {
                 "msgpack marker {marker:#04x} is not a value of this library"
             ),
             Self::Utf8 => formatter.write_str("a string is not UTF-8"),
-            Self::Key(kind) => write!(formatter, "a map key is {kind:?}, not a string"),
             Self::Trailing => formatter.write_str("the payload holds more than one value"),
         }
     }

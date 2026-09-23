@@ -33,11 +33,13 @@ impl Rolls {
         }
     }
 
+    #[cfg(test)]
     pub fn between(&mut self, low: usize, high: usize) -> usize {
         low + self.upto(high - low + 1)
     }
 
     /// Whether something of probability `chance` happens.
+    #[cfg(test)]
     pub fn chance(&mut self, chance: f64) -> bool {
         #[allow(clippy::cast_precision_loss)]
         let drawn = (self.roll() >> 11) as f64 / (1_u64 << 53) as f64;
