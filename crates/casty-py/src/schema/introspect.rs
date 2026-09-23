@@ -142,7 +142,6 @@ impl<'py> Introspect<'py> {
         self.is_dataclass.call1((value,))?.is_truthy()
     }
 
-    /// The fields of a dataclass, as name and whether it has no default of either kind.
     /// The annotations of the parameters of `body`, with the strings among them evaluated.
     pub fn parameters(&self, body: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
         let named = PyDict::new(self.py);
@@ -156,6 +155,7 @@ impl<'py> Introspect<'py> {
             .collect()
     }
 
+    /// The fields of a dataclass, as name and whether it has no default of either kind.
     pub fn dataclass_fields(&self, class: &Bound<'py, PyType>) -> PyResult<Vec<(String, bool)>> {
         let mut found = Vec::new();
         for field in self.fields.call1((class,))?.try_iter()? {
