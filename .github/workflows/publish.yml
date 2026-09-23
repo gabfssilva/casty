@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # casty is a compiled extension, built on each platform twice: an abi3 wheel for every CPython from 3.13 with the
+  # casty is a compiled extension, built on each platform twice: an abi3 wheel for every CPython from 3.12 with the
   # GIL, and a cp314t wheel, because abi3 does not cover free-threaded CPython.
   wheels:
     strategy:
@@ -19,7 +19,7 @@ jobs:
           - { os: macos-latest, target: x86_64 }
           - { os: macos-latest, target: aarch64 }
           - { os: windows-latest, target: x64 }
-        python: ["3.13", "3.14t"]
+        python: ["3.12", "3.14t"]
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v5

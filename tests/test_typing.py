@@ -1,3 +1,4 @@
+import ast
 import re
 import subprocess
 import sys
@@ -15,6 +16,11 @@ def describe_public_api_types() -> None:
         path = TYPING / "errors.py"
 
         assert {line for line, _ in errors(path)} == marked_lines(path)
+
+    def it_declares_the_api_in_the_grammar_of_python_3_12() -> None:
+        # pyright accepts newer syntax in a stub whatever its `pythonVersion`; the parser of 3.12, which mypy uses
+        # there, does not.
+        ast.parse((ROOT / "src/casty/__init__.pyi").read_text(), feature_version=(3, 12))
 
 
 def errors(path: Path) -> list[tuple[int, str]]:

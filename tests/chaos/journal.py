@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from itertools import count
 from pathlib import Path
-from typing import Literal, Protocol, TypeIs
+from typing import Literal, Protocol, TypeGuard
 
 from casty import System
 from tests.support import eventually
@@ -160,7 +160,7 @@ def ambiguous(error: BaseException, /) -> bool:
     return isinstance(error, AMBIGUOUS)
 
 
-def _grouped(error: BaseException, /) -> TypeIs[BaseExceptionGroup[BaseException]]:
+def _grouped(error: BaseException, /) -> TypeGuard[BaseExceptionGroup[BaseException]]:
     return isinstance(error, BaseExceptionGroup)
 
 

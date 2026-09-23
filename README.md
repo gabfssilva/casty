@@ -25,16 +25,16 @@ It processes messages one at a time, in a single process or replicated across a 
 uv add casty        # or: pip install casty
 ```
 
-casty needs Python 3.13 or later, 3.14 and free-threaded 3.14t included, and has no Python dependencies. Each platform
-has two wheels: one on the stable ABI (`cp313-abi3`), for every version with the GIL, and one for 3.14t
-(`cp314-cp314t`), which the stable ABI does not cover.
+casty needs Python 3.12 or later, free-threaded 3.14t included, and has no Python dependencies. Each platform has two
+wheels: one on the stable ABI (`cp312-abi3`), for every version with the GIL, and one for 3.14t (`cp314-cp314t`),
+which the stable ABI does not cover.
 
 On a platform or interpreter without a wheel, the install builds from source and needs a Rust toolchain, 1.90 or
 later. The same applies to installing from a checkout:
 
 ```sh
 uv add ./casty      # or: pip install ./casty
-uv build --wheel    # dist/casty-<version>-cp313-abi3-<platform>.whl, or cp314-cp314t on 3.14t
+uv build --wheel    # dist/casty-<version>-cp312-abi3-<platform>.whl, or cp314-cp314t on 3.14t
 ```
 
 ## Quick start

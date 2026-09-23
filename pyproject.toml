@@ -3,7 +3,7 @@ name = "casty"
 version = "0.30.0"
 description = "Typed, replicated virtual actors for Python"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Gabriel Francisco" }]
@@ -11,6 +11,7 @@ keywords = ["actor", "actor-model", "virtual-actors", "asyncio", "concurrency", 
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Rust",
@@ -51,7 +52,7 @@ include = ["src", "tests"]
 # `tests/typing` is what `test_typing` runs pyright against, one file at a time.
 exclude = ["tests/typing"]
 typeCheckingMode = "strict"
-pythonVersion = "3.13"
+pythonVersion = "3.12"
 # pytest-describe collects the nested test functions from locals, which pyright sees as never accessed.
 executionEnvironments = [
     { root = "src" },
@@ -65,7 +66,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py313"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC"]

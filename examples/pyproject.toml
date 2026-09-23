@@ -1,7 +1,7 @@
 [project]
 name = "casty-examples"
 version = "0.1.0"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = ["casty"]
 
 # The project installs `local_cluster.py` in development mode, which puts this directory on the path of every example.

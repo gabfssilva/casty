@@ -2,7 +2,7 @@
 
 Cada diretório é um programa que demonstra uma parte do casty. Todos usam o projeto `uv` deste diretório, que instala a versão local do casty a partir da raiz do repositório.
 
-Requer `uv`, Python 3.13 ou superior e uma toolchain Rust: na primeira execução, o `uv` compila o casty. Os comandos partem da raiz do repositório, e cada exemplo roda com `uv run` dentro do seu diretório:
+Requer `uv`, Python 3.12 ou superior e uma toolchain Rust: na primeira execução, o `uv` compila o casty. Os comandos partem da raiz do repositório, e cada exemplo roda com `uv run` dentro do seu diretório:
 
 ```sh
 cd examples/00-hello-world

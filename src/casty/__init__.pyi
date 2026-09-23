@@ -7,7 +7,9 @@ re-exported from the module that defines it: `casty.model`, `casty.collections` 
 
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from datetime import timedelta
-from typing import Generic, Never, Protocol, Self, TypeVar, overload, runtime_checkable
+from typing import Generic, Never, Protocol, Self, overload, runtime_checkable
+
+from typing_extensions import TypeVar
 
 from casty.collections import Collections as Collections
 from casty.model import TLS as TLS
@@ -176,8 +178,17 @@ class State(Protocol[_T]):
         replica. Raises `Unavailable` when too few replicas confirm it, as `set` does.
         """
 
+# The state and message types of an actor are invariant: a type of one state is not a type of another, and a ref to
+# it takes exactly the messages it declares. Written with `TypeVar` and not with a type parameter list, because the
+# variance of a type parameter is inferred and what is inferred here is not invariance.
+_S = TypeVar("_S")
+_M = TypeVar("_M")
+# `Context[S]` is `Context[S, Never]`: a body that takes no message at all. The `TypeVar` of `typing_extensions`,
+# because a default is 3.13 syntax in a type parameter list and 3.13 API in `typing.TypeVar`, and 3.12 reads this stub.
+_Received = TypeVar("_Received", default=Never)
+
 @runtime_checkable
-class Context[S, M = Never](Protocol):
+class Context(Protocol[_S, _Received]):
     """What the body of an activation receives."""
 
     @property
@@ -185,11 +196,11 @@ class Context[S, M = Never](Protocol):
         """The key of this entity. A key of a pinned type carries the address of its node: `@host:port/key`."""
 
     @property
-    def state(self) -> State[S]:
+    def state(self) -> State[_S]:
         """The state of the key: `value`, `set`, `update` and `delete`."""
 
     @property
-    def inbox(self) -> AsyncIterator[M]:
+    def inbox(self) -> AsyncIterator[_Received]:
         """Messages in arrival order. Ends after `idle_after` without messages: the type's, or the system's.
 
         Reading the next message is what ends the one before, so everything a body awaits in between, an `ask`
@@ -197,7 +208,7 @@ class Context[S, M = Never](Protocol):
         """
 
     @property
-    def self(self) -> Ref[M]:
+    def self(self) -> Ref[_Received]:
         """Reference to this entity, to hand to other actors."""
 
     @property
@@ -205,7 +216,7 @@ class Context[S, M = Never](Protocol):
         """The system of the node where this activation runs."""
 
     @overload
-    async def become[T](self, behavior: Actor[T, M] | DefaultedActor[T, M], state: T, /) -> None:
+    async def become[T](self, behavior: Actor[T, _Received] | DefaultedActor[T, _Received], state: T, /) -> None:
         """Hand the key to `behavior`, which runs it from the next read of `inbox` or `merge` on, from `state`.
 
         `behavior` takes the same messages, so every ref to the key stays good, and the key stays what it was: the
@@ -215,20 +226,14 @@ class Context[S, M = Never](Protocol):
         """
 
     @overload
-    async def become(self, behavior: Actor[S, M] | DefaultedActor[S, M], /) -> None:
+    async def become(self, behavior: Actor[_S, _Received] | DefaultedActor[_S, _Received], /) -> None:
         """Hand the key to `behavior`, which has the state type of this one and goes on from the last saved state."""
 
-    def merge[T](self, source: AsyncIterable[T], /) -> AsyncIterator[M | T]:
+    def merge[T](self, source: AsyncIterable[T], /) -> AsyncIterator[_Received | T]:
         """Messages and items of `source` in arrival order, until `source` ends.
 
         Idleness does not end it, and an exception raised by `source` propagates to the body.
         """
-
-# The state and message types of an actor are invariant: a type of one state is not a type of another, and a ref to
-# it takes exactly the messages it declares. Written with `TypeVar` and not with a type parameter list, because the
-# variance of a type parameter is inferred and what is inferred here is not invariance.
-_S = TypeVar("_S")
-_M = TypeVar("_M")
 
 class Actor(Generic[_S, _M]):  # noqa: UP046
     """Actor type without a default state: a key starts from the `initial` its ref is obtained with."""

@@ -6,7 +6,7 @@ found instead, so a malformed line or dump fails where it is read.
 
 from __future__ import annotations
 
-from typing import TypeIs
+from typing import TypeGuard
 
 
 def record(raw: object) -> dict[str, object]:
@@ -43,9 +43,9 @@ def texts(raw: object) -> tuple[str, ...]:
     return tuple(text(item) for item in items(raw))
 
 
-def _mapping(raw: object, /) -> TypeIs[dict[object, object]]:
+def _mapping(raw: object, /) -> TypeGuard[dict[object, object]]:
     return isinstance(raw, dict)
 
 
-def _sequence(raw: object, /) -> TypeIs[list[object]]:
+def _sequence(raw: object, /) -> TypeGuard[list[object]]:
     return isinstance(raw, list)
