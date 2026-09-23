@@ -10,6 +10,7 @@ use casty_core::schema::ir::{
     Container, Dataclass, Enum, Literal, Native, Node, NodeRef, Opaque, Union,
 };
 use casty_core::schema::{ClassRef, Int, Kind, Reader, SchemaError};
+use casty_core::store::Pages;
 use pyo3::exceptions::PyArithmeticError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFrozenSet, PyString, PyTuple};
@@ -33,35 +34,33 @@ pub fn load<'py>(
 /// The value the pages of a state hold: each top level field from the page named after it.
 pub fn from_pages<'py>(
     schema: &Bound<'py, Schema>,
-    pages: &Bound<'py, PyAny>,
+    pages: &Pages,
     node: Option<&Arc<Host>>,
-) -> PyResult<Bound<'py, PyAny>> {
+) -> Outcome<Bound<'py, PyAny>> {
     let loader = Loader { schema, node };
     let tree = schema.get().tree();
     let Some(dataclass) = tree.pages() else {
-        let Some(page) = pages.get_item(".").ok() else {
-            return Err(Failure::Schema(SchemaError::new("missing page '.'")).into());
-        };
-        let raw: Vec<u8> = page.extract()?;
-        let mut reader = Reader::new(&raw);
+        let page = pages
+            .get(".")
+            .ok_or_else(|| SchemaError::new("missing page '.'"))?;
+        let mut reader = Reader::new(page);
         let value = loader.read(tree.root(), &mut reader)?;
-        reader.finish().map_err(Failure::from)?;
+        reader.finish()?;
         return Ok(value);
     };
     let mut found: Vec<Option<Bound<'py, PyAny>>> = vec![None; dataclass.fields.len()];
     for (at, field) in dataclass.fields.iter().enumerate() {
-        let Ok(page) = pages.get_item(field.name.as_str()) else {
+        let Some(page) = pages.get(&field.name) else {
             continue;
         };
-        let raw: Vec<u8> = page.extract()?;
-        let mut reader = Reader::new(&raw);
+        let mut reader = Reader::new(page);
         let read = loader
             .read(field.node, &mut reader)
             .map_err(|failure| failure.under(&field.name))?;
         found[at] = Some(read);
-        reader.finish().map_err(Failure::from)?;
+        reader.finish()?;
     }
-    Ok(loader.build(dataclass, found)?)
+    loader.build(dataclass, found)
 }
 
 struct Loader<'a, 'py> {
@@ -552,6 +551,6 @@ impl<'py> Loader<'_, 'py> {
     }
 }
 
-fn wrong(expected: &str, kind: Kind) -> super::failure::Failure {
+fn wrong(expected: &str, kind: Kind) -> Failure {
     SchemaError::mismatch(expected, kind.python()).into()
 }
