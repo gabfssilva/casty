@@ -26,3 +26,6 @@ src/casty/_casty*.pyd
 .idea/
 .claude/
 .DS_Store
+
+# Task board (tackling-tasks), local only
+/.tasks/
