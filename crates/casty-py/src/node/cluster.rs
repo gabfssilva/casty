@@ -228,12 +228,9 @@ impl Entered {
         initial: Option<Pages>,
         answer: Py<PyAny>,
     ) {
-        let node = self.node.clone();
-        let running_loop = self.joined.running_loop.clone_ref(py);
-        let (actor, key) = (actor.to_owned(), key.to_owned());
-        self.joined.threads.spawn(async move {
-            let held = node.activate(&actor, &key, initial).await;
-            settle(&running_loop, Landed::Taken(held), answer);
+        let (node, actor, key) = (self.node.clone(), actor.to_owned(), key.to_owned());
+        self.dispatch(py, answer, async move {
+            Landed::Taken(node.activate(&actor, &key, initial).await)
         });
     }
 
@@ -249,12 +246,9 @@ impl Entered {
         active: bool,
         answer: Py<PyAny>,
     ) {
-        let node = self.node.clone();
-        let running_loop = self.joined.running_loop.clone_ref(py);
-        let (actor, key) = (actor.to_owned(), key.to_owned());
-        self.joined.threads.spawn(async move {
-            let written = node.commit(&actor, &key, lease, pages, active).await;
-            settle(&running_loop, Landed::Written(written), answer);
+        let (node, actor, key) = (self.node.clone(), actor.to_owned(), key.to_owned());
+        self.dispatch(py, answer, async move {
+            Landed::Written(node.commit(&actor, &key, lease, pages, active).await)
         });
     }
 
@@ -269,33 +263,44 @@ impl Entered {
         active: bool,
         answer: Py<PyAny>,
     ) {
-        let node = self.node.clone();
-        let running_loop = self.joined.running_loop.clone_ref(py);
-        let (actor, key) = (actor.to_owned(), key.to_owned());
-        self.joined.threads.spawn(async move {
-            let deleted = node.delete(&actor, &key, lease, active).await;
-            settle(&running_loop, Landed::Written(deleted), answer);
+        let (node, actor, key) = (self.node.clone(), actor.to_owned(), key.to_owned());
+        self.dispatch(py, answer, async move {
+            Landed::Written(node.delete(&actor, &key, lease, active).await)
         });
     }
 
     /// Resolve `answer` on the loop with where `(actor, key)` is as this node sees it, as a `casty.Placement`.
     pub fn placed(&self, py: Python<'_>, actor: &str, key: &str, answer: Py<PyAny>) {
-        let node = self.node.clone();
-        let running_loop = self.joined.running_loop.clone_ref(py);
-        let (actor, key) = (actor.to_owned(), key.to_owned());
-        self.joined.threads.spawn(async move {
-            let placed = node.placed(&actor, &key).await;
-            settle(&running_loop, Landed::Placed(placed), answer);
+        let (node, actor, key) = (self.node.clone(), actor.to_owned(), key.to_owned());
+        self.dispatch(py, answer, async move {
+            Landed::Placed(node.placed(&actor, &key).await)
         });
     }
 
     /// Resolve `answer` on the loop with every key the replica of this node keeps, as `(actor, key, deleted)`.
     pub fn stored(&self, py: Python<'_>, answer: Py<PyAny>) {
         let node = self.node.clone();
+        self.dispatch(
+            py,
+            answer,
+            async move { Landed::Stored(node.stored().await) },
+        );
+    }
+
+    /// Run `operation` on the threads of the transport, and resolve `answer` on the loop with what it lands.
+    ///
+    /// The loop may already be closed when it lands, which is what a system that stopped under an operation looks
+    /// like: nobody is left to resolve it for.
+    fn dispatch(
+        &self,
+        py: Python<'_>,
+        answer: Py<PyAny>,
+        operation: impl Future<Output = Landed> + Send + 'static,
+    ) {
         let running_loop = self.joined.running_loop.clone_ref(py);
         self.joined.threads.spawn(async move {
-            let stored = node.stored().await;
-            settle(&running_loop, Landed::Stored(stored), answer);
+            let landed = operation.await;
+            callback::on_loop(&running_loop, move |py| landed.resolve(py, answer.bind(py)));
         });
     }
 }
@@ -373,12 +378,6 @@ enum Landed {
     Written(Result<(), Failure>),
     Stored(Vec<(String, String, bool)>),
     Placed(Placed),
-}
-
-/// Hand the answer to the loop, which resolves the future the body is waiting on. The loop may already be closed, which
-/// is what a system that stopped under an operation looks like.
-fn settle(running_loop: &Py<PyAny>, landed: Landed, answer: Py<PyAny>) {
-    callback::on_loop(running_loop, move |py| landed.resolve(py, answer.bind(py)));
 }
 
 impl Landed {
