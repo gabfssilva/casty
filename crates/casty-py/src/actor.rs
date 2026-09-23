@@ -559,7 +559,7 @@ fn compiled(
     annotation: &Bound<'_, PyAny>,
     role: &str,
 ) -> PyResult<Py<Schema>> {
-    let built: Outcome<Schema> = Schema::compiled(py, introspect, annotation, false);
+    let built: Outcome<Schema> = Schema::compiled(introspect, annotation, false);
     match built {
         Ok(schema) => Ok(Bound::new(py, schema)?.unbind()),
         Err(failure) => Err(failure.under(role).into()),

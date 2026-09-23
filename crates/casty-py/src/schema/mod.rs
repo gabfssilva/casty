@@ -36,7 +36,6 @@ pub struct Schema {
 impl Schema {
     /// Compile `annotation` with an interpreter already read: the decorator compiles two schemas from one reading.
     pub fn compiled(
-        py: Python<'_>,
         introspect: &Introspect<'_>,
         annotation: &Bound<'_, PyAny>,
         canonical: bool,
@@ -46,7 +45,7 @@ impl Schema {
             tree: compiled.tree,
             classes: compiled.classes,
             codecs: compiled.codecs,
-            values: values::Values::new(py)?,
+            values: values::Values::new(introspect)?,
         })
     }
 
@@ -57,7 +56,7 @@ impl Schema {
         canonical: bool,
     ) -> failure::Outcome<Self> {
         let introspect = Introspect::new(py, py.get_type::<crate::refs::Ref>().into_any())?;
-        Self::compiled(py, &introspect, annotation, canonical)
+        Self::compiled(&introspect, annotation, canonical)
     }
 
     /// `value` as the bytes the node `at` writes it in.
@@ -161,5 +160,5 @@ pub fn reply_schema(py: Python<'_>, build: &Bound<'_, PyAny>) -> PyResult<Schema
     let Some(answer) = args.first() else {
         return Err(shape());
     };
-    Ok(Schema::compiled(py, &introspect, answer, false)?)
+    Ok(Schema::compiled(&introspect, answer, false)?)
 }

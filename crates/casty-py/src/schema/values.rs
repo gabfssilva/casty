@@ -3,6 +3,8 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
+use super::introspect::Introspect;
+
 /// `date(1970, 1, 1).toordinal()`: a `date` counts its days from the epoch a `datetime` counts its microseconds from.
 const EPOCH_ORDINAL: i64 = 719_163;
 
@@ -20,29 +22,21 @@ pub struct Values {
 }
 
 impl Values {
-    pub fn new(py: Python<'_>) -> PyResult<Self> {
+    /// The types `introspect` read the annotation with, and the zone and the epoch the walks build values from.
+    pub fn new(introspect: &Introspect<'_>) -> PyResult<Self> {
+        let py = introspect.py();
         let module = py.import("datetime")?;
-        let datetime = module.getattr("datetime")?.cast_into::<PyType>()?;
-        let utc = module.getattr("UTC")?;
         let named = PyDict::new(py);
-        named.set_item("tzinfo", utc)?;
-        let epoch = datetime.call((1970, 1, 1), Some(&named))?;
+        named.set_item("tzinfo", module.getattr("UTC")?)?;
+        let epoch = introspect.datetime.call((1970, 1, 1), Some(&named))?;
         Ok(Self {
-            datetime: datetime.unbind(),
-            date: module.getattr("date")?.cast_into::<PyType>()?.unbind(),
-            time: module.getattr("time")?.cast_into::<PyType>()?.unbind(),
-            timedelta: module.getattr("timedelta")?.cast_into::<PyType>()?.unbind(),
-            decimal: py
-                .import("decimal")?
-                .getattr("Decimal")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            uuid: py
-                .import("uuid")?
-                .getattr("UUID")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            mapping: py.import("collections.abc")?.getattr("Mapping")?.unbind(),
+            datetime: introspect.datetime.clone().unbind(),
+            date: introspect.date.clone().unbind(),
+            time: introspect.time.clone().unbind(),
+            timedelta: introspect.timedelta.clone().unbind(),
+            decimal: introspect.decimal.clone().unbind(),
+            uuid: introspect.uuid.clone().unbind(),
+            mapping: introspect.mapping.clone().unbind(),
             timezone: module.getattr("timezone")?.unbind(),
             epoch: epoch.unbind(),
         })
