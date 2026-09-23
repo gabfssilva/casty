@@ -1,37 +1,37 @@
 //! A counter: a number that goes up and down, and reads back.
 
 use casty_core::store::Pages;
-use casty_core::wire::{Reading, Writer};
+use casty_core::wire::Reading;
 
-use super::{Given, Native, Turn, WHOLE, named};
+use super::{Given, Native, Turn, WHOLE, named, nil, number, number_in};
 
 #[derive(Debug)]
 pub struct Counter;
 
 impl Native for Counter {
     fn initial(&self) -> Pages {
-        Pages::from([(WHOLE.to_owned(), written(0))])
+        Pages::from([(WHOLE.to_owned(), number(0))])
     }
 
     fn step(&self, held: &Pages, given: &Given<'_>, _: f64) -> Turn {
         let Given::Message(message) = given else {
             return Turn::default();
         };
-        let count = count(held);
+        let count = number_in(held, WHOLE, 0);
         let Ok((tag, reply, delta)) = read(message) else {
             return Turn::default();
         };
         let mut turn = Turn::default();
         let answer = match named(&tag) {
             "Add" => {
-                turn.save = Some(Pages::from([(WHOLE.to_owned(), written(count + delta))]));
-                nothing()
+                turn.save = Some(Pages::from([(WHOLE.to_owned(), number(count + delta))]));
+                nil()
             }
             "Reset" => {
-                turn.save = Some(Pages::from([(WHOLE.to_owned(), written(0))]));
-                nothing()
+                turn.save = Some(Pages::from([(WHOLE.to_owned(), number(0))]));
+                nil()
             }
-            "Get" => written(count),
+            "Get" => number(count),
             _ => return Turn::default(),
         };
         turn.replies = vec![(reply, answer)];
@@ -57,22 +57,4 @@ fn read(message: &[u8]) -> casty_core::wire::Result<(String, casty_core::node::T
         reply.ok_or(casty_core::schema::msgpack::Malformed::Truncated)?,
         delta,
     ))
-}
-
-fn count(held: &Pages) -> i64 {
-    held.get(WHOLE)
-        .and_then(|page| Reading::new(page).int().ok())
-        .unwrap_or(0)
-}
-
-fn written(count: i64) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.int(count);
-    writer.finish()
-}
-
-fn nothing() -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.nil();
-    writer.finish()
 }

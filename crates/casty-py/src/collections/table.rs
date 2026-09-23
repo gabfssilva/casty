@@ -18,7 +18,9 @@ use casty_core::schema::msgpack::Malformed;
 use casty_core::store::Pages;
 use casty_core::wire::{Reading, Result, Writer};
 
-use super::{Asking, Given, Native, Turn, named};
+use super::{
+    Asking, Given, Native, Turn, count, named, nil, number, number_in, optional_bytes, truth,
+};
 
 const SEGMENTS: &str = "segments";
 const ENTRIES: &str = "entries";
@@ -54,7 +56,7 @@ impl Native for Table {
         let Ok(read) = read(message) else {
             return Turn::default();
         };
-        let segments = number_in(held, SEGMENTS).max(1);
+        let segments = number_in(held, SEGMENTS, 0).max(1);
         let mut turn = Turn::default();
         let answer = match named(&read.tag) {
             "Segments" => number(segments),
@@ -197,9 +199,9 @@ impl Bucket {
                 .get(ENTRIES)
                 .and_then(|page| read_entries(&mut Reading::new(page)).ok())
                 .unwrap_or_default(),
-            modulus: number_in(pages, MODULUS).max(1),
-            id: number_in(pages, ID),
-            version: number_in(pages, VERSION),
+            modulus: number_in(pages, MODULUS, 0).max(1),
+            id: number_in(pages, ID, 0),
+            version: number_in(pages, VERSION, 0),
         }
     }
 
@@ -343,11 +345,6 @@ fn at<'a>(entries: &'a mut Entries, key: &[u8]) -> &'a mut Vec<Vec<u8>> {
     &mut entries[at].1
 }
 
-/// A count as the schema writes one, which is a signed number.
-fn count(held: usize) -> i64 {
-    i64::try_from(held).unwrap_or(i64::MAX)
-}
-
 /// Take `value` out from under `key`, or the whole key when there is no value to name.
 fn remove(entries: &mut Entries, key: &[u8], value: Option<&[u8]>) -> usize {
     let Some(at) = entries.iter().position(|(held, _)| held == key) else {
@@ -411,13 +408,7 @@ fn read(message: &[u8]) -> Result<Held> {
         match reading.name()? {
             "reply_to" => reply = Some(reading.target()?),
             "key" => key = Some(reading.bytes()?),
-            "value" => {
-                value = if reading.nil()? {
-                    None
-                } else {
-                    Some(reading.bytes()?)
-                };
-            }
+            "value" => value = optional_bytes(&mut reading)?,
             "generation" => generation = Some(reading.int()?),
             "seen" => seen = Some(reading.int()?),
             "split" => split = Some(reading.target()?),
@@ -475,13 +466,6 @@ fn adoption(reply: &Target, entries: &Entries, modulus: i64, id: i64, version: i
     writer.name("version");
     writer.int(version);
     writer.finish()
-}
-
-fn number_in(pages: &Pages, name: &str) -> i64 {
-    pages
-        .get(name)
-        .and_then(|page| Reading::new(page).int().ok())
-        .unwrap_or(0)
 }
 
 fn read_entries(reading: &mut Reading<'_>) -> Result<Entries> {
@@ -544,24 +528,6 @@ fn listed(entries: &Entries, key: &[u8]) -> Vec<u8> {
     for value in values {
         writer.bytes(value);
     }
-    writer.finish()
-}
-
-fn number(value: i64) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.int(value);
-    writer.finish()
-}
-
-fn truth(value: bool) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.bool(value);
-    writer.finish()
-}
-
-fn nil() -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.nil();
     writer.finish()
 }
 

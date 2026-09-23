@@ -15,7 +15,9 @@ pub mod table;
 use std::sync::Arc;
 
 use casty_core::node::Target;
+use casty_core::schema::msgpack::Malformed;
 use casty_core::store::Pages;
+use casty_core::wire::{Reading, Result, Writer};
 
 /// What a native body was given to work on.
 #[derive(Debug)]
@@ -137,6 +139,68 @@ pub fn named(tag: &str) -> &str {
 
 /// The single page a state that is not a dataclass lives in.
 pub const WHOLE: &str = ".";
+
+/// `int`, as an answer or a page.
+fn number(value: i64) -> Vec<u8> {
+    let mut writer = Writer::new();
+    writer.int(value);
+    writer.finish()
+}
+
+/// `bool`, as an answer or a page.
+fn truth(value: bool) -> Vec<u8> {
+    let mut writer = Writer::new();
+    writer.bool(value);
+    writer.finish()
+}
+
+/// `None`, which is what a message that returns nothing answers.
+fn nil() -> Vec<u8> {
+    optional(None)
+}
+
+/// `bytes | None`, as an answer or a page.
+fn optional(value: Option<&[u8]>) -> Vec<u8> {
+    let mut writer = Writer::new();
+    match value {
+        Some(value) => writer.bytes(value),
+        None => writer.nil(),
+    }
+    writer.finish()
+}
+
+/// A `bytes | None` field.
+fn optional_bytes(reading: &mut Reading<'_>) -> Result<Option<Vec<u8>>> {
+    if reading.nil()? {
+        return Ok(None);
+    }
+    Ok(Some(reading.bytes()?))
+}
+
+/// A `UUID` field, which travels as its sixteen bytes.
+fn uuid(reading: &mut Reading<'_>) -> Result<[u8; 16]> {
+    <[u8; 16]>::try_from(reading.bytes()?.as_slice()).map_err(|_| Malformed::Truncated)
+}
+
+/// A count as the schema writes one, which is a signed number.
+fn count(held: usize) -> i64 {
+    i64::try_from(held).unwrap_or(i64::MAX)
+}
+
+/// The number the page `name` holds, or `default` when it holds none.
+fn number_in(pages: &Pages, name: &str, default: i64) -> i64 {
+    pages
+        .get(name)
+        .and_then(|page| Reading::new(page).int().ok())
+        .unwrap_or(default)
+}
+
+/// The `bytes | None` the page `name` holds, and nothing when it holds none.
+fn optional_in(pages: &Pages, name: &str) -> Option<Vec<u8>> {
+    optional_bytes(&mut Reading::new(pages.get(name)?))
+        .ok()
+        .flatten()
+}
 
 #[cfg(test)]
 mod tests {

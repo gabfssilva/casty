@@ -25,7 +25,7 @@ use casty_core::schema::msgpack::Malformed;
 use casty_core::store::Pages;
 use casty_core::wire::{Reading, Result, Writer};
 
-use super::{Given, Native, Turn, named};
+use super::{Given, Native, Turn, named, number, number_in, optional, optional_in, truth};
 
 const VALUE: &str = "value";
 const GENERATION: &str = "generation";
@@ -135,18 +135,11 @@ fn removal(removed: bool, generation: i64) -> Vec<u8> {
 }
 
 fn value(held: &Pages) -> Option<Vec<u8>> {
-    let page = held.get(VALUE)?;
-    let mut reading = Reading::new(page);
-    if reading.nil().ok()? {
-        return None;
-    }
-    reading.bytes().ok()
+    optional_in(held, VALUE)
 }
 
 fn generation(held: &Pages) -> i64 {
-    held.get(GENERATION)
-        .and_then(|page| Reading::new(page).int().ok())
-        .unwrap_or(0)
+    number_in(held, GENERATION, 0)
 }
 
 /// The wall clock in microseconds, which is the generation an entry starts from.
@@ -163,27 +156,6 @@ fn saved(value: Option<&[u8]>, generation: i64) -> Pages {
         (VALUE.to_owned(), optional(value)),
         (GENERATION.to_owned(), number(generation)),
     ])
-}
-
-fn number(value: i64) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.int(value);
-    writer.finish()
-}
-
-fn optional(value: Option<&[u8]>) -> Vec<u8> {
-    let mut writer = Writer::new();
-    match value {
-        Some(value) => writer.bytes(value),
-        None => writer.nil(),
-    }
-    writer.finish()
-}
-
-fn truth(value: bool) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.bool(value);
-    writer.finish()
 }
 
 #[cfg(test)]

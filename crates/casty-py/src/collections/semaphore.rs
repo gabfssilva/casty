@@ -5,7 +5,7 @@ use casty_core::schema::msgpack::Malformed;
 use casty_core::store::Pages;
 use casty_core::wire::{Reading, Result, Writer};
 
-use super::{Given, Native, Turn, named};
+use super::{Given, Native, Turn, named, nil, number, number_in, truth, uuid};
 
 const CAPACITY: &str = "capacity";
 const NEXT_TOKEN: &str = "next_token";
@@ -286,10 +286,6 @@ fn read(message: &[u8]) -> Result<Held> {
     })
 }
 
-fn uuid(reading: &mut Reading<'_>) -> Result<[u8; 16]> {
-    <[u8; 16]>::try_from(reading.bytes()?.as_slice()).map_err(|_| Malformed::Truncated)
-}
-
 fn state(pages: &Pages) -> State {
     State {
         capacity: number_in(pages, CAPACITY, 0),
@@ -303,13 +299,6 @@ fn state(pages: &Pages) -> State {
             .and_then(|page| read_pending(page).ok())
             .unwrap_or_default(),
     }
-}
-
-fn number_in(pages: &Pages, name: &str, default: i64) -> i64 {
-    pages
-        .get(name)
-        .and_then(|page| Reading::new(page).int().ok())
-        .unwrap_or(default)
 }
 
 fn read_held(page: &[u8]) -> Result<Vec<Lease>> {
@@ -374,10 +363,6 @@ fn read_pending(page: &[u8]) -> Result<Vec<Pending>> {
 }
 
 fn saved(state: &State) -> Pages {
-    let mut capacity = Writer::new();
-    capacity.int(state.capacity);
-    let mut next = Writer::new();
-    next.int(state.next_token);
     let mut held = Writer::new();
     held.items(state.held.len());
     for lease in &state.held {
@@ -407,8 +392,8 @@ fn saved(state: &State) -> Pages {
         pending.float(waiting.until);
     }
     Pages::from([
-        (CAPACITY.to_owned(), capacity.finish()),
-        (NEXT_TOKEN.to_owned(), next.finish()),
+        (CAPACITY.to_owned(), number(state.capacity)),
+        (NEXT_TOKEN.to_owned(), number(state.next_token)),
         (HELD.to_owned(), held.finish()),
         (PENDING.to_owned(), pending.finish()),
     ])
@@ -421,23 +406,5 @@ fn token(value: Option<i64>) -> Vec<u8> {
         Some(value) => writer.int(value),
         None => writer.nil(),
     }
-    writer.finish()
-}
-
-fn number(value: i64) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.int(value);
-    writer.finish()
-}
-
-fn truth(value: bool) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.bool(value);
-    writer.finish()
-}
-
-fn nil() -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.nil();
     writer.finish()
 }

@@ -2,9 +2,9 @@
 
 use casty_core::node::Target;
 use casty_core::store::Pages;
-use casty_core::wire::{Reading, Result, Writer};
+use casty_core::wire::{Reading, Result};
 
-use super::{Given, Native, Turn, named};
+use super::{Given, Native, Turn, named, nil, optional, optional_bytes, optional_in, truth};
 
 /// The only field of the state, which is the page it lives in.
 const VALUE: &str = "value";
@@ -24,7 +24,7 @@ impl Native for Register {
         let Ok(read) = read(message) else {
             return Turn::default();
         };
-        let value = value(held);
+        let value = optional_in(held, VALUE);
         let mut turn = Turn::default();
         let answer = match named(&read.tag) {
             "Get" => optional(value.as_deref()),
@@ -80,38 +80,6 @@ fn read(message: &[u8]) -> Result<Held> {
     })
 }
 
-fn optional_bytes(reading: &mut Reading<'_>) -> Result<Option<Vec<u8>>> {
-    if reading.nil()? {
-        return Ok(None);
-    }
-    Ok(Some(reading.bytes()?))
-}
-
-fn value(held: &Pages) -> Option<Vec<u8>> {
-    let page = held.get(VALUE)?;
-    let mut reading = Reading::new(page);
-    optional_bytes(&mut reading).ok().flatten()
-}
-
 fn saved(value: Option<&[u8]>) -> Pages {
     Pages::from([(VALUE.to_owned(), optional(value))])
-}
-
-fn optional(value: Option<&[u8]>) -> Vec<u8> {
-    let mut writer = Writer::new();
-    match value {
-        Some(value) => writer.bytes(value),
-        None => writer.nil(),
-    }
-    writer.finish()
-}
-
-fn nil() -> Vec<u8> {
-    optional(None)
-}
-
-fn truth(value: bool) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.bool(value);
-    writer.finish()
 }

@@ -5,7 +5,7 @@ use casty_core::schema::msgpack::Malformed;
 use casty_core::store::Pages;
 use casty_core::wire::{Reading, Result, Writer};
 
-use super::{Given, Native, Turn, named};
+use super::{Given, Native, Turn, count, named, number, number_in, truth, uuid};
 
 const GENERATION: &str = "generation";
 const PENDING: &str = "pending";
@@ -196,16 +196,9 @@ fn read(message: &[u8]) -> Result<Held> {
     })
 }
 
-fn uuid(reading: &mut Reading<'_>) -> Result<[u8; 16]> {
-    <[u8; 16]>::try_from(reading.bytes()?.as_slice()).map_err(|_| Malformed::Truncated)
-}
-
 fn state(held: &Pages) -> State {
     State {
-        generation: held
-            .get(GENERATION)
-            .and_then(|page| Reading::new(page).int().ok())
-            .unwrap_or(0),
+        generation: number_in(held, GENERATION, 0),
         pending: held
             .get(PENDING)
             .and_then(|page| read_pending(page).ok())
@@ -267,8 +260,6 @@ fn read_completed(page: &[u8]) -> Result<Vec<Completed>> {
 }
 
 fn saved(state: &State) -> Pages {
-    let mut generation = Writer::new();
-    generation.int(state.generation);
     let mut pending = Writer::new();
     pending.items(state.pending.len());
     for party in &state.pending {
@@ -290,24 +281,8 @@ fn saved(state: &State) -> Pages {
         completed.float(done.until);
     }
     Pages::from([
-        (GENERATION.to_owned(), generation.finish()),
+        (GENERATION.to_owned(), number(state.generation)),
         (PENDING.to_owned(), pending.finish()),
         (COMPLETED.to_owned(), completed.finish()),
     ])
-}
-
-fn count(held: usize) -> i64 {
-    i64::try_from(held).unwrap_or(i64::MAX)
-}
-
-fn number(value: i64) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.int(value);
-    writer.finish()
-}
-
-fn truth(value: bool) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.bool(value);
-    writer.finish()
 }

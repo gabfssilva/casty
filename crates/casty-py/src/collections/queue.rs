@@ -15,7 +15,7 @@ use casty_core::schema::msgpack::Malformed;
 use casty_core::store::Pages;
 use casty_core::wire::{Reading, Result, Writer};
 
-use super::{Asking, Given, Native, Turn, named};
+use super::{Asking, Given, Native, Turn, count, named, nil, number, number_in, truth};
 
 const HEAD: &str = "head";
 const TAIL: &str = "tail";
@@ -49,7 +49,7 @@ impl Native for Queue {
         if named(&read.tag) != "Advance" {
             return Turn::default();
         }
-        let (head, tail) = (number_in(pages, HEAD), number_in(pages, TAIL));
+        let (head, tail) = (number_in(pages, HEAD, 0), number_in(pages, TAIL, 0));
         // Both only move forward, and the tail never stays behind the head: a segment the head passed is sealed.
         let next_head = head.max(read.head.unwrap_or(head));
         let next_tail = tail.max(read.tail.unwrap_or(tail)).max(next_head);
@@ -138,7 +138,7 @@ impl Native for Segment {
                 let waiting = run.waiting();
                 listed(&waiting[..waiting.len().min(1)], run.sealed)
             }
-            "Size" => number(i64::try_from(run.waiting().len()).unwrap_or(i64::MAX)),
+            "Size" => number(count(run.waiting().len())),
             "Clear" => {
                 run.clear();
                 nil()
@@ -170,7 +170,7 @@ impl Run {
                 .get(ITEMS)
                 .and_then(|page| read_items(page).ok())
                 .unwrap_or_default(),
-            taken: usize::try_from(number_in(pages, TAKEN)).unwrap_or(0),
+            taken: usize::try_from(number_in(pages, TAKEN, 0)).unwrap_or(0),
             sealed: pages
                 .get(SEALED)
                 .and_then(|page| Reading::new(page).bool().ok())
@@ -186,10 +186,7 @@ impl Run {
         }
         Pages::from([
             (ITEMS.to_owned(), items.finish()),
-            (
-                TAKEN.to_owned(),
-                number(i64::try_from(self.taken).unwrap_or(i64::MAX)),
-            ),
+            (TAKEN.to_owned(), number(count(self.taken))),
             (SEALED.to_owned(), truth(self.sealed)),
         ])
     }
@@ -307,13 +304,6 @@ fn ends(answer: &[u8]) -> Result<(i64, i64)> {
     Ok((reading.int()?, reading.int()?))
 }
 
-fn number_in(pages: &Pages, name: &str) -> i64 {
-    pages
-        .get(name)
-        .and_then(|page| Reading::new(page).int().ok())
-        .unwrap_or(0)
-}
-
 fn read_items(page: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut reading = Reading::new(page);
     let count = reading.items()?;
@@ -345,24 +335,6 @@ fn listed(items: &[Vec<u8>], sealed: bool) -> Vec<u8> {
         writer.bytes(item);
     }
     writer.bool(sealed);
-    writer.finish()
-}
-
-fn truth(value: bool) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.bool(value);
-    writer.finish()
-}
-
-fn number(value: i64) -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.int(value);
-    writer.finish()
-}
-
-fn nil() -> Vec<u8> {
-    let mut writer = Writer::new();
-    writer.nil();
     writer.finish()
 }
 
