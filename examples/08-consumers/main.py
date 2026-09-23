@@ -14,10 +14,11 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import timedelta
 
-from casty import ActorSystem, Cluster, Context, actor
+from local_cluster import nodes
+
+from casty import Context, actor
 
 PORTS = (7431, 7432, 7433)
-SEEDS = tuple(f"127.0.0.1:{port}" for port in PORTS)
 PARTITIONS = tuple(f"orders-{index}" for index in range(6))
 LAST = 60
 
@@ -70,52 +71,24 @@ async def consumer(ctx: Context[Cursor]) -> None:
         await ctx.state.set(Cursor(offset))
 
 
-def node(port: int, /) -> ActorSystem:
-    cluster = Cluster(
-        bind=f"127.0.0.1:{port}",
-        seeds=SEEDS,
-        heartbeat=timedelta(milliseconds=200),
+async def main() -> None:
+    async with nodes(
+        PORTS,
         suspect_after=timedelta(seconds=1),
         dead_after=timedelta(seconds=1),
-    )
-    return ActorSystem(cluster=cluster, leave_timeout=timedelta(seconds=1))
-
-
-async def host(system: ActorSystem, stop: asyncio.Event, /) -> None:
-    async with system:
-        await stop.wait()
-
-
-async def formed(systems: list[ActorSystem], /) -> None:
-    while True:
-        try:
-            if all(len(system.members) == len(systems) for system in systems):
-                return
-        except RuntimeError:
-            pass
-        await asyncio.sleep(0.1)
-
-
-async def main() -> None:
-    stop = asyncio.Event()
-    systems = [node(port) for port in PORTS]
-    async with asyncio.TaskGroup() as nodes:
-        tasks = [nodes.create_task(host(system, stop)) for system in systems]
-        await formed(systems)
-
+        leave_timeout=timedelta(seconds=1),
+    ) as cluster:
         # Obtaining the ref creates each key and activates it, wherever the ring places it. Nothing else is ever sent.
         for partition in PARTITIONS:
-            systems[0].ref(consumer, partition)
+            cluster.systems[0].ref(consumer, partition)
         await PROGRESS.reached(15)
 
         busiest, _ = Counter(address for _, _, address in PROGRESS.log).most_common(1)[0]
-        victim = next(index for index, system in enumerate(systems) if system.node.address == busiest)
         lost = {partition for partition, _, address in PROGRESS.log if address == busiest}
-        tasks[victim].cancel()
+        cluster.kill(next(system for system in cluster.systems if system.node.address == busiest))
         print(f"killed {busiest}, which was running {sorted(lost)}")
 
         await PROGRESS.reached(LAST)
-        stop.set()
 
     for partition in PARTITIONS:
         offsets = [offset for held, offset, _ in PROGRESS.log if held == partition]

@@ -15,11 +15,12 @@ from datetime import timedelta
 from pathlib import Path
 from typing import assert_never
 
-from casty import ActorSystem, Cluster, Context, Ref, actor
+from local_cluster import nodes
+
+from casty import ActorSystem, Context, Ref, actor
 from casty.sqlite import SQLiteStore
 
 PORTS = (7451, 7452, 7453)
-SEEDS = tuple(f"127.0.0.1:{port}" for port in PORTS)
 
 
 @dataclass(frozen=True)
@@ -61,39 +62,12 @@ async def tab(ctx: Context[int, AccountMsg]) -> None:
     await keep_balance(ctx)
 
 
-def node(port: int, store: SQLiteStore, /) -> ActorSystem:
-    cluster = Cluster(bind=f"127.0.0.1:{port}", seeds=SEEDS, heartbeat=timedelta(milliseconds=200))
-    # Every node is given the store: a durable type does not activate on a node without one. The cluster is stopped
-    # whole, with nobody left to take the keys of a leaving node, so the wait for someone to take them is kept short.
-    return ActorSystem(cluster=cluster, store=store, leave_timeout=timedelta(seconds=1))
-
-
-async def host(system: ActorSystem, stop: asyncio.Event, /) -> None:
-    async with system:
-        await stop.wait()
-
-
-async def formed(systems: list[ActorSystem], /) -> None:
-    """Wait until every node sees every other. A node is only usable once its `async with` is entered."""
-    while True:
-        try:
-            if all(len(system.members) == len(systems) for system in systems):
-                return
-        except RuntimeError:
-            pass
-        await asyncio.sleep(0.1)
-
-
 async def cluster(store: SQLiteStore, work: Callable[[ActorSystem], Awaitable[None]], /) -> None:
     """Start three nodes on `store` together, hand the first one to `work`, then stop all three."""
-    stop = asyncio.Event()
-    systems = [node(port, store) for port in PORTS]
-    async with asyncio.TaskGroup() as nodes:
-        for system in systems:
-            nodes.create_task(host(system, stop))
-        await formed(systems)
-        await work(systems[0])
-        stop.set()
+    # Every node is given the store: a durable type does not activate on a node without one. The cluster is stopped
+    # whole, with nobody left to take the keys of a leaving node, so the wait for someone to take them is kept short.
+    async with nodes(PORTS, store=store, leave_timeout=timedelta(seconds=1)) as running:
+        await work(running.systems[0])
 
 
 async def deposit(system: ActorSystem, /) -> None:

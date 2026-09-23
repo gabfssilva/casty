@@ -11,9 +11,11 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import assert_never
 
-from casty import ActorSystem, Cluster, Context, NodeId, Ref, Unavailable, actor
+from local_cluster import nodes
 
-SEED = "127.0.0.1:7411"
+from casty import ActorSystem, Context, NodeId, Ref, Unavailable, actor
+
+PORTS = (7411, 7412, 7413, 7414)
 KEYS = tuple(f"cart-{index}" for index in range(12))
 # Annotated because the state of a cart is a tuple of any number of items, which the empty literal alone is not.
 EMPTY_CART: tuple[str, ...] = ()
@@ -52,27 +54,6 @@ async def cart(ctx: Context[tuple[str, ...], CartMsg]) -> None:
                 assert_never(msg)
 
 
-def node(port: int, /) -> ActorSystem:
-    cluster = Cluster(bind=f"127.0.0.1:{port}", seeds=(SEED,), heartbeat=timedelta(milliseconds=200))
-    return ActorSystem(cluster=cluster, leave_timeout=timedelta(seconds=5))
-
-
-async def host(system: ActorSystem, stop: asyncio.Event, /) -> None:
-    async with system:
-        await stop.wait()
-
-
-async def formed(systems: list[ActorSystem], /) -> None:
-    """Wait until every node sees every other. A node is only usable once its `async with` is entered."""
-    while True:
-        try:
-            if all(len(system.members) == len(systems) for system in systems):
-                return
-        except RuntimeError:
-            pass
-        await asyncio.sleep(0.1)
-
-
 async def locate(system: ActorSystem, key: str, /) -> Located:
     """Ask until the key answers: while a key changes hands it is unavailable for a moment, never in two places."""
     while True:
@@ -91,29 +72,19 @@ async def report(title: str, through: ActorSystem, /) -> None:
 
 
 async def main() -> None:
-    stops = [asyncio.Event() for _ in range(4)]
-    systems = [node(7411 + index) for index in range(4)]
-    async with asyncio.TaskGroup() as nodes:
-        for system, stop in zip(systems[:3], stops, strict=False):
-            nodes.create_task(host(system, stop))
-        await formed(systems[:3])
-
+    async with nodes(PORTS[:3], leave_timeout=timedelta(seconds=5)) as cluster:
+        systems = cluster.systems
         # Each message enters through a different node. None of them is told where the cart is.
         for index, key in enumerate(KEYS):
             await systems[index % 3].ref(cart, key).ask(Add, "book")
             await systems[(index + 1) % 3].ref(cart, key).ask(Add, "pen")
         await report("three nodes", systems[0])
 
-        nodes.create_task(host(systems[3], stops[3]))
-        await formed(systems)
+        await cluster.start(PORTS[3])
         await report("a fourth joined", systems[0])
 
-        stops[1].set()
-        await formed([systems[0], systems[2], systems[3]])
+        await cluster.stop(systems[1])
         await report("the second left", systems[0])
-
-        for stop in stops:
-            stop.set()
 
 
 asyncio.run(main())
