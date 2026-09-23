@@ -1,8 +1,10 @@
-//! msgpack exactly as `msgpack-python` writes it.
+//! msgpack as casty writes it, on the wire and in the store.
 //!
-//! The format is not an implementation detail during the port: a node of this core and a node of the Python
-//! implementation form one cluster, and state written by one is read by the other. Every choice `packb` makes about
-//! which marker to use for a value is made here too, so the bytes match byte for byte.
+//! The markers are part of the format, not an implementation detail: a value is always written with the smallest
+//! marker that holds it and a float always as a double, so the same value has the same bytes on every node.
+
+// Every narrowing cast here writes a value its match arm has already bounded to the width it is cast to.
+#![allow(clippy::cast_possible_truncation)]
 
 use core::fmt;
 
@@ -139,23 +141,17 @@ pub fn write_f64(out: &mut Vec<u8>, value: f64) {
 pub fn write_str(out: &mut Vec<u8>, value: &str) {
     let bytes = value.as_bytes();
     match bytes.len() {
-        len @ 0..=31 => {
-            #[allow(clippy::cast_possible_truncation)]
-            out.push(0xa0 | len as u8);
-        }
+        len @ 0..=31 => out.push(0xa0 | len as u8),
         len @ 32..=0xff => {
             out.push(0xd9);
-            #[allow(clippy::cast_possible_truncation)]
             out.push(len as u8);
         }
         len @ 0x100..=0xffff => {
             out.push(0xda);
-            #[allow(clippy::cast_possible_truncation)]
             out.extend_from_slice(&(len as u16).to_be_bytes());
         }
         len => {
             out.push(0xdb);
-            #[allow(clippy::cast_possible_truncation)]
             out.extend_from_slice(&(len as u32).to_be_bytes());
         }
     }
@@ -166,17 +162,14 @@ pub fn write_bin(out: &mut Vec<u8>, value: &[u8]) {
     match value.len() {
         len @ 0..=0xff => {
             out.push(0xc4);
-            #[allow(clippy::cast_possible_truncation)]
             out.push(len as u8);
         }
         len @ 0x100..=0xffff => {
             out.push(0xc5);
-            #[allow(clippy::cast_possible_truncation)]
             out.extend_from_slice(&(len as u16).to_be_bytes());
         }
         len => {
             out.push(0xc6);
-            #[allow(clippy::cast_possible_truncation)]
             out.extend_from_slice(&(len as u32).to_be_bytes());
         }
     }
@@ -194,18 +187,13 @@ pub fn write_map_len(out: &mut Vec<u8>, len: usize) {
 /// The length of an array or a map, which have a fixed form of up to fifteen and then 16 and 32 bit ones.
 fn write_count(out: &mut Vec<u8>, len: usize, fixed: u8, sixteen: u8, thirty_two: u8) {
     match len {
-        len @ 0..=15 => {
-            #[allow(clippy::cast_possible_truncation)]
-            out.push(fixed | len as u8);
-        }
+        len @ 0..=15 => out.push(fixed | len as u8),
         len @ 16..=0xffff => {
             out.push(sixteen);
-            #[allow(clippy::cast_possible_truncation)]
             out.extend_from_slice(&(len as u16).to_be_bytes());
         }
         len => {
             out.push(thirty_two);
-            #[allow(clippy::cast_possible_truncation)]
             out.extend_from_slice(&(len as u32).to_be_bytes());
         }
     }
@@ -213,23 +201,17 @@ fn write_count(out: &mut Vec<u8>, len: usize, fixed: u8, sixteen: u8, thirty_two
 
 fn write_uint(out: &mut Vec<u8>, value: u64) {
     match value {
-        0..=0x7f => {
-            #[allow(clippy::cast_possible_truncation)]
-            out.push(value as u8);
-        }
+        0..=0x7f => out.push(value as u8),
         0x80..=0xff => {
             out.push(0xcc);
-            #[allow(clippy::cast_possible_truncation)]
             out.push(value as u8);
         }
         0x100..=0xffff => {
             out.push(0xcd);
-            #[allow(clippy::cast_possible_truncation)]
             out.extend_from_slice(&(value as u16).to_be_bytes());
         }
         0x1_0000..=0xffff_ffff => {
             out.push(0xce);
-            #[allow(clippy::cast_possible_truncation)]
             out.extend_from_slice(&(value as u32).to_be_bytes());
         }
         _ => {
@@ -242,22 +224,20 @@ fn write_uint(out: &mut Vec<u8>, value: u64) {
 fn write_negative(out: &mut Vec<u8>, value: i64) {
     match value {
         -0x20..=-1 => {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            #[allow(clippy::cast_sign_loss)]
             out.push(value as i8 as u8);
         }
         -0x80..=-0x21 => {
             out.push(0xd0);
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            #[allow(clippy::cast_sign_loss)]
             out.push(value as i8 as u8);
         }
         -0x8000..=-0x81 => {
             out.push(0xd1);
-            #[allow(clippy::cast_possible_truncation)]
             out.extend_from_slice(&(value as i16).to_be_bytes());
         }
         -0x8000_0000..=-0x8001 => {
             out.push(0xd2);
-            #[allow(clippy::cast_possible_truncation)]
             out.extend_from_slice(&(value as i32).to_be_bytes());
         }
         _ => {
@@ -465,7 +445,7 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::{Int, Kind, Malformed, Reader};
 
-    /// The bytes `msgpack.packb` writes for each value, which is what a Python node on the other side reads.
+    /// What a write puts out, in hex, which the tests hold against what `msgpack.packb` writes for the same value.
     fn written(write: impl FnOnce(&mut Vec<u8>)) -> String {
         let mut out = Vec::new();
         write(&mut out);

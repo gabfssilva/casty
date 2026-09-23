@@ -1,7 +1,7 @@
 //! The consistent hashing ring of one actor type, and the pinned keys it does not place.
 //!
 //! Every node derives the same ring from the same members, so the hash and the order of the tokens are part of the
-//! wire: a node of either implementation must place a key on the same replicas.
+//! wire: every node must place a key on the same replicas.
 
 use blake2::digest::consts::U8;
 use blake2::{Blake2b, Digest};
@@ -240,7 +240,7 @@ fn tokens_of(node: &NodeId, count: usize) -> Vec<Token> {
     found
 }
 
-/// The incarnation as the other implementation writes it into a token: the canonical form of a UUID.
+/// The incarnation as the text a token digests spells it: the canonical form of a UUID.
 fn written(incarnation: [u8; 16]) -> String {
     use core::fmt::Write;
     let hex = incarnation
