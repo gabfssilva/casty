@@ -121,9 +121,9 @@ fn encode(pages: &Pages) -> Vec<u8> {
     let mut writer = Writer::new();
     writer.tagged("State", 1);
     writer.name("pages");
-    writer.pairs(pages.len());
+    writer.items(pages.len());
     for (name, data) in pages {
-        writer.pair();
+        writer.items(2);
         writer.text(name);
         writer.bytes(data);
     }

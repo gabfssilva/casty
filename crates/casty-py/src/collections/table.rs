@@ -499,9 +499,9 @@ fn read_entries(reading: &mut Reading<'_>) -> Result<Entries> {
 
 /// The entries as a mapping, which the schema writes as a list of pairs.
 fn write_entries(writer: &mut Writer, entries: &Entries) {
-    writer.pairs(entries.len());
+    writer.items(entries.len());
     for (key, values) in entries {
-        writer.pair();
+        writer.items(2);
         writer.bytes(key);
         writer.items(values.len());
         for value in values {

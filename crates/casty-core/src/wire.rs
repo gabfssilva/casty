@@ -2,7 +2,7 @@
 //!
 //! A component sends dataclasses, and the schema writes one as a map of its fields, tagged by `__qualname__` when it
 //! is the top of a value or an alternative of a union. Nothing here reflects anything: the shape of each message is
-//! written out, which is what lets a node of either implementation read the other.
+//! written out by hand, and that shape is the wire format.
 
 use crate::node::{NodeId, Target};
 use crate::schema::msgpack::{self, Int, Kind, Malformed, Reader};
@@ -98,6 +98,7 @@ impl Writer {
         msgpack::write_bin(&mut self.0, value);
     }
 
+    /// A list or a tuple. A mapping is a list of `[key, value]` pairs, so that its keys are not limited to strings.
     pub fn items(&mut self, count: usize) {
         msgpack::write_array_len(&mut self.0, count);
     }
@@ -136,15 +137,6 @@ impl Writer {
                 self.int(*id);
             }
         }
-    }
-
-    /// A mapping as the schema writes it: a list of pairs, so that keys are not limited to strings.
-    pub fn pairs(&mut self, count: usize) {
-        msgpack::write_array_len(&mut self.0, count);
-    }
-
-    pub fn pair(&mut self) {
-        msgpack::write_array_len(&mut self.0, 2);
     }
 }
 

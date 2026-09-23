@@ -333,18 +333,18 @@ fn copies_of(writer: &mut Writer, keys: &[Copy]) {
 }
 
 fn sizes_of(writer: &mut Writer, sizes: &[(String, usize)]) {
-    writer.pairs(sizes.len());
+    writer.items(sizes.len());
     for (name, size) in sizes {
-        writer.pair();
+        writer.items(2);
         writer.text(name);
         writer.unsigned(*size as u64);
     }
 }
 
 fn pages_of(writer: &mut Writer, pages: &Pages) {
-    writer.pairs(pages.len());
+    writer.items(pages.len());
     for (name, data) in pages {
-        writer.pair();
+        writer.items(2);
         writer.text(name);
         writer.bytes(data);
     }
