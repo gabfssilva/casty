@@ -544,7 +544,7 @@ class Binding:
         self.settings: tuple[str | int, ...] = (kind, replicas, write, shards, *signature)
         self.confirmed = False
         self._metadata = system.ref(register.actor, f"{kind}:{len(name)}:{name}")
-        self._encoded = Value[tuple[str | int, ...]](tuple[str | int, ...], system).dump(self.settings)
+        self._encoded = Value(tuple[str | int, ...], system).dump(self.settings)
         self._lock = asyncio.Lock()
 
     async def ready(self) -> None:
