@@ -5,7 +5,7 @@ use casty_core::schema::msgpack::Malformed;
 use casty_core::store::Pages;
 use casty_core::wire::{Reading, Result, Writer};
 
-use super::{Given, Native, Turn, count, named, number, number_in, truth, uuid};
+use super::{Given, Native, Turn, count, fields, number, number_in, truth, uuid};
 
 const GENERATION: &str = "generation";
 const PENDING: &str = "pending";
@@ -26,8 +26,7 @@ impl Native for Barrier {
         true
     }
 
-    #[allow(clippy::too_many_lines)]
-    fn step(&self, held: &Pages, given: &Given<'_>, at: f64) -> Turn {
+    fn turn(&self, held: &Pages, given: &Given<'_>, at: f64) -> Option<Turn> {
         let before = state(held);
         let mut turn = Turn::default();
         // Whoever was waiting past its deadline hears that the barrier did not release it.
@@ -43,32 +42,31 @@ impl Native for Barrier {
                 state.pending.push(party.clone());
             }
         }
-        let message = match given {
-            Given::Message(message) | Given::Answered { message, .. } => Some(*message),
-            Given::Alarm => None,
-        };
         let mut waiting = None;
-        if let Some(message) = message {
-            let Ok(read) = self::read(message) else {
-                return Turn::default();
-            };
-            match named(&read.tag) {
+        if let Some(message) = given.message() {
+            let (mut id, mut parties, mut until) = (None, None, None);
+            let (tag, reply) = fields(message, |name, reading| {
+                match name {
+                    "id" => id = Some(uuid(reading)?),
+                    "parties" => {
+                        parties = Some(
+                            usize::try_from(reading.int()?).map_err(|_| Malformed::Truncated)?,
+                        );
+                    }
+                    "until" => until = Some(reading.float()?),
+                    _ => reading.skip()?,
+                }
+                Ok(())
+            })?;
+            match tag {
                 "Arrive" => {
-                    let (Some(id), Some(parties), Some(until)) =
-                        (read.id, read.parties, read.until)
-                    else {
-                        return Turn::default();
-                    };
+                    let (id, parties, until) = (id?, parties?, until?);
                     if state.completed.iter().any(|done| done.id == id) {
-                        turn.replies.push((read.reply, truth(true)));
+                        turn.replies.push((reply, truth(true)));
                     } else if until <= at {
-                        turn.replies.push((read.reply, truth(false)));
+                        turn.replies.push((reply, truth(false)));
                     } else {
-                        let party = Party {
-                            id,
-                            reply: read.reply,
-                            until,
-                        };
+                        let party = Party { id, reply, until };
                         match state.pending.iter().position(|held| held.id == id) {
                             Some(at) => state.pending[at] = party,
                             None => state.pending.push(party),
@@ -94,15 +92,13 @@ impl Native for Barrier {
                     }
                 }
                 "Cancel" => {
-                    let Some(id) = read.id else {
-                        return Turn::default();
-                    };
+                    let id = id?;
                     let done = state.completed.iter().any(|held| held.id == id);
-                    turn.replies.push((read.reply, truth(done)));
+                    turn.replies.push((reply, truth(done)));
                     state.pending.retain(|party| party.id != id);
                 }
-                "Waiting" => waiting = Some(read.reply),
-                _ => return Turn::default(),
+                "Waiting" => waiting = Some(reply),
+                _ => return None,
             }
         }
         if state != before {
@@ -113,7 +109,7 @@ impl Native for Barrier {
             turn.replies
                 .push((waiting, number(count(state.pending.len()))));
         }
-        turn
+        Some(turn)
     }
 }
 
@@ -158,42 +154,6 @@ fn deadline(state: &State) -> Option<f64> {
         .fold(None, |held: Option<f64>, until| {
             Some(held.map_or(until, |held| held.min(until)))
         })
-}
-
-/// Everything the three messages carry between them.
-struct Held {
-    tag: String,
-    reply: Target,
-    id: Option<[u8; 16]>,
-    parties: Option<usize>,
-    until: Option<f64>,
-}
-
-fn read(message: &[u8]) -> Result<Held> {
-    let mut reading = Reading::new(message);
-    let (tag, fields) = reading.tagged()?;
-    let mut reply = None;
-    let mut id = None;
-    let mut parties = None;
-    let mut until = None;
-    for _ in 0..fields {
-        match reading.name()? {
-            "reply_to" => reply = Some(reading.target()?),
-            "id" => id = Some(uuid(&mut reading)?),
-            "parties" => {
-                parties = Some(usize::try_from(reading.int()?).map_err(|_| Malformed::Truncated)?);
-            }
-            "until" => until = Some(reading.float()?),
-            _ => reading.skip()?,
-        }
-    }
-    Ok(Held {
-        tag,
-        reply: reply.ok_or(Malformed::Truncated)?,
-        id,
-        parties,
-        until,
-    })
 }
 
 fn state(held: &Pages) -> State {

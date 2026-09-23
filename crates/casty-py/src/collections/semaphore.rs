@@ -5,7 +5,7 @@ use casty_core::schema::msgpack::Malformed;
 use casty_core::store::Pages;
 use casty_core::wire::{Reading, Result, Writer};
 
-use super::{Given, Native, Turn, named, nil, number, number_in, truth, uuid};
+use super::{Given, Native, Turn, fields, nil, number, number_in, truth, uuid};
 
 const CAPACITY: &str = "capacity";
 const NEXT_TOKEN: &str = "next_token";
@@ -29,38 +29,28 @@ impl Native for Semaphore {
         true
     }
 
-    #[allow(clippy::too_many_lines)]
-    fn step(&self, pages: &Pages, given: &Given<'_>, at: f64) -> Turn {
+    fn turn(&self, pages: &Pages, given: &Given<'_>, at: f64) -> Option<Turn> {
         let before = state(pages);
         let mut turn = Turn::default();
         let mut state = expired(&before, at, &mut turn.replies);
-        let message = match given {
-            Given::Message(message) | Given::Answered { message, .. } => Some(*message),
-            Given::Alarm => None,
-        };
         // What answers after the leases have been handed out, which is every message but a request.
         let mut after: Option<(Target, Answer)> = None;
-        if let Some(message) = message {
-            let Ok(read) = self::read(message) else {
-                return Turn::default();
-            };
-            match named(&read.tag) {
+        if let Some(message) = given.message() {
+            let (tag, reply, read) = read(message)?;
+            match tag {
                 "Request" => {
-                    let (Some(id), Some(count), Some(ttl), Some(capacity)) =
-                        (read.id, read.count, read.ttl, read.capacity)
-                    else {
-                        return Turn::default();
-                    };
+                    let (id, count, ttl, capacity) =
+                        (read.id?, read.count?, read.ttl?, read.capacity?);
                     state.capacity = capacity;
                     if let Some(held) = state.held.iter().find(|held| held.id == id) {
-                        turn.replies.push((read.reply, token(Some(held.token))));
+                        turn.replies.push((reply, token(Some(held.token))));
                     } else if let Some(until) = read.until {
                         if until <= at {
-                            turn.replies.push((read.reply, token(None)));
+                            turn.replies.push((reply, token(None)));
                         } else {
                             let waiting = Pending {
                                 id,
-                                reply: read.reply,
+                                reply,
                                 count,
                                 ttl,
                                 until,
@@ -78,32 +68,26 @@ impl Native for Semaphore {
                             expires: at + ttl,
                         };
                         state.next_token += 1;
-                        turn.replies.push((read.reply, token(Some(held.token))));
+                        turn.replies.push((reply, token(Some(held.token))));
                         state.held.push(held);
                     } else {
-                        turn.replies.push((read.reply, token(None)));
+                        turn.replies.push((reply, token(None)));
                     }
                 }
                 "Cancel" => {
-                    let Some(id) = read.id else {
-                        return Turn::default();
-                    };
+                    let id = read.id?;
                     state.held.retain(|held| held.id != id);
                     state.pending.retain(|waiting| waiting.id != id);
-                    after = Some((read.reply, Answer::Nothing));
+                    after = Some((reply, Answer::Nothing));
                 }
                 "Release" => {
-                    let Some(wanted) = read.token else {
-                        return Turn::default();
-                    };
+                    let wanted = read.token?;
                     let before = state.held.len();
                     state.held.retain(|held| held.token != wanted);
-                    after = Some((read.reply, Answer::Truth(state.held.len() != before)));
+                    after = Some((reply, Answer::Truth(state.held.len() != before)));
                 }
                 "Renew" => {
-                    let (Some(wanted), Some(ttl)) = (read.token, read.ttl) else {
-                        return Turn::default();
-                    };
+                    let (wanted, ttl) = (read.token?, read.ttl?);
                     let mut changed = false;
                     for held in &mut state.held {
                         if held.token == wanted {
@@ -111,16 +95,13 @@ impl Native for Semaphore {
                             changed = true;
                         }
                     }
-                    after = Some((read.reply, Answer::Truth(changed)));
+                    after = Some((reply, Answer::Truth(changed)));
                 }
                 "Available" => {
-                    let Some(capacity) = read.capacity else {
-                        return Turn::default();
-                    };
-                    state.capacity = capacity;
-                    after = Some((read.reply, Answer::Available));
+                    state.capacity = read.capacity?;
+                    after = Some((reply, Answer::Available));
                 }
-                _ => return Turn::default(),
+                _ => return None,
             }
         }
         grant(&mut state, at, &mut turn.replies);
@@ -138,7 +119,7 @@ impl Native for Semaphore {
                 },
             ));
         }
-        turn
+        Some(turn)
     }
 }
 
@@ -234,10 +215,9 @@ fn deadline(state: &State) -> Option<f64> {
         })
 }
 
-/// Everything the five messages carry between them.
+/// Everything the five messages carry between them, besides who they answer.
+#[derive(Default)]
 struct Held {
-    tag: String,
-    reply: Target,
     id: Option<[u8; 16]>,
     token: Option<i64>,
     count: Option<i64>,
@@ -246,26 +226,17 @@ struct Held {
     until: Option<f64>,
 }
 
-fn read(message: &[u8]) -> Result<Held> {
-    let mut reading = Reading::new(message);
-    let (tag, fields) = reading.tagged()?;
-    let mut reply = None;
-    let mut id = None;
-    let mut token = None;
-    let mut count = None;
-    let mut ttl = None;
-    let mut capacity = None;
-    let mut until = None;
-    for _ in 0..fields {
-        match reading.name()? {
-            "reply_to" => reply = Some(reading.target()?),
-            "id" => id = Some(uuid(&mut reading)?),
-            "token" => token = Some(reading.int()?),
-            "count" => count = Some(reading.int()?),
-            "ttl" => ttl = Some(reading.float()?),
-            "capacity" => capacity = Some(reading.int()?),
+fn read(message: &[u8]) -> Option<(&str, Target, Held)> {
+    let mut held = Held::default();
+    let (tag, reply) = fields(message, |name, reading| {
+        match name {
+            "id" => held.id = Some(uuid(reading)?),
+            "token" => held.token = Some(reading.int()?),
+            "count" => held.count = Some(reading.int()?),
+            "ttl" => held.ttl = Some(reading.float()?),
+            "capacity" => held.capacity = Some(reading.int()?),
             "until" => {
-                until = if reading.nil()? {
+                held.until = if reading.nil()? {
                     None
                 } else {
                     Some(reading.float()?)
@@ -273,17 +244,9 @@ fn read(message: &[u8]) -> Result<Held> {
             }
             _ => reading.skip()?,
         }
-    }
-    Ok(Held {
-        tag,
-        reply: reply.ok_or(Malformed::Truncated)?,
-        id,
-        token,
-        count,
-        ttl,
-        capacity,
-        until,
-    })
+        Ok(())
+    })?;
+    Some((tag, reply, held))
 }
 
 fn state(pages: &Pages) -> State {

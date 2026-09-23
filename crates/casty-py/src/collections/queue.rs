@@ -11,11 +11,10 @@
 //! so one found there is one that was deleted, and it answers as the sealed and empty segment it was.
 
 use casty_core::node::Target;
-use casty_core::schema::msgpack::Malformed;
 use casty_core::store::Pages;
 use casty_core::wire::{Reading, Result, Writer};
 
-use super::{Asking, Given, Native, Turn, count, named, nil, number, number_in, truth};
+use super::{Asking, Given, Native, Turn, count, fields, nil, number, number_in, truth};
 
 const HEAD: &str = "head";
 const TAIL: &str = "tail";
@@ -39,15 +38,10 @@ impl Native for Queue {
         index(0, 0)
     }
 
-    fn step(&self, pages: &Pages, given: &Given<'_>, _: f64) -> Turn {
-        let Given::Message(message) = given else {
-            return Turn::default();
-        };
-        let Ok(read) = read(message) else {
-            return Turn::default();
-        };
-        if named(&read.tag) != "Advance" {
-            return Turn::default();
+    fn turn(&self, pages: &Pages, given: &Given<'_>, _: f64) -> Option<Turn> {
+        let (tag, reply, read) = read(given.message()?)?;
+        if tag != "Advance" {
+            return None;
         }
         let (head, tail) = (number_in(pages, HEAD, 0), number_in(pages, TAIL, 0));
         // Both only move forward, and the tail never stays behind the head: a segment the head passed is sealed.
@@ -57,8 +51,8 @@ impl Native for Queue {
         if (next_head, next_tail) != (head, tail) {
             turn.save = Some(index(next_head, next_tail));
         }
-        turn.replies = vec![(read.reply, span(next_head, next_tail))];
-        turn
+        turn.replies = vec![(reply, span(next_head, next_tail))];
+        Some(turn)
     }
 }
 
@@ -78,57 +72,39 @@ impl Native for Segment {
         held.is_empty() || (run.sealed && run.waiting().is_empty())
     }
 
-    fn step(&self, held: &Pages, given: &Given<'_>, _: f64) -> Turn {
-        let (message, answered) = match given {
-            Given::Message(message) => (*message, None),
-            Given::Answered { message, answer } => (*message, Some(*answer)),
-            Given::Alarm => return Turn::default(),
-        };
-        let Ok(read) = read(message) else {
-            return Turn::default();
-        };
-        let tag = named(&read.tag);
+    fn turn(&self, held: &Pages, given: &Given<'_>, _: f64) -> Option<Turn> {
+        let (tag, reply, read) = read(given.message()?)?;
         // Only the messages that take or hand out items need to know which segment nothing wrote this is.
         let opening = held.is_empty() && matches!(tag, "Offer" | "Take" | "Peek");
         if opening {
-            let Some(answer) = answered else {
-                let Some(index) = read.index else {
-                    return Turn::default();
-                };
-                return Turn {
+            let Some(answer) = given.answer() else {
+                return Some(Turn {
                     ask: Some(Asking {
-                        to: index,
+                        to: read.index?,
                         message: Box::new(where_is),
                     }),
                     ..Turn::default()
-                };
+                });
             };
-            let (Ok((_, tail)), Some(at)) = (ends(answer), read.at) else {
-                return Turn::default();
-            };
-            if at < tail {
+            let (_, tail) = ends(answer).ok()?;
+            if read.at? < tail {
                 // Deleted once it was sealed and drained: it answers as it did then, and goes again.
                 let answer = if tag == "Offer" {
                     truth(false)
                 } else {
                     listed(&[], true)
                 };
-                return Turn {
+                return Some(Turn {
                     delete: true,
-                    replies: vec![(read.reply, answer)],
+                    replies: vec![(reply, answer)],
                     ..Turn::default()
-                };
+                });
             }
         }
         let before = Run::of(held);
         let mut run = before.clone();
         let answer = match tag {
-            "Offer" => {
-                let Some(item) = read.value else {
-                    return Turn::default();
-                };
-                truth(run.offer(item))
-            }
+            "Offer" => truth(run.offer(read.value?)),
             "Take" => {
                 // A negative limit is refused by the facade, and here it simply takes nothing.
                 let taken = run.take(usize::try_from(read.limit.unwrap_or(0)).unwrap_or(0));
@@ -143,15 +119,15 @@ impl Native for Segment {
                 run.clear();
                 nil()
             }
-            _ => return Turn::default(),
+            _ => return None,
         };
         let mut turn = Turn::default();
         // The tail the index named is written even when nothing in it changed, so that it is asked about only once.
         if run != before || opening {
             turn.save = Some(run.pages());
         }
-        turn.replies = vec![(read.reply, answer)];
-        turn
+        turn.replies = vec![(reply, answer)];
+        Some(turn)
     }
 }
 
@@ -235,13 +211,12 @@ impl Run {
     }
 }
 
-/// Everything the messages of the index and of a segment carry between them.
+/// Everything the messages of the index and of a segment carry between them, besides who they answer.
 ///
 /// `index` and `at` are the index of the queue and the number of the segment a message is for, which a segment
 /// nothing wrote asks the index about.
+#[derive(Default)]
 struct Held {
-    tag: String,
-    reply: Target,
     value: Option<Vec<u8>>,
     limit: Option<i64>,
     head: Option<i64>,
@@ -250,38 +225,21 @@ struct Held {
     at: Option<i64>,
 }
 
-fn read(message: &[u8]) -> Result<Held> {
-    let mut reading = Reading::new(message);
-    let (tag, fields) = reading.tagged()?;
-    let mut reply = None;
-    let mut value = None;
-    let mut limit = None;
-    let mut head = None;
-    let mut tail = None;
-    let mut index = None;
-    let mut at = None;
-    for _ in 0..fields {
-        match reading.name()? {
-            "reply_to" => reply = Some(reading.target()?),
-            "value" => value = Some(reading.bytes()?),
-            "limit" => limit = Some(reading.int()?),
-            "head" => head = Some(reading.int()?),
-            "tail" => tail = Some(reading.int()?),
-            "index" => index = Some(reading.target()?),
-            "at" => at = Some(reading.int()?),
+fn read(message: &[u8]) -> Option<(&str, Target, Held)> {
+    let mut held = Held::default();
+    let (tag, reply) = fields(message, |name, reading| {
+        match name {
+            "value" => held.value = Some(reading.bytes()?),
+            "limit" => held.limit = Some(reading.int()?),
+            "head" => held.head = Some(reading.int()?),
+            "tail" => held.tail = Some(reading.int()?),
+            "index" => held.index = Some(reading.target()?),
+            "at" => held.at = Some(reading.int()?),
             _ => reading.skip()?,
         }
-    }
-    Ok(Held {
-        tag,
-        reply: reply.ok_or(Malformed::Truncated)?,
-        value,
-        limit,
-        head,
-        tail,
-        index,
-        at,
-    })
+        Ok(())
+    })?;
+    Some((tag, reply, held))
 }
 
 /// `queue.Advance` that moves nothing, which answers where the head and the tail are.

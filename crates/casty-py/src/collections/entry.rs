@@ -20,12 +20,10 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use casty_core::node::Target;
-use casty_core::schema::msgpack::Malformed;
 use casty_core::store::Pages;
-use casty_core::wire::{Reading, Result, Writer};
+use casty_core::wire::Writer;
 
-use super::{Given, Native, Turn, named, number, number_in, optional, optional_in, truth};
+use super::{Given, Native, Turn, fields, number, number_in, optional, optional_in, truth};
 
 const VALUE: &str = "value";
 const GENERATION: &str = "generation";
@@ -43,22 +41,23 @@ impl Native for Entry {
         value(held).is_none()
     }
 
-    fn step(&self, held: &Pages, given: &Given<'_>, _: f64) -> Turn {
-        let Given::Message(message) = given else {
-            return Turn::default();
-        };
-        let Ok(read) = self::read(message) else {
-            return Turn::default();
-        };
+    fn turn(&self, held: &Pages, given: &Given<'_>, _: f64) -> Option<Turn> {
+        let (mut put, mut listed) = (None, None);
+        let (tag, reply) = fields(given.message()?, |name, reading| {
+            match name {
+                "value" => put = Some(reading.bytes()?),
+                "listed" => listed = Some(reading.int()?),
+                _ => reading.skip()?,
+            }
+            Ok(())
+        })?;
         let value = value(held);
         let generation = generation(held);
         let next = generation.saturating_add(1);
         let mut turn = Turn::default();
-        let answer = match named(&read.tag) {
+        let answer = match tag {
             "Put" => {
-                let (Some(put), Some(listed)) = (read.value, read.listed) else {
-                    return Turn::default();
-                };
+                let (put, listed) = (put?, listed?);
                 if value.is_some() {
                     turn.save = Some(saved(Some(&put), generation));
                     number(0)
@@ -76,9 +75,7 @@ impl Native for Entry {
                 removal(value.is_some(), generation)
             }
             "Retire" => {
-                let Some(listed) = read.listed else {
-                    return Turn::default();
-                };
+                let listed = listed?;
                 if value.is_some() {
                     number(0)
                 } else if listed > generation {
@@ -88,41 +85,11 @@ impl Native for Entry {
                     number(generation)
                 }
             }
-            _ => return Turn::default(),
+            _ => return None,
         };
-        turn.replies = vec![(read.reply, answer)];
-        turn
+        turn.replies = vec![(reply, answer)];
+        Some(turn)
     }
-}
-
-/// Everything the five messages carry between them.
-struct Held {
-    tag: String,
-    reply: Target,
-    value: Option<Vec<u8>>,
-    listed: Option<i64>,
-}
-
-fn read(message: &[u8]) -> Result<Held> {
-    let mut reading = Reading::new(message);
-    let (tag, fields) = reading.tagged()?;
-    let mut reply = None;
-    let mut value = None;
-    let mut listed = None;
-    for _ in 0..fields {
-        match reading.name()? {
-            "reply_to" => reply = Some(reading.target()?),
-            "value" => value = Some(reading.bytes()?),
-            "listed" => listed = Some(reading.int()?),
-            _ => reading.skip()?,
-        }
-    }
-    Ok(Held {
-        tag,
-        reply: reply.ok_or(Malformed::Truncated)?,
-        value,
-        listed,
-    })
 }
 
 /// `tuple[bool, int]`: whether a value was removed, and the generation to unlist the key under, 0 when none was listed.

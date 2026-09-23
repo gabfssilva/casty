@@ -14,12 +14,11 @@
 use blake2::digest::consts::U8;
 use blake2::{Blake2b, Digest};
 use casty_core::node::Target;
-use casty_core::schema::msgpack::Malformed;
 use casty_core::store::Pages;
 use casty_core::wire::{Reading, Result, Writer};
 
 use super::{
-    Asking, Given, Native, Turn, count, named, nil, number, number_in, optional_bytes, truth,
+    Asking, Given, Native, Turn, count, fields, nil, number, number_in, optional_bytes, truth,
 };
 
 const SEGMENTS: &str = "segments";
@@ -47,24 +46,15 @@ impl Native for Table {
         counted(1)
     }
 
-    fn step(&self, held: &Pages, given: &Given<'_>, _: f64) -> Turn {
-        let (message, answered) = match given {
-            Given::Message(message) => (*message, false),
-            Given::Answered { message, .. } => (*message, true),
-            Given::Alarm => return Turn::default(),
-        };
-        let Ok(read) = read(message) else {
-            return Turn::default();
-        };
+    fn turn(&self, held: &Pages, given: &Given<'_>, _: f64) -> Option<Turn> {
+        let (tag, reply, read) = read(given.message()?)?;
+        let answered = given.answer().is_some();
         let segments = number_in(held, SEGMENTS, 0).max(1);
         let mut turn = Turn::default();
-        let answer = match named(&read.tag) {
+        let answer = match tag {
             "Segments" => number(segments),
             "Grow" => {
-                let (Some(seen), Some(split), Some(into)) = (read.seen, read.split, read.into)
-                else {
-                    return Turn::default();
-                };
+                let (seen, split, into) = (read.seen?, read.split?, read.into?);
                 match doubled(segments) {
                     // Only the split the caller counted from is made, so callers that found segments full at once
                     // make one between them.
@@ -74,7 +64,7 @@ impl Native for Table {
                                 to: split,
                                 message: Box::new(move |reply| splitting(reply, &into, modulus)),
                             });
-                            return turn;
+                            return Some(turn);
                         }
                         turn.save = Some(counted(segments + 1));
                         number(segments + 1)
@@ -82,10 +72,10 @@ impl Native for Table {
                     _ => number(segments),
                 }
             }
-            _ => return Turn::default(),
+            _ => return None,
         };
-        turn.replies = vec![(read.reply, answer)];
-        turn
+        turn.replies = vec![(reply, answer)];
+        Some(turn)
     }
 }
 
@@ -98,24 +88,16 @@ impl Native for Segment {
         Bucket::first().pages()
     }
 
-    fn step(&self, held: &Pages, given: &Given<'_>, _: f64) -> Turn {
-        let (message, answered) = match given {
-            Given::Message(message) => (*message, false),
-            Given::Answered { message, .. } => (*message, true),
-            Given::Alarm => return Turn::default(),
-        };
-        let Ok(read) = read(message) else {
-            return Turn::default();
-        };
+    fn turn(&self, held: &Pages, given: &Given<'_>, _: f64) -> Option<Turn> {
+        let (tag, reply, read) = read(given.message()?)?;
+        let answered = given.answer().is_some();
         let before = Bucket::of(held);
         let mut bucket = before.clone();
-        let adopting = named(&read.tag) == "Adopt";
+        let adopting = tag == "Adopt";
         let mut turn = Turn::default();
-        let answer = match named(&read.tag) {
+        let answer = match tag {
             "Split" => {
-                let (Some(into), Some(modulus)) = (read.into, read.modulus) else {
-                    return Turn::default();
-                };
+                let (into, modulus) = (read.into?, read.modulus?);
                 // Asked again after a split whose count the directory did not save, the segment is split already.
                 if bucket.modulus < modulus {
                     let (kept, moved) = bucket.parted(modulus);
@@ -127,7 +109,7 @@ impl Native for Segment {
                                 adoption(reply, &moved, modulus, id, version)
                             }),
                         });
-                        return turn;
+                        return Some(turn);
                     }
                     bucket.entries = kept;
                     bucket.modulus = modulus;
@@ -135,11 +117,8 @@ impl Native for Segment {
                 nil()
             }
             "Adopt" => {
-                let (Some(entries), Some(modulus), Some(id), Some(version)) =
-                    (read.entries, read.modulus, read.id, read.version)
-                else {
-                    return Turn::default();
-                };
+                let (entries, modulus, id, version) =
+                    (read.entries?, read.modulus?, read.id?, read.version?);
                 // An attempt at the split that did not finish adopted an older version of the segment the keys came
                 // from, and its adoption may arrive after the one that did: it never replaces it.
                 if (modulus, version) > (bucket.modulus, bucket.version) {
@@ -152,14 +131,7 @@ impl Native for Segment {
                 }
                 nil()
             }
-            tag => {
-                let Some(answer) =
-                    bucket.answer(tag, read.key, read.value, read.generation, read.position)
-                else {
-                    return Turn::default();
-                };
-                answer
-            }
+            tag => bucket.answer(tag, read.key, read.value, read.generation, read.position)?,
         };
         if bucket != before {
             // An adoption keeps the version of the segment the keys came from; every other write raises it.
@@ -168,8 +140,8 @@ impl Native for Segment {
             }
             turn.save = Some(bucket.pages());
         }
-        turn.replies = vec![(read.reply, answer)];
-        turn
+        turn.replies = vec![(reply, answer)];
+        Some(turn)
     }
 }
 
@@ -372,10 +344,9 @@ fn listed_under(values: &[Vec<u8>]) -> i64 {
         .unwrap_or(0)
 }
 
-/// Everything the messages of a directory and of its segments carry between them.
+/// Everything the messages of a directory and of its segments carry between them, besides who they answer.
+#[derive(Default)]
 struct Held {
-    tag: String,
-    reply: Target,
     key: Option<Vec<u8>>,
     value: Option<Vec<u8>>,
     generation: Option<i64>,
@@ -389,53 +360,26 @@ struct Held {
     position: Option<i64>,
 }
 
-fn read(message: &[u8]) -> Result<Held> {
-    let mut reading = Reading::new(message);
-    let (tag, fields) = reading.tagged()?;
-    let mut reply = None;
-    let mut key = None;
-    let mut value = None;
-    let mut generation = None;
-    let mut seen = None;
-    let mut split = None;
-    let mut into = None;
-    let mut modulus = None;
-    let mut id = None;
-    let mut version = None;
-    let mut entries = None;
-    let mut position = None;
-    for _ in 0..fields {
-        match reading.name()? {
-            "reply_to" => reply = Some(reading.target()?),
-            "key" => key = Some(reading.bytes()?),
-            "value" => value = optional_bytes(&mut reading)?,
-            "generation" => generation = Some(reading.int()?),
-            "seen" => seen = Some(reading.int()?),
-            "split" => split = Some(reading.target()?),
-            "into" => into = Some(reading.target()?),
-            "modulus" => modulus = Some(reading.int()?),
-            "id" => id = Some(reading.int()?),
-            "version" => version = Some(reading.int()?),
-            "entries" => entries = Some(read_entries(&mut reading)?),
-            "position" => position = Some(reading.int()?),
+fn read(message: &[u8]) -> Option<(&str, Target, Held)> {
+    let mut held = Held::default();
+    let (tag, reply) = fields(message, |name, reading| {
+        match name {
+            "key" => held.key = Some(reading.bytes()?),
+            "value" => held.value = optional_bytes(reading)?,
+            "generation" => held.generation = Some(reading.int()?),
+            "seen" => held.seen = Some(reading.int()?),
+            "split" => held.split = Some(reading.target()?),
+            "into" => held.into = Some(reading.target()?),
+            "modulus" => held.modulus = Some(reading.int()?),
+            "id" => held.id = Some(reading.int()?),
+            "version" => held.version = Some(reading.int()?),
+            "entries" => held.entries = Some(read_entries(reading)?),
+            "position" => held.position = Some(reading.int()?),
             _ => reading.skip()?,
         }
-    }
-    Ok(Held {
-        tag,
-        reply: reply.ok_or(Malformed::Truncated)?,
-        key,
-        value,
-        generation,
-        seen,
-        split,
-        into,
-        modulus,
-        id,
-        version,
-        entries,
-        position,
-    })
+        Ok(())
+    })?;
+    Some((tag, reply, held))
 }
 
 /// `table_segment.Split` of a segment into `into`, telling the hashes apart over `modulus`.

@@ -30,6 +30,24 @@ pub enum Given<'a> {
     Answered { message: &'a [u8], answer: &'a [u8] },
 }
 
+impl<'a> Given<'a> {
+    /// The message the turn is on, which an answer comes back with and the alarm has none of.
+    fn message(&self) -> Option<&'a [u8]> {
+        match *self {
+            Self::Message(message) | Self::Answered { message, .. } => Some(message),
+            Self::Alarm => None,
+        }
+    }
+
+    /// The answer to what the last turn asked for.
+    fn answer(&self) -> Option<&'a [u8]> {
+        match *self {
+            Self::Answered { answer, .. } => Some(answer),
+            Self::Message(_) | Self::Alarm => None,
+        }
+    }
+}
+
 /// What one message does: what it writes, what it answers, and what it waits for.
 ///
 /// `ask` is the one thing that suspends a body: the rest of the message takes effect only once the answer arrives,
@@ -68,10 +86,16 @@ pub trait Native: Send + Sync + core::fmt::Debug + 'static {
     /// The pages a key of this type starts from.
     fn initial(&self) -> Pages;
 
-    /// One message, the alarm going off, or the answer the last message was waiting for.
+    /// One message, the alarm going off, or the answer the last message was waiting for, and nothing for a message
+    /// the body does not take.
     ///
     /// `at` is the wall clock in seconds, which only a body with deadlines reads.
-    fn step(&self, held: &Pages, given: &Given<'_>, at: f64) -> Turn;
+    fn turn(&self, held: &Pages, given: &Given<'_>, at: f64) -> Option<Turn>;
+
+    /// The turn `given` takes, where a message the body does not take changes nothing and answers no one.
+    fn step(&self, held: &Pages, given: &Given<'_>, at: f64) -> Turn {
+        self.turn(held, given, at).unwrap_or_default()
+    }
 
     /// Whether this body ever asks for a deadline. One that does not is never woken without a message.
     fn timed(&self) -> bool {
@@ -131,14 +155,29 @@ fn collection(name: &str) -> Option<&str> {
     Some(kind)
 }
 
-/// The name of a message within its type, which is the last part of the qualname it travels under.
-#[must_use]
-pub fn named(tag: &str) -> &str {
-    tag.rsplit('.').next().unwrap_or(tag)
-}
-
 /// The single page a state that is not a dataclass lives in.
 pub const WHOLE: &str = ".";
+
+/// A message as it travels: its name within its type, who it answers, and every other field, which `field` reads by
+/// its name or steps over. Nothing when the message is not one.
+///
+/// The name within the type is the last part of the qualname the message travels under.
+fn fields(
+    message: &[u8],
+    mut field: impl FnMut(&str, &mut Reading<'_>) -> Result<()>,
+) -> Option<(&str, Target)> {
+    let mut reading = Reading::new(message);
+    let tag = reading.tag().ok()?;
+    let len = reading.fields().ok()?;
+    let mut reply = None;
+    for _ in 0..len {
+        match reading.name().ok()? {
+            "reply_to" => reply = Some(reading.target().ok()?),
+            name => field(name, &mut reading).ok()?,
+        }
+    }
+    Some((&tag[tag.rfind('.').map_or(0, |dot| dot + 1)..], reply?))
+}
 
 /// `int`, as an answer or a page.
 fn number(value: i64) -> Vec<u8> {
