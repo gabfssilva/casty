@@ -302,13 +302,11 @@ impl Activation {
 
     /// Ask the replicas for the key, and go on with what they hold.
     fn taken(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
-        let entry = slf.get().entry.clone();
-        let key = slf.get().key.clone();
+        let this = slf.get();
         let initial = Self::initial(slf, py)?;
-        let taken = slf
-            .get()
+        let taken = this
             .node
-            .persist(py, &entry, &key, Op::Activate { initial })?;
+            .persist(py, &this.entry, &this.key, Op::Activate { initial })?;
         Self::then(slf, &taken, Self::held_by)
     }
 
@@ -391,12 +389,11 @@ impl Activation {
                 return Self::wound_down(slf, py);
             }
         }
-        let entry = slf.get().entry.clone();
         let (behavior, named, pages) = {
             let state = slf.get().held();
             (
                 state.behavior.clone_ref(py),
-                state.named(&entry),
+                state.named(&slf.get().entry),
                 state.pages.clone(),
             )
         };
@@ -574,10 +571,10 @@ impl Activation {
                 return Ok(());
             }
         }
-        let entry = slf.get().entry.clone();
+        let entry = &slf.get().entry;
         let (switching, moved, again, gone, alone) = {
             let mut state = slf.get().held();
-            let moved = state.named(&entry) != state.behavior.definition().name;
+            let moved = state.named(entry) != state.behavior.definition().name;
             let switching = state.switching;
             let empty = state.mailbox.empty();
             let releasing = state.releasing;
@@ -597,7 +594,7 @@ impl Activation {
             forsaken(py, &slf.get().node, gone)?;
         }
         if switching && moved {
-            let named = slf.get().held().named(&entry);
+            let named = slf.get().held().named(entry);
             return Self::successor(slf, py, &named);
         }
         if switching {
@@ -663,8 +660,6 @@ impl Activation {
         id: u64,
         failure: &Bound<'_, PyAny>,
     ) -> PyResult<f64> {
-        let entry = slf.get().entry.clone();
-        let key = slf.get().key.clone();
         let backoff = slf.get().settings().backoff;
         let (current, delay) = {
             let mut state = slf.get().held();
@@ -683,29 +678,40 @@ impl Activation {
                 grown.min(backoff.limit.as_secs_f64()),
             )
         };
-        slf.get().node.observe(py, || Observed::Failed {
-            actor: entry.clone(),
-            key: key.clone(),
+        Self::ended_by(slf, py, current, failure)?;
+        Ok(delay)
+    }
+
+    /// `failure` ended the message `current`: the observer hears of it, and so does whoever asked, as a message the
+    /// key did not process when it is `Unavailable` and as one that failed there otherwise.
+    fn ended_by(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        current: Option<Deliver>,
+        failure: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let this = slf.get();
+        this.node.observe(py, || Observed::Failed {
+            actor: this.entry.clone(),
+            key: this.key.clone(),
             error: failure.clone().unbind(),
         });
-        if let Some(current) = current
-            && let Some(reply) = &current.reply
-        {
-            let error: String = failure.get_type().getattr("__name__")?.extract()?;
-            let message: String = failure.str()?.extract()?;
-            let outcome = if error == "Unavailable" {
-                Outcome::unreached(&entry, &key)
-            } else {
-                Outcome::Failed {
-                    actor: entry.clone(),
-                    key: key.clone(),
-                    error,
-                    message,
-                }
-            };
-            slf.get().node.answer(py, reply, &outcome)?;
-        }
-        Ok(delay)
+        let Some(reply) = current.and_then(|current| current.reply) else {
+            return Ok(());
+        };
+        let error: String = failure.get_type().getattr("__name__")?.extract()?;
+        let message: String = failure.str()?.extract()?;
+        let outcome = if error == "Unavailable" {
+            Outcome::unreached(&this.entry, &this.key)
+        } else {
+            Outcome::Failed {
+                actor: this.entry.clone(),
+                key: this.key.clone(),
+                error,
+                message,
+            }
+        };
+        this.node.answer(py, &reply, &outcome)
     }
 
     /// Remove the activation and the active mark, so that nothing brings the key back.
@@ -717,15 +723,14 @@ impl Activation {
     /// A key let go on purpose keeps its place in the table until its last write is out instead: what reaches it
     /// meanwhile queues behind what was there, and goes on once a new activation would no longer race that write.
     fn deactivate(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
-        let entry = slf.get().entry.clone();
-        let key = slf.get().key.clone();
+        let this = slf.get();
         let releasing = {
-            let mut state = slf.get().held();
+            let mut state = this.held();
             state.live = false;
             state.releasing
         };
         if !releasing {
-            slf.get().node.vacate(slf);
+            this.node.vacate(slf);
             Self::refuse_waiting(
                 slf,
                 py,
@@ -744,7 +749,7 @@ impl Activation {
         };
         // A key whose state was deleted keeps nothing, not even the mark, so there is nothing left to write.
         if deleted {
-            slf.get().node.forgo(&entry, &key, lease);
+            this.node.forgo(&this.entry, &this.key, lease);
             return Self::over(slf, py);
         }
         // A native key that holds nothing a new activation would miss goes instead of staying: a read of a key nothing
@@ -761,7 +766,7 @@ impl Activation {
                 active: false,
             }
         };
-        let released = slf.get().node.persist(py, &entry, &key, last)?;
+        let released = this.node.persist(py, &this.entry, &this.key, last)?;
         Self::then(slf, &released, Self::released)
     }
 
@@ -825,13 +830,12 @@ impl Activation {
     /// A queued `tell` that routing refuses, larger than a message between two nodes, is dropped and reported, and
     /// the rest of the queue still goes.
     fn pass_on(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
-        let entry = slf.get().entry.clone();
-        let key = slf.get().key.clone();
-        let (queued, held) = slf.get().held().mailbox.drain();
+        let this = slf.get();
+        let (queued, held) = this.held().mailbox.drain();
         for deliver in queued {
-            if let Err(refused) = slf.get().node.hand(py, Command::Deliver(deliver)) {
+            if let Err(refused) = this.node.hand(py, Command::Deliver(deliver)) {
                 let reason = refused.value(py).to_string();
-                slf.get().node.dropped(py, &entry, &key, &reason);
+                this.node.dropped(py, &this.entry, &this.key, &reason);
             }
         }
         Self::call(slf, py, &held)
@@ -877,9 +881,10 @@ impl Activation {
         if called.is_empty() {
             return Ok(());
         }
-        let room = Outcome::full(&slf.get().entry, &slf.get().key);
+        let this = slf.get();
+        let room = Outcome::full(&this.entry, &this.key);
         for caller in called {
-            slf.get().node.answer(py, caller, &room)?;
+            this.node.answer(py, caller, &room)?;
         }
         Ok(())
     }
@@ -1577,16 +1582,22 @@ impl Activation {
         value: &Bound<'py, PyAny>,
         yields: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let entry = slf.get().entry.clone();
-        let key = slf.get().key.clone();
         if slf.get().held().switching {
+            let Self { entry, key, .. } = slf.get();
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "{entry}/{key} became another behavior, which owns the state now"
             )));
         }
         let behavior = slf.get().held().behavior.clone_ref(py);
         let pages = Self::pages_of(slf, py, &behavior, value)?;
-        Self::write(slf, py, pages, Some(value.clone().unbind()), false, yields)
+        let wrote = Wrote {
+            pages,
+            value: Some(value.clone().unbind()),
+            switching: false,
+            yields,
+            deleted: false,
+        };
+        Self::write(slf, py, wrote)
     }
 
     /// Hand the key to another actor type, which runs it from the next read on.
@@ -1597,7 +1608,6 @@ impl Activation {
         value: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         Self::writable(slf)?;
-        let entry = slf.get().entry.clone();
         slf.get().node.learn(py, behavior);
         let definition = behavior.definition();
         let mut pages = match value {
@@ -1611,10 +1621,17 @@ impl Activation {
                 .collect::<Pages>(),
             Some(value) => Schema::write_pages(definition.state.bind(py), value)?,
         };
-        if definition.name != entry {
+        if definition.name != slf.get().entry {
             pages.insert(BEHAVIOR.to_owned(), definition.name.clone().into_bytes());
         }
-        let written = Self::write(slf, py, pages, None, true, false)?;
+        let wrote = Wrote {
+            pages,
+            value: None,
+            switching: true,
+            yields: false,
+            deleted: false,
+        };
+        let written = Self::write(slf, py, wrote)?;
         Ok(Bound::new(py, Awaited::of(written))?.into_any())
     }
 
@@ -1625,34 +1642,35 @@ impl Activation {
     fn write<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
-        pages: Pages,
-        value: Option<Py<PyAny>>,
-        switching: bool,
-        yields: bool,
+        wrote: Wrote,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let entry = slf.get().entry.clone();
-        let key = slf.get().key.clone();
-        let written = slf.get().node.future(py)?;
-        let lease = slf.get().held().lease;
-        let op = Op::Commit {
-            lease,
-            pages: pages.clone(),
-            active: true,
-        };
-        let commit = slf.get().node.persist(py, &entry, &key, op)?;
-        let wrote = Wrote {
-            written: written.clone().unbind(),
-            pages,
-            value,
-            switching,
-            yields,
-            deleted: false,
-        };
-        Self::then(slf, &commit, move |slf, py, commit| {
-            wrote.landed(slf, py, commit)
+        let this = slf.get();
+        let written = this.node.future(py)?;
+        let op = this.writing(&wrote.pages, wrote.deleted);
+        let landing = this.node.persist(py, &this.entry, &this.key, op)?;
+        let waiting = written.clone().unbind();
+        Self::then(slf, &landing, move |slf, py, landing| {
+            wrote.landed(slf, py, waiting.bind(py), landing)
         })?;
-        slf.get().held().writes += 1;
+        this.held().writes += 1;
         Ok(written)
+    }
+
+    /// The write of `pages` under the lease of this activation, or the deletion of the key, which stays active.
+    fn writing(&self, pages: &Pages, deleting: bool) -> Op {
+        let lease = self.held().lease;
+        if deleting {
+            Op::Delete {
+                lease,
+                active: true,
+            }
+        } else {
+            Op::Commit {
+                lease,
+                pages: pages.clone(),
+                active: true,
+            }
+        }
     }
 
     /// Delete the state of the key on the replicas, and return once the deletion is written.
@@ -1662,9 +1680,8 @@ impl Activation {
     /// nothing of the key behind.
     pub fn delete<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         Self::writable(slf)?;
-        let entry = slf.get().entry.clone();
-        let key = slf.get().key.clone();
         if slf.get().held().switching {
+            let Self { entry, key, .. } = slf.get();
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "{entry}/{key} became another behavior, which owns the state now"
             )));
@@ -1677,29 +1694,14 @@ impl Activation {
             ),
             None => (Pages::new(), None),
         };
-        let written = slf.get().node.future(py)?;
-        let lease = slf.get().held().lease;
-        let deletion = slf.get().node.persist(
-            py,
-            &entry,
-            &key,
-            Op::Delete {
-                lease,
-                active: true,
-            },
-        )?;
         let wrote = Wrote {
-            written: written.clone().unbind(),
             pages,
             value,
             switching: false,
             yields: false,
             deleted: true,
         };
-        Self::then(slf, &deletion, move |slf, py, deletion| {
-            wrote.landed(slf, py, deletion)
-        })?;
-        slf.get().held().writes += 1;
+        let written = Self::write(slf, py, wrote)?;
         Ok(Bound::new(py, Awaited::of(written))?.into_any())
     }
 
@@ -1722,8 +1724,6 @@ impl Activation {
 /// A write of the body on its way to the replicas, and what it changes here once they have it.
 #[derive(Debug)]
 struct Wrote {
-    /// What the body is waiting on, which only the write landing resolves.
-    written: Py<PyAny>,
     pages: Pages,
     value: Option<Py<PyAny>>,
     switching: bool,
@@ -1735,14 +1735,16 @@ struct Wrote {
 }
 
 impl Wrote {
-    /// The write landed, or did not. Once no write of the body is in flight, the runs that ended meanwhile go on.
+    /// The write landed, or did not, and `written`, which the body waits on, hears which. Once no write of the body is
+    /// in flight, the runs that ended meanwhile go on.
     fn landed(
         self,
         activation: &Bound<'_, Activation>,
         py: Python<'_>,
+        written: &Bound<'_, PyAny>,
         commit: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let landed = self.taken_in(activation, py, commit);
+        let landed = self.taken_in(activation, py, written, commit);
         let settled = {
             let mut state = activation.get().held();
             state.writes = state.writes.saturating_sub(1);
@@ -1759,9 +1761,9 @@ impl Wrote {
         self,
         activation: &Bound<'_, Activation>,
         py: Python<'_>,
+        written: &Bound<'_, PyAny>,
         commit: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let written = self.written.bind(py);
         if let Err(failure) = commit.call_method0("result") {
             // The key moved to another owner, so the body ends where its write was refused instead of going on.
             if failure.is_instance_of::<Fencing>(py) {
@@ -1883,24 +1885,12 @@ impl Activation {
             };
             pages
         };
-        let entry = slf.get().entry.clone();
-        let key = slf.get().key.clone();
         // The state changes when the write lands, not before: a body that went on from a write that did not happen
         // would be running on a state no replica has.
-        let lease = slf.get().held().lease;
-        let op = if deleting {
-            Op::Delete {
-                lease,
-                active: true,
-            }
-        } else {
-            Op::Commit {
-                lease,
-                pages: pages.clone(),
-                active: true,
-            }
-        };
-        let landing = slf.get().node.persist(py, &entry, &key, op);
+        let this = slf.get();
+        let landing = this
+            .node
+            .persist(py, &this.entry, &this.key, this.writing(&pages, deleting));
         let written = match landing {
             Ok(written) => written,
             // A write that is refused before it starts ends the message the same way one that fails does.
@@ -1951,32 +1941,8 @@ impl Activation {
 
     /// A write or an ask of a native body did not go through: whoever asked hears what ended it.
     fn refused(slf: &Bound<'_, Self>, py: Python<'_>, failure: &PyErr) -> PyResult<()> {
-        let entry = slf.get().entry.clone();
-        let key = slf.get().key.clone();
-        let error: String = failure.get_type(py).getattr("__name__")?.extract()?;
-        let message: String = failure.value(py).str()?.extract()?;
-        slf.get().node.observe(py, || Observed::Failed {
-            actor: entry.clone(),
-            key: key.clone(),
-            error: failure.value(py).clone().into_any().unbind(),
-        });
-        let Some(current) = slf.get().held().current.take() else {
-            return Ok(());
-        };
-        let Some(reply) = &current.reply else {
-            return Ok(());
-        };
-        let outcome = if error == "Unavailable" {
-            Outcome::unreached(&entry, &key)
-        } else {
-            Outcome::Failed {
-                actor: entry,
-                key,
-                error,
-                message,
-            }
-        };
-        slf.get().node.answer(py, reply, &outcome)
+        let current = slf.get().held().current.take();
+        Self::ended_by(slf, py, current, failure.value(py).as_any())
     }
 
     /// Ask another key, and come back to the same message with its answer.
