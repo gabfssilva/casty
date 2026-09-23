@@ -804,6 +804,7 @@ The API reference, generated from the docstrings, is at <https://gabfssilva.gith
 | `leave_timeout` | 30 s | Budget of an orderly exit |
 | `observer` | `None` | Called with every event of the node; `None` is a `LoggingObserver`. See [Observing a node](#observing-a-node). |
 | `store` | `None` | Where durable types keep their state outside every process (see `casty.Store`). Every node of a cluster is given one reaching the same records. |
+| `runtime` | `None` | Threads the transport runs on, shared with the systems and clients given the same `Runtime`; `None` starts a thread per core for this node alone. A system without `cluster` has no transport and uses none. See [Starting a node](#starting-a-node). |
 
 `idle_after`, `backoff`, `ask_timeout` and `write_timeout` apply to the actor types that set none.
 
@@ -837,8 +838,8 @@ does a `heartbeat`, `anti_entropy`, `overlay.graft_after`, `overlay.shuffle_ever
 ### `Client`
 
 `seeds` (required), `name`, `tls`, `compression`, `address_map`, `limits`, `ask_timeout` (10 s), `sync_every` (5 s),
-`observer`. Members: `ref`, `node`, `members`, `stats()`, `await placement(actor, key, at=...)`. A client hosts nothing
-and can only be answered; see [Clients](#clients).
+`observer`, `runtime`. Members: `ref`, `node`, `members`, `stats()`, `await placement(actor, key, at=...)`. A client
+hosts nothing and can only be answered; see [Clients](#clients).
 
 ### Errors
 
