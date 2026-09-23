@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from operator import methodcaller
 from typing import Literal, assert_never
@@ -122,6 +122,38 @@ class Ignore:
 @dataclass(frozen=True)
 class Nap:
     reply_to: Ref[int]
+
+
+@dataclass(frozen=True)
+class Asleep:
+    """What a body of `sleeper` says of a nap: that it began, and that a cancellation cut it short."""
+
+    napping: asyncio.Event = field(default_factory=asyncio.Event)
+    stopped: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+NAPS: dict[str, Asleep] = {}
+"""What each key of `sleeper` says of its naps, which a test puts in place before it asks the key."""
+
+
+@actor(initial=Account())
+async def sleeper(ctx: Context[Account, Nap | Balance]) -> None:
+    """Naps ten seconds on each `Nap` before answering it, and answers `Balance` at once."""
+    async for msg in ctx.inbox:
+        match msg:
+            case Nap(reply_to):
+                asleep = NAPS[ctx.key]
+                asleep.napping.set()
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    asleep.stopped.set()
+                    raise
+                reply_to.tell(0)
+            case Balance(reply_to):
+                reply_to.tell(ctx.state.value.balance)
+            case _:
+                assert_never(msg)
 
 
 @dataclass(frozen=True)
@@ -553,51 +585,23 @@ def describe_actor_system() -> None:
 
     def when_an_ask_is_cancelled() -> None:
         async def it_cancels_the_body_on_it_and_the_next_ask_is_answered_promptly() -> None:
-            napping = asyncio.Event()
-            stopped = asyncio.Event()
-
-            @actor(initial=Account())
-            async def sleeper(ctx: Context[Account, Nap | Balance]) -> None:
-                async for msg in ctx.inbox:
-                    match msg:
-                        case Nap(reply_to):
-                            napping.set()
-                            try:
-                                await asyncio.sleep(10)
-                            except asyncio.CancelledError:
-                                stopped.set()
-                                raise
-                            reply_to.tell(0)
-                        case Balance(reply_to):
-                            reply_to.tell(ctx.state.value.balance)
-                        case _:
-                            assert_never(msg)
+            asleep = NAPS["s-1"] = Asleep()
 
             async with ActorSystem() as system:
                 ref = system.ref(sleeper, "s-1")
                 asked = asyncio.ensure_future(ref.ask(Nap))
-                await napping.wait()
+                await asleep.napping.wait()
                 asked.cancel()
 
                 # The caller sees its own cancellation, as with any other await.
                 with pytest.raises(asyncio.CancelledError):
                     await asked
                 async with asyncio.timeout(1):
-                    await stopped.wait()
+                    await asleep.stopped.wait()
                     assert await ref.ask(Balance) == 0
 
         async def it_raises_timeout_error_under_asyncio_timeout_and_frees_the_key() -> None:
-            @actor(initial=Account())
-            async def sleeper(ctx: Context[Account, Nap | Balance]) -> None:
-                async for msg in ctx.inbox:
-                    match msg:
-                        case Nap(reply_to):
-                            await asyncio.sleep(10)
-                            reply_to.tell(0)
-                        case Balance(reply_to):
-                            reply_to.tell(ctx.state.value.balance)
-                        case _:
-                            assert_never(msg)
+            NAPS["s-1"] = Asleep()
 
             async with ActorSystem() as system:
                 ref = system.ref(sleeper, "s-1")
@@ -609,19 +613,9 @@ def describe_actor_system() -> None:
                     assert await ref.ask(Balance) == 0
 
         async def it_frees_the_key_when_the_deadline_of_the_ask_passes() -> None:
-            @actor(initial=Account(), ask_timeout=timedelta(milliseconds=100))
-            async def sleeper(ctx: Context[Account, Nap | Balance]) -> None:
-                async for msg in ctx.inbox:
-                    match msg:
-                        case Nap(reply_to):
-                            await asyncio.sleep(10)
-                            reply_to.tell(0)
-                        case Balance(reply_to):
-                            reply_to.tell(ctx.state.value.balance)
-                        case _:
-                            assert_never(msg)
+            NAPS["s-1"] = Asleep()
 
-            async with ActorSystem() as system:
+            async with ActorSystem(ask_timeout=timedelta(milliseconds=100)) as system:
                 ref = system.ref(sleeper, "s-1")
                 started = asyncio.get_running_loop().time()
 
@@ -786,25 +780,7 @@ def describe_actor_system() -> None:
             assert taken == [1, 2, 4]
 
         async def it_passes_on_to_the_ask_the_body_was_awaiting() -> None:
-            napping = asyncio.Event()
-            stopped = asyncio.Event()
-
-            @actor(initial=Account())
-            async def sleeper(ctx: Context[Account, Nap | Balance]) -> None:
-                async for msg in ctx.inbox:
-                    match msg:
-                        case Nap(reply_to):
-                            napping.set()
-                            try:
-                                await asyncio.sleep(10)
-                            except asyncio.CancelledError:
-                                stopped.set()
-                                raise
-                            reply_to.tell(0)
-                        case Balance(reply_to):
-                            reply_to.tell(ctx.state.value.balance)
-                        case _:
-                            assert_never(msg)
+            asleep = NAPS["k"] = Asleep()
 
             @actor(initial=Account())
             async def front(ctx: Context[Account, Nap]) -> None:
@@ -813,11 +789,11 @@ def describe_actor_system() -> None:
 
             async with ActorSystem() as system:
                 asked = asyncio.ensure_future(system.ref(front, "k").ask(Nap))
-                await napping.wait()
+                await asleep.napping.wait()
                 asked.cancel()
 
                 async with asyncio.timeout(1):
-                    await stopped.wait()
+                    await asleep.stopped.wait()
                     assert await system.ref(sleeper, "k").ask(Balance) == 0
 
     def when_a_type_handles_several_messages_at_once() -> None:
