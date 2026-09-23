@@ -628,12 +628,14 @@ impl Running {
         })
         .await?;
         let id = endpoint.node().clone();
-        let Declared {
-            counts,
-            kinds,
-            write_timeouts,
-            durables,
-        } = Declared::of(types);
+        let mut counts = Counts::default();
+        for kind in &types {
+            counts.learn(&kind.actor, kind.replicas);
+        }
+        let kinds = types
+            .into_iter()
+            .map(|kind| (kind.actor.clone(), kind))
+            .collect();
         let membership: Box<dyn Members> = if member {
             Box::new(Membership::new(
                 id.clone(),
@@ -683,8 +685,6 @@ impl Running {
                 routing: Routing::new(node.id().clone()),
                 replication,
                 kinds,
-                write_timeouts,
-                durables,
                 running: BTreeSet::new(),
                 handed: None,
                 told: false,
@@ -751,12 +751,8 @@ struct Held {
     handoff: Handoff,
     routing: Routing,
     replication: Replication,
-    /// What this node knows of each type it has: how many replicas its keys have and who confirms a write.
-    kinds: HashMap<String, crate::handoff::service::Kind>,
-    /// How long an operation over a key waits for its replicas, for the types that set it themselves.
-    write_timeouts: HashMap<String, core::time::Duration>,
-    /// When the store of the system keeps the writes of each durable type.
-    durables: HashMap<String, Durable>,
+    /// The types this node has, as the process declared them.
+    kinds: HashMap<String, Kind>,
     /// The keys with an activation here, which the host reports as they come and go.
     running: BTreeSet<Entity>,
     /// Who is waiting for every key this node stopped replicating to be taken by the nodes that replicate it now.
@@ -814,39 +810,6 @@ impl Standing {
     }
 }
 
-/// What the types a node starts with declare, split into the tables the node task keeps.
-#[derive(Default)]
-struct Declared {
-    counts: Counts,
-    kinds: HashMap<String, crate::handoff::service::Kind>,
-    write_timeouts: HashMap<String, core::time::Duration>,
-    durables: HashMap<String, Durable>,
-}
-
-impl Declared {
-    fn of(types: Vec<Kind>) -> Self {
-        let mut declared = Self::default();
-        for kind in types {
-            declared.counts.learn(&kind.actor, kind.replicas);
-            if let Some(timeout) = kind.write_timeout {
-                declared.write_timeouts.insert(kind.actor.clone(), timeout);
-            }
-            if let Some(durable) = kind.durable {
-                declared.durables.insert(kind.actor.clone(), durable);
-            }
-            declared.kinds.insert(
-                kind.actor,
-                crate::handoff::service::Kind {
-                    replicas: kind.replicas,
-                    write: kind.write,
-                    pinned: kind.pinned,
-                },
-            );
-        }
-        declared
-    }
-}
-
 impl Held {
     fn owner(&self, actor: &str, key: &str) -> Option<NodeId> {
         acting(
@@ -880,14 +843,12 @@ impl Held {
             .filter(|replica| answering.contains(*replica))
             .count()
             .max(1);
+        let kind = self.kinds.get(actor);
         Some(Around {
             wanted,
-            write: self
-                .kinds
-                .get(actor)
-                .map_or(Write::Majority, |kind| kind.write),
-            write_timeout: self.write_timeouts.get(actor).copied(),
-            durable: self.durables.get(actor).copied(),
+            write: kind.map_or(Write::Majority, |kind| kind.write),
+            write_timeout: kind.and_then(|kind| kind.write_timeout),
+            durable: kind.and_then(|kind| kind.durable),
             replicas,
         })
     }
@@ -923,28 +884,14 @@ impl Held {
 
     /// Take in what a type declares, and start counting it the first time it is seen.
     fn learn(&mut self, kind: Kind, now: f64) {
-        self.kinds.insert(
-            kind.actor.clone(),
-            crate::handoff::service::Kind {
-                replicas: kind.replicas,
-                write: kind.write,
-                pinned: kind.pinned,
-            },
-        );
-        match kind.write_timeout {
-            Some(timeout) => self.write_timeouts.insert(kind.actor.clone(), timeout),
-            None => self.write_timeouts.remove(&kind.actor),
-        };
-        match kind.durable {
-            Some(durable) => self.durables.insert(kind.actor.clone(), durable),
-            None => self.durables.remove(&kind.actor),
-        };
         if !self.counts.counted(&kind.actor) {
             self.counts.learn(&kind.actor, kind.replicas);
             self.placement.learned(&kind.actor);
-            self.membership.know(&BTreeSet::from([kind.actor]), now);
+            self.membership
+                .know(&BTreeSet::from([kind.actor.clone()]), now);
             self.membership.mark();
         }
+        self.kinds.insert(kind.actor.clone(), kind);
     }
 
     /// Activate a key from its replicas, or fail at once when no member hosts its type.
@@ -1344,14 +1291,14 @@ fn flush(
     if changed {
         let seen = held.membership.members();
         held.handoff.knows(
-            held.kinds.clone(),
             seen.iter()
                 .filter(|member| !matches!(member.status, Status::Dead | Status::Left))
                 .map(|member| member.node.clone())
                 .collect(),
         );
-        held.placement
-            .update(&seen, &held.counts, &mut held.handoff);
+        for step in held.placement.update(&seen, &held.counts) {
+            held.handoff.begin(&step, held.kinds.get(&step.actor));
+        }
         held.unreachable(&seen);
         let _ = members.send(seen.clone());
         held.host.members(seen);

@@ -26,9 +26,6 @@ pub struct Step {
 
 /// The ranges this node is filling from the replicas that had them.
 pub trait Transfers {
-    /// Start filling the ranges of `step`. The step is dropped once `filled` says so.
-    fn take(&mut self, step: &Step);
-
     /// Whether `key` is in a range of `step` that is still arriving, so that this node holds it back.
     fn receiving(&self, step: &Step, key: &str) -> bool;
 
@@ -36,15 +33,11 @@ pub trait Transfers {
     fn filled(&mut self) -> Vec<Step>;
 }
 
-/// No transfer at all: a step is taken as soon as the ring gives it, which is what a node alone does.
+/// No transfer at all: the steps it is given are filled at once, which is what a node alone does.
 #[derive(Debug, Default)]
 pub struct Direct(Vec<Step>);
 
 impl Transfers for Direct {
-    fn take(&mut self, step: &Step) {
-        self.0.push(step.clone());
-    }
-
     fn receiving(&self, _step: &Step, _key: &str) -> bool {
         false
     }
@@ -203,7 +196,10 @@ impl Placement {
     ///
     /// Most changes to the table say nothing about which nodes are in the cluster, so a ring whose nodes did not
     /// change is kept as it is.
-    pub fn update(&mut self, members: &[Member], counts: &Counts, transfers: &mut impl Transfers) {
+    ///
+    /// What comes back is the steps this node gained ranges in, for its transfers to start filling. Each one holds its
+    /// ranges until `settle` hears that it is filled.
+    pub fn update(&mut self, members: &[Member], counts: &Counts) -> Vec<Step> {
         self.members = members
             .iter()
             .map(|member| (member.node.clone(), member.clone()))
@@ -220,10 +216,12 @@ impl Placement {
                 Some(Ring::build(nodes.iter().cloned(), VNODES))
             };
         }
+        let mut taken = Vec::new();
         for name in counts.known() {
-            self.advance(&name, counts, transfers);
+            taken.extend(self.advance(&name, counts));
         }
         self.entered = self.entered || nodes.len() > 1;
+        taken
     }
 
     /// Put a type this node just met on the ring it answers from, as it is.
@@ -255,9 +253,9 @@ impl Placement {
     ///
     /// A step this node gains nothing in is walked through: it takes nothing over there, so nothing has to arrive
     /// first. The previous ring of a step is the one right before it, which is where its ranges are pulled from.
-    fn advance(&mut self, actor: &str, counts: &Counts, transfers: &mut impl Transfers) {
+    fn advance(&mut self, actor: &str, counts: &Counts) -> Vec<Step> {
         let Some(target) = self.ring.clone() else {
-            return;
+            return Vec::new();
         };
         let steps = self.steps.entry(actor.to_owned()).or_default();
         let held = steps
@@ -266,7 +264,7 @@ impl Placement {
             .or_else(|| self.walked.get(actor).cloned());
         let Some(node) = self.node.clone() else {
             self.walked.insert(actor.to_owned(), target);
-            return;
+            return Vec::new();
         };
         // A base that holds nobody but this node is a node that was in no ring with anyone: it is the one entering,
         // and the ring without it is what came before.
@@ -294,12 +292,12 @@ impl Placement {
             }
             base = ring;
         }
-        let steps = self.steps.entry(actor.to_owned()).or_default();
-        for step in &taken {
-            steps.push(step.clone());
-            transfers.take(step);
-        }
+        self.steps
+            .entry(actor.to_owned())
+            .or_default()
+            .extend(taken.iter().cloned());
         self.walked.insert(actor.to_owned(), base);
+        taken
     }
 }
 
@@ -358,15 +356,11 @@ mod tests {
         (0..200).map(|index| format!("key-{index}")).collect()
     }
 
-    /// Transfers that never finish, so that every step this node gained keeps holding its ranges.
+    /// Transfers that never finish, so that every step they are given keeps holding its ranges.
     #[derive(Debug, Default)]
     struct Waiting(Vec<Step>);
 
     impl Transfers for Waiting {
-        fn take(&mut self, step: &Step) {
-            self.0.push(step.clone());
-        }
-
         fn receiving(&self, step: &Step, key: &str) -> bool {
             let point = token(&step.actor, key);
             self.0.contains(step) && step.ranges.iter().any(|span| span.holds(point))
@@ -382,8 +376,7 @@ mod tests {
         let ids = Rolls::seeded(51).nodes(5);
         let members: Vec<Member> = ids.iter().map(|node| member(node, Status::Alive)).collect();
         let mut placement = Placement::new(Some(ids[0].clone()));
-        let mut transfers = Direct::default();
-        placement.update(&members, &counts(), &mut transfers);
+        let mut transfers = Direct(placement.update(&members, &counts()));
         placement.settle(&mut transfers);
         let ring = Ring::build(ids.clone(), VNODES);
 
@@ -405,8 +398,8 @@ mod tests {
         let ids = Rolls::seeded(52).nodes(4);
         let mut members: Vec<Member> = ids.iter().map(|node| member(node, Status::Alive)).collect();
         let mut placement = Placement::new(Some(ids[0].clone()));
-        let mut transfers = Direct::default();
-        placement.update(&members, &counts(), &mut transfers);
+        let transfers = Direct::default();
+        placement.update(&members, &counts());
         let owned: Vec<String> = keys()
             .into_iter()
             .filter(|key| {
@@ -416,7 +409,7 @@ mod tests {
         assert!(!owned.is_empty(), "the node owned nothing to begin with");
 
         members[1].status = Status::Dead;
-        placement.update(&members, &counts(), &mut transfers);
+        placement.update(&members, &counts());
 
         for key in owned {
             let answers = placement.owner(ACTOR, &key, &counts(), &transfers);
@@ -441,10 +434,9 @@ mod tests {
         let before = Ring::build(ids[..3].iter().cloned(), VNODES);
         let after = Ring::build(ids.clone(), VNODES);
         let mut placement = Placement::new(Some(entering.clone()));
-        let mut transfers = Waiting::default();
         let all: Vec<Member> = ids.iter().map(|node| member(node, Status::Alive)).collect();
 
-        placement.update(&all, &counts(), &mut transfers);
+        let transfers = Waiting(placement.update(&all, &counts()));
 
         assert_eq!(
             transfers.0.len(),
@@ -483,8 +475,7 @@ mod tests {
         let ids = Rolls::seeded(54).nodes(4);
         let members: Vec<Member> = ids.iter().map(|node| member(node, Status::Alive)).collect();
         let mut placement = Placement::new(None);
-        let mut transfers = Waiting::default();
-        placement.update(&members, &counts(), &mut transfers);
+        let transfers = Waiting(placement.update(&members, &counts()));
         let ring = Ring::build(ids.clone(), VNODES);
 
         for key in keys() {
@@ -501,10 +492,10 @@ mod tests {
         let ids = Rolls::seeded(55).nodes(4);
         let members: Vec<Member> = ids.iter().map(|node| member(node, Status::Alive)).collect();
         let mut placement = Placement::new(Some(ids[0].clone()));
-        let mut transfers = Direct::default();
+        let transfers = Direct::default();
         let mut counts = Counts::default();
         counts.give_up("tests.deploy:audit");
-        placement.update(&members, &counts, &mut transfers);
+        placement.update(&members, &counts);
 
         let replicas = placement.replicas("tests.deploy:audit", "a", &counts, &transfers);
 
@@ -516,8 +507,8 @@ mod tests {
     fn a_cluster_of_one_places_every_key_on_it() {
         let ids = Rolls::seeded(56).nodes(1);
         let mut placement = Placement::new(Some(ids[0].clone()));
-        let mut transfers = Direct::default();
-        placement.update(&[member(&ids[0], Status::Alive)], &counts(), &mut transfers);
+        let transfers = Direct::default();
+        placement.update(&[member(&ids[0], Status::Alive)], &counts());
 
         for key in keys() {
             assert_eq!(placement.replicas(ACTOR, &key, &counts(), &transfers), ids);
@@ -540,7 +531,7 @@ mod tests {
             .chain([None])
             .map(|node| {
                 let mut placement = Placement::new(node);
-                placement.update(&members, &counts(), &mut Direct::default());
+                placement.update(&members, &counts());
                 placement
             })
             .collect();
@@ -577,7 +568,9 @@ mod tests {
         ];
 
         for table in tables {
-            placement.update(&alive(&table), &counts(), &mut transfers);
+            transfers
+                .0
+                .extend(placement.update(&alive(&table), &counts()));
 
             assert_eq!(
                 placement.replicas(ACTOR, &key, &counts(), &transfers),
@@ -600,12 +593,12 @@ mod tests {
         let ids = Rolls::seeded(59).nodes(4);
         let key = pinned_to(&ids[1], "worker");
         let mut placement = Placement::new(Some(ids[0].clone()));
-        let mut transfers = Direct::default();
+        let transfers = Direct::default();
 
         for status in [Status::Dead, Status::Leaving] {
             let mut members = alive(&ids);
             members[1].status = status;
-            placement.update(&members, &counts(), &mut transfers);
+            placement.update(&members, &counts());
             // It is still the node that keeps the key: no other one takes it over.
             assert_eq!(
                 placement.replicas(ACTOR, &key, &counts(), &transfers),
@@ -619,7 +612,7 @@ mod tests {
             .filter(|node| **node != ids[1])
             .cloned()
             .collect();
-        placement.update(&alive(&others), &counts(), &mut transfers);
+        placement.update(&alive(&others), &counts());
         assert!(
             placement
                 .replicas(ACTOR, &key, &counts(), &transfers)
@@ -640,14 +633,14 @@ mod tests {
         let restarted = NodeId::fresh(ids[1].address.clone());
         let key = pinned_to(&ids[1], "worker");
         let mut placement = Placement::new(Some(ids[0].clone()));
-        let mut transfers = Direct::default();
+        let transfers = Direct::default();
 
         // The incarnation that went down stays in the table beside the new one until the join that replaced it is known.
         for status in [Status::Suspect, Status::Dead] {
             let mut members = alive(&ids);
             members[1].status = status;
             members.push(member(&restarted, Status::Alive));
-            placement.update(&members, &counts(), &mut transfers);
+            placement.update(&members, &counts());
             assert_eq!(
                 placement.owner(ACTOR, &key, &counts(), &transfers),
                 Some(restarted.clone())
@@ -655,7 +648,7 @@ mod tests {
         }
 
         let now = [ids[0].clone(), restarted.clone(), ids[2].clone()];
-        placement.update(&alive(&now), &counts(), &mut transfers);
+        placement.update(&alive(&now), &counts());
         assert_eq!(
             placement.replicas(ACTOR, &key, &counts(), &transfers),
             vec![restarted.clone()]

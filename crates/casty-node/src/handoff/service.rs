@@ -24,18 +24,10 @@ use casty_core::replication::replica::{Arriving, Replica};
 use tokio::time::Instant;
 
 use crate::events::{Direction, Event};
+use crate::node::Kind;
 use crate::placement::{Step, Transfers};
 use crate::replication::service::{Entity, Outgoing};
 use crate::replication::wire::Message;
-
-/// A type this process runs, as the handoff needs it: how many replicas its keys have, who confirms a write, and
-/// whether its keys are pinned, which puts none of them in a range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Kind {
-    pub replicas: usize,
-    pub write: Write,
-    pub pinned: bool,
-}
 
 /// A range this node is filling, and when it asks for it again.
 #[derive(Debug)]
@@ -91,7 +83,6 @@ pub struct Handoff {
     giving: HashMap<(String, NodeId), Giving>,
     /// The handover of a node being put back together, by the type and the node it comes from.
     taking: HashMap<(String, NodeId), Arriving>,
-    kinds: HashMap<String, Kind>,
     present: BTreeSet<NodeId>,
     sends: Vec<Outgoing>,
     /// Keys that arrived since the last pass, which is when what this node keeps is decided again.
@@ -120,7 +111,6 @@ impl Handoff {
             handing: HashMap::new(),
             giving: HashMap::new(),
             taking: HashMap::new(),
-            kinds: HashMap::new(),
             present: BTreeSet::new(),
             sends: Vec::new(),
             swept: false,
@@ -134,12 +124,11 @@ impl Handoff {
         }
     }
 
-    /// The types this node has and the members a transfer can reach, which every decision here reads.
+    /// The members a transfer can reach, which every decision here reads.
     ///
     /// A node the cluster gave up on is not one of them, even while the ring still places keys on it: nothing it is
     /// sent is answered, so asking it for a range or waiting for it to take one is waiting for the deadline.
-    pub fn knows(&mut self, kinds: HashMap<String, Kind>, present: BTreeSet<NodeId>) {
-        self.kinds = kinds;
+    pub fn knows(&mut self, present: BTreeSet<NodeId>) {
         self.present = present;
         // The rest of a handover from a node the cluster gave up on never comes.
         self.taking
@@ -575,24 +564,20 @@ impl Handoff {
             message: Message::Pull(message),
         });
     }
-}
 
-impl Transfers for Handoff {
-    fn take(&mut self, step: &Step) {
-        let kind = self.kinds.get(&step.actor).copied().unwrap_or(Kind {
-            replicas: step.previous.nodes().len(),
-            write: Write::Majority,
-            pinned: false,
-        });
+    /// Start filling the ranges of `step`, a step of `kind` as this process has it. The placement drops the step once
+    /// `filled` says so.
+    pub fn begin(&mut self, step: &Step, kind: Option<&Kind>) {
         // No key of a pinned type is in a range, so its step has nothing to pull and nothing to report: it is through
         // as soon as it is taken, and the placement drops it on the pass that made it.
-        if kind.pinned {
+        if kind.is_some_and(|kind| kind.pinned) {
             self.settled.push(step.clone());
             return;
         }
         self.moved = true;
-        let count = kind.replicas.min(step.previous.nodes().len());
-        let reads = quorums(kind.write, count).reads;
+        let previous = step.previous.nodes().len();
+        let count = kind.map_or(previous, |kind| kind.replicas.min(previous));
+        let reads = quorums(kind.map_or(Write::Majority, |kind| kind.write), count).reads;
         let sources: BTreeSet<NodeId> = step
             .previous
             .nodes()
@@ -625,7 +610,9 @@ impl Transfers for Handoff {
             delay: self.backoff.first,
         });
     }
+}
 
+impl Transfers for Handoff {
     fn receiving(&self, step: &Step, key: &str) -> bool {
         self.holds
             .iter()
@@ -670,7 +657,7 @@ mod tests {
     use casty_core::rolls::Rolls;
     use casty_core::store::Pages;
     use casty_net::limits::Limits;
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
 
     use casty_core::placement::{Range, Ring, pin};
 
@@ -799,7 +786,7 @@ mod tests {
                 ..at(&ids[0], 1)
             },
         );
-        giver.knows(HashMap::new(), BTreeSet::from([ids[1].clone()]));
+        giver.knows(BTreeSet::from([ids[1].clone()]));
         let now = Instant::now();
         giver.give(
             vec![Handover {
@@ -883,7 +870,7 @@ mod tests {
         let mut handoff = Handoff::new(ids[0].clone(), LIMIT, Backoff::default());
         let mut replica = Replica::new(ids[0].clone(), LIMIT);
         replica.install(ACTOR, at(&ids[1], 1));
-        handoff.knows(HashMap::new(), BTreeSet::from([ids[1].clone()]));
+        handoff.knows(BTreeSet::from([ids[1].clone()]));
         let now = Instant::now();
         handoff.give(
             vec![Handover {
@@ -944,7 +931,7 @@ mod tests {
         let mut handoff = Handoff::new(ids[0].clone(), LIMIT, Backoff::default());
         let mut replica = Replica::new(ids[0].clone(), LIMIT);
         replica.install(ACTOR, at(&ids[1], 1));
-        handoff.knows(HashMap::new(), BTreeSet::from([ids[1].clone()]));
+        handoff.knows(BTreeSet::from([ids[1].clone()]));
         assert!(handoff.observed().is_empty(), "nothing is moving yet");
 
         handoff.give(
@@ -990,17 +977,17 @@ mod tests {
         let ids = Rolls::seeded(66).nodes(2);
         let mut handoff = Handoff::new(ids[0].clone(), LIMIT, Backoff::default());
         let mut replica = Replica::new(ids[0].clone(), LIMIT);
-        handoff.knows(HashMap::new(), BTreeSet::from([ids[1].clone()]));
+        handoff.knows(BTreeSet::from([ids[1].clone()]));
         let previous = Ring::build(ids.iter().cloned(), VNODES);
 
-        Transfers::take(
-            &mut handoff,
+        handoff.begin(
             &Step {
                 actor: ACTOR.to_owned(),
                 previous: previous.clone(),
                 ring: previous,
                 ranges: Vec::new(),
             },
+            None,
         );
         assert_eq!(
             handoff.observed(),
@@ -1042,7 +1029,7 @@ mod tests {
         let keys = keep(&mut kept, &ids[1], 12, &small());
         let mut puller = Handoff::new(ids[0].clone(), WIDE, Backoff::default());
         let mut filling = Replica::new(ids[0].clone(), WIDE);
-        puller.knows(HashMap::new(), BTreeSet::from([ids[1].clone()]));
+        puller.knows(BTreeSet::from([ids[1].clone()]));
         let previous = Ring::build(ids.iter().cloned(), VNODES);
         let step = Step {
             actor: ACTOR.to_owned(),
@@ -1054,7 +1041,7 @@ mod tests {
                 end: u64::MAX,
             }],
         };
-        Transfers::take(&mut puller, &step);
+        puller.begin(&step, None);
 
         let asked = Instant::now();
         let mut answer = answered(&mut puller, &filling, &mut source, &mut kept, asked);
@@ -1096,7 +1083,7 @@ mod tests {
         let mut giver = Handoff::new(ids[0].clone(), WIDE, Backoff::default());
         let mut kept = Replica::new(ids[0].clone(), WIDE);
         let keys = keep(&mut kept, &ids[0], 12, &small());
-        giver.knows(HashMap::new(), BTreeSet::from([ids[1].clone()]));
+        giver.knows(BTreeSet::from([ids[1].clone()]));
         let now = Instant::now();
         giver.give(handovers(&keys, &ids[1]), &kept, now);
         giver.fired(now, &kept);
@@ -1159,7 +1146,7 @@ mod tests {
             listed > message,
             "the names alone take {listed} bytes, which one message carries"
         );
-        giver.knows(HashMap::new(), BTreeSet::from([ids[1].clone()]));
+        giver.knows(BTreeSet::from([ids[1].clone()]));
         let now = Instant::now();
         giver.give(handovers(&keys, &ids[1]), &kept, now);
         giver.fired(now, &kept);
@@ -1221,9 +1208,9 @@ mod tests {
         }
         let mut puller = Handoff::new(ids[0].clone(), WIDE, Backoff::default());
         let mut filling = Replica::new(ids[0].clone(), WIDE);
-        puller.knows(HashMap::new(), BTreeSet::from([ids[1].clone()]));
+        puller.knows(BTreeSet::from([ids[1].clone()]));
         let step = whole(&ids);
-        Transfers::take(&mut puller, &step);
+        puller.begin(&step, None);
 
         let answer = answered(
             &mut puller,
@@ -1248,8 +1235,8 @@ mod tests {
     fn a_pinned_key_is_never_arriving() {
         let ids = Rolls::seeded(72).nodes(2);
         let mut handoff = Handoff::new(ids[0].clone(), LIMIT, Backoff::default());
-        handoff.knows(HashMap::new(), BTreeSet::from([ids[1].clone()]));
-        Transfers::take(&mut handoff, &whole(&ids));
+        handoff.knows(BTreeSet::from([ids[1].clone()]));
+        handoff.begin(&whole(&ids), None);
 
         assert!(
             handoff.arriving(ACTOR, KEY),
@@ -1268,15 +1255,15 @@ mod tests {
             let mut handoff = Handoff::new(ids[0].clone(), LIMIT, Backoff::default());
             let replica = Replica::new(ids[0].clone(), LIMIT);
             let kind = Kind {
+                actor: ACTOR.to_owned(),
                 replicas: 1,
                 write: Write::Majority,
+                write_timeout: None,
                 pinned,
+                durable: None,
             };
-            handoff.knows(
-                HashMap::from([(ACTOR.to_owned(), kind)]),
-                BTreeSet::from([ids[1].clone()]),
-            );
-            Transfers::take(&mut handoff, &step);
+            handoff.knows(BTreeSet::from([ids[1].clone()]));
+            handoff.begin(&step, Some(&kind));
             handoff.fired(Instant::now(), &replica);
             (
                 handoff.take().len(),
@@ -1323,7 +1310,7 @@ mod tests {
                 ..at(&ids[0], 2)
             },
         );
-        giver.knows(HashMap::new(), BTreeSet::from([ids[1].clone()]));
+        giver.knows(BTreeSet::from([ids[1].clone()]));
         let now = Instant::now();
         giver.give(
             vec![Handover {
