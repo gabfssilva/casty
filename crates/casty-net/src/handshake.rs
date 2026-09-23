@@ -12,16 +12,6 @@ use casty_core::schema::msgpack::{self, Int, Kind, Reader};
 use crate::compress::Name;
 use crate::frame::ProtocolError;
 
-/// Why a hello was rejected. `Duplicate` means the rejecting node is opening its own connection to the sender, and
-/// that connection is the one both sides keep.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rejection {
-    Cluster = 1,
-    Itself = 4,
-    Duplicate = 5,
-    Limits = 6,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     pub cluster: String,
@@ -40,40 +30,33 @@ pub struct Ack {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reject {
-    pub code: i64,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Hello(Hello),
     Ack(Ack),
-    Reject(Reject),
+    /// The hello was refused, for the reason given.
+    Reject(String),
+    /// The rejecting node is opening its own connection to the sender, and that connection is the one both sides
+    /// keep.
+    Duplicate,
 }
 
-/// The reply to `hello` from the node described by `local`, before duplicate connections are considered.
-pub fn answer(hello: &Hello, local: &Hello) -> Result<Ack, Reject> {
+/// The reply to `hello` from the node described by `local`, or why it is refused, before duplicate connections are
+/// considered.
+pub fn answer(hello: &Hello, local: &Hello) -> Result<Ack, String> {
     if hello.cluster != local.cluster {
-        return Err(Reject {
-            code: Rejection::Cluster as i64,
-            reason: format!("cluster {:?} is not {:?}", hello.cluster, local.cluster),
-        });
+        return Err(format!(
+            "cluster {:?} is not {:?}",
+            hello.cluster, local.cluster
+        ));
     }
     if hello.sizes != local.sizes {
-        return Err(Reject {
-            code: Rejection::Limits as i64,
-            reason: format!(
-                "limits (frame, message, window) {:?} are not {:?}",
-                hello.sizes, local.sizes
-            ),
-        });
+        return Err(format!(
+            "limits (frame, message, window) {:?} are not {:?}",
+            hello.sizes, local.sizes
+        ));
     }
     if hello.node == local.node {
-        return Err(Reject {
-            code: Rejection::Itself as i64,
-            reason: "connection to itself".to_owned(),
-        });
+        return Err("connection to itself".to_owned());
     }
     Ok(Ack {
         node: local.node.clone(),
@@ -118,13 +101,15 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
             }
             ("hello-ack", out)
         }
-        Message::Reject(reject) => {
-            msgpack::write_map_len(&mut out, 2);
-            key(&mut out, "code");
-            msgpack::write_int(&mut out, Int::Signed(reject.code));
+        Message::Reject(reason) => {
+            msgpack::write_map_len(&mut out, 1);
             key(&mut out, "reason");
-            msgpack::write_str(&mut out, &reject.reason);
+            msgpack::write_str(&mut out, reason);
             ("hello-reject", out)
+        }
+        Message::Duplicate => {
+            msgpack::write_map_len(&mut out, 0);
+            ("hello-duplicate", out)
         }
     }
 }
@@ -160,10 +145,10 @@ pub fn decode(name: &str, payload: &[u8]) -> Result<Message, ProtocolError> {
                 compression,
             }))
         }
-        "hello-reject" => Ok(Message::Reject(Reject {
-            code: fields.integer("code").ok_or_else(malformed)?,
-            reason: fields.text("reason").ok_or_else(malformed)?,
-        })),
+        "hello-reject" => Ok(Message::Reject(
+            fields.text("reason").ok_or_else(malformed)?,
+        )),
+        "hello-duplicate" => Ok(Message::Duplicate),
         _ => Err(malformed()),
     }
 }
@@ -286,7 +271,7 @@ fn value(reader: &mut Reader<'_>) -> Option<Value> {
 mod tests {
     use casty_core::node::NodeId;
 
-    use super::{Ack, Hello, Message, Reject, Rejection, answer, decode, encode};
+    use super::{Ack, Hello, Message, answer, decode, encode};
     use crate::compress::{Name, PREFERENCE};
     use crate::limits::Limits;
 
@@ -320,10 +305,8 @@ mod tests {
                 node: node(None, 4),
                 compression: None,
             }),
-            Message::Reject(Reject {
-                code: Rejection::Cluster as i64,
-                reason: "cluster 'other' is not 'casty'".to_owned(),
-            }),
+            Message::Reject("cluster 'other' is not 'casty'".to_owned()),
+            Message::Duplicate,
         ];
         for message in messages {
             let (name, payload) = encode(&message);
@@ -343,16 +326,18 @@ mod tests {
     #[test]
     fn it_rejects_what_it_cannot_speak_to() {
         let local = hello("casty", node(Some("a:1"), 1));
-        let refused = |theirs: Hello| answer(&theirs, &local).unwrap_err().code;
+        let refused = |theirs: Hello| answer(&theirs, &local).unwrap_err();
 
-        let mut other = hello("other", node(Some("b:1"), 2));
-        assert_eq!(refused(other.clone()), Rejection::Cluster as i64);
-        other = hello("casty", node(Some("b:1"), 2));
-        other.sizes[1] *= 8;
-        assert_eq!(refused(other), Rejection::Limits as i64);
+        assert_eq!(
+            refused(hello("other", node(Some("b:1"), 2))),
+            r#"cluster "other" is not "casty""#
+        );
+        let mut larger = hello("casty", node(Some("b:1"), 2));
+        larger.sizes[1] *= 8;
+        assert!(refused(larger).starts_with("limits"));
         assert_eq!(
             refused(hello("casty", node(Some("a:1"), 1))),
-            Rejection::Itself as i64
+            "connection to itself"
         );
     }
 
@@ -360,16 +345,6 @@ mod tests {
     fn a_payload_that_is_not_a_handshake_is_refused() {
         assert!(decode("hello", &[0xc0]).is_err());
         assert!(decode("hello-ack", &[]).is_err());
-        assert!(
-            decode(
-                "what",
-                &encode(&Message::Reject(Reject {
-                    code: 1,
-                    reason: String::new()
-                }))
-                .1
-            )
-            .is_err()
-        );
+        assert!(decode("what", &encode(&Message::Reject(String::new())).1).is_err());
     }
 }

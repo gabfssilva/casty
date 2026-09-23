@@ -18,7 +18,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
 
 use crate::connection::{Broken, Bytes, Connection, Greeting, Incoming, Socket};
-use crate::handshake::{Hello, Message, Reject, Rejection, answer};
+use crate::handshake::{Hello, Message, answer};
 use crate::limits::Limits;
 use crate::tls::Identity;
 
@@ -288,26 +288,20 @@ impl Pool {
         let Ok(Ok(Message::Hello(hello))) = heard else {
             return;
         };
-        let reply = match answer(&hello, &self.settings.local) {
-            Err(reject) => Err(reject),
-            Ok(_) if self.keeps_own(&hello.node) => Err(Reject {
-                code: Rejection::Duplicate as i64,
-                reason: "the connection this node is opening is kept".to_owned(),
-            }),
-            Ok(ack) => Ok(ack),
-        };
-        match reply {
-            Err(reject) => greeting.reject(&Message::Reject(reject)).await,
-            Ok(ack) => {
-                let compression = ack.compression;
-                if greeting.say(&Message::Ack(ack)).await.is_err() {
-                    return;
-                }
-                greeting.compress(compression);
-                let connection = greeting.run(hello.node.clone(), self.inbound.clone());
-                self.register(&connection, &hello.node, false, None);
+        let ack = match answer(&hello, &self.settings.local) {
+            Err(reason) => return greeting.reject(&Message::Reject(reason)).await,
+            Ok(_) if self.keeps_own(&hello.node) => {
+                return greeting.reject(&Message::Duplicate).await;
             }
+            Ok(ack) => ack,
+        };
+        let compression = ack.compression;
+        if greeting.say(&Message::Ack(ack)).await.is_err() {
+            return;
         }
+        greeting.compress(compression);
+        let connection = greeting.run(hello.node.clone(), self.inbound.clone());
+        self.register(&connection, &hello.node, false, None);
     }
 
     async fn dial(self: Arc<Self>, address: String) {
@@ -331,12 +325,12 @@ impl Pool {
                 let connection = greeting.run(peer.clone(), self.inbound.clone());
                 self.register(&connection, &peer, true, Some(&address));
             }
-            Message::Reject(reject) if reject.code == Rejection::Duplicate as i64 => {
+            Message::Duplicate => {
                 // The peer keeps the connection it is opening to this node, and accepting it supersedes this dial.
                 tokio::time::sleep(self.settings.limits.handshake).await;
                 self.fail(&address);
             }
-            Message::Reject(reject) => {
+            Message::Reject(reason) => {
                 let seeded = self.held().dials.get(&address).is_some_and(|dial| {
                     dial.queue
                         .iter()
@@ -344,8 +338,7 @@ impl Pool {
                 });
                 if seeded {
                     let _ = self.inbound.send(Incoming::Refused(format!(
-                        "{address} refused the connection: {}",
-                        reject.reason
+                        "{address} refused the connection: {reason}"
                     )));
                 }
                 self.unreached(&address);
