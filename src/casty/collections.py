@@ -3,6 +3,11 @@
 Each collection is a handful of actor types, configured by replicas and write level: a configuration is a type of
 its own, so two collections of the same kind with different settings never share a key. The bodies of those types
 run in the core; what is here builds their messages and reads their answers.
+
+A set, a dict and a multimap list their keys in an index, sharded by key and cut into segments of about 512 keys.
+`scan` reads the index a segment at a time and holds only the segment it reads, whatever the size of the collection.
+It is not a snapshot: what is written or removed while it runs may be seen or not, what is there throughout is seen,
+and nothing is seen twice.
 """
 
 import asyncio
@@ -777,7 +782,7 @@ class _Index:
     ) -> list[R]:
         """What `visit` answers at every segment of every shard, the shards at once and the segments of each at once.
 
-        Not a snapshot: a key written meanwhile may be seen or not, and one a split moves meanwhile is seen once.
+        Not a snapshot, like `segments`; a key a split moves meanwhile is seen once.
         """
         await self._binding.ready()
         shards = await _each(lambda shard: self._walk(shard, visit), range(self._binding.shards))
@@ -871,9 +876,8 @@ class Dict[K, V]:
 
     Replacing the value of a key asks only its entry. A new key is listed before its value is saved, and a removed one
     is unlisted after its value is cleared, so a call that stops halfway may leave a listing without a value but never
-    a value without a listing. `scan`, `items` and `clear` read the index a segment at a time, ask the entries of its
-    keys a few dozen at a time, and drop each listing they find without a value; `items` and `clear` read the shards of
-    the index at once. `size` counts the listings and asks no entry.
+    a value without a listing. `scan`, `items` and `clear` ask the entries of the keys a segment lists a few dozen at a
+    time, and drop each listing they find without a value.
     """
 
     def __init__(self, binding: Binding, key: type[K], value: type[V]) -> None:
@@ -913,10 +917,9 @@ class Dict[K, V]:
         return removed
 
     async def scan(self) -> AsyncIterator[tuple[K, V]]:
-        """Every entry, reading the index a segment of about 512 keys at a time and the values of each together.
+        """Every entry, reading the index a segment at a time and the values of each segment together.
 
-        Not a snapshot: an entry written while the scan runs may be seen or not, and none is seen twice. Only the
-        segment being read is held, whatever the size of the dict.
+        Not a snapshot: see `casty.collections`.
         """
         async for listed in self._index.scan():
             for pair in await self._entries(listed):
@@ -995,9 +998,8 @@ class Dict[K, V]:
 class Set[T: Hashable](_Table):
     """Unique encoded values.
 
-    `scan` reads them a segment of the index at a time and is not a snapshot; `items`, which reads the shards at once,
-    and the set algebra are built on it, on the client. `intersection` and `difference` ask the other set about each
-    member of this one.
+    `items` and the set algebra are built on `scan`, on the client. `intersection` and `difference` ask the other set
+    about each member of this one.
     """
 
     def __init__(self, binding: Binding, value: type[T]) -> None:
@@ -1018,10 +1020,9 @@ class Set[T: Hashable](_Table):
         return bool(await self._index.get(self._value.dump(value)))
 
     async def scan(self) -> AsyncIterator[T]:
-        """Every member, reading the index a segment of about 512 members at a time.
+        """Every member, reading the index a segment at a time.
 
-        Not a snapshot: a member added or removed while the scan runs may be seen or not, and none is seen twice.
-        Only the segment being read is held, whatever the size of the set.
+        Not a snapshot: see `casty.collections`.
         """
         async for listed in self._index.scan():
             for raw in listed:
@@ -1089,8 +1090,7 @@ class MultiMap[K, V](_Table):
     async def scan(self) -> AsyncIterator[tuple[K, V]]:
         """Every value with its key, reading the index a segment at a time, the values of a key one after the other.
 
-        Not a snapshot: a value put or removed while the scan runs may be seen or not, and none is seen twice. Only
-        the segment being read is held, whatever the size of the multimap.
+        Not a snapshot: see `casty.collections`.
         """
         async for listed in self._index.scan():
             for raw, values in listed.items():
