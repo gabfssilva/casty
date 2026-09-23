@@ -1,3 +1,4 @@
+import asyncio
 from collections import Counter
 from contextlib import suppress
 from datetime import timedelta
@@ -5,7 +6,7 @@ from datetime import timedelta
 import pytest
 
 from casty import Client, NodeId, Refused, Unavailable
-from tests.app import Entries, Note, Notes, Pay, Pending, Where, account, ledger, notes, order
+from tests.app import Entries, Hold, Locate, Note, Notes, Pay, Pending, Where, account, gate, ledger, notes, order
 from tests.cluster import Harness, Node
 from tests.support import eventually
 from tests.traffic import Traffic
@@ -50,6 +51,58 @@ def describe_client() -> None:
 
                 # The client read every key through its own table, so an owner it never learned about is unreachable.
                 assert joined.system.node in {listing.node for listing in listings.values()}
+
+    def when_the_only_node_it_reaches_dies() -> None:
+        async def it_fails_the_ask_in_flight_and_sees_the_node_dead() -> None:
+            async with Harness.start(1) as harness:
+                client = await harness.client()
+                (node,) = harness.nodes
+                assert await client.ref(gate, "g-1").ask(Locate) == node.system.node
+                waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold))
+
+                await harness.crash(node)
+
+                # Nobody is left to tell the client: what fails the ask is the connection it rode on.
+                async with asyncio.timeout(_BEFORE_ASK_TIMEOUT.total_seconds()):
+                    with pytest.raises(Unavailable):
+                        await waiting
+                assert [member.status for member in client.members] == ["dead"]
+
+    def when_another_process_takes_the_address_of_the_node_it_waits_on() -> None:
+        async def it_fails_the_ask_in_flight_and_reaches_the_new_process() -> None:
+            async with Harness.start(1) as harness:
+                client = await harness.client()
+                (node,) = harness.nodes
+                waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold))
+                assert await client.ref(gate, "g-2").ask(Locate) == node.system.node
+
+                await harness.crash(node)
+                restarted = await harness.add(address=node.address)
+
+                async with asyncio.timeout(_BEFORE_ASK_TIMEOUT.total_seconds()):
+                    with pytest.raises(Unavailable):
+                        await waiting
+
+                async def the_new_process_answers() -> None:
+                    assert await client.ref(gate, "g-2").ask(Locate) == restarted.system.node
+
+                await eventually(the_new_process_answers, _BEFORE_ASK_TIMEOUT)
+
+    def when_its_connection_drops_and_the_node_lives() -> None:
+        async def it_reconnects_and_keeps_the_ask_in_flight() -> None:
+            async with Harness.start(1) as harness:
+                client = await harness.client()
+                (node,) = harness.nodes
+                waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold))
+                assert await client.ref(gate, "g-2").ask(Locate) == node.system.node
+
+                await harness.sever()
+
+                assert await client.ref(gate, "g-3").ask(Locate) == node.system.node
+                await asyncio.sleep(_BEFORE_ASK_TIMEOUT.total_seconds() / 3)
+                assert not waiting.done()
+                assert [member.status for member in client.members] == ["alive"]
+                waiting.cancel()
 
     def when_the_cluster_has_another_name() -> None:
         async def it_refuses_to_start() -> None:

@@ -13,7 +13,7 @@ use casty_net::compress::Name;
 use casty_net::endpoint::{Config, Endpoint, Received};
 use casty_net::frame::{Frame, VERSION};
 use casty_net::limits::Limits;
-use casty_net::pool::{Lost, Target, Traffic};
+use casty_net::pool::{Heard, Peer, Target, Traffic};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -547,11 +547,11 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn it_reports_the_peer_of_a_connection_that_ended() {
     let (lost, mut heard) = tokio::sync::mpsc::unbounded_channel();
-    let reporting: Lost = Arc::new(move |peer: &casty_core::node::NodeId| {
-        let _ = lost.send(peer.clone());
+    let reporting: Heard = Arc::new(move |peer: Peer| {
+        let _ = lost.send(peer);
     });
     let mut watching = Endpoint::start(Config {
-        lost: Some(reporting),
+        heard: Some(reporting),
         ..config(Some("127.0.0.1:0"))
     })
     .await
@@ -567,8 +567,37 @@ async fn it_reports_the_peer_of_a_connection_that_ended() {
     let reported = tokio::time::timeout(WITHIN, heard.recv()).await;
     assert_eq!(
         reported,
-        Ok(Some(gone)),
+        Ok(Some(Peer::Lost(gone))),
         "the lost connection was not reported"
+    );
+    watching.close(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_reports_a_peer_whose_address_no_longer_answers() {
+    let (unreached, mut heard) = tokio::sync::mpsc::unbounded_channel();
+    let reporting: Heard = Arc::new(move |peer: Peer| {
+        let _ = unreached.send(peer);
+    });
+    let watching = Endpoint::start(Config {
+        heard: Some(reporting),
+        ..config(None)
+    })
+    .await
+    .unwrap();
+    let peer = node().await;
+    let gone = peer.node().clone();
+    peer.close(true).await;
+
+    watching
+        .send(&Target::Node(gone.clone()), "actors", b"anyone there")
+        .unwrap();
+
+    let reported = tokio::time::timeout(WITHIN, heard.recv()).await;
+    assert_eq!(
+        reported,
+        Ok(Some(Peer::Unreached(gone))),
+        "the dropped envelope was not reported"
     );
     watching.close(true).await;
 }

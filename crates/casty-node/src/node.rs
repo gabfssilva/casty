@@ -20,7 +20,7 @@ use casty_core::placement::pinned;
 use casty_core::replication::messages::Write;
 use casty_core::store::{Durable, Held as State, Pages};
 use casty_net::endpoint::{Config, Endpoint, Meter, Sender, TooLarge};
-use casty_net::pool::{Lost, Target as Destination};
+use casty_net::pool::{Heard, Peer, Target as Destination};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -183,8 +183,8 @@ enum Ask {
     Handed(oneshot::Sender<Vec<Entity>>),
     /// The leave stopped waiting for `Handed`: what is still owed is what the node goes without.
     Abandon,
-    /// A connection to a peer ended, which the transport says from a task of its own.
-    Lost(NodeId),
+    /// What happened to a peer, which the transport says from a task of its own.
+    Heard(Peer),
     Leave,
     Depart,
     Stop,
@@ -550,9 +550,9 @@ impl Running {
         let (asks, taking) = mpsc::unbounded_channel();
         // Weak, so that the transport holding it does not keep the task of the node waiting for asks forever.
         let reporting = asks.downgrade();
-        let lost: Lost = Arc::new(move |peer: &NodeId| {
+        let heard: Heard = Arc::new(move |peer: Peer| {
             if let Some(asks) = reporting.upgrade() {
-                let _ = asks.send(Ask::Lost(peer.clone()));
+                let _ = asks.send(Ask::Heard(peer));
             }
         });
         let endpoint = Endpoint::start(Config {
@@ -564,7 +564,7 @@ impl Running {
             min_compressed: cluster.min_compressed,
             address_map: cluster.address_map.clone(),
             limits: cluster.limits,
-            lost: Some(lost),
+            heard: Some(heard),
         })
         .await?;
         let id = endpoint.node().clone();
@@ -774,6 +774,37 @@ impl Table {
     fn refresh(&mut self) {
         if let Self::Client(directory) = self {
             directory.ask();
+        }
+    }
+
+    /// A connection to `node` ended. A member leaves it to its failure detector; a client, which has none, asks the
+    /// node again at once.
+    fn lost(&mut self, node: &NodeId) {
+        if let Self::Client(directory) = self {
+            directory.lost(node);
+        }
+    }
+
+    /// The transport dropped what was sent to `node`, and whether that is the death of the node here. A member only
+    /// suspects it, and leaves the verdict to `dead_after` and the gossip of the others; a client, which has neither,
+    /// takes it as the death.
+    fn unreached(&mut self, node: &NodeId, now: f64) -> bool {
+        match self {
+            Self::Member(membership) => {
+                membership.unreached(node, now);
+                false
+            }
+            Self::Client(directory) => {
+                directory.unreached(node);
+                true
+            }
+        }
+    }
+
+    /// An envelope of any component arrived from `node`, which a member counts as a sign of life.
+    fn heard(&mut self, node: &NodeId, now: f64) {
+        if let Self::Member(membership) = self {
+            membership.heard(node, now);
         }
     }
 }
@@ -1066,6 +1097,23 @@ impl Held {
         }
     }
 
+    /// What the transport says of a peer.
+    fn heard(&mut self, peer: Peer, now: f64) {
+        match peer {
+            Peer::Lost(node) => {
+                self.membership.lost(&node);
+                self.host.observe(Event::ConnectionLost { node });
+            }
+            // A client may no longer list the node, one that left or that another process took the address of, and
+            // still wait on it.
+            Peer::Unreached(node) => {
+                if self.membership.unreached(&node, now) {
+                    self.forsake(&[node]);
+                }
+            }
+        }
+    }
+
     /// Fail every request sent to a node the cluster gave up on, instead of waiting for the deadline.
     fn unreachable(&mut self, members: &[Member]) {
         let gone: Vec<NodeId> = members
@@ -1073,6 +1121,11 @@ impl Held {
             .filter(|member| member.status == Status::Dead)
             .map(|member| member.node.clone())
             .collect();
+        self.forsake(&gone);
+    }
+
+    /// Fail the requests sent toward `gone`, whose answers will not come.
+    fn forsake(&mut self, gone: &[NodeId]) {
         if gone.is_empty() {
             return;
         }
@@ -1115,7 +1168,12 @@ async fn run(
     loop {
         tokio::select! {
             arrived = endpoint.recv() => match arrived {
-                Some(Ok(envelope)) => received(&sender, &mut held, &envelope.name, &envelope.payload, now()),
+                Some(Ok(envelope)) => {
+                    if let Some(from) = &envelope.from {
+                        held.membership.heard(from, now());
+                    }
+                    received(&sender, &mut held, &envelope.name, &envelope.payload, now());
+                }
                 Some(Err(refused)) => {
                     if let Some(entered) = entered.take() {
                         let _ = entered.send(Err(refused));
@@ -1298,7 +1356,7 @@ fn asked(sender: &Sender, held: &mut Held, ask: Ask, now: f64) -> bool {
                 let _ = handed.send(owed);
             }
         }
-        Ask::Lost(node) => held.host.observe(Event::ConnectionLost { node }),
+        Ask::Heard(peer) => held.heard(peer, now),
         Ask::Leave => {
             held.routing.stopped = true;
             if let Table::Member(membership) = &mut held.membership {

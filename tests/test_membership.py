@@ -53,6 +53,19 @@ def describe_membership() -> None:
                 await eventually(seen_as(gone, "dead", a, b), WITHIN)
                 await eventually(seen_as(gone, None, a, b), WITHIN)
 
+    def when_a_process_dies_and_its_address_refuses_the_connection() -> None:
+        async def it_suspects_it_at_the_first_failed_dial_without_waiting_for_silence() -> None:
+            # An hour of silence before a suspicion: only the refused dial can start one.
+            deaf = replace(FAST, suspect_after=timedelta(hours=1))
+
+            async with Harness.start(3, timing=deaf) as harness:
+                a, b, c = harness.nodes
+                gone = c.system.node
+
+                await harness.crash(c)
+
+                await eventually(seen_as(gone, "dead", a, b), WITHIN)
+
     def when_a_short_isolation_heals() -> None:
         async def it_refutes_the_suspicion_and_keeps_the_node_identity() -> None:
             patient = replace(FAST, dead_after=timedelta(seconds=30))

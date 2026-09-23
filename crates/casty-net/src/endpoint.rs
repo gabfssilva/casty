@@ -16,7 +16,7 @@ use crate::connection::{Incoming, Socket};
 use crate::frame::VERSION;
 use crate::handshake::{Hello, Role, VERSIONS};
 use crate::limits::Limits;
-use crate::pool::{AddressMap, Lost, Pool, Settings, Target, Traffic};
+use crate::pool::{AddressMap, Heard, Pool, Settings, Target, Traffic};
 use crate::tls::Tls;
 
 /// How a node reaches the others.
@@ -31,8 +31,9 @@ pub struct Config {
     pub min_compressed: usize,
     pub address_map: Option<AddressMap>,
     pub limits: Limits,
-    /// What hears of a connection that ended while this node was running. Nothing listens by default.
-    pub lost: Option<Lost>,
+    /// What hears of peers: a connection that ended, and envelopes dropped for a peer that was not reached. Nothing
+    /// listens by default.
+    pub heard: Option<Heard>,
 }
 
 impl core::fmt::Debug for Config {
@@ -57,7 +58,7 @@ impl Default for Config {
             min_compressed: 4096,
             address_map: None,
             limits: Limits::default(),
-            lost: None,
+            heard: None,
         }
     }
 }
@@ -67,6 +68,8 @@ impl Default for Config {
 pub struct Received {
     pub name: String,
     pub payload: Vec<u8>,
+    /// The peer it came from, or nothing for an envelope this node sent itself.
+    pub from: Option<NodeId>,
 }
 
 /// A payload larger than the limit of one message, which never reaches the wire.
@@ -129,7 +132,7 @@ impl Endpoint {
                 min_compressed: config.min_compressed,
                 tls: identity.clone(),
                 address_map: config.address_map.clone(),
-                lost: config.lost.clone(),
+                heard: config.heard.clone(),
             },
             inbound.clone(),
         );
@@ -188,12 +191,17 @@ impl Endpoint {
     /// The next envelope for this node, or the refusal of a seed that would not have it.
     pub async fn recv(&mut self) -> Option<Result<Received, String>> {
         match self.inbound.recv().await? {
-            Incoming::Local { name, payload } => Some(Ok(Received { name, payload })),
+            Incoming::Local { name, payload } => Some(Ok(Received {
+                name,
+                payload,
+                from: None,
+            })),
             Incoming::Remote(arrival) => {
                 arrival.from.consume(&arrival.record);
                 Some(Ok(Received {
                     name: arrival.record.name,
                     payload: arrival.record.payload,
+                    from: Some(arrival.from.peer().clone()),
                 }))
             }
             Incoming::Refused(reason) => Some(Err(reason)),

@@ -190,6 +190,11 @@ class Harness:
         """Make the machine of `node` disappear: it keeps running, and nothing reaches it or leaves it."""
         self._block(pair for other in self._nodes if other is not node for pair in self._both_ways(node, other))
 
+    async def sever(self) -> None:
+        """Reset every connection the proxies carry, as a network that drops them does, and keep accepting new ones."""
+        for proxy in self._proxies.values():
+            await proxy.close()
+
     def heal(self) -> None:
         """Let every pair exchange bytes again, delivering what the blocked proxies held."""
         self._blocked.clear()

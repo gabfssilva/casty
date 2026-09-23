@@ -44,8 +44,17 @@ type Queued = (Target, String, Vec<u8>);
 /// What turns an advertised address into the one that is dialed: a tunnel, a NAT, or a proxy of a test.
 pub type AddressMap = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
-/// What hears of a connection to a peer that ended while this node was running, called from the task that saw it end.
-pub type Lost = Arc<dyn Fn(&NodeId) + Send + Sync>;
+/// What the pool tells of a peer while this node is running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Peer {
+    /// The connection to it ended.
+    Lost(NodeId),
+    /// Envelopes for it were dropped: a dial to its address failed, or another incarnation answers there.
+    Unreached(NodeId),
+}
+
+/// What hears of peers, called from the task that saw what happened to them.
+pub type Heard = Arc<dyn Fn(Peer) + Send + Sync>;
 
 /// How a peer is reached, and which side opened it.
 #[derive(Debug)]
@@ -84,7 +93,7 @@ pub struct Settings {
     pub min_compressed: usize,
     pub tls: Option<Identity>,
     pub address_map: Option<AddressMap>,
-    pub lost: Option<Lost>,
+    pub heard: Option<Heard>,
 }
 
 impl core::fmt::Debug for Settings {
@@ -157,54 +166,56 @@ impl Pool {
             Dial(String, Arc<Notify>),
             Queued,
             Drop,
+            Replaced(NodeId),
         }
         let next = {
             let mut state = self.held();
             let held = match target {
-                Target::Node(node) => match state.links.get(node) {
-                    Some(link) => Some(Arc::clone(&link.connection)),
-                    // Another incarnation answers at that address, so this envelope has nowhere to go.
-                    None if node
+                Target::Node(node) => state
+                    .links
+                    .get(node)
+                    .map(|link| Arc::clone(&link.connection)),
+                Target::Seed(address) => state.addresses.get(address).map(Arc::clone),
+            };
+            match (held, target) {
+                (Some(connection), _) => Next::Send(connection),
+                // Another incarnation answers at the address of the node, so this envelope has nowhere to go.
+                (None, Target::Node(node))
+                    if node
                         .address
                         .as_ref()
                         .is_some_and(|address| state.addresses.contains_key(address)) =>
-                    {
-                        return;
+                {
+                    Next::Replaced(node.clone())
+                }
+                (None, _) => match target.address() {
+                    None => Next::Drop,
+                    Some(_) if state.closed => Next::Drop,
+                    Some(address) => {
+                        let queued = (target.clone(), name.to_owned(), payload.to_vec());
+                        if let Some(dial) = state.dials.get_mut(address) {
+                            dial.queue.push(queued);
+                            Next::Queued
+                        } else {
+                            let cancel = Arc::new(Notify::new());
+                            state.dials.insert(
+                                address.to_owned(),
+                                Dial {
+                                    queue: vec![queued],
+                                    cancel: Arc::clone(&cancel),
+                                },
+                            );
+                            Next::Dial(address.to_owned(), cancel)
+                        }
                     }
-                    None => None,
                 },
-                Target::Seed(address) => state.addresses.get(address).map(Arc::clone),
-            };
-            match (held, target.address()) {
-                (Some(connection), _) => Next::Send(connection),
-                (None, None) => Next::Drop,
-                (None, Some(address)) if state.closed => {
-                    let _ = address;
-                    Next::Drop
-                }
-                (None, Some(address)) => {
-                    let queued = (target.clone(), name.to_owned(), payload.to_vec());
-                    if let Some(dial) = state.dials.get_mut(address) {
-                        dial.queue.push(queued);
-                        Next::Queued
-                    } else {
-                        let cancel = Arc::new(Notify::new());
-                        state.dials.insert(
-                            address.to_owned(),
-                            Dial {
-                                queue: vec![queued],
-                                cancel: Arc::clone(&cancel),
-                            },
-                        );
-                        Next::Dial(address.to_owned(), cancel)
-                    }
-                }
             }
         };
         match next {
             Next::Send(connection) => connection.send(name, payload),
             Next::Dial(address, cancel) => self.start(address, cancel),
             Next::Queued | Next::Drop => {}
+            Next::Replaced(node) => self.tell(Peer::Unreached(node)),
         }
     }
 
@@ -295,7 +306,7 @@ impl Pool {
                     return;
                 }
                 greeting.compress(compression);
-                let connection = greeting.run(self.inbound.clone());
+                let connection = greeting.run(hello.node.clone(), self.inbound.clone());
                 self.register(&connection, &hello.node, false, None);
             }
         }
@@ -313,13 +324,13 @@ impl Pool {
             tokio::time::sleep(wait).await;
         }
         let Ok((mut greeting, message)) = self.initiate(&address).await else {
-            return self.fail(&address);
+            return self.unreached(&address);
         };
         match message {
             Message::Ack(ack) => {
                 let peer = ack.node.clone();
                 greeting.compress(ack.compression);
-                let connection = greeting.run(self.inbound.clone());
+                let connection = greeting.run(peer.clone(), self.inbound.clone());
                 self.register(&connection, &peer, true, Some(&address));
             }
             Message::Reject(reject) if reject.code == Rejection::Duplicate as i64 => {
@@ -339,9 +350,9 @@ impl Pool {
                         reject.reason
                     )));
                 }
-                self.fail(&address);
+                self.unreached(&address);
             }
-            Message::Hello(_) => self.fail(&address),
+            Message::Hello(_) => self.unreached(&address),
         }
     }
 
@@ -423,7 +434,7 @@ impl Pool {
         initiated: bool,
         dialed: Option<&str>,
     ) {
-        let previous = {
+        let (previous, replaced) = {
             let mut state = self.held();
             if state.closed {
                 connection.abort();
@@ -449,15 +460,20 @@ impl Pool {
             );
             // Queued under the same lock that made the connection reachable: a send that arrives in between would
             // otherwise go out ahead of what was waiting for the dial to finish.
+            let mut replaced = Vec::new();
             for (target, name, payload) in queue {
-                if matches!(&target, Target::Seed(_)) || target == Target::Node(peer.clone()) {
-                    connection.send(&name, &payload);
+                match target {
+                    Target::Node(node) if node != *peer => replaced.push(node),
+                    _ => connection.send(&name, &payload),
                 }
             }
-            previous
+            (previous, replaced)
         };
         if let Some(previous) = previous {
             previous.connection.abort();
+        }
+        for node in unique(replaced) {
+            self.tell(Peer::Unreached(node));
         }
         let pool = Arc::clone(self);
         let watched = Arc::clone(connection);
@@ -484,14 +500,36 @@ impl Pool {
             // A connection another one replaced reaches the peer still, and one this node is closing is not lost.
             current && !state.closed
         };
-        if lost && let Some(report) = &self.settings.lost {
-            report(peer);
+        if lost {
+            self.tell(Peer::Lost(peer.clone()));
         }
     }
 
-    fn fail(&self, address: &str) {
+    fn tell(&self, peer: Peer) {
+        if let Some(heard) = &self.settings.heard {
+            heard(peer);
+        }
+    }
+
+    /// Give up a dial that reached no node, and tell of the nodes whose envelopes it drops.
+    fn unreached(&self, address: &str) {
+        for node in unique(self.fail(address)) {
+            self.tell(Peer::Unreached(node));
+        }
+    }
+
+    /// Give up a dial, and answer the nodes its queue held envelopes for.
+    fn fail(&self, address: &str) -> Vec<NodeId> {
         let mut state = self.held();
-        state.dials.remove(address);
+        let dropped = state.dials.remove(address).map_or_else(Vec::new, |dial| {
+            dial.queue
+                .into_iter()
+                .filter_map(|(target, _, _)| match target {
+                    Target::Node(node) => Some(node),
+                    Target::Seed(_) => None,
+                })
+                .collect()
+        });
         let previous = state.backoff.get(address).copied();
         let first = self.settings.limits.backoff_first;
         let limit = self.settings.limits.backoff_limit;
@@ -504,7 +542,19 @@ impl Pool {
                 retry_at: Instant::now() + delay.mul_f64(jitter),
             },
         );
+        dropped
     }
+}
+
+/// `nodes` without repeats, in the order they first appear.
+fn unique(nodes: Vec<NodeId>) -> Vec<NodeId> {
+    let mut seen = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        if !seen.contains(&node) {
+            seen.push(node);
+        }
+    }
+    seen
 }
 
 /// A number in `[0, 1)`, which is all the jitter of a retry needs.

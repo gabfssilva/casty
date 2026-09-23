@@ -8,6 +8,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use casty_core::node::NodeId;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
 
@@ -177,9 +178,9 @@ impl<S: Socket> Greeting<S> {
         self.mux.compressor = name;
     }
 
-    /// Start exchanging envelopes, giving back the handle the pool keeps.
+    /// Start exchanging envelopes with `peer`, the node the handshake named, giving back the handle the pool keeps.
     #[must_use]
-    pub fn run(self, inbound: mpsc::UnboundedSender<Incoming>) -> Arc<Connection> {
+    pub fn run(self, peer: NodeId, inbound: mpsc::UnboundedSender<Incoming>) -> Arc<Connection> {
         let Self {
             socket,
             mux,
@@ -188,6 +189,7 @@ impl<S: Socket> Greeting<S> {
             bytes,
         } = self;
         let connection = Arc::new(Connection {
+            peer,
             mux: Mutex::new(mux),
             writable: Notify::new(),
             done: Notify::new(),
@@ -214,6 +216,7 @@ impl<S: Socket> Greeting<S> {
 /// A connection that is exchanging envelopes.
 #[derive(Debug)]
 pub struct Connection {
+    peer: NodeId,
     mux: Mutex<Mux>,
     writable: Notify,
     done: Notify,
@@ -224,6 +227,12 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// The node at the other end.
+    #[must_use]
+    pub fn peer(&self) -> &NodeId {
+        &self.peer
+    }
+
     /// Queue an envelope. It goes out as the peer's credit allows, and is lost if the connection dies first.
     pub fn send(&self, name: &str, payload: &[u8]) {
         let stream = if name == "replication" {

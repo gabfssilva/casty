@@ -1,7 +1,7 @@
 //! The overlay, the broadcast and the member table, driven by what arrives and by the clock.
 //!
 //! Nothing here does I/O: the caller hands it messages and instants, and takes what it must send. Every message
-//! carries the record of its sender, because envelopes do not say where they come from.
+//! carries the record of its sender, so that each one is also an observation of it.
 
 use core::time::Duration;
 use std::collections::{BTreeSet, HashMap};
@@ -248,6 +248,43 @@ impl Membership {
         }
     }
 
+    /// An envelope of any component arrived from `node`: a sign of life as good as an answer to a ping.
+    ///
+    /// Without it a node busy enough to queue its membership messages behind the traffic of its keys would be
+    /// suspected for the silence of the one component while the others keep talking.
+    pub fn heard(&mut self, node: &NodeId, now: f64) {
+        let watched = self
+            .table
+            .record(node)
+            .is_some_and(|record| matches!(record.status, Status::Alive | Status::Leaving));
+        if !watched {
+            return;
+        }
+        // Once per envelope, so the entry is updated in place rather than keyed again.
+        match self.seen.get_mut(node) {
+            Some(at) => *at = now,
+            None => {
+                self.seen.insert(node.clone(), now);
+            }
+        }
+    }
+
+    /// No connection to `node` opened, or another incarnation answers at its address: suspect it now, without waiting
+    /// out `suspect_after`.
+    ///
+    /// A suspicion and not a death: the node refutes it if it is alive and only this link failed, and `dead_after`
+    /// still passes before anyone takes its keys. A node that is leaving is left to the heartbeat, since its handoff
+    /// is what a false suspicion would cut short.
+    pub fn unreached(&mut self, node: &NodeId, now: f64) {
+        let alive = self
+            .table
+            .record(node)
+            .is_some_and(|record| record.status == Status::Alive);
+        if alive && *node != self.node {
+            self.suspect(node, now);
+        }
+    }
+
     pub fn expire(&mut self, now: f64) {
         let changed = self.table.expire(now);
         self.publish(changed, None, now);
@@ -424,5 +461,131 @@ impl Membership {
         } else if !self.joined && self.members().len() > 1 {
             self.joined = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::time::Duration;
+    use std::collections::BTreeSet;
+
+    use casty_core::membership::table::Status;
+    use casty_core::membership::views::Overlay;
+    use casty_core::node::NodeId;
+    use casty_net::pool::Target;
+
+    use super::super::wire::encode;
+    use super::{Membership, Timings};
+
+    const SUSPECT_AFTER: f64 = 5.0;
+
+    fn timings() -> Timings {
+        Timings {
+            suspect_after: Duration::from_secs_f64(SUSPECT_AFTER),
+            ..Timings::default()
+        }
+    }
+
+    /// Hand every message each node queued to the node it names, until nobody has anything left to say.
+    fn exchange(nodes: &mut [Membership], now: f64) {
+        for _ in 0..32 {
+            let outgoing: Vec<_> = nodes.iter_mut().flat_map(Membership::take).collect();
+            if outgoing.is_empty() {
+                return;
+            }
+            for out in outgoing {
+                let payload = encode(&out.message);
+                let to = nodes.iter_mut().find(|node| match &out.to {
+                    Target::Node(id) => node.node == *id,
+                    Target::Seed(address) => node.node.address.as_ref() == Some(address),
+                });
+                if let Some(to) = to {
+                    to.receive(&payload, now);
+                }
+            }
+        }
+    }
+
+    /// Two members that joined each other at `0.0` and heard nothing since.
+    fn pair() -> [Membership; 2] {
+        let a = NodeId::fresh(Some("10.0.0.1:7400".to_owned()));
+        let b = NodeId::fresh(Some("10.0.0.2:7400".to_owned()));
+        let mut nodes = [
+            Membership::new(
+                a,
+                BTreeSet::new(),
+                Vec::new(),
+                timings(),
+                Overlay::default(),
+            ),
+            Membership::new(
+                b,
+                BTreeSet::new(),
+                vec!["10.0.0.1:7400".to_owned()],
+                timings(),
+                Overlay::default(),
+            ),
+        ];
+        nodes[1].join();
+        exchange(&mut nodes, 0.0);
+        nodes
+    }
+
+    fn status(of: &Membership, node: &NodeId) -> Option<Status> {
+        of.members()
+            .into_iter()
+            .find(|member| member.node == *node)
+            .map(|member| member.status)
+    }
+
+    #[test]
+    fn a_member_silent_for_suspect_after_is_suspected() {
+        let [mut a, b] = pair();
+
+        a.probe(SUSPECT_AFTER + 0.1);
+
+        assert_eq!(status(&a, &b.node), Some(Status::Suspect));
+    }
+
+    #[test]
+    fn an_envelope_of_any_component_counts_as_a_sign_of_life() {
+        let [mut a, b] = pair();
+
+        a.heard(&b.node, SUSPECT_AFTER - 0.1);
+        a.probe(SUSPECT_AFTER + 0.1);
+
+        assert_eq!(status(&a, &b.node), Some(Status::Alive));
+    }
+
+    #[test]
+    fn a_member_the_transport_did_not_reach_is_suspected_at_once() {
+        let [mut a, b] = pair();
+
+        a.unreached(&b.node, 0.1);
+
+        assert_eq!(status(&a, &b.node), Some(Status::Suspect));
+    }
+
+    #[test]
+    fn a_member_that_is_leaving_is_left_to_the_heartbeat() {
+        let mut nodes = pair();
+        nodes[1].leave(0.1);
+        exchange(&mut nodes, 0.1);
+        let [a, b] = &mut nodes;
+        assert_eq!(status(a, &b.node), Some(Status::Leaving));
+
+        a.unreached(&b.node, 0.2);
+
+        assert_eq!(status(a, &b.node), Some(Status::Leaving));
+    }
+
+    #[test]
+    fn a_node_never_suspects_itself() {
+        let [mut a, _] = pair();
+        let me = a.node.clone();
+
+        a.unreached(&me, 0.1);
+
+        assert_eq!(status(&a, &me), Some(Status::Alive));
     }
 }

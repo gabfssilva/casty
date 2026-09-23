@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use casty_core::mailbox::Backoff;
@@ -13,7 +14,7 @@ use casty_core::node::NodeId;
 use casty_net::compress::Name;
 use casty_net::endpoint::{Config, Endpoint};
 use casty_net::limits::Limits;
-use casty_net::pool::AddressMap;
+use casty_net::pool::{AddressMap, Heard, Peer};
 use casty_net::tls::Tls;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -84,6 +85,8 @@ impl Cluster {
 #[derive(Debug)]
 enum Command {
     Know(BTreeSet<String>),
+    /// The transport dropped what was sent to a node, which it says from a task of its own.
+    Unreached(NodeId),
     Leave,
     Depart,
     Stop,
@@ -105,6 +108,14 @@ impl Joined {
     /// Without seeds the node is a cluster of its own from the start; with them, it waits for one to answer, or for
     /// another node to reach it first.
     pub async fn start(cluster: Cluster, types: BTreeSet<String>) -> io::Result<Self> {
+        let (commands, taking) = mpsc::unbounded_channel();
+        // Weak, so that the transport holding it does not keep the task waiting for commands forever.
+        let reporting = commands.downgrade();
+        let heard: Heard = Arc::new(move |peer: Peer| {
+            if let (Peer::Unreached(node), Some(commands)) = (peer, reporting.upgrade()) {
+                let _ = commands.send(Command::Unreached(node));
+            }
+        });
         let endpoint = Endpoint::start(Config {
             bind: Some(cluster.bind.clone()),
             advertise: cluster.advertise.clone(),
@@ -114,7 +125,7 @@ impl Joined {
             min_compressed: cluster.min_compressed,
             address_map: cluster.address_map.clone(),
             limits: cluster.limits,
-            lost: None,
+            heard: Some(heard),
         })
         .await?;
         let node = endpoint.node().clone();
@@ -127,7 +138,6 @@ impl Joined {
         );
         let (members, watching) = watch::channel(service.members());
         let (removed, gone) = watch::channel(false);
-        let (commands, taking) = mpsc::unbounded_channel();
         let (entered, joining) = oneshot::channel();
         let timings = cluster.timings;
         let running = tokio::spawn(run(
@@ -218,6 +228,9 @@ async fn run(
         tokio::select! {
             arrived = endpoint.recv() => match arrived {
                 Some(Ok(envelope)) => {
+                    if let Some(from) = &envelope.from {
+                        service.heard(from, now());
+                    }
                     if envelope.name == NAME {
                         service.receive(&envelope.payload, now());
                     }
@@ -239,6 +252,7 @@ async fn run(
             _ = anti_entropy.tick() => service.anti_entropy(),
             command = commands.recv() => match command {
                 Some(Command::Know(types)) => service.know(&types, now()),
+                Some(Command::Unreached(node)) => service.unreached(&node, now()),
                 Some(Command::Leave) => service.leave(now()),
                 Some(Command::Depart) => service.depart(now()),
                 Some(Command::Stop) | None => {
