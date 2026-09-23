@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 
 use crate::compress::{Name, PREFERENCE};
 use crate::connection::Incoming;
-use crate::handshake::{Hello, Role};
+use crate::handshake::Hello;
 use crate::limits::Limits;
 use crate::pool::{AddressMap, Heard, Pool, Settings, Target, Traffic};
 use crate::tls::Tls;
@@ -109,11 +109,6 @@ impl Endpoint {
         let local = Hello {
             cluster: config.cluster.clone(),
             node: node.clone(),
-            role: if node.address.is_none() {
-                Role::Client
-            } else {
-                Role::Member
-            },
             compression: config
                 .compression
                 .clone()

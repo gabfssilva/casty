@@ -12,30 +12,6 @@ use casty_core::schema::msgpack::{self, Int, Kind, Reader};
 use crate::compress::Name;
 use crate::frame::ProtocolError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    Member,
-    Client,
-}
-
-impl Role {
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Member => "member",
-            Self::Client => "client",
-        }
-    }
-
-    fn of(written: &str) -> Option<Self> {
-        match written {
-            "member" => Some(Self::Member),
-            "client" => Some(Self::Client),
-            _ => None,
-        }
-    }
-}
-
 /// Why a hello was rejected. `Duplicate` means the rejecting node is opening its own connection to the sender, and
 /// that connection is the one both sides keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +26,6 @@ pub enum Rejection {
 pub struct Hello {
     pub cluster: String,
     pub node: NodeId,
-    pub role: Role,
     pub compression: Vec<Name>,
     /// `frame`, `message` and `window` of `Limits`, which a node bounds what it receives by. Each side sends by its
     /// own, so a peer with other sizes would break the connection at the first frame, envelope or window past them:
@@ -61,7 +36,6 @@ pub struct Hello {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ack {
     pub node: NodeId,
-    pub role: Role,
     pub compression: Option<Name>,
 }
 
@@ -103,7 +77,6 @@ pub fn answer(hello: &Hello, local: &Hello) -> Result<Ack, Reject> {
     }
     Ok(Ack {
         node: local.node.clone(),
-        role: local.role,
         compression: crate::compress::chosen(&hello.compression, &local.compression),
     })
 }
@@ -114,15 +87,13 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
     let mut out = Vec::new();
     match message {
         Message::Hello(hello) => {
-            msgpack::write_map_len(&mut out, 8);
+            msgpack::write_map_len(&mut out, 7);
             key(&mut out, "cluster");
             msgpack::write_str(&mut out, &hello.cluster);
             key(&mut out, "address");
             address(&mut out, &hello.node);
             key(&mut out, "incarnation");
             msgpack::write_bin(&mut out, &hello.node.incarnation);
-            key(&mut out, "role");
-            msgpack::write_str(&mut out, hello.role.name());
             key(&mut out, "compression");
             msgpack::write_array_len(&mut out, hello.compression.len());
             for name in &hello.compression {
@@ -135,13 +106,11 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
             ("hello", out)
         }
         Message::Ack(ack) => {
-            msgpack::write_map_len(&mut out, 4);
+            msgpack::write_map_len(&mut out, 3);
             key(&mut out, "address");
             address(&mut out, &ack.node);
             key(&mut out, "incarnation");
             msgpack::write_bin(&mut out, &ack.node.incarnation);
-            key(&mut out, "role");
-            msgpack::write_str(&mut out, ack.role.name());
             key(&mut out, "compression");
             match ack.compression {
                 None => msgpack::write_nil(&mut out),
@@ -167,7 +136,6 @@ pub fn decode(name: &str, payload: &[u8]) -> Result<Message, ProtocolError> {
         "hello" => Ok(Message::Hello(Hello {
             cluster: fields.text("cluster").ok_or_else(malformed)?,
             node: fields.node().ok_or_else(malformed)?,
-            role: Role::of(&fields.text("role").ok_or_else(malformed)?).ok_or_else(malformed)?,
             // A compressor this build does not have is one it cannot choose.
             compression: fields
                 .texts("compression")
@@ -189,8 +157,6 @@ pub fn decode(name: &str, payload: &[u8]) -> Result<Message, ProtocolError> {
             };
             Ok(Message::Ack(Ack {
                 node: fields.node().ok_or_else(malformed)?,
-                role: Role::of(&fields.text("role").ok_or_else(malformed)?)
-                    .ok_or_else(malformed)?,
                 compression,
             }))
         }
@@ -320,7 +286,7 @@ fn value(reader: &mut Reader<'_>) -> Option<Value> {
 mod tests {
     use casty_core::node::NodeId;
 
-    use super::{Ack, Hello, Message, Reject, Rejection, Role, answer, decode, encode};
+    use super::{Ack, Hello, Message, Reject, Rejection, answer, decode, encode};
     use crate::compress::{Name, PREFERENCE};
     use crate::limits::Limits;
 
@@ -336,7 +302,6 @@ mod tests {
         Hello {
             cluster: cluster.to_owned(),
             node,
-            role: Role::Member,
             compression: PREFERENCE.to_vec(),
             sizes: [limits.frame, limits.message, limits.window],
         }
@@ -349,12 +314,10 @@ mod tests {
             Message::Hello(hello("casty", node(None, 2))),
             Message::Ack(Ack {
                 node: node(Some("10.0.0.1:1"), 3),
-                role: Role::Client,
                 compression: Some(Name::Lz4),
             }),
             Message::Ack(Ack {
                 node: node(None, 4),
-                role: Role::Member,
                 compression: None,
             }),
             Message::Reject(Reject {

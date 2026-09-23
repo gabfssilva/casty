@@ -229,7 +229,7 @@ async fn it_reports_a_seed_whose_limits_differ() {
     assert!(reason.contains("8388608"), "{reason}");
 }
 
-/// The hello names the cluster, the node, its role, the compressors and the limits, and no payload format: there is
+/// The hello names the cluster, the node, the compressors and the limits, and no payload format: there is
 /// only one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hello_names_no_payload_format() {
@@ -275,7 +275,6 @@ async fn a_hello_names_no_payload_format() {
             "frame",
             "incarnation",
             "message",
-            "role",
             "window",
         ]
     );
@@ -499,7 +498,6 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
             if let Some(casty_net::handshake::Message::Hello(_)) = said {
                 let ack = casty_net::handshake::Message::Ack(casty_net::handshake::Ack {
                     node: casty_core::node::NodeId::fresh(Some(listening.clone())),
-                    role: casty_net::handshake::Role::Member,
                     compression: None,
                 });
                 let (name, payload) = casty_net::handshake::encode(&ack);
