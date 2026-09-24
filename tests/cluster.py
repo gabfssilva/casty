@@ -433,7 +433,7 @@ class Proxy:
         host, _, port = self._target.rpartition(":")
         try:
             # Blocked, the pair does not even reach the other side: a machine nobody can reach accepts no connection.
-            await self._open.wait()
+            await self._opened()
             # A node that died refuses the connection, and this pair ends before it starts.
             with suppress(OSError):
                 upstream, answers = await asyncio.open_connection(host, int(port))
@@ -448,15 +448,21 @@ class Proxy:
             # Both ends close even when the harness cancels this pair, so that no transport outlives its server.
             writer.close()
 
+    async def _opened(self) -> None:
+        # `set` wakes every waiter even when `clear` follows in the same step, as `heal` then `isolate` does: without
+        # looking again, what a waiter held would cross a block that is already back.
+        while not self._open.is_set():
+            await self._open.wait()
+
     async def _pump(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         # A node that died breaks its pipe, which is how this half of the pair ends.
         with suppress(OSError):
             while data := await reader.read(_CHUNK):
                 # The read that was already waiting would cross the partition; holding it is what makes the block whole.
-                await self._open.wait()
+                await self._opened()
                 if self._delay:
                     await asyncio.sleep(self._delay)
-                    await self._open.wait()
+                    await self._opened()
                 self.forwarded += len(data)
                 writer.write(data)
                 await writer.drain()

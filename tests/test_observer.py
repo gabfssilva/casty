@@ -66,9 +66,10 @@ def describe_observer() -> None:
                 key = await _key_on(a)
                 with pytest.raises(ActorFailed):
                     await a.system.ref(brittle, "b-1").ask(Crash)
+                napping = await _placed_on(a)
                 # One message runs or waits, and a mailbox of one holds the next: the third has nowhere to go.
                 for _ in range(3):
-                    a.system.ref(sleepy, "s-1").tell(NAP)
+                    a.system.ref(sleepy, napping).tell(NAP)
 
                 harness.partition({a}, {b, c, d})
                 with pytest.raises(Unavailable):
@@ -145,6 +146,16 @@ async def _key_on(node: Node) -> str:
         if (await node.system.ref(ledger, key).ask(Entries)).node == node.system.node:
             return key
     raise AssertionError(f"none of the first {_TRIES} keys is owned by {node.address}")
+
+
+async def _placed_on(node: Node) -> str:
+    """The first of `s-0`, `s-1`, … that `node` places on itself: a key the test sends to from there never crosses
+    the partition, nor reaches the node it crashes."""
+    for index in range(_TRIES):
+        key = f"s-{index}"
+        if (await node.system.placement(sleepy, key)).owner == node.system.node:
+            return key
+    raise AssertionError(f"none of the first {_TRIES} keys is placed on {node.address}")
 
 
 _TRIES = 100
