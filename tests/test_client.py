@@ -151,6 +151,18 @@ def describe_client() -> None:
                 assert [member.status for member in client.members] == ["alive"]
                 waiting.cancel()
 
+    def when_it_closes_with_an_ask_in_flight() -> None:
+        async def it_fails_the_ask_with_unavailable_before_the_ask_timeout() -> None:
+            async with Harness.start(1) as harness:
+                (node,) = harness.nodes
+                async with Client(seeds=(node.address,), ask_timeout=timedelta(minutes=1)) as client:
+                    waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold))
+                    assert await client.ref(gate, "g-2").ask(Locate) == node.system.node
+
+                with pytest.raises(Unavailable, match="stopped"):
+                    async with asyncio.timeout(WITHIN.total_seconds()):
+                        await waiting
+
     def when_the_cluster_has_another_name() -> None:
         async def it_refuses_to_start() -> None:
             async with Harness.start(1) as harness:

@@ -79,6 +79,11 @@ impl Replies {
         self.waiting.len()
     }
 
+    /// Every request still waiting, taken out: once the system has stopped, none of them will be answered.
+    pub fn abandon(&mut self) -> Vec<Waiting> {
+        self.waiting.drain().map(|(_, waiting)| waiting).collect()
+    }
+
     /// Note the key the request `id` was sent to, if it still waits, and keep what was sent when it may go `again`.
     pub fn sent(&mut self, id: i64, deliver: &Deliver, again: bool) {
         if let Some(waiting) = self.waiting.get_mut(&id) {
@@ -103,6 +108,24 @@ pub fn cancel(
         Some((actor, key)) => node.cancel(py, actor, key, id),
         None => Ok(()),
     }
+}
+
+/// Fail a request its system stopped under with `Unavailable`: the key may have processed it, but no answer reaches a
+/// system that has stopped.
+pub fn forsake(py: Python<'_>, waiting: &Waiting) -> PyResult<()> {
+    let future = waiting.future.bind(py);
+    if future.call_method0("done")?.is_truthy()? {
+        return Ok(());
+    }
+    if let Some(deadline) = &waiting.deadline {
+        deadline.bind(py).call_method0("cancel")?;
+    }
+    let why = match &waiting.to {
+        Some((actor, key)) => format!("the system stopped before {actor}/{key} answered"),
+        None => "the system stopped before the answer arrived".to_owned(),
+    };
+    future.call_method1("set_exception", (crate::errors::Unavailable::new_err(why),))?;
+    Ok(())
 }
 
 /// Turn `outcome` into what the one waiting sees: the decoded value, or the error that says why there is none.

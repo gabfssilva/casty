@@ -968,7 +968,8 @@ otherwise answers `WrongOwner`; the sender retries once with its current view, a
 
 Messages from one node to one key use one connection and one mailbox, which preserves their order while the owner does
 not change. With `on_full="wait"`, a message that waited for room on another node can be overtaken by a later one from
-the same node. A pending `ask` fails with `Unavailable` as soon as the sender sees the target as `dead`.
+the same node. A pending `ask` fails with `Unavailable` as soon as the sender sees the target as `dead`, and when the
+`ActorSystem` or `Client` that made it stops.
 
 An `ask` made by a body carries the chain of keys waiting on it, at most 16, and the owner checks it before the mailbox.
 A cancelled `ask` sends a cancellation for its request, routed like the request and through the transport even when the

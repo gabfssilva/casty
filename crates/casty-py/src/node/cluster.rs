@@ -307,6 +307,7 @@ fn left(py: Python<'_>, joined: &Arc<Joined>, node: &Arc<Node>, then: &Ending) {
         }
         Ending::Gone(gone) => {
             node.stop_taking();
+            node.forsake(py);
             let gone = gone.bind(py);
             if let Ok(done) = gone.call_method0("done")
                 && !done.is_truthy().unwrap_or(true)

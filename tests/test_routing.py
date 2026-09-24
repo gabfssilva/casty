@@ -79,6 +79,24 @@ def describe_routing() -> None:
                     async with asyncio.timeout(WITHIN.total_seconds()):
                         await waiting
 
+    def when_the_node_that_asked_leaves_with_the_ask_in_flight() -> None:
+        async def it_fails_the_ask_with_unavailable_before_the_ask_timeout() -> None:
+            patient = replace(FAST, ask_timeout=timedelta(minutes=1))
+
+            async with Harness.start(2, timing=patient) as harness:
+                a, b = harness.nodes
+
+                async def answered_from(key: str) -> NodeId:
+                    return await a.system.ref(gate, key).ask(Locate)
+
+                key = await _key_on(b, answered_from)
+                waiting = asyncio.ensure_future(a.system.ref(gate, key).ask(Hold))
+                await harness.leave(a)
+
+                with pytest.raises(Unavailable, match="stopped"):
+                    async with asyncio.timeout(WITHIN.total_seconds()):
+                        await waiting
+
     def when_a_type_is_used_for_the_first_time() -> None:
         async def it_runs_on_nodes_that_never_touched_it_and_every_member_learns_of_it() -> None:
             async with Harness.start(3) as harness:

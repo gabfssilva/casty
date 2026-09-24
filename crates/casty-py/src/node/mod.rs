@@ -207,6 +207,14 @@ impl Node {
         self.stopped.store(true, Ordering::SeqCst);
     }
 
+    /// Fail every `ask` still waiting for its answer: the system has stopped, and no answer reaches it any more.
+    pub fn forsake(&self, py: Python<'_>) {
+        let abandoned = self.replies.locked().abandon();
+        for waiting in &abandoned {
+            let _ = replies::forsake(py, waiting);
+        }
+    }
+
     /// Where this node is. Alone it is an incarnation with no address; in a cluster it is the identity it joined under.
     #[must_use]
     pub fn id(&self) -> NodeId {
@@ -376,6 +384,7 @@ impl Node {
             return;
         }
         self.stop_taking();
+        self.forsake(py);
         if !gone
             .call_method0("done")
             .is_ok_and(|done| done.is_truthy().unwrap_or(true))
