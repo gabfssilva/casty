@@ -145,19 +145,21 @@ class Harness:
         address: str | None = None,
         cut_off: Iterable[Node] = (),
         runtime: Runtime | None = None,
+        joining: Callable[[ActorSystem], object] | None = None,
     ) -> Node:
         """Start one more node, seeded with the nodes that are running, on `address` or on a free port.
 
         It never exchanges bytes with `cut_off`, from before it starts: a node blocked only once it is up has already
         talked to everyone, which is too late for a test about what it does before it has heard from them. `runtime`
-        carries its transport instead of the one of the harness.
+        carries its transport instead of the one of the harness. `joining` is called with its system once the join is
+        under way and before the node has entered.
         """
         seeds = _seeds(tuple(node.address for node in self._nodes), address)
         where = address or self._address()
         self._ids += 1
         source = self._ids
         self._block(pair for other in cut_off for pair in ((other.id, where), (source, other.address)))
-        return await self._start(source, where, seeds, version, name, runtime or self._runtime)
+        return await self._start(source, where, seeds, version, name, runtime or self._runtime, joining)
 
     async def client(self, *, name: str = "casty") -> Client:
         """Start a client of the cluster, reaching it through proxies of its own, closed when the harness closes."""
@@ -219,6 +221,7 @@ class Harness:
         version: Sequence[ActorDefinition],
         name: str,
         runtime: Runtime | None,
+        joining: Callable[[ActorSystem], object] | None = None,
     ) -> Node:
         cluster = Cluster(
             bind=address,
@@ -250,6 +253,11 @@ class Harness:
         started: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         stop = asyncio.Event()
         task = self._tasks.create_task(self._run(system, started, stop))
+        if joining is not None:
+            # One step of the task enters the system, which starts the join; the join ends only after the loop has
+            # forwarded its bytes through the proxies, which it does not do before `joining` returns.
+            await asyncio.sleep(0)
+            joining(system)
         # A node that never enters the cluster is a failed test, not a test that hangs.
         async with asyncio.timeout(_JOIN.total_seconds()):
             await started

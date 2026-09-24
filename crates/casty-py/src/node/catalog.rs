@@ -55,6 +55,11 @@ impl Catalog {
         self.unknown.contains(name)
     }
 
+    /// Every name met that did not import.
+    pub fn given_up(&self) -> impl Iterator<Item = &str> {
+        self.unknown.iter().map(String::as_str)
+    }
+
     pub fn give_up(&mut self, name: &str) {
         self.unknown.insert(name.to_owned());
     }

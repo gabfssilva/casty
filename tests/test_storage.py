@@ -12,7 +12,7 @@ import pytest
 from casty import ActorSystem, Context, Ref, Store, Unavailable, actor
 from casty.sqlite import SQLiteStore
 from tests.app import Append, Entries, durable_ledger, ledger
-from tests.cluster import WITHIN, Harness
+from tests.cluster import WITHIN, Harness, Node
 from tests.support import Records, eventually
 from tests.traffic import kept
 
@@ -176,6 +176,17 @@ def describe_a_durable_type() -> None:
                     await ref.ask(Add, 1)
                 assert store.saves == saved
 
+    def when_a_node_meets_it_while_it_joins() -> None:
+        async def it_saves_the_writes_of_the_keys_the_node_owns_once_it_is_in() -> None:
+            store = Records()
+            async with Harness.start(1, store=store) as harness:
+                [a] = harness.nodes
+                # What a replication message or a command reaching the node before it has entered makes it do.
+                b = await harness.add(joining=lambda system: system._resolve(tally.name))  # pyright: ignore[reportPrivateUsage]
+                key = await _placed_on(b, a)
+                assert await a.system.ref(tally, key).ask(Add, 4) == 4
+                assert (tally.name, key) in store.records
+
 
 def describe_the_sqlite_store() -> None:
     async def it_opens_its_file_only_once_entered(tmp_path: Path) -> None:
@@ -280,6 +291,23 @@ def describe_a_cluster_on_a_sqlite_store() -> None:
                     listing = await harness.nodes[0].system.ref(durable_ledger, key).ask(Entries)
                     broken = kept(key, listing.entries, confirmed[key], attempted[key])
                     assert not broken, "; ".join(broken)
+
+
+async def _placed_on(node: Node, by: Node) -> str:
+    """The first of `t-0`, `t-1`, … that `by` places on `node`, once it sees `node` alive.
+
+    Only `by` is asked: asking a node where a key of a type is makes it meet the type.
+    """
+
+    async def seen() -> None:
+        assert node.system.node in {member.node for member in by.system.members if member.status == "alive"}
+
+    await eventually(seen, WITHIN)
+    for index in range(64):
+        key = f"t-{index}"
+        if (await by.system.placement(tally, key)).owner == node.system.node:
+            return key
+    raise AssertionError(f"none of the first 64 keys is placed on {node.address} by {by.address}")
 
 
 def _version(order: int, /) -> bytes:

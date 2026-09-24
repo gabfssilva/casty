@@ -362,10 +362,21 @@ impl Node {
         *self.system.locked() = None;
     }
 
-    /// The node is in the cluster: take the identity it joined under and what it sees.
+    /// The node is in the cluster: take the identity it joined under and what it sees, and tell it every type met.
+    ///
+    /// A type met while the node joined, by a message that reached it before it had entered, found no cluster to tell.
+    /// The ring places the keys of every type on every member, so the node would own keys of it all the same, without
+    /// the replica count and the store the type declares.
     pub fn entered(&self, cluster: &Entered) {
         *self.id.locked() = cluster.id().clone();
         *self.members.locked() = cluster.members();
+        let catalog = self.catalog.locked();
+        for kind in catalog.kinds() {
+            cluster.node().learn(kind);
+        }
+        for name in catalog.given_up() {
+            cluster.node().gave_up(name);
+        }
     }
 
     /// Say goodbye to the cluster and stop the transport, resolving `gone` once it is over.
