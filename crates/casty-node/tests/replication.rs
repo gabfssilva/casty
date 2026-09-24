@@ -17,7 +17,7 @@ use casty_net::limits::Limits;
 use casty_node::node::{Cluster, Host, Kind, Node, Running};
 use casty_node::replication::service::{Failure, Storing};
 
-use common::{ACTOR, Idle, WITHIN, cluster, kind};
+use common::{ACTOR, Idle, POLL, WITHIN, cluster, kind};
 
 const MIB: usize = 1024 * 1024;
 
@@ -607,14 +607,25 @@ async fn a_deleted_key_keeps_no_state_anywhere_and_starts_again_from_its_initial
         .await
         .expect("the replicas confirmed the deletion");
 
-    // What a node keeps of the key is its tombstone at most, until every replica has answered for it.
+    // What a node keeps of the key is its tombstone at most, until every replica has answered for it. The deletion
+    // returned with a majority, so the last replica may take the tombstone a moment later.
     for index in 0..3 {
-        let stored = world.at(index).stored().await;
+        let tombstoned = tokio::time::timeout(WITHIN, async {
+            loop {
+                let stored = world.at(index).stored().await;
+                if stored
+                    .iter()
+                    .all(|(_, key, deleted)| key != "acc-9" || *deleted)
+                {
+                    return;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await;
         assert!(
-            stored
-                .iter()
-                .all(|(_, key, deleted)| key != "acc-9" || *deleted),
-            "node {index} kept the state of a deleted key: {stored:?}"
+            tombstoned.is_ok(),
+            "node {index} kept the state of a deleted key"
         );
     }
     let missing = world

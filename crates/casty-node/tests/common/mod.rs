@@ -13,7 +13,7 @@ use casty_node::node::{Cluster, Host, Kind, Node, Running};
 pub const ACTOR: &str = "tests.app:account";
 pub const WITHIN: Duration = Duration::from_secs(30);
 /// How long a wait sleeps before it looks at the nodes again.
-const POLL: Duration = Duration::from_millis(20);
+pub const POLL: Duration = Duration::from_millis(20);
 
 pub fn quick() -> Timings {
     Timings {
