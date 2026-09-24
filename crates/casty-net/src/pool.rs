@@ -227,10 +227,12 @@ impl Pool {
         let pool = Arc::clone(self);
         let closing = Arc::clone(&self.closing);
         tokio::spawn(async move {
+            // Biased, so that a dial cancelled while it was connecting never goes on to write its hello.
             tokio::select! {
-                () = pool.dial(address) => {}
+                biased;
                 () = cancel.notified() => {}
                 () = closing.notified() => {}
+                () = pool.dial(address) => {}
             }
         });
     }
@@ -437,7 +439,8 @@ impl Pool {
             let mut queue = Vec::new();
             for address in [peer.address.as_deref(), dialed].into_iter().flatten() {
                 if let Some(dial) = state.dials.remove(address) {
-                    dial.cancel.notify_waiters();
+                    // A permit rather than a wakeup: the task of the dial may not be waiting for it yet.
+                    dial.cancel.notify_one();
                     queue.extend(dial.queue);
                 }
                 state.backoff.remove(address);
