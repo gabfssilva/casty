@@ -46,5 +46,6 @@ jobs:
       - run: uv run ruff check src tests benchmarks examples docs
       - run: uv run ruff format --check src tests benchmarks examples docs
       - run: uv run pyright
-      # A test still running after two minutes prints the stack of every thread: what a hung job leaves behind.
-      - run: uv run pytest -q -o faulthandler_timeout=120
+      # A test still running after two minutes prints the stack of every thread, and `-v` names each test before it
+      # runs: what a hung job leaves behind.
+      - run: uv run pytest -v -o faulthandler_timeout=120
