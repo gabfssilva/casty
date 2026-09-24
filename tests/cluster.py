@@ -377,7 +377,11 @@ class Proxy:
     """
 
     def __init__(self, spawn: Callable[[Coroutine[None, None, None]], None], target: str, /) -> None:
-        listener = socket.create_server(("127.0.0.1", 0))
+        # asyncio sets TCP_NODELAY only on sockets whose proto is IPPROTO_TCP, and those `create_server` makes are not:
+        # without it, Nagle holds every small write back until the delayed ACK of Linux, 40 ms later.
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
         self.address = f"127.0.0.1:{listener.getsockname()[1]}"
         self._spawn = spawn
         self._target = target
