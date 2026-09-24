@@ -858,7 +858,7 @@ impl Node {
     /// it takes the key over, with nothing once a write is written.
     ///
     /// Alone, the memory of the process answers at once; the store of a durable type and the replicas of a cluster
-    /// answer when they have it.
+    /// answer when they have it, and a node of a cluster that is out of it answers `Unavailable`.
     pub fn persist<'py>(
         self: &Arc<Self>,
         py: Python<'py>,
@@ -879,6 +879,13 @@ impl Node {
         let answer = self.future(py)?;
         if let Some(cluster) = self.cluster() {
             cluster.persist(actor, key, op, answer.clone().unbind());
+        } else if self.network.locked().is_some() {
+            // Before it has entered, or between a removal and the join after it, a key has no replicas to be taken
+            // from, and what the memory of the process kept would never reach them.
+            let outside = crate::errors::Unavailable::new_err(format!(
+                "{actor}/{key}: this node is not in its cluster"
+            ));
+            answer.call_method1("set_exception", (outside.into_value(py),))?;
         } else if let Some(durability) = self.durability(py, actor) {
             self.persist_stored(py, actor, key, op, durability, &answer)?;
         } else {

@@ -17,7 +17,7 @@ use casty_core::wire::Writer;
 use casty_net::endpoint::{Config, Endpoint, TooLarge};
 use casty_net::pool::Target as Address;
 use casty_node::node::{Cluster, Host, Node, Running};
-use casty_node::routing::wire::{Answer, Message, Routed, decode_answer, encode};
+use casty_node::routing::wire::{Answer, Message, Routed, decode, decode_answer, encode};
 use tokio::sync::{Notify, oneshot};
 
 use common::{ACTOR, WITHIN, cluster, kind};
@@ -327,6 +327,76 @@ async fn a_message_of_a_kind_the_node_does_not_know_is_dropped_and_what_follows_
     );
     peer.close(true).await;
     world.stop().await;
+}
+
+/// A node that is still joining is alone on its ring, where every key is its own. The members that already placed it
+/// route keys to it before its seed has answered the join, and a key it ran then would start from nothing, beside the
+/// state the cluster keeps for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_that_has_not_joined_sends_back_what_it_is_routed() {
+    // A seed that takes the join and never answers it.
+    let mut seed = Endpoint::start(Config {
+        bind: Some("127.0.0.1:0".to_owned()),
+        ..Config::default()
+    })
+    .await
+    .expect("it started");
+    let address = seed.node().address.clone().expect("it listens");
+    let host = Arc::new(Counting::default());
+    let joining = tokio::spawn(Running::start(
+        cluster(&[address]),
+        host.clone(),
+        vec![kind(REPLICAS, Write::Majority)],
+    ));
+    let joiner = tokio::time::timeout(WITHIN, seed.recv())
+        .await
+        .expect("the join never came")
+        .expect("the endpoint closed")
+        .expect("the joiner refused the seed")
+        .from
+        .expect("it came from the joiner");
+
+    let request = Routed {
+        command: Command::Deliver(Deliver {
+            actor: ACTOR.to_owned(),
+            key: "early".to_owned(),
+            message: b"hello".to_vec(),
+            reply: Some(Target::Reply {
+                node: seed.node().clone(),
+                id: 1,
+            }),
+            chain: Chain::default(),
+        }),
+        origin: seed.node().clone(),
+        attempt: 1,
+    };
+    seed.send(
+        &Address::Node(joiner),
+        "actors",
+        &encode(&Message::Routed(request.clone())),
+    )
+    .expect("it fits");
+    let answered = tokio::time::timeout(WITHIN, async {
+        loop {
+            let received = seed
+                .recv()
+                .await
+                .expect("the endpoint closed")
+                .expect("the joiner refused the seed");
+            match received.name.as_str() {
+                "actors" => return decode(&received.payload).expect("a routing message"),
+                "replies" => panic!("the node took a key before it joined"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the node never answered the message");
+
+    assert_eq!(answered, Message::WrongOwner(request));
+    assert!(host.taken.lock().expect("a live lock").is_empty());
+    joining.abort();
+    seed.close(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

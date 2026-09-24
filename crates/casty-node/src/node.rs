@@ -824,6 +824,7 @@ impl Held {
                 .owner(actor, key, &self.counts, &self.handoff),
             key,
             self.node.id(),
+            self.membership.joined(),
             self.standing.acting,
         )
     }
@@ -1393,6 +1394,7 @@ fn swept(held: &mut Held) {
             counts: &held.counts,
             handoff: &held.handoff,
             node: held.node.id(),
+            joined: held.membership.joined(),
             majority: held.standing.acting,
         },
     );
@@ -1412,17 +1414,30 @@ struct Where<'a> {
     counts: &'a Counts,
     handoff: &'a Handoff,
     node: &'a NodeId,
+    joined: bool,
     majority: bool,
 }
 
-/// The owner of `key` as `node` acts on it: nobody, where the ring gives the key to `node` and `node` does not see a
-/// majority of the members alive (`Standing`).
+/// The owner of `key` as `node` acts on it: nobody before `node` has joined, and nobody where the ring gives the key to
+/// `node` and `node` does not see a majority of the members alive (`Standing`).
 ///
-/// Such a node may be on the small side of a partition, whose other side takes its keys over once it declares it dead.
-/// It stops seeing the others `alive` a `dead_after` before that, and gives its keys up then, so that an activation it
-/// kept does not answer from a state the new owner has written past. A pinned key has no other node to go to.
-fn acting(owner: Option<NodeId>, key: &str, node: &NodeId, majority: bool) -> Option<NodeId> {
+/// A node that has not joined is alone on its ring, where every key is its own. The members that placed it already
+/// route keys to it while its seed has not answered yet, and a key it took then would start from nothing, beside the
+/// state the cluster it is joining keeps.
+///
+/// A node that does not see a majority may be on the small side of a partition, whose other side takes its keys over
+/// once it declares it dead. It stops seeing the others `alive` a `dead_after` before that, and gives its keys up then,
+/// so that an activation it kept does not answer from a state the new owner has written past. A pinned key has no
+/// other node to go to.
+fn acting(
+    owner: Option<NodeId>,
+    key: &str,
+    node: &NodeId,
+    joined: bool,
+    majority: bool,
+) -> Option<NodeId> {
     match owner {
+        _ if !joined => None,
         Some(owner) if owner == *node && !majority && pinned(key).is_none() => None,
         owner => owner,
     }
@@ -1439,6 +1454,7 @@ impl casty_core::handoff::sweep::Placement for Where<'_> {
             self.placement.owner(actor, key, self.counts, self.handoff),
             key,
             self.node,
+            self.joined,
             self.majority,
         )
     }
