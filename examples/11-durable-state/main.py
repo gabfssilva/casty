@@ -85,11 +85,11 @@ async def balances(system: ActorSystem, /) -> None:
 async def main() -> None:
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "state.db"
-        with SQLiteStore(path) as store:
+        async with SQLiteStore(path) as store:
             await cluster(store, deposit)
         print("every node stopped, and every replica with it; the file is what is left")
         # The file opened again, as new processes on this machine would.
-        with SQLiteStore(path) as store:
+        async with SQLiteStore(path) as store:
             await cluster(store, balances)
 
 

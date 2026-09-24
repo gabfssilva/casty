@@ -1,10 +1,10 @@
 //! What a node reports to the observer it was built with, and how a report reaches it.
 //!
-//! The observer is never called where an event happens. Each event is scheduled on the loop as a callback of its own:
-//! with `call_soon` when it happens on the loop, in the middle of a step of the node, and with `call_soon_threadsafe`
-//! when it comes from the threads of the transport, which never wait for Python. So the observer runs on the loop,
-//! after the step that emitted the event, and it may call back into the system; and an observer that raises is a
-//! callback that raised, which the loop hands to its exception handler while the node goes on.
+//! The observer is never called where an event happens. Each event is scheduled on the loop as a callback of its own
+//! with `call_soon`: in the middle of a step of the node when it happens on the loop, and from the inbox of the loop
+//! when it comes from the threads of the transport, which never enter Python. So the observer runs on the loop, after
+//! the step that emitted the event, and it may call back into the system; and an observer that raises is a callback
+//! that raised, which the loop hands to its exception handler while the node goes on.
 //!
 //! Nor is an event of a kind the observer does not take ever built. An observer with a `wants` method is asked, when
 //! the system enters, whether it takes each kind, and what it said no to is dropped before anything reaches the
@@ -201,7 +201,7 @@ impl Observed {
     }
 }
 
-/// Schedule `observer(event)` on `running_loop`, from the loop itself or, `threadsafe`, from any other thread.
+/// Schedule `observer(event)` on `running_loop`, from the loop itself.
 ///
 /// An event that cannot be scheduled is let go: the loop has closed, which is a system on its way out, and nobody is
 /// left to hear of it.
@@ -210,14 +210,8 @@ pub fn deliver(
     running_loop: &Bound<'_, PyAny>,
     observer: &Py<PyAny>,
     event: Observed,
-    threadsafe: bool,
 ) {
-    let schedule = if threadsafe {
-        "call_soon_threadsafe"
-    } else {
-        "call_soon"
-    };
     let _ = event
         .value(py)
-        .and_then(|value| running_loop.call_method1(schedule, (observer, value)));
+        .and_then(|value| running_loop.call_method1("call_soon", (observer, value)));
 }

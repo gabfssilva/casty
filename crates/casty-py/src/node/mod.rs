@@ -5,6 +5,7 @@ pub mod callback;
 pub mod catalog;
 pub mod cluster;
 pub mod context;
+pub mod inbox;
 pub mod observe;
 pub mod replies;
 pub mod runs;
@@ -168,7 +169,7 @@ impl Node {
         };
         let event = event();
         if self.takes(event.kind()) {
-            observe::deliver(py, &running, &self.observer, event, false);
+            observe::deliver(py, &running, &self.observer, event);
         }
     }
 
@@ -239,7 +240,7 @@ impl Node {
         self: &Arc<Self>,
         py: Python<'_>,
         network: &Bound<'_, PyAny>,
-        running_loop: Py<PyAny>,
+        running_loop: &Bound<'_, PyAny>,
         entered: &Bound<'_, PyAny>,
         system: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
@@ -265,7 +266,7 @@ impl Node {
         py: Python<'_>,
         settings: cluster::Settings,
         map: Option<&Bound<'_, PyAny>>,
-        running_loop: Py<PyAny>,
+        running_loop: &Bound<'_, PyAny>,
         entered: &Bound<'_, PyAny>,
         system: &Bound<'_, PyAny>,
         member: bool,
@@ -322,13 +323,7 @@ impl Node {
             return Ok(());
         };
         let entered = self.future(py)?;
-        self.join(
-            py,
-            network.bind(py),
-            running.unbind(),
-            &entered,
-            system.bind(py),
-        )
+        self.join(py, network.bind(py), &running, &entered, system.bind(py))
     }
 
     /// What `__aenter__` gives back to await: the entry, undone if its caller stops waiting for it or the cluster
@@ -874,7 +869,7 @@ impl Node {
         }
         let answer = self.future(py)?;
         if let Some(cluster) = self.cluster() {
-            cluster.persist(py, actor, key, op, answer.clone().unbind());
+            cluster.persist(actor, key, op, answer.clone().unbind());
         } else if let Some(durability) = self.durability(py, actor) {
             self.persist_stored(py, actor, key, op, durability, &answer)?;
         } else {
@@ -1252,7 +1247,7 @@ system_methods!(ActorSystem {
                 node.join(
                     py,
                     cluster.bind(py),
-                    running.unbind(),
+                    &running,
                     &entered,
                     slf.as_any(),
                 )?;
@@ -1330,7 +1325,7 @@ system_methods!(ActorSystem {
     fn stored<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stored = self.node.future(py)?;
         if let Some(cluster) = self.node.cluster() {
-            cluster.stored(py, stored.clone().unbind());
+            cluster.stored(stored.clone().unbind());
         } else {
             let keys = self.node.store().kept();
             stored.call_method1("set_result", (keys,))?;
@@ -1531,7 +1526,7 @@ fn whereabouts<'py>(
     node.learn(actor, &definition);
     let answer = node.future(py)?;
     if let Some(cluster) = node.cluster() {
-        cluster.placed(py, &definition.name, &key, answer.clone().unbind());
+        cluster.placed(&definition.name, &key, answer.clone().unbind());
     } else {
         let alone = node.id();
         let placement = casty_node::node::Placed {
@@ -1786,7 +1781,7 @@ system_methods!(Client {
             py,
             held.settings.clone(),
             map,
-            running.unbind(),
+            &running,
             &entered,
             slf.as_any(),
             false,

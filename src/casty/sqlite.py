@@ -23,8 +23,11 @@ class SQLiteStore:
     system.
 
     A save keeps its record only when its version is greater than the version of the record kept, compared as bytes,
-    which is how SQLite compares blobs. A method returns once its statement committed. The statements run on a thread
-    of the store, one at a time, so the event loop never waits for the disk.
+    which is how SQLite compares blobs. A method returns once its statement committed.
+
+    The store is used inside `async with`, which opens the file on entering and closes it on leaving, once the
+    statements under way are done. Opening, every statement and closing run on a thread of the store, one at a time, so
+    the event loop never waits for the disk.
 
     Parameters
     ----------
@@ -33,26 +36,21 @@ class SQLiteStore:
     """
 
     def __init__(self, path: str | PathLike[str], /) -> None:
-        self._db = sqlite3.connect(path, autocommit=True, check_same_thread=False)
-        # A write-ahead log lets the processes sharing the file read while one of them writes. Processes opening a new
-        # file at once race to switch it, and SQLite refuses the switches that lose without waiting: the file keeps the
-        # log the winner set, which every connection to it then uses.
-        with suppress(sqlite3.OperationalError):
-            self._db.execute("PRAGMA journal_mode = WAL")
-        self._db.execute("PRAGMA synchronous = FULL")
-        self._db.execute(_TABLE)
+        self._path = path
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="casty-sqlite")
+        self._db: sqlite3.Connection | None = None
 
-    def __enter__(self) -> Self:
+    async def __aenter__(self) -> Self:
+        try:
+            self._db = await asyncio.get_running_loop().run_in_executor(self._worker, _open, self._path)
+        except BaseException:
+            self._worker.shutdown(wait=False)
+            raise
         return self
 
-    def __exit__(self, *exc: object) -> None:
-        self.close()
-
-    def close(self) -> None:
-        """Wait for the statements under way, then close the file."""
-        self._worker.shutdown()
-        self._db.close()
+    async def __aexit__(self, *exc: object) -> None:
+        await asyncio.get_running_loop().run_in_executor(self._worker, self._close)
+        self._worker.shutdown(wait=False)
 
     async def load(self, actor: str, key: str, /) -> tuple[bytes, bytes | None] | None:
         """The record of `(actor, key)` as `(version, state)`, or `None` when there is none."""
@@ -67,7 +65,7 @@ class SQLiteStore:
         await asyncio.get_running_loop().run_in_executor(self._worker, self._run, _DROP, (actor, key, version))
 
     def _load(self, actor: str, key: str, /) -> tuple[bytes, bytes | None] | None:
-        row: object = self._db.execute(_LOAD, (actor, key)).fetchone()
+        row: object = self._connection().execute(_LOAD, (actor, key)).fetchone()
         match row:
             case None:
                 return None
@@ -77,7 +75,28 @@ class SQLiteStore:
                 raise TypeError(f"the record of {actor}/{key} is {row!r}, which casty did not write")
 
     def _run(self, statement: str, parameters: tuple[str | bytes | None, ...], /) -> None:
-        self._db.execute(statement, parameters)
+        self._connection().execute(statement, parameters)
+
+    def _close(self) -> None:
+        self._connection().close()
+        self._db = None
+
+    def _connection(self) -> sqlite3.Connection:
+        if self._db is None:
+            raise RuntimeError("the store is not open: use it inside async with")
+        return self._db
+
+
+def _open(path: str | PathLike[str], /) -> sqlite3.Connection:
+    db = sqlite3.connect(path, autocommit=True)
+    # A write-ahead log lets the processes sharing the file read while one of them writes. Processes opening a new file
+    # at once race to switch it, and SQLite refuses the switches that lose without waiting: the file keeps the log the
+    # winner set, which every connection to it then uses.
+    with suppress(sqlite3.OperationalError):
+        db.execute("PRAGMA journal_mode = WAL")
+    db.execute("PRAGMA synchronous = FULL")
+    db.execute(_TABLE)
+    return db
 
 
 _TABLE = """

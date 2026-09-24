@@ -17,8 +17,7 @@ pub struct Threads {
 }
 
 impl Threads {
-    /// A runtime of `workers` threads, or of one per core. Always of several threads: a dial that asks the loop where
-    /// an address goes waits in place (`block_in_place`), which a runtime of one thread refuses.
+    /// A runtime of `workers` threads, or of one per core.
     pub fn start(workers: Option<usize>) -> PyResult<Arc<Self>> {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.enable_all();

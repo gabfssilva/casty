@@ -9,7 +9,7 @@ use casty_net::compress::Name;
 use casty_net::endpoint::{Config, Endpoint, Received};
 use casty_net::frame::Frame;
 use casty_net::limits::Limits;
-use casty_net::pool::{Heard, Peer, Target, Traffic};
+use casty_net::pool::{Dialing, Heard, Peer, Target, Traffic};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -334,7 +334,9 @@ async fn what_it_compresses_is_what_crosses_the_wire() {
     let proxy = proxied(&address, Arc::clone(&counted)).await;
     let sender = Endpoint::start(Config {
         compression: Some(vec![Name::Zstd]),
-        address_map: Some(Arc::new(move |_| proxy.clone())),
+        address_map: Some(Arc::new(move |_: &str| -> Dialing {
+            Box::pin(std::future::ready(proxy.clone()))
+        })),
         ..config(Some("127.0.0.1:0"))
     })
     .await

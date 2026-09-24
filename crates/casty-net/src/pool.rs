@@ -9,6 +9,7 @@
 //! rejects the other hello as duplicate, and the other node hands the queue of its dial to the connection it accepts.
 
 use std::collections::{BTreeSet, HashMap};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -41,8 +42,13 @@ impl Target {
 
 type Queued = (Target, String, Vec<u8>);
 
-/// What turns an advertised address into the one that is dialed: a tunnel, a NAT, or a proxy of a test.
-pub type AddressMap = Arc<dyn Fn(&str) -> String + Send + Sync>;
+/// What turns an advertised address into the one that is dialed: a tunnel, a NAT, or a proxy of a test. It answers
+/// with a future, so a map that has to ask someone else, like the event loop of a binding, holds no thread while it
+/// waits.
+pub type AddressMap = Arc<dyn Fn(&str) -> Dialing + Send + Sync>;
+
+/// The address a dial goes to, once the map has said.
+pub type Dialing = Pin<Box<dyn Future<Output = String> + Send>>;
 
 /// What the pool tells of a peer while this node is running.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,7 +356,7 @@ impl Pool {
     async fn initiate(&self, address: &str) -> Result<(Greeting, Message), Broken> {
         let dialed = match &self.settings.address_map {
             None => address.to_owned(),
-            Some(map) => map(address),
+            Some(map) => map(address).await,
         };
         let socket = tokio::time::timeout(self.settings.limits.dial, TcpStream::connect(&dialed))
             .await

@@ -1,11 +1,10 @@
 //! The bridge between the node of a cluster and the event loop this process runs its bodies on.
 //!
 //! The components run on the threads of the transport and never touch an interpreter. What they decide reaches the
-//! loop as a callback, and what the loop decides reaches them through the channel of the node. Nothing here waits
-//! for the other side: a call from the node task hands the work over and returns, because the loop is what would
-//! answer it, and a call from the loop leaves a request on the channel.
+//! loop through its inbox, and what the loop decides reaches them through the channel of the node. Nothing here waits
+//! for the other side: a call from the node task leaves the work in the inbox and returns, because the loop is what
+//! would answer it, and a call from the loop leaves a request on the channel.
 
-use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -16,7 +15,7 @@ use casty_core::outcome::Outcome;
 use casty_core::store::Held;
 use casty_net::compress::Name;
 use casty_net::limits::Limits;
-use casty_net::pool::AddressMap;
+use casty_net::pool::{AddressMap, Dialing};
 use casty_net::tls::Tls;
 use casty_node::events::Event;
 use casty_node::membership::service::{Member, Timings};
@@ -26,8 +25,8 @@ use casty_node::replication::service::{Failure, Storing};
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 
-use super::callback;
-use super::observe::{self, Observed};
+use super::inbox::Inbox;
+use super::observe::Observed;
 use super::{Node, Op};
 use crate::actor::period;
 use crate::lock::Locked;
@@ -54,8 +53,9 @@ pub struct Joined {
     joining: Mutex<Option<tokio::task::AbortHandle>>,
     /// The node of the cluster, from the moment it has joined one.
     node: OnceLock<Cluster>,
-    /// The loop the bodies run on, which is the only thread that touches an interpreter.
-    running_loop: Py<PyAny>,
+    /// How the threads of the transport reach the loop the bodies run on, which is the only thread that touches an
+    /// interpreter.
+    inbox: Inbox,
 }
 
 impl Joined {
@@ -71,7 +71,7 @@ impl Joined {
         mut settings: Settings,
         map: Option<&Bound<'_, PyAny>>,
         types: Vec<Kind>,
-        running_loop: Py<PyAny>,
+        running_loop: &Bound<'_, PyAny>,
         entered: Py<PyAny>,
         system: Py<PyAny>,
         member: bool,
@@ -81,14 +81,17 @@ impl Joined {
             Some(shared) => shared,
             None => Threads::start(None)?,
         };
+        let inbox = Inbox::open(py, running_loop)?;
         let host: Arc<dyn Host> = Arc::new(Bridge {
             node: Arc::downgrade(node),
-            running_loop: running_loop.clone_ref(py),
-            observer: node.observer(py),
-            store: node.storage(py),
+            inbox: inbox.clone(),
+            store: node.storage(py).map(Arc::new),
         });
         if let Some(map) = map {
-            let mapping = Arc::new(Mapping::new(py, map, &running_loop));
+            let mapping = Arc::new(Mapping {
+                map: map.clone().unbind(),
+                inbox: inbox.clone(),
+            });
             let dialing: AddressMap = Arc::new(move |address: &str| mapping.dialed(address));
             settings.address_map = Some(dialing);
         }
@@ -98,7 +101,7 @@ impl Joined {
             joining: Mutex::new(None),
             threads: runtime.handle().clone(),
             runtime: Mutex::new(Some(runtime)),
-            running_loop: running_loop.clone_ref(py),
+            inbox,
         });
         let held = Arc::clone(&joined);
         let node = Arc::clone(node);
@@ -108,9 +111,9 @@ impl Joined {
             } else {
                 Running::client(settings, host, types).await
             };
-            callback::on_loop(&running_loop, move |py| {
-                entering(&held, &node, started, entered.bind(py), system.bind(py))
-            });
+            let inbox = held.inbox.clone();
+            inbox
+                .send(move |py| entering(&held, &node, started, entered.bind(py), system.bind(py)));
         });
         *joined.joining.locked() = Some(join.abort_handle());
         Ok(joined)
@@ -128,8 +131,7 @@ impl Joined {
     /// End the join if it still runs, and let the threads of the transport go: a runtime of its own ends here, without
     /// waiting for them, and a shared one goes on for the systems that still hold it.
     ///
-    /// They are given up rather than joined: a dial of theirs may be waiting for the loop, and this runs on the loop,
-    /// so waiting here is waiting for something that is waiting for this.
+    /// They are given up rather than joined: this runs on the loop, which never waits for a thread.
     pub fn shutdown(&self) {
         if let Some(joining) = self.joining.locked().take() {
             joining.abort();
@@ -149,7 +151,6 @@ impl Joined {
             left(py, joined, node, &then);
             return;
         };
-        let running_loop = joined.running_loop.clone_ref(py);
         let node = Arc::clone(node);
         let joined = Arc::clone(joined);
         joined.threads.clone().spawn(async move {
@@ -159,7 +160,8 @@ impl Joined {
                 // What it went without, the node has already reported to the observer.
                 running.leave().await;
             }
-            callback::on_loop(&running_loop, move |py| {
+            let inbox = joined.inbox.clone();
+            inbox.send(move |py| {
                 left(py, &joined, &node, &then);
                 Ok(())
             });
@@ -200,9 +202,9 @@ impl Entered {
 
     /// Carry `op` out on the replicas of the key, resolving `answer` on the loop once they have answered: with what
     /// they hold when it takes the key over, with nothing once they confirmed a write.
-    pub fn persist(&self, py: Python<'_>, actor: &str, key: &str, op: Op, answer: Py<PyAny>) {
+    pub fn persist(&self, actor: &str, key: &str, op: Op, answer: Py<PyAny>) {
         let (node, actor, key) = (self.node.clone(), actor.to_owned(), key.to_owned());
-        self.dispatch(py, answer, async move {
+        self.dispatch(answer, async move {
             match op {
                 Op::Activate { initial } => {
                     Landed::Taken(node.activate(&actor, &key, initial).await)
@@ -220,21 +222,17 @@ impl Entered {
     }
 
     /// Resolve `answer` on the loop with where `(actor, key)` is as this node sees it, as a `casty.Placement`.
-    pub fn placed(&self, py: Python<'_>, actor: &str, key: &str, answer: Py<PyAny>) {
+    pub fn placed(&self, actor: &str, key: &str, answer: Py<PyAny>) {
         let (node, actor, key) = (self.node.clone(), actor.to_owned(), key.to_owned());
-        self.dispatch(py, answer, async move {
+        self.dispatch(answer, async move {
             Landed::Placed(node.placed(&actor, &key).await)
         });
     }
 
     /// Resolve `answer` on the loop with every key the replica of this node keeps, as `(actor, key, deleted)`.
-    pub fn stored(&self, py: Python<'_>, answer: Py<PyAny>) {
+    pub fn stored(&self, answer: Py<PyAny>) {
         let node = self.node.clone();
-        self.dispatch(
-            py,
-            answer,
-            async move { Landed::Stored(node.stored().await) },
-        );
+        self.dispatch(answer, async move { Landed::Stored(node.stored().await) });
     }
 
     /// Run `operation` on the threads of the transport, and resolve `answer` on the loop with what it lands.
@@ -243,14 +241,13 @@ impl Entered {
     /// like: nobody is left to resolve it for.
     fn dispatch(
         &self,
-        py: Python<'_>,
         answer: Py<PyAny>,
         operation: impl Future<Output = Landed> + Send + 'static,
     ) {
-        let running_loop = self.joined.running_loop.clone_ref(py);
+        let inbox = self.joined.inbox.clone();
         self.joined.threads.spawn(async move {
             let landed = operation.await;
-            callback::on_loop(&running_loop, move |py| landed.resolve(py, answer.bind(py)));
+            inbox.send(move |py| landed.resolve(py, answer.bind(py)));
         });
     }
 }
@@ -389,13 +386,13 @@ fn raised<'py>(py: Python<'py>, failure: &Failure) -> Bound<'py, PyAny> {
 }
 
 /// What the node of a cluster calls when something reaches this process.
+///
+/// Each call runs on the node task, so each one only leaves its work in the inbox of the loop and returns.
 struct Bridge {
     node: Weak<Node>,
-    running_loop: Py<PyAny>,
-    /// What the system reports to.
-    observer: Py<PyAny>,
+    inbox: Inbox,
     /// What keeps the state of the durable types, when the system was built with a store.
-    store: Option<Py<PyAny>>,
+    store: Option<Arc<Py<PyAny>>>,
 }
 
 impl core::fmt::Debug for Bridge {
@@ -405,13 +402,12 @@ impl core::fmt::Debug for Bridge {
 }
 
 impl Bridge {
-    /// Queue `work` on the loop. It is dropped if the loop or the interpreter is gone, which is a process on its way
-    /// out.
+    /// Leave `work` for the loop. Nothing is left once the system is gone.
     fn hand_over(&self, work: Arriving) {
         let Some(node) = self.node.upgrade() else {
             return;
         };
-        callback::on_loop(&self.running_loop, move |py| work.arrive(py, &node));
+        self.inbox.send(move |py| work.arrive(py, &node));
     }
 }
 
@@ -460,16 +456,16 @@ impl Host for Bridge {
 
     fn observe(&self, event: Event) {
         let event = Observed::Cluster(event);
-        // Decided before the interpreter is reached: what the observer does not take costs the node task nothing.
-        if !self
-            .node
-            .upgrade()
-            .is_some_and(|node| node.takes(event.kind()))
-        {
+        let Some(node) = self.node.upgrade() else {
+            return;
+        };
+        // Decided before the loop is reached: what the observer does not take costs the node task nothing.
+        if !node.takes(event.kind()) {
             return;
         }
-        let _ = Python::try_attach(|py| {
-            observe::deliver(py, self.running_loop.bind(py), &self.observer, event, true);
+        self.inbox.send(move |py| {
+            node.observe(py, || event);
+            Ok(())
         });
     }
 
@@ -478,13 +474,9 @@ impl Host for Bridge {
             node.from_store(request.id, Err(super::storage::NO_STORE.to_owned()));
             return;
         };
-        let id = request.id;
-        let handed = Python::try_attach(|py| {
-            super::storage::hand(py, self.running_loop.bind(py), store, node, request);
-        });
-        if handed.is_none() {
-            node.from_store(id, Err("the interpreter is shutting down".to_owned()));
-        }
+        let (store, node) = (Arc::clone(store), node.clone());
+        self.inbox
+            .send(move |py| super::storage::hand(py, store.bind(py), &node, &request));
     }
 }
 
@@ -550,28 +542,19 @@ impl Arriving {
 #[derive(Debug)]
 struct Mapping {
     map: Py<PyAny>,
-    running_loop: Py<PyAny>,
+    inbox: Inbox,
 }
 
 impl Mapping {
-    fn new(py: Python<'_>, map: &Bound<'_, PyAny>, running_loop: &Py<PyAny>) -> Self {
-        Self {
-            map: map.clone().unbind(),
-            running_loop: running_loop.clone_ref(py),
-        }
-    }
-
-    /// The address to dial, asked of the loop.
+    /// The address to dial, once the loop has said.
     ///
-    /// Waiting here does not hold anything of the node up: a dial has a task of its own, and the worker it runs on
-    /// is given back to the runtime while it waits, which it can, because the node the dial belongs to is not what
-    /// would answer it. A map that raises, or an answer that does not come within `ASKING`, leaves the address as it
-    /// was for this dial only: the node is dialed directly instead of through whatever the map would have put in
-    /// between, and the next dial asks again.
-    fn dialed(self: &Arc<Self>, address: &str) -> String {
-        let (answer, answered) = channel();
+    /// The dial waits for the answer as a future, holding no thread. A map that raises, or an answer that does not
+    /// come within `ASKING`, leaves the address as it was for this dial only: the node is dialed directly instead of
+    /// through whatever the map would have put in between, and the next dial asks again.
+    fn dialed(self: &Arc<Self>, address: &str) -> Dialing {
+        let (answer, answered) = tokio::sync::oneshot::channel();
         let (mapping, asked) = (Arc::clone(self), address.to_owned());
-        let handed = callback::on_loop(&self.running_loop, move |py| {
+        self.inbox.send(move |py| {
             let dialed = mapping
                 .map
                 .bind(py)
@@ -581,11 +564,13 @@ impl Mapping {
             let _ = answer.send(dialed);
             Ok(())
         });
-        if !handed {
-            return address.to_owned();
-        }
-        tokio::task::block_in_place(|| answered.recv_timeout(ASKING))
-            .unwrap_or_else(|_| address.to_owned())
+        let address = address.to_owned();
+        Box::pin(async move {
+            match tokio::time::timeout(ASKING, answered).await {
+                Ok(Ok(dialed)) => dialed,
+                _ => address,
+            }
+        })
     }
 }
 

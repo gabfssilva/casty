@@ -58,35 +58,27 @@ pub fn storing(store: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Py<PyAny>>> 
     Ok(Some(store.clone().unbind()))
 }
 
-/// Carry `request` of the node of a cluster out on `store`, from a thread of the transport: the call is made on the
-/// loop, and the node hears what the store answered through its channel.
+/// Carry `request` of the node of a cluster out on `store`, on the loop: the node hears what the store answered
+/// through its channel.
 pub fn hand(
     py: Python<'_>,
-    running_loop: &Bound<'_, PyAny>,
-    store: &Py<PyAny>,
+    store: &Bound<'_, PyAny>,
     node: &Cluster,
-    request: Storing,
-) {
-    let id = request.id;
-    let (store, cluster) = (store.clone_ref(py), node.clone());
-    let started = callback::threadsafe(running_loop, move |py| {
-        perform(
-            py,
-            store.bind(py),
-            &request.actor,
-            &request.key,
-            &request.storage,
-            request.within.as_secs_f64(),
-            Box::new(move |_, kept| {
-                cluster.from_store(id, kept);
-                Ok(())
-            }),
-        )
-    });
-    if let Err(failed) = started {
-        // A loop that takes no more calls is a system on its way out; the node hears the call went nowhere.
-        node.from_store(id, Err(format!("the event loop took no call: {failed}")));
-    }
+    request: &Storing,
+) -> PyResult<()> {
+    let (id, cluster) = (request.id, node.clone());
+    perform(
+        py,
+        store,
+        &request.actor,
+        &request.key,
+        &request.storage,
+        request.within.as_secs_f64(),
+        Box::new(move |_, kept| {
+            cluster.from_store(id, kept);
+            Ok(())
+        }),
+    )
 }
 
 /// Call `store` for `storage` of `(actor, key)`, on the loop this runs on, and hand what it answers to `then`.

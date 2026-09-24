@@ -1,6 +1,5 @@
 """The store of a system: the state of a durable type outlives the process that wrote it, and every replica."""
 
-import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 from itertools import count
@@ -14,39 +13,8 @@ from casty import ActorSystem, Context, Ref, Store, Unavailable, actor
 from casty.sqlite import SQLiteStore
 from tests.app import Append, Entries, durable_ledger, ledger
 from tests.cluster import WITHIN, Harness
-from tests.support import eventually
+from tests.support import Records, eventually
 from tests.traffic import kept
-
-
-class Records:
-    """A store in memory, kept as `casty.Store` asks: of the saves of a key, the one of the greatest version stays.
-
-    `failing` makes every save raise, and `saves` counts the ones that went through.
-    """
-
-    def __init__(self) -> None:
-        self.records: dict[tuple[str, str], tuple[bytes, bytes | None]] = {}
-        self.saves = 0
-        self.failing = False
-
-    async def load(self, actor: str, key: str, /) -> tuple[bytes, bytes | None] | None:
-        await asyncio.sleep(0)
-        return self.records.get((actor, key))
-
-    async def save(self, actor: str, key: str, version: bytes, state: bytes | None, /) -> None:
-        await asyncio.sleep(0)
-        if self.failing:
-            raise OSError("the disk is full")
-        self.saves += 1
-        kept = self.records.get((actor, key))
-        if kept is None or kept[0] <= version:
-            self.records[(actor, key)] = (version, state)
-
-    async def drop(self, actor: str, key: str, version: bytes, /) -> None:
-        await asyncio.sleep(0)
-        kept = self.records.get((actor, key))
-        if kept is not None and kept[0] <= version:
-            del self.records[(actor, key)]
 
 
 @dataclass(frozen=True)
@@ -210,8 +178,23 @@ def describe_a_durable_type() -> None:
 
 
 def describe_the_sqlite_store() -> None:
+    async def it_opens_its_file_only_once_entered(tmp_path: Path) -> None:
+        path = tmp_path / "records.db"
+        store = SQLiteStore(path)
+        assert not path.exists()
+        async with store:
+            assert path.exists()
+
+    def when_it_was_not_entered() -> None:
+        async def it_refuses_every_statement(tmp_path: Path) -> None:
+            store = SQLiteStore(tmp_path / "records.db")
+            with pytest.raises(RuntimeError, match="async with"):
+                await store.load("a", "k")
+            async with store:
+                assert await store.load("a", "k") is None
+
     async def it_keeps_of_the_saves_of_a_key_the_one_of_the_greatest_version(tmp_path: Path) -> None:
-        with SQLiteStore(tmp_path / "records.db") as store:
+        async with SQLiteStore(tmp_path / "records.db") as store:
             assert await store.load("a", "k") is None
             await store.save("a", "k", _version(2), b"two")
             await store.save("a", "k", _version(1), b"one")
@@ -222,7 +205,7 @@ def describe_the_sqlite_store() -> None:
             assert await store.load("b", "k") is None
 
     async def it_forgets_a_record_only_when_it_is_not_later_than_the_drop(tmp_path: Path) -> None:
-        with SQLiteStore(tmp_path / "records.db") as store:
+        async with SQLiteStore(tmp_path / "records.db") as store:
             await store.save("a", "k", _version(2), None)
             await store.drop("a", "k", _version(1))
             assert await store.load("a", "k") == (_version(2), None)
@@ -231,7 +214,7 @@ def describe_the_sqlite_store() -> None:
 
     async def it_shares_its_records_with_every_store_on_the_same_file(tmp_path: Path) -> None:
         path = tmp_path / "records.db"
-        with SQLiteStore(path) as one, SQLiteStore(path) as other:
+        async with SQLiteStore(path) as one, SQLiteStore(path) as other:
             assert isinstance(one, Store)
             await one.save("a", "k", _version(1), b"one")
             assert await other.load("a", "k") == (_version(1), b"one")
@@ -239,7 +222,7 @@ def describe_the_sqlite_store() -> None:
             await one.save("a", "k", _version(2), b"late")
             assert await one.load("a", "k") == (_version(3), b"three")
 
-        with SQLiteStore(path) as reopened:
+        async with SQLiteStore(path) as reopened:
             assert await reopened.load("a", "k") == (_version(3), b"three")
 
 
@@ -248,21 +231,19 @@ def describe_a_cluster_on_a_sqlite_store() -> None:
         async def it_reads_every_durable_key_back_as_last_confirmed(tmp_path: Path) -> None:
             path = tmp_path / "records.db"
             keys = {f"k-{index}": (index, index + 100, index + 200) for index in range(24)}
-            with SQLiteStore(path) as store:
-                async with Harness.start(3, store=store) as harness:
-                    for index, (key, entries) in enumerate(keys.items()):
-                        ref = harness.nodes[index % 3].system.ref(durable_ledger, key)
-                        for entry in entries:
-                            assert await ref.ask(Append, entry)
-                    assert await harness.nodes[0].system.ref(ledger, "memory").ask(Append, 1)
+            async with SQLiteStore(path) as store, Harness.start(3, store=store) as harness:
+                for index, (key, entries) in enumerate(keys.items()):
+                    ref = harness.nodes[index % 3].system.ref(durable_ledger, key)
+                    for entry in entries:
+                        assert await ref.ask(Append, entry)
+                assert await harness.nodes[0].system.ref(ledger, "memory").ask(Append, 1)
 
             # Leaving the harness stopped every node: no process holds a replica of any key any more.
-            with SQLiteStore(path) as store:
-                async with Harness.start(3, store=store) as harness:
-                    for index, (key, entries) in enumerate(keys.items()):
-                        listing = await harness.nodes[(index + 1) % 3].system.ref(durable_ledger, key).ask(Entries)
-                        assert listing.entries == entries, key
-                    assert (await harness.nodes[0].system.ref(ledger, "memory").ask(Entries)).entries == ()
+            async with SQLiteStore(path) as store, Harness.start(3, store=store) as harness:
+                for index, (key, entries) in enumerate(keys.items()):
+                    listing = await harness.nodes[(index + 1) % 3].system.ref(durable_ledger, key).ask(Entries)
+                    assert listing.entries == entries, key
+                assert (await harness.nodes[0].system.ref(ledger, "memory").ask(Entries)).entries == ()
 
     def when_keys_were_written_while_a_node_was_down() -> None:
         async def it_reads_them_back_once_every_node_crashed_and_new_ones_started(tmp_path: Path) -> None:
@@ -283,24 +264,22 @@ def describe_a_cluster_on_a_sqlite_store() -> None:
 
                 await eventually(appended, WITHIN)
 
-            with SQLiteStore(path) as store:
-                async with Harness.start(3, store=store) as harness:
-                    a, b, c = harness.nodes
-                    for key in keys[:8]:
-                        await append(a.system, key)
-                    await harness.crash(c)
-                    # Until the others remove it, the keys `c` owned answer `Unavailable`, and `append` tries again.
-                    for key in keys:
-                        await append(b.system, key)
-                    await harness.crash(a)
-                    await harness.crash(b)
+            async with SQLiteStore(path) as store, Harness.start(3, store=store) as harness:
+                a, b, c = harness.nodes
+                for key in keys[:8]:
+                    await append(a.system, key)
+                await harness.crash(c)
+                # Until the others remove it, the keys `c` owned answer `Unavailable`, and `append` tries again.
+                for key in keys:
+                    await append(b.system, key)
+                await harness.crash(a)
+                await harness.crash(b)
 
-            with SQLiteStore(path) as store:
-                async with Harness.start(3, store=store) as harness:
-                    for key in keys:
-                        listing = await harness.nodes[0].system.ref(durable_ledger, key).ask(Entries)
-                        broken = kept(key, listing.entries, confirmed[key], attempted[key])
-                        assert not broken, "; ".join(broken)
+            async with SQLiteStore(path) as store, Harness.start(3, store=store) as harness:
+                for key in keys:
+                    listing = await harness.nodes[0].system.ref(durable_ledger, key).ask(Entries)
+                    broken = kept(key, listing.entries, confirmed[key], attempted[key])
+                    assert not broken, "; ".join(broken)
 
 
 def _version(order: int, /) -> bytes:

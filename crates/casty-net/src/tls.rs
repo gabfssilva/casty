@@ -30,14 +30,17 @@ pub struct Identity {
 
 impl Tls {
     /// Read the files and build the two configurations, or say what is wrong with them.
-    pub fn identity(&self) -> io::Result<Identity> {
-        let chain = certificates(&self.cert)?;
-        let key = private_key(&self.key)?;
+    ///
+    /// The files are read with `tokio::fs`, on the threads tokio keeps for calls that block, so a slow disk holds no
+    /// worker of the transport.
+    pub async fn identity(&self) -> io::Result<Identity> {
+        let chain = certificates(&self.cert).await?;
+        let key = private_key(&self.key).await?;
         let authority = match &self.ca {
             None => None,
             Some(path) => {
                 let mut roots = RootCertStore::empty();
-                for certificate in certificates(path)? {
+                for certificate in certificates(path).await? {
                     roots
                         .add(certificate)
                         .map_err(|error| io::Error::other(format!("{path}: {error}")))?;
@@ -81,8 +84,8 @@ impl Tls {
     }
 }
 
-fn certificates(path: &str) -> io::Result<Vec<CertificateDer<'static>>> {
-    let raw = std::fs::read(path)?;
+async fn certificates(path: &str) -> io::Result<Vec<CertificateDer<'static>>> {
+    let raw = tokio::fs::read(path).await?;
     let found = CertificateDer::pem_slice_iter(&raw)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| io::Error::other(format!("{path}: {error}")))?;
@@ -92,8 +95,8 @@ fn certificates(path: &str) -> io::Result<Vec<CertificateDer<'static>>> {
     Ok(found)
 }
 
-fn private_key(path: &str) -> io::Result<PrivateKeyDer<'static>> {
-    let raw = std::fs::read(path)?;
+async fn private_key(path: &str) -> io::Result<PrivateKeyDer<'static>> {
+    let raw = tokio::fs::read(path).await?;
     PrivateKeyDer::from_pem_slice(&raw).map_err(|error| match error {
         pem::Error::NoItemsFound => io::Error::other(format!("{path} holds no private key")),
         error => io::Error::other(format!("{path}: {error}")),

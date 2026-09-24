@@ -109,7 +109,7 @@ impl Endpoint {
     pub async fn start(config: Config) -> io::Result<Self> {
         let identity = match &config.tls {
             None => None,
-            Some(tls) => Some(tls.identity()?),
+            Some(tls) => Some(tls.identity().await?),
         };
         let (inbound, receiver) = mpsc::unbounded_channel();
         let (node, listener) = match &config.bind {

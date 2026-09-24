@@ -161,7 +161,7 @@ from casty.sqlite import SQLiteStore
 async def account(ctx: Context[int, AccountMsg]) -> None: ...
 
 
-async with ActorSystem(cluster=cluster, store=SQLiteStore("accounts.db")) as system: ...
+async with SQLiteStore("accounts.db") as store, ActorSystem(cluster=cluster, store=store) as system: ...
 ```
 
 | `durable` | Saved to the store |
@@ -181,7 +181,8 @@ comes back after every replica, or the whole cluster, was lost. The store keeps 
 - The collections are not durable.
 
 `casty.sqlite.SQLiteStore(path)` is a store in one SQLite file, for a system alone or for the nodes of one machine,
-which may all open the same file. Nodes on several machines need a store over a database they all reach;
+which may all open the same file. It is used inside `async with`, and opens, reads, writes and closes the file on a
+thread of its own. Nodes on several machines need a store over a database they all reach;
 `src/casty/sqlite.py` is the shape of one, one statement per method. `examples/11-durable-state` stops a whole cluster
 and reads its durable keys back on new nodes.
 

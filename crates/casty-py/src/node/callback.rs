@@ -1,5 +1,4 @@
-//! Rust closures as the callables the event loop takes: `call_soon`, `call_later`, `call_soon_threadsafe` and
-//! `add_done_callback`.
+//! Rust closures as the callables the event loop takes: `call_soon`, `call_later` and `add_done_callback`.
 //!
 //! Each closure is handed to one of those once, and the loop calls it once. It moves out what it captured when it
 //! runs, so a second call would find nothing and do nothing.
@@ -79,25 +78,4 @@ pub fn when_done(
     let callback = Callback::new(future.py(), move |py, args| call(py, &args.get_item(0)?))?;
     future.call_method1("add_done_callback", (callback,))?;
     Ok(())
-}
-
-/// Call `call` on `running_loop` from a thread that is not the loop's.
-pub fn threadsafe(
-    running_loop: &Bound<'_, PyAny>,
-    call: impl FnOnce(Python<'_>) -> PyResult<()> + Send + 'static,
-) -> PyResult<()> {
-    let callback = Callback::bare(running_loop.py(), call)?;
-    running_loop.call_method1("call_soon_threadsafe", (callback,))?;
-    Ok(())
-}
-
-/// Hand `call` to `running_loop` from a thread of the transport, which attaches to the interpreter to do it.
-///
-/// Answers whether the loop took it. An interpreter on its way out, or a loop that has closed, takes nothing: that is
-/// a system that stopped, and nobody is left on the loop to hear of it.
-pub fn on_loop(
-    running_loop: &Py<PyAny>,
-    call: impl FnOnce(Python<'_>) -> PyResult<()> + Send + 'static,
-) -> bool {
-    Python::try_attach(|py| threadsafe(running_loop.bind(py), call).is_ok()).unwrap_or(false)
 }

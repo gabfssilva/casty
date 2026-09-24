@@ -270,8 +270,8 @@ async def control(system: ActorSystem, links: Links, clock: Clock, /) -> None:
 async def main(launch: Launch, /) -> None:
     clock = Clock()
     period = timing(launch.size)
-    with patch.object(time, "time", clock.time), SQLiteStore(launch.store) as store:
-        async with asyncio.TaskGroup() as tasks:
+    with patch.object(time, "time", clock.time):
+        async with SQLiteStore(launch.store) as store, asyncio.TaskGroup() as tasks:
             links = Links(tasks)
             try:
                 cluster = Cluster(

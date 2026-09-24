@@ -21,3 +21,34 @@ async def eventually(check: Callable[[], Awaitable[None]], within: timedelta = t
             if loop.time() >= deadline:
                 raise last from None
         await asyncio.sleep(0.01)
+
+
+class Records:
+    """A store in memory, kept as `casty.Store` asks: of the saves of a key, the one of the greatest version stays.
+
+    `failing` makes every save raise, and `saves` counts the ones that went through.
+    """
+
+    def __init__(self) -> None:
+        self.records: dict[tuple[str, str], tuple[bytes, bytes | None]] = {}
+        self.saves = 0
+        self.failing = False
+
+    async def load(self, actor: str, key: str, /) -> tuple[bytes, bytes | None] | None:
+        await asyncio.sleep(0)
+        return self.records.get((actor, key))
+
+    async def save(self, actor: str, key: str, version: bytes, state: bytes | None, /) -> None:
+        await asyncio.sleep(0)
+        if self.failing:
+            raise OSError("the disk is full")
+        self.saves += 1
+        kept = self.records.get((actor, key))
+        if kept is None or kept[0] <= version:
+            self.records[(actor, key)] = (version, state)
+
+    async def drop(self, actor: str, key: str, version: bytes, /) -> None:
+        await asyncio.sleep(0)
+        kept = self.records.get((actor, key))
+        if kept is not None and kept[0] <= version:
+            del self.records[(actor, key)]
