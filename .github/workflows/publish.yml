@@ -29,6 +29,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - uses: PyO3/maturin-action@v1
+        env:
+          # The GCC of the manylinux2014 cross image does not define __ARM_ARCH, which the assembly of ring requires.
+          CFLAGS_aarch64_unknown_linux_gnu: -D__ARM_ARCH=8
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --interpreter python${{ matrix.python }}
