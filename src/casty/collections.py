@@ -1302,13 +1302,17 @@ class Semaphore:
         """`ask` on the semaphore, created again from its capacity when every replica of it was lost.
 
         The collections are not durable, and a semaphore has no default: the key a lost one leaves is not started
-        until a ref brings its capacity again.
+        until a ref brings its capacity again. That ref starts the key without waiting, and while the owner of the key
+        changes the next ask can still find nothing there: that ask was not processed, which `Unavailable` says.
         """
         try:
             return await ask(self._ref)
         except NotStarted:
             self._ref = self._binding.started(semaphore.actor, SemaphoreState(self._capacity))
+        try:
             return await ask(self._ref)
+        except NotStarted as missing:
+            raise Unavailable(str(missing)) from missing
 
     def _validate(self, n: int, ttl: float) -> None:
         if not 1 <= n <= self._capacity:

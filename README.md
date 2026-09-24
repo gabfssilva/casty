@@ -538,7 +538,7 @@ async def crawler(ctx: Context[int, Crawl | Acquired | Denied]) -> None:
 
 - `Acquire(reply_to, n=1, ttl=30.0, wait=None, lease_id=None)`. `wait` is how long the request stays in line: `None` for as long as it takes, `0` for now or never. The semaphore names the lease when `lease_id` is `None`. Sent again under the same `lease_id`, a request keeps its place in line, and a granted one hears its grant again.
 - `Release(lease_id)` gives the permits back, or withdraws a request still waiting, and answers nothing. `Renew(reply_to, lease_id, ttl)` answers whether the lease was still held, and `Get(reply_to)` answers a `Status`.
-- The capacity is the one of the ref that created the key; the `initial` of a later ref is ignored. A ref to a key nobody created, received in a message, meets `NotStarted`, and so does one to a key lost with every replica, since the collections are not durable, until a ref brings its capacity again. `Semaphore` and `Lock` do that themselves.
+- The capacity is the one of the ref that created the key; the `initial` of a later ref is ignored. A ref to a key nobody created, received in a message, meets `NotStarted`, and so does one to a key lost with every replica, since the collections are not durable, until a ref brings its capacity again. `Semaphore` and `Lock` do that themselves; a call of theirs that still finds the key missing, while it changes owner, raises `Unavailable`.
 
 ## casty as a distributed toolkit
 

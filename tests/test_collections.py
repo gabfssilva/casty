@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import pytest
 
-from casty import ActorSystem, Collections, Context, Ref, actor
+from casty import ActorSystem, Collections, Context, NotStarted, Ref, Unavailable, actor
 from casty import collections as kinds
 from casty.collections import (
     MISSING,
@@ -814,6 +814,22 @@ print(system._encode(schema, values).hex())
                 async with asyncio.timeout(0):
                     await semaphore.acquire()
             assert await semaphore.available() == 1
+
+    async def it_answers_unavailable_when_the_semaphore_it_started_again_is_still_missing() -> None:
+        async with ActorSystem() as system:
+            permits = Collections(system).semaphore("permits", capacity=1)
+            asked = 0
+
+            # What the owner answers while its key changes hands after every replica of the semaphore was lost: the
+            # ref that brings the capacity again starts the key without waiting, and the next ask can come first.
+            async def missing(_: Ref[semaphore.Message]) -> int:
+                nonlocal asked
+                asked += 1
+                raise NotStarted("casty.collections:semaphore_3_majority/permits was not started")
+
+            with pytest.raises(Unavailable):
+                await permits._asked(missing)  # pyright: ignore[reportPrivateUsage]
+            assert asked == 2
 
     async def it_does_not_resubmit_a_wait_after_its_interest_expired(monkeypatch: pytest.MonkeyPatch) -> None:
         now = 100.0
