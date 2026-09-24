@@ -1,0 +1,57 @@
+# The everyday commands of casty. `make check` runs what CI checks, on the Python of `.venv`.
+
+PY_PATHS := src tests benchmarks examples docs
+FT_ENV := .venv-3.14t
+LINUX_TARGETS := x86_64 aarch64
+
+.DEFAULT_GOAL := help
+.PHONY: help sync build test test-ft test-rust lint fmt typecheck docs check chaos bench wheels-linux
+
+help: ## List the targets
+	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-13s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+sync: ## Install the dev tools and build the extension
+	uv sync
+
+build: ## Rebuild the extension: uv does not rebuild it after a Rust change
+	uv sync --reinstall-package casty
+
+test: build ## Python suite
+	uv run pytest -q
+
+test-ft: ## Python suite on free-threaded 3.14t, in its own environment
+	UV_PROJECT_ENVIRONMENT=$(FT_ENV) uv sync --python 3.14t --reinstall-package casty
+	UV_PROJECT_ENVIRONMENT=$(FT_ENV) uv run --python 3.14t pytest -q
+
+test-rust: ## Rust suite
+	cargo test --all-targets
+
+lint: ## ruff, rustfmt and clippy, with warnings as errors as in CI
+	uv run ruff check $(PY_PATHS)
+	uv run ruff format --check $(PY_PATHS)
+	cargo fmt --all --check
+	cargo clippy --all-targets -- -D warnings
+
+fmt: ## Format Python and Rust
+	uv run ruff format $(PY_PATHS)
+	cargo fmt --all
+
+typecheck: ## pyright, strict
+	uv run pyright
+
+docs: ## Build the reference and check every public name has its page
+	uv run mkdocs build --strict
+	uv run python docs/check_reference.py
+
+check: lint typecheck test-rust test docs ## Everything CI checks, but 3.14t (make test-ft)
+
+chaos: build ## Chaos run, shaped by CHAOS_NODES, CHAOS_MINUTES and CHAOS_SEED
+	CASTY_CHAOS=1 uv run pytest tests/chaos -s
+
+bench: build ## Micro benchmarks, into benchmarks/results/micro.json
+	uv run python -m benchmarks.micro --output benchmarks/results/micro.json
+
+wheels-linux: ## manylinux wheels for x86_64 and aarch64 into dist/, which skyward ships to its nodes
+	for target in $(LINUX_TARGETS); do \
+		uvx maturin build --release --zig --target $$target-unknown-linux-gnu --compatibility manylinux2014 --out dist || exit 1; \
+	done

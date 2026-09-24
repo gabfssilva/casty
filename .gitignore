@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+.venv-3.14t
 
 /benchmarks/results/
 
