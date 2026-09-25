@@ -322,6 +322,12 @@ impl Replication {
         }
     }
 
+    /// How long an operation waits for the replicas of its key, for a type that does not say.
+    #[must_use]
+    pub fn write_timeout(&self) -> Duration {
+        self.write_timeout
+    }
+
     /// The copies this node keeps, which a range transfer reads from and fills.
     #[must_use]
     pub fn replica(&self) -> &Replica {

@@ -179,6 +179,16 @@ impl Placement {
             })
     }
 
+    /// The owner `key` goes to once every range on its way has arrived: the owner on the ring the table asks for.
+    ///
+    /// Messages go there. A node that is still filling the range of a key it will own holds them until the range
+    /// has arrived, while `owner` keeps answering from the ring before, so that the key does not start there from
+    /// nothing.
+    #[must_use]
+    pub fn destination(&self, actor: &str, key: &str, counts: &Counts) -> Option<NodeId> {
+        self.owner(actor, key, counts, &Direct::default())
+    }
+
     /// The member advertised at `address`, the one most likely to answer when there are several.
     ///
     /// A node restarted on its address is another incarnation, and the older one can stay in the table beside it until

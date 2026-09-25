@@ -394,7 +394,10 @@ class ActorDefinition(Protocol):
 
     @property
     def write_timeout(self) -> timedelta | None:
-        """How long a write of the state or an activation waits for replicas. `None` is the system's."""
+        """How long a write of the state or an activation waits for replicas, and a message for an owner to take it.
+
+        `None` is the system's.
+        """
         ...
 
     @property

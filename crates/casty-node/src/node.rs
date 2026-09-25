@@ -41,7 +41,8 @@ use crate::replication::service::{
     Around, Entity, Failure, Replication, StoreAnswer, Storing, Written,
 };
 use crate::replication::wire::{self as replication};
-use crate::routing::service::{Decision, Routing, cancelling};
+use crate::routing::service::{Decision, Place, Routing, cancelling, refuse};
+use crate::routing::waiting::{self, LIMIT, Waiting};
 use crate::routing::wire::{self as routing, Answer, Cancel, Routed};
 
 const MEMBERSHIP: &str = "membership";
@@ -55,7 +56,8 @@ pub struct Kind {
     pub actor: String,
     pub replicas: usize,
     pub write: Write,
-    /// How long an operation over a key of the type waits for its replicas. Nothing means the node's.
+    /// How long an operation over a key of the type waits for its replicas, and a message of it for an owner that
+    /// takes it. Nothing means the node's.
     pub write_timeout: Option<core::time::Duration>,
     /// Whether each key runs on the node its key names, which leaves the type out of the ranges of the ring.
     pub pinned: bool,
@@ -78,7 +80,7 @@ pub struct Cluster {
     pub min_compressed: usize,
     pub address_map: Option<AddressMap>,
     pub limits: Limits,
-    /// How long an activation or a write waits for the replicas of its key.
+    /// How long an activation or a write waits for the replicas of its key, and a message for an owner that takes it.
     pub write_timeout: core::time::Duration,
     /// How long a node waits before asking again for what another one owes it.
     pub backoff: Backoff,
@@ -493,8 +495,9 @@ impl Node {
         });
     }
 
-    /// Where `(actor, key)` is as this node sees it now, which is what it routes a message to the key by: a key of a
-    /// range still arriving here is placed on the ring before the change, as its messages are.
+    /// Where `(actor, key)` is as this node sees it now: a key of a range still arriving here is placed on the ring
+    /// before the change until the range has arrived, while its messages go to its owner after the change, which holds
+    /// them until then.
     ///
     /// Nothing, once the node has stopped.
     pub async fn placed(&self, actor: &str, key: &str) -> Placed {
@@ -684,6 +687,7 @@ impl Running {
                 told: false,
                 standing: Standing::new(cluster.timings.dead_after / 2),
                 toward: HashMap::new(),
+                waiting: Waiting::new(LIMIT),
             },
             cluster.timings,
             members,
@@ -771,6 +775,8 @@ struct Held {
     standing: Standing,
     /// The node each request went to, and how it ends if that node never answers.
     toward: HashMap<i64, (NodeId, Outcome)>,
+    /// The messages that wait on this node until their key has an owner that takes them.
+    waiting: Waiting,
 }
 
 /// Whether a node acts as the owner of the keys the ring gives it: it does while it sees a majority of the members
@@ -861,33 +867,136 @@ impl Held {
         })
     }
 
-    /// Send a command toward the owner of its key, remembering where a request went so a lost node can fail it.
-    fn route(&mut self, sender: &Sender, command: Command) {
-        let owner = self.owner(command.actor(), command.key());
-        if let (Some(owner), Some(Target::Reply { id, .. })) = (owner.as_ref(), command.reply()) {
-            let failure = Outcome::unreached(command.actor(), command.key());
-            self.toward.insert(*id, (owner.clone(), failure));
+    /// Where the messages of a key go from this node.
+    ///
+    /// They go to the owner the key has once every range on its way has arrived. A key that is to run here but still
+    /// runs from the ring before, its range not having arrived yet, holds its messages here until it has.
+    ///
+    /// A node that has not joined is alone on its ring and cannot tell where any key is. The members that placed it
+    /// already route keys to it, and it holds them until it has joined, when they go on to wherever their key is.
+    fn place(&self, actor: &str, key: &str) -> Place {
+        if !self.membership.joined() {
+            return Place::Holding;
         }
+        if self.owner(actor, key).as_ref() == Some(self.node.id()) {
+            return Place::Here;
+        }
+        let destination = acting(
+            self.placement.destination(actor, key, &self.counts),
+            key,
+            self.node.id(),
+            self.membership.joined(),
+            self.standing.acting,
+        );
+        match destination {
+            Some(node) if node == *self.node.id() => Place::Holding,
+            Some(node) => Place::At(node),
+            None => Place::Nowhere,
+        }
+    }
+
+    /// How long an operation over a key of `actor` waits, which is also as long as a message of it waits here.
+    fn timeout(&self, actor: &str) -> core::time::Duration {
+        self.kinds
+            .get(actor)
+            .and_then(|kind| kind.write_timeout)
+            .unwrap_or(self.replication.write_timeout())
+    }
+
+    /// Send a command toward the owner of its key, behind what of the key waits here already.
+    fn route(&mut self, sender: &Sender, command: Command) {
         let routed = Routed {
             command,
             origin: self.node.id().clone(),
             attempt: 1,
         };
-        let decision = self.routing.route(routed, owner);
+        let (actor, key) = (routed.command.actor(), routed.command.key());
+        let decision = if self.waiting.holds(actor, key) {
+            Decision::Wait {
+                routed,
+                after: core::time::Duration::ZERO,
+            }
+        } else {
+            let place = self.place(actor, key);
+            self.routing.route(routed, place)
+        };
         self.act(sender, decision);
     }
 
-    /// Stop waiting for a request of this node, and send its cancellation toward whoever runs the key.
+    /// Take what arrived for a key, behind what of it waits here already.
+    fn take(&mut self, sender: &Sender, message: routing::Message) {
+        let (actor, key) = match &message {
+            routing::Message::Routed(routed) | routing::Message::WrongOwner(routed) => {
+                (routed.command.actor(), routed.command.key())
+            }
+            routing::Message::Cancel(cancel) => (cancel.actor.as_str(), cancel.key.as_str()),
+        };
+        let timeout = self.timeout(actor);
+        let place = self.place(actor, key);
+        let behind = place == Place::Here && self.waiting.holds(actor, key);
+        let decision = match message {
+            routing::Message::Routed(routed) if behind => Decision::Wait {
+                routed,
+                after: core::time::Duration::ZERO,
+            },
+            message => self.routing.receive(message, place, timeout),
+        };
+        self.act(sender, decision);
+    }
+
+    /// Stop waiting for a request of this node, and send its cancellation toward whoever runs the key, unless the
+    /// request is still here.
     fn cancel(&mut self, sender: &Sender, cancel: Cancel) {
         if let Target::Reply { node, id } = &cancel.request
             && node == self.node.id()
         {
             self.toward.remove(id);
         }
-        let owner = self.owner(&cancel.actor, &cancel.key);
+        if self.waiting.cancel(&cancel) {
+            return;
+        }
+        let owner = self.place(&cancel.actor, &cancel.key).node(self.node.id());
         if let Some(decision) = cancelling(cancel, owner) {
             self.act(sender, decision);
         }
+    }
+
+    /// Keep a command here until its key takes it, or answer that it cannot wait when too many do already.
+    fn wait(&mut self, sender: &Sender, routed: Routed, after: core::time::Duration) {
+        // A request of this node that waits here is on its way to no node, whichever one it was sent to before.
+        if routed.origin == *self.node.id()
+            && let Some(Target::Reply { id, .. }) = routed.command.reply()
+        {
+            self.toward.remove(id);
+        }
+        if self.waiting.full() {
+            let why = format!("{LIMIT} messages wait on this node for their keys already");
+            self.act(sender, refuse(routed.command, Outcome::unreached, &why));
+            return;
+        }
+        let timeout = self.timeout(routed.command.actor());
+        self.waiting.keep(routed, Instant::now(), after, timeout);
+    }
+
+    /// Send on what waits here and may go now, and answer what waited past its deadline.
+    fn release(&mut self, sender: &Sender) {
+        let now = Instant::now();
+        for (actor, key) in self.waiting.keys() {
+            let place = self.place(&actor, &key);
+            let holding = place == Place::Holding;
+            for released in self.waiting.release(&actor, &key, holding, now) {
+                let decision = match released {
+                    waiting::Released::Ready(routed) => self.routing.route(routed, place.clone()),
+                    waiting::Released::Expired(routed) => refuse(
+                        routed.command,
+                        Outcome::unreached,
+                        "no owner took the message within the write timeout",
+                    ),
+                };
+                self.act(sender, decision);
+            }
+        }
+        self.waiting.looked(now);
     }
 
     /// Take in what a type declares, and start counting it the first time it is seen.
@@ -929,6 +1038,15 @@ impl Held {
     fn act(&mut self, sender: &Sender, decision: Decision) {
         match decision {
             Decision::Send { to, message } => {
+                // A request of this node remembers where it went, so that losing that node fails it.
+                if let (routing::Message::Routed(routed), Destination::Node(owner)) =
+                    (&message, &to)
+                    && routed.origin == *self.node.id()
+                    && let Some(Target::Reply { id, .. }) = routed.command.reply()
+                {
+                    let failure = Outcome::unreached(routed.command.actor(), routed.command.key());
+                    self.toward.insert(*id, (owner.clone(), failure));
+                }
                 // Never too large: `Node::route` measured the command in its largest form before it came in.
                 let _ = sender.send(&to, ACTORS, &routing::encode(&message));
             }
@@ -936,7 +1054,9 @@ impl Held {
                 let host = Arc::clone(&self.host);
                 host.hand(&self.node, command);
             }
+            Decision::Wait { routed, after } => self.wait(sender, routed, after),
             Decision::Cancel(cancel) => {
+                self.waiting.cancel(&cancel);
                 self.host
                     .cancel(&cancel.actor, &cancel.key, &cancel.request);
             }
@@ -1069,7 +1189,7 @@ async fn run(
             _ = graft.tick() => held.membership.graft(now()),
             _ = shuffle.tick() => held.membership.shuffle(now()),
             _ = anti_entropy.tick() => held.membership.anti_entropy(),
-            () = deadline(earliest(&held)) => operations(&mut held),
+            () = deadline(earliest(&held)) => operations(&sender, &mut held),
             ask = asks.recv() => match ask {
                 Some(ask) => {
                     if !asked(&sender, &mut held, ask, now()) {
@@ -1097,14 +1217,7 @@ fn received(sender: &Sender, held: &mut Held, name: &str, payload: &[u8], now: f
             if matches!(message, routing::Message::WrongOwner(_)) {
                 held.membership.refresh();
             }
-            let owner = match &message {
-                routing::Message::Routed(routed) | routing::Message::WrongOwner(routed) => {
-                    held.owner(routed.command.actor(), routed.command.key())
-                }
-                routing::Message::Cancel(cancel) => held.owner(&cancel.actor, &cancel.key),
-            };
-            let decision = held.routing.receive(message, owner);
-            held.act(sender, decision);
+            held.take(sender, message);
         }
         REPLIES => {
             let Ok(answer) = routing::decode_answer(payload) else {
@@ -1246,15 +1359,16 @@ fn earliest(held: &Held) -> Option<Instant> {
         held.replication.due(),
         held.handoff.due(),
         held.standing.due(),
+        held.waiting.due(),
     ]
     .into_iter()
     .flatten()
     .min()
 }
 
-/// Carry out the deadlines that came due, start again the activations another owner fenced, and ask about the
-/// tombstones that have lingered.
-fn operations(held: &mut Held) {
+/// Carry out the deadlines that came due, start again the activations another owner fenced, ask about the
+/// tombstones that have lingered, and send on the messages whose wait is over.
+fn operations(sender: &Sender, held: &mut Held) {
     let now = Instant::now();
     for entity in held.replication.fired(now) {
         let Some(around) = held.around(&entity.0, &entity.1) else {
@@ -1275,6 +1389,9 @@ fn operations(held: &mut Held) {
             .bury(&entity, &around.replicas, around.durable.is_some());
     }
     held.handoff.fired(now, held.replication.replica());
+    if held.waiting.due().is_some_and(|due| due <= now) {
+        held.release(sender);
+    }
 }
 
 fn flush(
@@ -1316,10 +1433,11 @@ fn flush(
         .standing
         .observe(held.membership.majority(), Instant::now());
     // A ring, an owner or a copy that arrived may have moved a key, so what this node keeps is decided again; so
-    // does a node that stopped or started acting as an owner.
+    // does a node that stopped or started acting as an owner. The messages waiting for a key that moved go on.
     if held.handoff.resweep() || changed || standing {
         held.placement.settle(&mut held.handoff);
         swept(held);
+        held.release(sender);
     }
     for out in held.handoff.take() {
         held.replication.hand(out);

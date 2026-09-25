@@ -291,7 +291,7 @@ An active key carries a mark in its replicated state. If its node dies, the node
 | Bounded mailbox is full, `on_full="refuse"` | `MailboxFull` | |
 | The `ask` closes a cycle: the key it goes to waits, down the chain of asks, for its answer | `ReentrancyError`, at once, naming the cycle | The message is not queued |
 | In a cluster, the message, an initial state or the answer is larger than `Limits.message` | `MessageTooLarge` | Nothing was sent |
-| Owner unreachable, too few replicas, owner changing, or the store of a durable type not answering | `Unavailable` | The message may or may not have been processed |
+| Owner unreachable, too few replicas, no owner taking the message within the `write_timeout` of the type while the owner changes, or the store of a durable type not answering | `Unavailable` | The message may or may not have been processed |
 | The owner's code does not have the actor type | `UnknownActor` | |
 | The `ask` is cancelled, or gets no answer within `ask_timeout` | `CancelledError` / `TimeoutError` | The key drops the message if it is still queued, or cancels the body working on it (see [Cancellation](#cancellation)) |
 
@@ -722,7 +722,7 @@ The API reference, generated from the docstrings, is at <https://gabfssilva.gith
 | `durable` | `None` | `"write"` saves every confirmed write to the system's store before `state.set` returns; a `timedelta` saves the latest confirmed write at most that long after it, and the last write of an activation and deletions at once. `None` keeps the state in memory only. |
 | `idle_after` | the system's | Time without messages after which `inbox` ends |
 | `ask_timeout` | the system's | Deadline of an `ask` to this type |
-| `write_timeout` | the system's | How long a write of the state or an activation waits for replicas |
+| `write_timeout` | the system's | How long a write of the state or an activation waits for replicas, and a message for an owner to take it |
 | `backoff` | the system's | Delay before restarting a body that raised |
 
 ### `Context[S, M]`
@@ -745,7 +745,7 @@ The API reference, generated from the docstrings, is at <https://gabfssilva.gith
 | `idle_after` | 1 min | Time without messages after which `inbox` ends |
 | `backoff` | `Backoff(first=100ms, limit=10s, factor=2.0)` | Delay before restarting a body that raised |
 | `ask_timeout` | 10 s | Deadline of `ask` |
-| `write_timeout` | 5 s | How long a write of the state or an activation waits for replicas |
+| `write_timeout` | 5 s | How long a write of the state or an activation waits for replicas, and a message for an owner to take it |
 | `leave_timeout` | 30 s | Budget of an orderly exit |
 | `observer` | `None` | Called with every event of the node; `None` is a `LoggingObserver`. See [Observing a node](#observing-a-node). |
 | `store` | `None` | Where durable types keep their state outside every process (see `casty.Store`). Every node of a cluster is given one reaching the same records. |
@@ -859,9 +859,9 @@ A pinned key, `@host:port/name`, is kept by the member advertising that address 
 
 ### Routing
 
-A message goes to the owner the sender computes. The receiver checks that it is the owner in its own view, and otherwise answers `WrongOwner`; the sender retries once with its current view, and a second refusal ends in `Unavailable`.
+A message goes to the owner the sender computes on the ring the member table asks for, which is where the key runs once every range on its way has arrived. The receiver checks that it is that owner in its own view, and otherwise answers `WrongOwner` with the message, which it did not deliver. The sender keeps the message and sends it again after 10 ms, waiting twice as long each time it comes back, up to a second, until the views of the two nodes meet; a message that has waited the `write_timeout` of its type in all ends in `Unavailable`. A node that has not joined yet cannot tell where a key is: it holds what it is routed until it has joined, and then sends it on to wherever its key is. A node keeps at most 100 000 waiting messages and refuses more with `Unavailable`.
 
-Messages from one node to one key use one connection and one mailbox, which preserves their order while the owner does not change. With `on_full="wait"`, a message that waited for room on another node can be overtaken by a later one from the same node. A pending `ask` fails with `Unavailable` as soon as the sender sees the target as `dead`, and when the `ActorSystem` or `Client` that made it stops.
+Messages from one node to one key use one connection and one mailbox, which preserves their order while the owner does not change. The messages of a key that wait on a node go on in the order they came, and what that node sends the key meanwhile waits behind them. With `on_full="wait"`, a message that waited for room on another node can be overtaken by a later one from the same node. A pending `ask` fails with `Unavailable` as soon as the sender sees the target as `dead`, and when the `ActorSystem` or `Client` that made it stops.
 
 An `ask` made by a body carries the chain of keys waiting on it, at most 16, and the owner checks it before the mailbox. A cancelled `ask` sends a cancellation for its request, routed like the request and through the transport even when the key is on the same node, so it queues behind it. One that still arrives first, as after a `WrongOwner` retry, is kept until the deadline of the type's `ask` and drops the request when it comes.
 
@@ -885,7 +885,7 @@ After each change of the ring or of an owner, every node sweeps what it stores a
 - **ends** activations of keys it no longer owns, returning their mailboxes to routing;
 - **hands over** keys whose replica set no longer includes it, deleting the local copy once all current replicas confirm.
 
-A node that gains a token range pulls it from the nodes of the previous ring. While the range is arriving, the node accepts writes but does not count towards quorums; otherwise empty new replicas could form a quorum alone and start a key from `initial`. The ring step is held until the transfer ends, and keys in that range can be unavailable meanwhile.
+A node that gains a token range pulls it from the nodes of the previous ring. While the range is arriving, the node accepts writes but does not count towards quorums; otherwise empty new replicas could form a quorum alone and start a key from `initial`. The ring step is held until the transfer ends. The node that had a key of the range gives it up as soon as it sees the change, so meanwhile the messages for the key wait on the node it moves to, which takes them in the order they came once the range has arrived. One that waits longer than the `write_timeout` of its type ends in `Unavailable`.
 
 Ranges and handovers travel as numbered streams of messages that each fit in `Limits.message`. An answer missing a message is not counted and the source is asked again; each message of a handover is confirmed on its own, so the confirmation of a large handover never exceeds the limit.
 

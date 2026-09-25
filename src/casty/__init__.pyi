@@ -328,7 +328,8 @@ def actor[S, M](body: Body[S, M], /) -> Actor[S, M]:
     ask_timeout
         Deadline of an `ask` to the type. `None` is the system's.
     write_timeout
-        How long a write of the state or an activation waits for replicas. `None` is the system's.
+        How long a write of the state or an activation waits for replicas, and a message for an owner to take it.
+        `None` is the system's.
     backoff
         Delay before restarting a body that raised. `None` is the system's.
     durable
@@ -417,7 +418,8 @@ class ActorSystem:
     ask_timeout
         Deadline of an `ask`, for the types that set none.
     write_timeout
-        How long a write of the state or an activation waits for replicas, for the types that set none.
+        How long a write of the state or an activation waits for replicas, and a message for an owner to take it,
+        for the types that set none.
     leave_timeout
         How long an orderly shutdown waits for the nodes that replicate the keys of this one to take them.
     observer

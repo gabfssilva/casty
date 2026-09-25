@@ -7,6 +7,7 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use casty_core::chain::Chain;
 use casty_core::mailbox::{Command, Deliver};
@@ -17,7 +18,7 @@ use casty_core::wire::Writer;
 use casty_net::endpoint::{Config, Endpoint, TooLarge};
 use casty_net::pool::Target as Address;
 use casty_node::node::{Cluster, Host, Node, Running};
-use casty_node::routing::wire::{Answer, Message, Routed, decode, decode_answer, encode};
+use casty_node::routing::wire::{Answer, Message, Routed, decode_answer, encode};
 use tokio::sync::{Notify, oneshot};
 
 use common::{ACTOR, WITHIN, cluster, kind};
@@ -114,8 +115,37 @@ impl World {
         common::converged(&self.nodes, count, REPLICAS).await;
     }
 
+    /// Start one more node, joining through the first, and return as soon as it has joined.
+    async fn join(&mut self) {
+        let host = Arc::new(Counting::default());
+        let seeds: Vec<String> = self.nodes[0]
+            .node
+            .id()
+            .address
+            .clone()
+            .into_iter()
+            .collect();
+        let node = Running::start(
+            cluster(&seeds),
+            host.clone(),
+            vec![kind(REPLICAS, Write::Majority)],
+        )
+        .await
+        .expect("it joined");
+        self.nodes.push(node);
+        self.hosts.push(host);
+    }
+
     /// Ask `key` from the node `at`, and wait for the answer.
     async fn ask(&self, at: usize, key: &str) -> Outcome {
+        tokio::time::timeout(WITHIN, self.send(at, key))
+            .await
+            .expect("the answer never came")
+            .expect("the answer was dropped")
+    }
+
+    /// Ask `key` from the node `at` without waiting for the answer.
+    fn send(&self, at: usize, key: &str) -> oneshot::Receiver<Outcome> {
         let node = &self.nodes[at].node;
         let id = node.take();
         let waiting = self.hosts[at].expect(id);
@@ -127,10 +157,7 @@ impl World {
             Chain::default(),
         )
         .expect("it fits");
-        tokio::time::timeout(WITHIN, waiting)
-            .await
-            .expect("the answer never came")
-            .expect("the answer was dropped")
+        waiting
     }
 
     fn taken(&self) -> BTreeMap<String, u64> {
@@ -186,6 +213,44 @@ async fn a_key_is_reached_from_every_node_and_lives_on_one_of_them() {
     let owners: BTreeSet<NodeId> = keys.iter().flat_map(|key| world.holders(key)).collect();
     assert!(owners.len() > 1, "every key landed on the same node");
     world.stop().await;
+}
+
+/// A node that joins takes the keys the ring moves to it once their ranges have arrived, while the node that had them
+/// gives them up as soon as it sees the join. A message for such a key waits on the node that joined meanwhile,
+/// instead of going back and forth between the two until it fails.
+///
+/// A node that was alone before the join is walked in as well, so the first join moves keys both ways.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_key_moving_to_a_node_that_joined_answers_every_ask_while_its_range_arrives() {
+    for size in [1, 3] {
+        let mut world = World::start(size).await;
+        world.converged(size).await;
+        for index in 0..200 {
+            world.ask(0, &format!("acc-{index}")).await;
+        }
+
+        world.join().await;
+        let waiting: Vec<(String, usize, oneshot::Receiver<Outcome>)> = (0..200)
+            .flat_map(|index| {
+                let key = format!("acc-{index}");
+                (0..world.nodes.len())
+                    .map(|at| (key.clone(), at, world.send(at, &key)))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        for (key, at, answer) in waiting {
+            let outcome = tokio::time::timeout(WITHIN, answer)
+                .await
+                .expect("the answer never came")
+                .expect("the answer was dropped");
+            assert!(
+                matches!(outcome, Outcome::Value(_)),
+                "{size} + 1 nodes, {key} from {at}: {outcome:?}"
+            );
+        }
+        world.stop().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -331,9 +396,10 @@ async fn a_message_of_a_kind_the_node_does_not_know_is_dropped_and_what_follows_
 
 /// A node that is still joining is alone on its ring, where every key is its own. The members that already placed it
 /// route keys to it before its seed has answered the join, and a key it ran then would start from nothing, beside the
-/// state the cluster keeps for it.
+/// state the cluster keeps for it. It holds what it is routed instead, until it has joined or the message has waited
+/// the write timeout, and sends none of it back to go round again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_node_that_has_not_joined_sends_back_what_it_is_routed() {
+async fn a_node_that_has_not_joined_holds_what_it_is_routed_and_takes_none_of_it() {
     // A seed that takes the join and never answers it.
     let mut seed = Endpoint::start(Config {
         bind: Some("127.0.0.1:0".to_owned()),
@@ -344,7 +410,10 @@ async fn a_node_that_has_not_joined_sends_back_what_it_is_routed() {
     let address = seed.node().address.clone().expect("it listens");
     let host = Arc::new(Counting::default());
     let joining = tokio::spawn(Running::start(
-        cluster(&[address]),
+        Cluster {
+            write_timeout: Duration::from_millis(300),
+            ..cluster(&[address])
+        },
         host.clone(),
         vec![kind(REPLICAS, Write::Majority)],
     ));
@@ -373,7 +442,7 @@ async fn a_node_that_has_not_joined_sends_back_what_it_is_routed() {
     seed.send(
         &Address::Node(joiner),
         "actors",
-        &encode(&Message::Routed(request.clone())),
+        &encode(&Message::Routed(request)),
     )
     .expect("it fits");
     let answered = tokio::time::timeout(WITHIN, async {
@@ -384,8 +453,8 @@ async fn a_node_that_has_not_joined_sends_back_what_it_is_routed() {
                 .expect("the endpoint closed")
                 .expect("the joiner refused the seed");
             match received.name.as_str() {
-                "actors" => return decode(&received.payload).expect("a routing message"),
-                "replies" => panic!("the node took a key before it joined"),
+                "actors" => panic!("the node sent back what it was routed"),
+                "replies" => return decode_answer(&received.payload).expect("an answer"),
                 _ => {}
             }
         }
@@ -393,7 +462,13 @@ async fn a_node_that_has_not_joined_sends_back_what_it_is_routed() {
     .await
     .expect("the node never answered the message");
 
-    assert_eq!(answered, Message::WrongOwner(request));
+    assert_eq!(
+        answered,
+        Answer {
+            id: 1,
+            outcome: Outcome::unreached(ACTOR, "early"),
+        }
+    );
     assert!(host.taken.lock().expect("a live lock").is_empty());
     joining.abort();
     seed.close(true).await;

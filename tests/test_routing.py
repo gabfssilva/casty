@@ -41,6 +41,25 @@ def describe_routing() -> None:
                 assert [where.balance for where in located] == [3] * _KEYS
                 assert {where.node for where in located} == {node.system.node for node in harness.nodes}
 
+    def when_a_node_joins() -> None:
+        async def it_answers_every_key_from_every_node_as_soon_as_it_has_entered() -> None:
+            keys = [f"acc-{index}" for index in range(_KEYS)]
+            # From one node the first join moves keys both ways; from three it only moves them to the new node.
+            for size in (1, 3):
+                async with Harness.start(size) as harness:
+                    for key in keys:
+                        await harness.nodes[0].system.ref(account, key).ask(Deposit, 1)
+
+                    await harness.add()
+                    async with asyncio.TaskGroup() as depositing:
+                        for node in harness.nodes:
+                            for key in keys:
+                                depositing.create_task(node.system.ref(account, key).ask(Deposit, 1))
+
+                    first = harness.nodes[0].system
+                    located = [await first.ref(account, key).ask(Where) for key in keys]
+                    assert [where.balance for where in located] == [size + 2] * _KEYS
+
     def when_a_node_sends_many_messages_to_a_remote_key() -> None:
         async def it_delivers_them_in_order() -> None:
             async with Harness.start(2) as harness:
