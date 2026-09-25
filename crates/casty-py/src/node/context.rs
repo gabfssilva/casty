@@ -1,14 +1,15 @@
 //! What the body of an activation receives, and the iterator it reads its messages from.
 
+use core::time::Duration;
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration};
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyType;
+use pyo3::types::{PyDict, PyType};
 
 use super::Node;
 use super::activation::Activation;
-use crate::actor::Definition;
+use crate::actor::{Definition, period};
 use crate::refs::Ref;
 
 /// The context of one run of the body of an activation: its key, its state, and the messages that reach it.
@@ -101,6 +102,77 @@ impl Context {
         Activation::become_another(self.activation.bind(py), py, behavior, &definition, state)
     }
 
+    /// Await `work` beside the body, and tell this entity what it gives, through `mapper` when there is one, or what
+    /// `failed` makes of what it raised.
+    #[pyo3(signature = (work, mapper = None, /, *, failed = None))]
+    fn to_self(
+        &self,
+        py: Python<'_>,
+        work: &Bound<'_, PyAny>,
+        mapper: Option<Py<PyAny>>,
+        failed: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let activation = self.activation.bind(py);
+        Activation::handed(activation, py, self.run);
+        let itself = Bound::new(py, self.itself(py))?.unbind();
+        let actor = activation.get().entry().to_owned();
+        let key = activation.get().key().to_owned();
+        let node = self.node.clone();
+        self.node.pipe(py, work, move |py, done| {
+            let message = match (done, mapper, failed) {
+                (Ok(value), Some(mapper), _) => mapper.bind(py).call1((value,)),
+                (Ok(value), None, _) => Ok(value),
+                (Err(error), _, Some(failed)) => failed.bind(py).call1((error,)),
+                (Err(error), _, None) => {
+                    node.dropped(py, &actor, &key, &raised(&error)?);
+                    return Ok(());
+                }
+            };
+            let told = message.and_then(|message| itself.bind(py).call_method1("tell", (message,)));
+            if let Err(error) = told {
+                node.dropped(py, &actor, &key, &error.value(py).to_string());
+            }
+            Ok(())
+        })
+    }
+
+    /// Tell this entity `message` `delay` from now, and then every `interval`, while the key is active; once, without
+    /// `interval`. It takes the place of the schedule named `name`, and resolves to it once the replicas have it.
+    #[pyo3(signature = (name, delay, interval, message, /))]
+    fn schedule<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        delay: &Bound<'py, PyAny>,
+        interval: &Bound<'py, PyAny>,
+        message: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let delay = period("delay", delay)?;
+        let every = if interval.is_none() {
+            None
+        } else {
+            let every = period("interval", interval)?;
+            if every.is_zero() {
+                return Err(PyValueError::new_err(format!(
+                    "interval is {interval}, which is not positive"
+                )));
+            }
+            Some(every)
+        };
+        Activation::schedule(self.activation.bind(py), py, name, delay, every, message)
+    }
+
+    /// The schedules of the key that are not over, by name, in the order they were made.
+    #[getter]
+    fn schedules<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let all = PyDict::new(py);
+        for schedule in Activation::schedules(self.activation.bind(py), py) {
+            let name = schedule.name.clone();
+            all.set_item(name, Bound::new(py, schedule)?)?;
+        }
+        Ok(all)
+    }
+
     /// Messages and items of `source` in arrival order, until `source` ends.
     fn merge(&self, py: Python<'_>, source: &Bound<'_, PyAny>) -> Inbox {
         let items = source
@@ -157,6 +229,86 @@ impl State {
     }
 }
 
+/// A message a key tells itself at a time, once or on an interval, which its replicas keep.
+#[pyclass(frozen, module = "casty._casty")]
+#[derive(Debug)]
+pub struct Schedule {
+    activation: Py<Activation>,
+    /// Which of the schedules of that name this is: the one made last takes the place of the others.
+    id: u64,
+    name: String,
+    message: Py<PyAny>,
+    interval: Option<Duration>,
+}
+
+impl Schedule {
+    #[must_use]
+    pub fn new(
+        activation: Py<Activation>,
+        id: u64,
+        name: String,
+        message: Py<PyAny>,
+        interval: Option<Duration>,
+    ) -> Self {
+        Self {
+            activation,
+            id,
+            name,
+            message,
+            interval,
+        }
+    }
+}
+
+#[pymethods]
+impl Schedule {
+    #[classmethod]
+    fn __class_getitem__<'py>(
+        class: &Bound<'py, PyType>,
+        item: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        crate::generic::alias(class, item)
+    }
+
+    /// What the key calls it: no two of its schedules share a name.
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The message it tells the key.
+    #[getter]
+    fn message(&self, py: Python<'_>) -> Py<PyAny> {
+        self.message.clone_ref(py)
+    }
+
+    /// How long after each time it goes off it goes off again. `None` for one that goes off once.
+    #[getter]
+    fn interval(&self) -> Option<Duration> {
+        self.interval
+    }
+
+    /// When it goes off next, or `None` once it is over or another of its name took its place.
+    #[getter]
+    fn due<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let Some(due) = self.activation.get().due(self.id) else {
+            return Ok(None);
+        };
+        let datetime = py.import("datetime")?;
+        let utc = datetime.getattr("timezone")?.getattr("utc")?;
+        let epoch = datetime
+            .getattr("datetime")?
+            .call_method1("fromtimestamp", (0, utc))?;
+        let since = datetime.getattr("timedelta")?.call1((0, 0, due))?;
+        epoch.add(since).map(Some)
+    }
+
+    /// Stop it, and return once the replicas no longer have it.
+    fn cancel<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Activation::unschedule(self.activation.bind(py), py, self.id)
+    }
+}
+
 /// The messages of an activation, on their own or merged with a source the body brought.
 #[pyclass(frozen, module = "casty._casty")]
 #[derive(Debug)]
@@ -175,6 +327,17 @@ impl Inbox {
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         Activation::read(self.activation.bind(py), py, self.run, self.source.as_ref())
     }
+}
+
+/// Why work handed to `to_self` without `failed` sent nothing: the class of what it raised, and its text.
+fn raised(error: &Bound<'_, PyAny>) -> PyResult<String> {
+    let class: String = error.get_type().getattr("__name__")?.extract()?;
+    let text: String = error.str()?.extract()?;
+    Ok(if text.is_empty() {
+        format!("the work handed to to_self raised {class}")
+    } else {
+        format!("the work handed to to_self raised {class}: {text}")
+    })
 }
 
 /// What a read ends with when nothing else will arrive.

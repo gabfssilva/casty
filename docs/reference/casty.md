@@ -30,6 +30,8 @@ them under the same names.
 
 ::: casty.State
 
+::: casty.Schedule
+
 ::: casty.Ref
 
 ## Systems

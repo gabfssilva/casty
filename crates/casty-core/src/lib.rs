@@ -13,6 +13,7 @@ pub mod outcome;
 pub mod placement;
 pub mod replication;
 pub mod rolls;
+pub mod schedule;
 pub mod schema;
 pub mod store;
 pub mod wire;

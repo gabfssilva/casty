@@ -1,14 +1,26 @@
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from operator import methodcaller
 from typing import Literal, assert_never
 from uuid import UUID
 
 import pytest
 
-from casty import ActorFailed, ActorSystem, Backoff, Context, DefaultedActor, MailboxFull, ReentrancyError, Ref, actor
+from casty import (
+    ActorFailed,
+    ActorSystem,
+    Backoff,
+    Context,
+    DefaultedActor,
+    Event,
+    MailboxFull,
+    MessageDropped,
+    ReentrancyError,
+    Ref,
+    actor,
+)
 from tests.app import Account, Balance, Deposit, Order, Paid, Pay, Pending, account
 from tests.support import eventually
 
@@ -169,6 +181,134 @@ class Note:
 class Descend:
     reply_to: Ref[tuple[str, ...]]
     depth: int
+
+
+@dataclass(frozen=True)
+class Begin:
+    """Has a body hand its work to `to_self`."""
+
+
+@dataclass(frozen=True)
+class Heard:
+    reply_to: Ref[tuple[str, ...]]
+
+
+type Handing = Begin | Relay | Note | Heard
+"""What a body that hands work to itself takes: the start, a question, what the work gives, and a read of it all."""
+
+
+async def _noted(ctx: Context[tuple[str, ...], Handing], msg: Relay | Note | Heard) -> None:
+    """Answer `Relay` with the key, keep each `Note`, and answer `Heard` with the notes kept, sorted."""
+    match msg:
+        case Relay(reply_to):
+            reply_to.tell(ctx.key)
+        case Note(text):
+            await ctx.state.update(lambda notes: (*notes, text))
+        case Heard(reply_to):
+            reply_to.tell(tuple(sorted(ctx.state.value)))
+        case _:
+            assert_never(msg)
+
+
+@dataclass(frozen=True)
+class Plan:
+    delay: timedelta
+    interval: timedelta | None
+    text: str
+
+
+@dataclass(frozen=True)
+class Unplan:
+    reply_to: Ref[tuple[datetime | None, ...]]
+
+
+@dataclass(frozen=True)
+class Plans:
+    reply_to: Ref[tuple[tuple[str, timedelta | None, datetime | None], ...]]
+
+
+@dataclass(frozen=True)
+class Replan:
+    reply_to: Ref[tuple[datetime | None, int]]
+
+
+@dataclass(frozen=True)
+class Wipe:
+    pass
+
+
+@dataclass(frozen=True)
+class Shift:
+    pass
+
+
+@dataclass(frozen=True)
+class Misplan:
+    reply_to: Ref[tuple[str, ...]]
+
+
+type Planning = Plan | Unplan | Plans | Replan | Wipe | Shift | Misplan | Explode | Note | Heard
+"""What a body that schedules messages for itself takes, and the `Note`s it schedules, named after their text."""
+
+
+def _plans(ctx: Context[tuple[str, ...], Planning]) -> tuple[tuple[str, timedelta | None, datetime | None], ...]:
+    return tuple((name, schedule.interval, schedule.due) for name, schedule in ctx.schedules.items())
+
+
+@actor(initial=tuple[str, ...](), idle_after=timedelta(milliseconds=100))
+async def planner(ctx: Context[tuple[str, ...], Planning]) -> None:
+    async for msg in ctx.inbox:
+        match msg:
+            case Plan(delay, interval, text):
+                await ctx.schedule(text, delay, interval, Note(text))
+            case Unplan(reply_to):
+                cancelled = tuple(ctx.schedules.values())
+                for schedule in cancelled:
+                    await schedule.cancel()
+                reply_to.tell(tuple(schedule.due for schedule in cancelled))
+            case Plans(reply_to):
+                reply_to.tell(_plans(ctx))
+            case Replan(reply_to):
+                first = await ctx.schedule("later", timedelta(hours=1), None, Note("first"))
+                await ctx.schedule("later", timedelta(hours=2), None, Note("second"))
+                # The first one is over: cancelling it leaves the one that took its place.
+                await first.cancel()
+                reply_to.tell((first.due, len(ctx.schedules)))
+            case Wipe():
+                await ctx.state.delete()
+            case Shift():
+                await ctx.become(replanner)
+            case Misplan(reply_to):
+                refused: list[str] = []
+                for delay, interval in ((timedelta(days=-1), None), (timedelta(0), timedelta(0))):
+                    try:
+                        await ctx.schedule("never", delay, interval, Note("never"))
+                    except ValueError as error:
+                        refused.append(str(error))
+                reply_to.tell(tuple(refused))
+            case Explode():
+                raise RuntimeError("boom")
+            case Note(text):
+                await ctx.state.update(lambda notes: (*notes, text))
+            case Heard(reply_to):
+                reply_to.tell(tuple(sorted(ctx.state.value)))
+            case _:
+                assert_never(msg)
+
+
+@actor(initial=tuple[str, ...]())
+async def replanner(ctx: Context[tuple[str, ...], Planning]) -> None:
+    """What `planner` becomes: it keeps its notes, lists its schedules, and reads nothing else."""
+    async for msg in ctx.inbox:
+        match msg:
+            case Note(text):
+                await ctx.state.update(lambda notes: (*notes, f"then {text}"))
+            case Plans(reply_to):
+                reply_to.tell(_plans(ctx))
+            case Heard(reply_to):
+                reply_to.tell(tuple(sorted(ctx.state.value)))
+            case _:
+                pass
 
 
 def describe_actor_system() -> None:
@@ -942,3 +1082,267 @@ def describe_actor_system() -> None:
                     assert answers == ["caller"]
 
                 await eventually(asked_back)
+
+    def when_the_body_hands_work_to_itself() -> None:
+        async def it_reads_its_next_messages_meanwhile_and_takes_what_the_work_gives_as_a_message() -> None:
+            released = asyncio.Event()
+
+            @actor(initial=Account())
+            async def slow(ctx: Context[Account, Relay]) -> None:
+                async for msg in ctx.inbox:
+                    await released.wait()
+                    msg.reply_to.tell("slow")
+
+            @actor(initial=tuple[str, ...]())
+            async def handing(ctx: Context[tuple[str, ...], Handing]) -> None:
+                async for msg in ctx.inbox:
+                    match msg:
+                        case Begin():
+                            ctx.to_self(ctx.system.ref(slow, ctx.key).ask(Relay), Note)
+                        case _:
+                            await _noted(ctx, msg)
+
+            async with ActorSystem() as system:
+                ref = system.ref(handing, "k")
+                ref.tell(Begin())
+                # Answered while `slow` still holds the answer back.
+                assert await ref.ask(Heard) == ()
+                released.set()
+
+                async def noted() -> None:
+                    assert await ref.ask(Heard) == ("slow",)
+
+                await eventually(noted)
+
+        async def it_maps_a_gather_and_what_the_work_raised_into_messages() -> None:
+            async def broken() -> str:
+                raise ValueError("no answer")
+
+            @actor(initial=tuple[str, ...]())
+            async def handing(ctx: Context[tuple[str, ...], Handing]) -> None:
+                async for msg in ctx.inbox:
+                    match msg:
+                        case Begin():
+                            both = asyncio.gather(ctx.system.ref(handing, "a").ask(Relay), ctx.self.ask(Relay))
+                            ctx.to_self(both, lambda keys: Note("+".join(keys)))
+                            ctx.to_self(broken(), Note, failed=lambda error: Note(f"failed: {error}"))
+                            ctx.to_self(asyncio.sleep(0, Note("as it is")))
+                        case _:
+                            await _noted(ctx, msg)
+
+            async with ActorSystem() as system:
+                ref = system.ref(handing, "k")
+                ref.tell(Begin())
+
+                async def noted() -> None:
+                    assert await ref.ask(Heard) == ("a+k", "as it is", "failed: no answer")
+
+                await eventually(noted)
+
+        async def it_reports_a_dropped_message_when_the_work_raises_and_nothing_maps_it() -> None:
+            events: list[Event] = []
+
+            async def broken() -> Note:
+                raise ValueError("no answer")
+
+            @actor(initial=tuple[str, ...]())
+            async def handing(ctx: Context[tuple[str, ...], Handing]) -> None:
+                async for msg in ctx.inbox:
+                    match msg:
+                        case Begin():
+                            ctx.to_self(broken())
+                        case _:
+                            await _noted(ctx, msg)
+
+            async with ActorSystem(observer=events.append) as system:
+                system.ref(handing, "k").tell(Begin())
+
+                async def reported() -> None:
+                    assert (
+                        MessageDropped(handing.name, "k", "the work handed to to_self raised ValueError: no answer")
+                        in events
+                    )
+
+                await eventually(reported)
+
+        async def it_lets_the_keys_its_work_asks_ask_it_back_while_it_is_still_on_the_message() -> None:
+            released = asyncio.Event()
+            beginning: set[str] = set()
+
+            @actor(initial=Account())
+            async def back(ctx: Context[Account, Relay]) -> None:
+                async for msg in ctx.inbox:
+                    try:
+                        msg.reply_to.tell(await ctx.system.ref(handing, ctx.key).ask(Relay))
+                    except ReentrancyError as error:
+                        msg.reply_to.tell(str(error))
+
+            @actor(initial=tuple[str, ...]())
+            async def handing(ctx: Context[tuple[str, ...], Handing]) -> None:
+                async for msg in ctx.inbox:
+                    match msg:
+                        case Begin() if ctx.key == "direct":
+                            ctx.to_self(ctx.system.ref(back, ctx.key).ask(Relay), Note)
+                            beginning.add(ctx.key)
+                            await released.wait()
+                        case Begin():
+                            both = asyncio.gather(ctx.system.ref(back, ctx.key).ask(Relay))
+                            ctx.to_self(both, lambda answers: Note(answers[0]))
+                            beginning.add(ctx.key)
+                            await released.wait()
+                        case _:
+                            await _noted(ctx, msg)
+
+            async with ActorSystem() as system:
+                for key in ("direct", "gathered"):
+                    system.ref(handing, key).tell(Begin())
+
+                async def asked_back() -> None:
+                    # The body is on `Begin`, and what `back` did about it waits behind: its question, or, refused as
+                    # a cycle, the refusal as a note.
+                    assert beginning == {"direct", "gathered"}
+                    assert [system._queued(handing, key) for key in ("direct", "gathered")] == [1, 1]
+
+                await eventually(asked_back)
+                released.set()
+
+                async def noted() -> None:
+                    for key in ("direct", "gathered"):
+                        assert await system.ref(handing, key).ask(Heard) == (key,)
+
+                await eventually(noted)
+
+        async def it_cancels_the_work_that_has_not_ended_when_the_system_stops() -> None:
+            began = asyncio.Event()
+            cancelled = asyncio.Event()
+
+            async def forever() -> Note:
+                began.set()
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+                return Note("never")
+
+            @actor(initial=tuple[str, ...]())
+            async def handing(ctx: Context[tuple[str, ...], Handing]) -> None:
+                async for msg in ctx.inbox:
+                    match msg:
+                        case Begin():
+                            ctx.to_self(forever())
+                        case _:
+                            await _noted(ctx, msg)
+
+            async with ActorSystem() as system:
+                system.ref(handing, "k").tell(Begin())
+                await asyncio.wait_for(began.wait(), 5)
+
+            await asyncio.wait_for(cancelled.wait(), 5)
+
+    def when_the_body_schedules_messages_for_itself() -> None:
+        async def it_tells_them_after_the_delay_and_then_every_interval_while_the_key_stays_active() -> None:
+            async with ActorSystem() as system:
+                ref = system.ref(planner, "k")
+                # Both are due after the `idle_after` of the type, which a key with schedules does not idle out at.
+                ref.tell(Plan(timedelta(milliseconds=150), timedelta(milliseconds=50), "tick"))
+                ref.tell(Plan(timedelta(milliseconds=150), None, "once"))
+                # Nothing else reaches the key meanwhile, so only its schedules keep it active.
+                await asyncio.sleep(0.6)
+
+                heard = await ref.ask(Heard)
+                assert heard.count("once") == 1
+                assert heard.count("tick") >= 3
+                assert [(name, interval) for name, interval, _ in await ref.ask(Plans)] == [
+                    ("tick", timedelta(milliseconds=50))
+                ]
+
+        async def it_lists_them_by_name_until_they_are_cancelled_and_idles_out_once_none_is_left() -> None:
+            async with ActorSystem() as system:
+                ref = system.ref(planner, "k")
+                made = datetime.now(UTC)
+                ref.tell(Plan(timedelta(hours=1), None, "later"))
+                ref.tell(Plan(timedelta(hours=2), timedelta(hours=1), "hourly"))
+
+                listed = await ref.ask(Plans)
+                assert [(name, interval) for name, interval, _ in listed] == [
+                    ("later", None),
+                    ("hourly", timedelta(hours=1)),
+                ]
+                for (_, _, due), delay in zip(listed, (timedelta(hours=1), timedelta(hours=2)), strict=True):
+                    assert due is not None
+                    assert made + delay <= due < made + delay + timedelta(seconds=5)
+
+                assert await ref.ask(Unplan) == (None, None)
+                assert await ref.ask(Plans) == ()
+
+                async def idled_out() -> None:
+                    assert system.activations() == ()
+
+                await eventually(idled_out)
+
+        async def it_puts_a_schedule_in_place_of_the_one_of_the_same_name() -> None:
+            async with ActorSystem() as system:
+                ref = system.ref(planner, "k")
+                made = datetime.now(UTC)
+                assert await ref.ask(Replan) == (None, 1)
+
+                [(name, interval, due)] = await ref.ask(Plans)
+                assert (name, interval) == ("later", None)
+                assert due is not None
+                assert made + timedelta(hours=2) <= due < made + timedelta(hours=2, seconds=5)
+
+        async def it_goes_on_after_the_body_raises() -> None:
+            async with ActorSystem(backoff=Backoff(first=timedelta(milliseconds=10))) as system:
+                ref = system.ref(planner, "k")
+                ref.tell(Plan(timedelta(0), timedelta(milliseconds=50), "tick"))
+                with pytest.raises(ActorFailed):
+                    await ref.ask(Explode)
+                before = (await ref.ask(Heard)).count("tick")
+
+                async def ticking() -> None:
+                    assert (await ref.ask(Heard)).count("tick") >= before + 2
+
+                await eventually(ticking)
+                assert [name for name, _, _ in await ref.ask(Plans)] == ["tick"]
+
+        async def it_cancels_them_when_the_state_is_deleted() -> None:
+            async with ActorSystem() as system:
+                ref = system.ref(planner, "k")
+                ref.tell(Plan(timedelta(hours=1), None, "later"))
+                assert len(await ref.ask(Plans)) == 1
+                ref.tell(Wipe())
+                assert await ref.ask(Plans) == ()
+
+        async def it_keeps_them_going_when_the_key_becomes_another_behavior() -> None:
+            async with ActorSystem() as system:
+                ref = system.ref(planner, "k")
+                ref.tell(Plan(timedelta(milliseconds=50), timedelta(milliseconds=50), "tick"))
+                ref.tell(Shift())
+                assert [name for name, _, _ in await ref.ask(Plans)] == ["tick"]
+
+                async def ticking_there() -> None:
+                    assert "then tick" in await ref.ask(Heard)
+
+                await eventually(ticking_there)
+
+        async def it_takes_them_up_when_the_key_is_activated_again_and_sends_what_came_due_meanwhile() -> None:
+            async with ActorSystem() as system:
+                ref = system.ref(planner, "k")
+                ref.tell(Plan(timedelta(milliseconds=100), None, "late"))
+                assert len(await ref.ask(Plans)) == 1
+                assert await system.release(planner, "k")
+                await asyncio.sleep(0.2)
+
+                async def heard() -> None:
+                    assert await ref.ask(Heard) == ("late",)
+
+                await eventually(heard)
+                assert await ref.ask(Plans) == ()
+
+        async def it_refuses_a_negative_delay_and_an_interval_that_is_not_positive() -> None:
+            async with ActorSystem() as system:
+                assert await system.ref(planner, "k").ask(Misplan) == (
+                    "delay is -1 day, 0:00:00, which is negative",
+                    "interval is 0:00:00, which is not positive",
+                )

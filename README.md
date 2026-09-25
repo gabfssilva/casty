@@ -1,13 +1,14 @@
 # casty
 
-Typed, replicated virtual actors for Python.
+A minimalist, type-safe actor framework for Python 3.12+ with built-in distributed clustering.
 
-You can think of an actor as a stateful entity identified by its type and key, defined as an async function. It processes messages one at a time, in a single process or replicated across a cluster.
+casty offers you a way to define distributed computation using async functions. Each actor is a plain `async def` identified by a type and a key, with nothing to spawn or supervise: the cluster places it on a node by consistent hashing, routes its messages there, and replicates its state to a quorum of nodes. You write each actor as if it ran alone in one process, holding its state in memory and handling one message at a time, and adding nodes spreads the actors across them without changing that code.
 
 ## Contents
 
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Actors](#actors)
 - [Guide](#guide)
 - [Clusters](#clusters)
 - [Collections](#collections)
@@ -45,44 +46,132 @@ from casty import ActorSystem, Context, Ref, actor
 
 @dataclass(frozen=True)
 class Greet:
-    reply_to: Ref[str]
     name: str
 
 
+@dataclass(frozen=True)
+class Count:
+    reply_to: Ref[int]
+
+
 @actor(initial=0)
-async def greeter(ctx: Context[int, Greet]) -> None:
+async def greeter(ctx: Context[int, Greet | Count]) -> None:
     async for msg in ctx.inbox:
-        count = await ctx.state.update(lambda count: count + 1)
-        msg.reply_to.tell(f"hello, {msg.name}! greeting #{count} from {ctx.key}")
+        match msg:
+            case Greet(name):
+                count = await ctx.state.update(lambda count: count + 1)
+                print(f"hello, {name}! greeting #{count} from {ctx.key}")
+            case Count(reply_to):
+                reply_to.tell(ctx.state.value)
 
 
 async def main() -> None:
     async with ActorSystem() as system:
         ana = system.ref(greeter, "ana")
-        print(await ana.ask(Greet, "world"))  # hello, world! greeting #1 from ana
-        print(await ana.ask(Greet, "again"))  # hello, again! greeting #2 from ana
-        print(await system.ref(greeter, "bia").ask(Greet, "world"))  # greeting #1 from bia
+        ana.tell(Greet("world"))  # hello, world! greeting #1 from ana
+        ana.tell(Greet("again"))  # hello, again! greeting #2 from ana
+        print(await ana.ask(Count))  # 2
+        print(await system.ref(greeter, "bia").ask(Count))  # 0
 
 
 asyncio.run(main())
 ```
 
-- `greeter` is an actor type. `Context[int, Greet]` declares its state type and its message type.
-- `"ana"` and `"bia"` are keys. Each key is an entity with its own state and mailbox.
-- `system.ref(greeter, "ana")` is the address of the entity. Obtaining it creates the key if it does not exist.
-- `ana.ask(Greet, "world")` sends `Greet(reply_to, "world")` and waits for what the actor tells `reply_to`.
+- `greeter` is an actor type. `Context[int, Greet | Count]` declares that its state is an `int` and that it receives `Greet` and `Count` messages; pyright checks both, and casty serializes them.
+- `"ana"` and `"bia"` are keys: two actors of the same type, each with its own state and its own mailbox.
+- `system.ref(greeter, "ana")` is the address of an actor. There is nothing to spawn: the actor starts on its first message, stops when it goes idle, and its state is kept in between.
+- `ana.tell(Greet("world"))` sends a message and returns at once. The actor handles its messages one at a time, in the order they arrive.
+- `ana.ask(Count)` builds `Count(reply_to)`, sends it, and waits for what the actor tells `reply_to`. It is how code outside the actors reads from them; between actors, `tell` is the default (see [Actors](#actors)).
+- `ctx.state.update` saves the new count and returns once it is stored.
+
+### On a cluster
+
+To run the same actor on a cluster, give the system a `Cluster`: the address the node listens on and the nodes it joins through. `greeter` does not change.
+
+```python
+from casty import Cluster
+
+cluster = Cluster(bind="10.0.0.5:7400", seeds=("10.0.0.4:7400",))
+async with ActorSystem(cluster=cluster) as system:
+    ana = system.ref(greeter, "ana")  # the same actor, from any node
+```
+
+Start one such node per machine. casty places each key on one of them by consistent hashing and routes every message for it there, from whichever node sends it: the `print` of `greeter` shows on the node that runs `ana`. Each write of the state is confirmed by two of the three nodes that keep a copy, which are the defaults (see [Clusters](#clusters)). [`examples/06-distribution`](examples/06-distribution) runs a cluster on one machine and shows keys moving between nodes as they join and leave.
+
+## Actors
+
+An actor is identified by its type and its key. The type is the function decorated with `@actor`; the key is a string you choose, such as an account number or a user id. `(account, "acc-1")` and `(account, "acc-2")` are two actors that run the same code, each with its own state and its own mailbox. There is no `spawn`, no parent and no actor object: `system.ref(account, "acc-1")` names the actor, and a message sent to that ref reaches it on whichever node it runs.
+
+An actor is active only while it has work. Its first message, or the first `ref` to it, activates it: casty loads its state on the node that owns the key and starts the body. The body reads messages from `ctx.inbox`, which ends after `idle_after` without messages (one minute by default). When the body returns, the actor is deactivated and its state stays stored, and the next message activates it again from that state. Only active actors hold a task and the memory of their body.
+
+An actor handles one message at a time, in the order they arrive. The body takes the next message when it reads `ctx.inbox` again, so nothing else runs on the actor in between and the body needs no locks. For the same reason, everything the body awaits before reading again holds up the messages of its key: a write until it is confirmed, an `ask` until its answer, a sleep, any I/O. A task the body starts runs beside it and holds up nothing.
+
+Between actors, `tell` is the default. When an actor needs an answer, `ctx.to_self(work, mapper)` gets it without holding up its key: it awaits `work` beside the body, and tells the actor what `mapper` makes of the result, as one more message. `work` is any awaitable: an `ask`, a `gather` of several, a call to a database. The actor goes on with its mailbox meanwhile, so what it has to remember until the answer arrives, such as a transfer in progress, goes in the message or in the state.
+
+```python
+@actor(initial=0)
+async def teller(ctx: Context[int, Transfer | Withdrawn]) -> None:
+    async for msg in ctx.inbox:
+        match msg:
+            case Transfer(source, amount):
+                withdrawal = ctx.system.ref(account, source).ask(Withdraw, amount)
+                ctx.to_self(withdrawal, partial(Withdrawn, msg))
+            case Withdrawn(transfer, ok):
+                ...
+```
+
+`mapper` runs when `work` ends, after the body has moved on to other messages, so a `lambda` that reads `msg` would read a later one; `functools.partial` binds it when `to_self` is called. Without `mapper`, the result is the message. `failed=` turns an exception of `work` into a message too; without it, the exception is reported as a `MessageDropped` (see [Observing a node](#observing-a-node)).
+
+Local variables last only as long as one run of the body. The body starts again from the last saved state after it raises, each time the actor is activated, and on another node when its key moves there, so what must survive goes in `ctx.state` (see [State](#state)).
+
+`ctx.become(other, state)` hands the key to another actor type that takes the same messages, so each state of a state machine can be a function of its own. The key and its refs stay the same, the change is saved with the state, and the next message is read by the new body. pyright checks that the state fits the new type.
+
+```python
+@actor
+async def pending(ctx: Context[Pending, OrderMsg]) -> None:
+    async for msg in ctx.inbox:
+        match msg:
+            case Pay(reply_to, amount):
+                await ctx.become(paid, Paid(ctx.state.value.items, amount))
+                reply_to.tell(f"paid {amount}")
+            case Ship(reply_to, _):
+                reply_to.tell("refused: not paid yet")
+```
+
+A body is ordinary asyncio code, so it does not have to wait for messages: it can sleep, read a stream or run a `TaskGroup`, and `ctx.merge(source)` interleaves its mailbox with any async iterable. `Context[S]`, without a message type, declares an actor that takes no messages at all:
+
+```python
+@actor(initial=Cursor())
+async def consumer(ctx: Context[Cursor]) -> None:
+    async for record in broker.stream(ctx.key, ctx.state.value.offset + 1):
+        await process(record)
+        await ctx.state.set(Cursor(record.offset))
+
+
+system.ref(consumer, "orders-0")  # creates the key and starts the body
+```
+
+An active actor is marked in its replicated state. If its node dies, the node that takes the key over starts the body again from the saved state, with no message sent, so work done after the last write is repeated. [`examples/01-state-machine`](examples/01-state-machine) and [`examples/08-consumers`](examples/08-consumers) run both patterns.
+
+`ctx.schedule(name, delay, interval, message)` tells the actor `message` after `delay` and then every `interval`, or once when `interval` is `None`. A schedule is saved with the state, so it goes on after its node dies: only the node where the actor is active sends it, and an actor with schedules does not go idle. The name identifies it. Scheduling under a name in use replaces that schedule, so a body can schedule on every message that asks for it without adding a second one, and `ctx.schedules` maps each name to its schedule, which `cancel()` stops:
+
+```python
+@actor(initial=Feed())
+async def poller(ctx: Context[Feed, Watch | Poll | Unwatch]) -> None:
+    async for msg in ctx.inbox:
+        match msg:
+            case Watch(every):
+                await ctx.schedule("poll", timedelta(0), every, Poll())
+            case Poll():
+                await ctx.state.set(await fetch(ctx.key, ctx.state.value))
+            case Unwatch():
+                if (polling := ctx.schedules.get("poll")) is not None:
+                    await polling.cancel()
+```
+
+Each time a schedule goes off is a message, queued like a `tell`, and a write of its next time, which the node that takes the key over goes on from. Times are kept by the wall clock, and a time missed by more than one interval is skipped. The schedules go on under the type `become` hands the key to, which takes the same messages, and `state.delete()` cancels them.
 
 ## Guide
-
-### Actors, keys and refs
-
-An actor is an entity identified by `(actor type, key)`. There is no `spawn`, no hierarchy and no actor object: you name the entity and send it a message.
-
-A key is activated when its ref is obtained or a message arrives: casty loads its state and runs the body, which is the decorated function. `ctx.inbox` ends after `idle_after` without messages (the type's, or the system's, one minute by default); when the body returns, the key is deactivated and its state stays stored. The next ref or message activates it again from the saved state.
-
-- Only active keys use a task and memory for a body.
-- Local variables do not survive deactivation, a restart or a move to another node. What must survive goes in the state.
-- A key handles one message at a time, so a body needs no locks.
 
 ### tell and ask
 
@@ -232,7 +321,7 @@ async def teller(ctx: Context[int, Transfer]) -> None:
             msg.reply_to.tell(False)
 ```
 
-An `ask` made by a body carries the keys whose bodies wait for its answer: those waiting on the message the body is on, and the body itself until it reads again. One that comes back to such a key raises `ReentrancyError` at once, naming the cycle, instead of waiting for the deadline: a body asking its own key, or two keys asking each other. The chain names the 16 most recent keys and only the task that read the message adds to it, so a longer cycle, one through a task the body started, and two requests that each hold a key the other asks still end in `TimeoutError`.
+An `ask` made by a body carries the keys whose bodies wait for its answer: those waiting on the message the body is on, and the body itself until it reads again. One that comes back to such a key raises `ReentrancyError` at once, naming the cycle, instead of waiting for the deadline: a body asking its own key, or two keys asking each other. The chain names the 16 most recent keys and only the task that read the message adds to it, so a longer cycle, one through a task the body started, and two requests that each hold a key the other asks still end in `TimeoutError`. An `ask` handed to `ctx.to_self` keeps nobody waiting: calling it ends the wait of what the body asked on its message so far, so a key its work asks may ask it back, and a cycle through an `ask` the body still awaits ends at the deadline instead.
 
 ### What holds up a key
 
@@ -599,7 +688,7 @@ system.ref(nightly, "report")  # creates the key and starts the body, once for t
 
 The order of the last two lines of the loop decides what a failure does. Saving the next date first means a crash during the report skips that night: at most once. Building the report first means a crash before the save builds it again on the next owner: at least once. During a change of owner two nodes can briefly run the key, but with `write="majority"` only one of them can confirm the save, and a body whose save is not confirmed never reaches the line after it. With the save first, each night is claimed by at most one node.
 
-casty keeps no timers for keys that are not running, what Orleans calls reminders: a key that idles out is deactivated and wakes only on a message. A scheduler of many timers, such as one expiry per session, keeps them in keys of its own, grouped by when they are due: each is a running key that sleeps until its time, tells the entities whose timers are due, and deletes its state. Every active key holds a task and memory, so the grouping sets how many of them run at once.
+casty keeps no timers for keys that are not running, what Orleans calls reminders: a key that idles out is deactivated and wakes only on a message. A key with schedules (see [Actors](#actors)) does not idle out, and a key let go with `ActorSystem.release` takes its schedules up when a message activates it again. A scheduler of many timers, such as one expiry per session, keeps them in keys of its own, grouped by when they are due: each is a running key that sleeps until its time, tells the entities whose timers are due, and deletes its state. Every active key holds a task and memory, so the grouping sets how many of them run at once.
 
 ### Brokers
 
@@ -736,6 +825,9 @@ The API reference, generated from the docstrings, is at <https://gabfssilva.gith
 | `system` | System of the node running this activation |
 | `await become(behavior[, state])` | Hand the key to another actor type with the same messages |
 | `merge(source)` | Messages and items of `source` in arrival order, until `source` ends |
+| `to_self(work[, mapper], failed=)` | Await `work` beside the body and tell this entity what it gives, as a message |
+| `await schedule(name, delay, interval, message)` | Tell this entity `message` after `delay`, then every `interval`; replaces the schedule named `name` |
+| `schedules` | The schedules of the key by name, each with `name`, `message`, `interval`, `due` and `await cancel()` |
 
 ### `ActorSystem`
 

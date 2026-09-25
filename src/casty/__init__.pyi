@@ -5,8 +5,8 @@ Everything that runs is in `casty._casty`; this is the contract it answers to. T
 re-exported from the module that defines it: `casty.model`, `casty.collections` and `casty.observer`.
 """
 
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
-from datetime import timedelta
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping
+from datetime import datetime, timedelta
 from typing import Generic, Never, Protocol, Self, overload, runtime_checkable
 
 from typing_extensions import TypeVar
@@ -142,6 +142,33 @@ class MessageBuilder[**P, R, M](Protocol):
 
     def __call__(self, reply_to: Ref[R], /, *args: P.args, **kwargs: P.kwargs) -> M: ...
 
+@runtime_checkable
+class Schedule[M](Protocol):
+    """A message a key tells itself at a time, once or on an interval, made by `Context.schedule`."""
+
+    @property
+    def name(self) -> str:
+        """What the key calls it. No two schedules of a key share a name."""
+
+    @property
+    def message(self) -> M:
+        """The message it tells the key."""
+
+    @property
+    def interval(self) -> timedelta | None:
+        """How long after each time it goes off it goes off again. `None` for a schedule that goes off once."""
+
+    @property
+    def due(self) -> datetime | None:
+        """When it goes off next, in UTC, or `None` once it is over or another of its name took its place."""
+
+    async def cancel(self) -> None:
+        """Stop it, and return once the type's write level confirms it.
+
+        A schedule that is over, or that another of its name replaced, returns at once. Raises `RuntimeError` when the
+        activation that made it is over.
+        """
+
 # A state is read and written as the same type, so it is invariant, for the reason the types of an actor are.
 _T = TypeVar("_T")
 
@@ -229,10 +256,70 @@ class Context(Protocol[_S, _Received]):
     async def become(self, behavior: Actor[_S, _Received] | DefaultedActor[_S, _Received], /) -> None:
         """Hand the key to `behavior`, which has the state type of this one and goes on from the last saved state."""
 
+    async def schedule(
+        self, name: str, delay: timedelta, interval: timedelta | None, message: _Received, /
+    ) -> Schedule[_Received]:
+        """Tell this entity `message` `delay` from now, and then every `interval`; once when `interval` is `None`.
+
+        The schedule takes the place of the one of the key named `name`, if there is one, so scheduling under the same
+        name again, at the start of the body or on every message that asks for it, never adds a second one. Returns
+        the schedule once the type's write level confirms it. A schedule is saved with the state of the key, so
+        the node that runs the key after this one, when this one fails or the key moves, takes it up where it was. It
+        goes off on the node where the key is active, and only while it is: a key with schedules does not idle out, and
+        one that is not active, after its body returns or `ActorSystem.release`, takes them up when it is activated
+        again. A time that passed while no node ran the key goes off at once.
+
+        Times are kept by the wall clock. An interval counts from the time the schedule was due, not from when its
+        message is read, and a time missed by more than one interval, by a busy loop or a key taken over late, is
+        skipped. Each time it goes off is a message queued like a `tell`, and a write of the time it goes off next, or
+        of its end. A message queued on a node that dies is lost as any queued message is, and a time whose write was
+        not confirmed goes off again on the node that takes the key over.
+
+        The schedules go on under the behavior `become` hands the key to, which takes the same messages, and
+        `state.delete` cancels them. Raises `SchemaError` when `message` is not one of the messages of the type, and
+        `ValueError` when `delay` is negative or `interval` is not positive.
+        """
+
+    @property
+    def schedules(self) -> Mapping[str, Schedule[_Received]]:
+        """The schedules of the key that are not over, by name, in the order they were made."""
+
     def merge[T](self, source: AsyncIterable[T], /) -> AsyncIterator[_Received | T]:
         """Messages and items of `source` in arrival order, until `source` ends.
 
         Idleness does not end it, and an exception raised by `source` propagates to the body.
+        """
+
+    @overload
+    def to_self(self, work: Awaitable[_Received], /, *, failed: Callable[[Exception], _Received] | None = None) -> None:
+        """Await `work` beside the body, and tell this entity what it gives, as a message. Returns at once.
+
+        The body goes on reading its messages meanwhile, so an `ask` handed over this way holds up nothing: its answer
+        is queued behind the messages that arrived before it, and it goes wherever the key is by then, activating it
+        again if it went idle. `work` is any awaitable: an `ask`, a `gather` of several, a call to a database.
+
+        When `work` raises, `failed` makes the message of what it raised. Without `failed`, and when a message cannot
+        be told, nothing is sent and the system reports a `MessageDropped`. Work that has not ended when the system
+        stops is cancelled, and sends nothing.
+
+        Nothing the body asked on this message before calling it keeps it waiting any more, as far as
+        `ReentrancyError` goes: a key asked that way may ask this one back, and is queued. A cycle through such an
+        `ask` that the body still awaits ends at the deadline instead.
+        """
+
+    @overload
+    def to_self[T](
+        self,
+        work: Awaitable[T],
+        mapper: Callable[[T], _Received],
+        /,
+        *,
+        failed: Callable[[Exception], _Received] | None = None,
+    ) -> None:
+        """Await `work` beside the body, and tell this entity what `mapper` makes of what it gives.
+
+        `mapper` runs when `work` ends, after the body has moved on: a `lambda` that reads the message of the loop reads
+        the one the body is on by then. `functools.partial(Withdrawn, msg)` binds it when `to_self` is called.
         """
 
 class Actor(Generic[_S, _M]):  # noqa: UP046
@@ -667,6 +754,7 @@ __all__ = [
     "Ref",
     "Refused",
     "Runtime",
+    "Schedule",
     "SchemaError",
     "State",
     "Stats",

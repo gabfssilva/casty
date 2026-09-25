@@ -76,6 +76,45 @@ async def session(ctx: Context[int, SessionMsg]) -> None:
                 assert_never(msg)
 
 
+@dataclass(frozen=True)
+class Ticking:
+    nodes: tuple[NodeId, ...] = ()
+
+
+@dataclass(frozen=True)
+class Tick:
+    pass
+
+
+@dataclass(frozen=True)
+class StartTicking:
+    reply_to: Ref[None]
+
+
+@dataclass(frozen=True)
+class Ticked:
+    reply_to: Ref[tuple[tuple[NodeId, ...], NodeId]]
+
+
+type TickerMsg = StartTicking | Tick | Ticked
+
+
+@actor(initial=Ticking())
+async def ticker(ctx: Context[Ticking, TickerMsg]) -> None:
+    """Keeps the node each `Tick` of its schedule reached."""
+    async for msg in ctx.inbox:
+        match msg:
+            case StartTicking(reply_to):
+                await ctx.schedule("tick", timedelta(milliseconds=50), timedelta(milliseconds=50), Tick())
+                reply_to.tell(None)
+            case Tick():
+                await ctx.state.set(Ticking((*ctx.state.value.nodes, ctx.system.node)))
+            case Ticked(reply_to):
+                reply_to.tell((ctx.state.value.nodes, ctx.system.node))
+            case _:
+                assert_never(msg)
+
+
 @actor(initial=Blob())
 async def blob(ctx: Context[Blob, BlobMsg]) -> None:
     """Keeps one field larger than a message, built here so that no message has to carry it."""
@@ -251,6 +290,28 @@ def describe_replication() -> None:
 
                 await eventually(every_order_is_still_paid, WITHIN)
 
+    def when_a_key_with_a_schedule_loses_its_machine() -> None:
+        async def it_goes_on_from_the_node_that_takes_the_key_over() -> None:
+            async with Harness.start(3) as harness:
+                a, b, _ = harness.nodes
+                key = await _ticker_on(b, a)
+                gone = b.system.node
+                await a.system.ref(ticker, key).ask(StartTicking)
+
+                async def ticking_there() -> None:
+                    nodes, _ = await a.system.ref(ticker, key).ask(Ticked)
+                    assert gone in nodes
+
+                await eventually(ticking_there, WITHIN)
+                harness.isolate(b)
+                await harness.crash(b)
+
+                async def ticking_elsewhere() -> None:
+                    nodes, _ = await a.system.ref(ticker, key).ask(Ticked)
+                    assert len(set(nodes) - {gone}) == 1
+
+                await eventually(ticking_elsewhere, WITHIN)
+
     def when_a_field_is_several_times_the_message_limit() -> None:
         async def it_saves_it_in_parts_and_the_next_owner_reads_it_back_identically() -> None:
             size = 3 * NARROW.message
@@ -332,6 +393,16 @@ async def _session_on(node: Node, asked_from: Node) -> str:
     for index in range(_TRIES):
         key = f"s-{index}"
         _, owner = await asked_from.system.ref(session, key).ask(Balance)
+        if owner == node.system.node:
+            return key
+    raise AssertionError(f"none of the first {_TRIES} keys is owned by {node.address}")
+
+
+async def _ticker_on(node: Node, asked_from: Node) -> str:
+    """The first of `t-0`, `t-1`, … whose owner for `ticker` is `node`, seen from `asked_from`."""
+    for index in range(_TRIES):
+        key = f"t-{index}"
+        _, owner = await asked_from.system.ref(ticker, key).ask(Ticked)
         if owner == node.system.node:
             return key
     raise AssertionError(f"none of the first {_TRIES} keys is owned by {node.address}")

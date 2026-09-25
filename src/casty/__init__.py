@@ -49,6 +49,7 @@ Context = _core.Context
 DefaultedActor = _core.DefaultedActor
 Ref = _core.Ref
 Runtime = _core.Runtime
+Schedule = _core.Schedule
 State = _core.State
 actor = _core.actor
 
@@ -117,6 +118,7 @@ __all__ = [
     "Ref",
     "Refused",
     "Runtime",
+    "Schedule",
     "SchemaError",
     "State",
     "Stats",

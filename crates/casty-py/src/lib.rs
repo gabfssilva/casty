@@ -29,6 +29,7 @@ fn _casty(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<node::Writes>()?;
     module.add_class::<node::context::Context>()?;
     module.add_class::<node::context::State>()?;
+    module.add_class::<node::context::Schedule>()?;
     module.add_class::<refs::Ref>()?;
     module.add_class::<runtime::Runtime>()?;
     module.add_class::<schema::Schema>()?;

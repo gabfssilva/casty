@@ -5,13 +5,15 @@
 //! the local variables of the previous run. One run of the body reads the mailbox at a time, known by the message it
 //! took last.
 
+use core::time::Duration;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use casty_core::chain::{Chain, Link};
 use casty_core::mailbox::{Command, Deliver, Mailbox, Put, Withdrawn};
 use casty_core::node::Target;
 use casty_core::outcome::Outcome;
+use casty_core::schedule::{self, SCHEDULES};
 use casty_core::store::Pages;
 use pyo3::prelude::*;
 
@@ -19,7 +21,7 @@ use crate::collections::{Given, Native, Turn};
 
 use super::callback;
 use super::cluster::{Fencing, Taken};
-use super::context::{Context, ended};
+use super::context::{Context, Schedule, ended};
 use super::observe::Observed;
 use super::{Node, Op};
 use crate::actor::Definition;
@@ -79,6 +81,13 @@ struct State {
     alarm: Option<Py<PyAny>>,
     /// Whether a native body has nothing to do, so that a message arriving takes its loop up again.
     resting: bool,
+    /// The schedules of the key, in the order they were made. Every write of the body carries them in `@schedules`.
+    schedules: Vec<Scheduled>,
+    /// The number the next schedule is known by.
+    scheduled: u64,
+    /// The pages of the last write sent, which a write of the schedules alone carries so as not to undo a write still
+    /// in flight.
+    sent: Pages,
 }
 
 impl State {
@@ -102,6 +111,39 @@ impl State {
             Some(page) => String::from_utf8_lossy(page).into_owned(),
         }
     }
+
+    /// The page of the schedules of the key. A key without schedules has none.
+    fn schedules_page(&self) -> Option<Vec<u8>> {
+        if self.schedules.is_empty() {
+            return None;
+        }
+        let all: Vec<schedule::Schedule> = self
+            .schedules
+            .iter()
+            .map(|scheduled| scheduled.schedule.clone())
+            .collect();
+        Some(schedule::encode(&all))
+    }
+
+    /// The timers of the schedules, taken out to be cancelled.
+    fn unarmed(&mut self) -> Vec<Py<PyAny>> {
+        self.schedules
+            .iter_mut()
+            .filter_map(|scheduled| scheduled.timer.take())
+            .collect()
+    }
+}
+
+/// A schedule of the key, known by its number in this activation: another of its name takes its place under another
+/// number, so that what was waiting on the one it replaced does not reach it.
+#[derive(Debug)]
+struct Scheduled {
+    id: u64,
+    schedule: schedule::Schedule,
+    /// The message, as the body gave it or as the page reads back.
+    message: Py<PyAny>,
+    /// The timer that fires it, armed once the replicas have it and again after each time it goes off.
+    timer: Option<Py<PyAny>>,
 }
 
 /// One run of the body on the loop: its task, and the message it took last.
@@ -208,6 +250,9 @@ impl Activation {
                 deleted: false,
                 alarm: None,
                 resting: false,
+                schedules: Vec::new(),
+                scheduled: 0,
+                sent: Pages::new(),
             }),
         };
         Ok(Bound::new(py, activation)?.unbind())
@@ -260,6 +305,14 @@ impl Activation {
     /// What this activation goes by: the settings of the behavior it runs, over the system's.
     fn settings(&self) -> super::Settings {
         self.held().behavior.settings.over(&self.node.settings)
+    }
+
+    /// What the body hears when it writes after `become`.
+    fn became(&self) -> PyErr {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "{}/{} became another behavior, which owns the state now",
+            self.entry, self.key
+        ))
     }
 
     /// Take the key over on the next turn of the loop, after whatever brought it here has been queued.
@@ -325,10 +378,15 @@ impl Activation {
         };
         {
             let mut state = slf.get().held();
+            state.sent = held.pages.clone();
             state.pages = held.pages;
             state.lease = held.lease;
             state.exists = true;
             state.offered = None;
+        }
+        let behavior = Arc::clone(&slf.get().held().behavior);
+        if behavior.native.is_none() {
+            Self::taken_up(slf, py, &behavior)?;
         }
         Self::resume(slf, py)
     }
@@ -369,6 +427,9 @@ impl Activation {
         let mut pages = Schema::write_pages(definition.state.bind(py), state)?;
         if definition.name != slf.get().entry {
             pages.insert(BEHAVIOR.to_owned(), definition.name.clone().into_bytes());
+        }
+        if let Some(page) = slf.get().held().schedules_page() {
+            pages.insert(SCHEDULES.to_owned(), page);
         }
         Ok(pages)
     }
@@ -791,6 +852,7 @@ impl Activation {
                 pending.extend(run.item.take());
                 pending.extend(run.idle.take());
             }
+            pending.extend(state.unarmed());
             in_hand.extend(state.current.take());
             (in_hand, pending)
         };
@@ -896,15 +958,17 @@ impl Activation {
                 return Ok(());
             }
             state.finished = true;
-            let timers: Vec<Py<PyAny>> = state
+            let mut timers: Vec<Py<PyAny>> = state
                 .idle
                 .take()
                 .into_iter()
                 .chain(state.alarm.take())
                 .collect();
+            timers.extend(state.unarmed());
             (core::mem::take(&mut state.ends), timers)
         };
-        // A collection's idle or deadline timer left armed would step a body that is over.
+        // A collection's idle or deadline timer left armed would step a body that is over, and a schedule would tell a
+        // key that is no longer active here.
         for timer in timers {
             timer.bind(py).call_method0("cancel")?;
         }
@@ -930,8 +994,17 @@ impl Activation {
                 Ok(())
             }
             Command::Deliver(deliver) => {
+                let cycle = slf.get().closed(&deliver.chain);
+                // What a body asks its own key reaches it in the step that asks, before that step could hand the
+                // answer over to `to_self`: it waits in the mailbox, in its place, until the step is over.
+                let undecided = match (&cycle, &deliver.reply) {
+                    (Some(_), Some(reply)) if Self::reader(slf, py).is_some() => {
+                        Some((reply.clone(), deliver.chain.clone()))
+                    }
+                    _ => None,
+                };
                 // Before the mailbox: a message no run would ever read fails at once, whether there is room or not.
-                if let Some(cycle) = slf.get().closed(&deliver) {
+                if let (Some(cycle), None) = (cycle, &undecided) {
                     return match &deliver.reply {
                         Some(reply) => slf.get().node.answer(py, reply, &Outcome::Cycle(cycle)),
                         None => Ok(()),
@@ -939,14 +1012,37 @@ impl Activation {
                 }
                 let put = slf.get().held().mailbox.put(deliver);
                 match put {
-                    Put::Queued => Self::wake(slf, py),
+                    Put::Queued => Self::wake(slf, py)?,
                     Put::Refused(deliver) => {
-                        Self::answer(slf, py, &deliver, Outcome::full, "the mailbox is full")
+                        Self::answer(slf, py, &deliver, Outcome::full, "the mailbox is full")?;
                     }
-                    Put::Held => Ok(()),
+                    Put::Held => {}
+                }
+                match undecided {
+                    Some((reply, chain)) => Self::decide(slf, py, reply, chain),
+                    None => Ok(()),
                 }
             }
         }
+    }
+
+    /// Once the step on the loop is over, refuse the request `reply` if the run still waits for its answer down
+    /// `chain`, unless the run read it meanwhile.
+    fn decide(slf: &Bound<'_, Self>, py: Python<'_>, reply: Target, chain: Chain) -> PyResult<()> {
+        let activation = slf.clone().unbind();
+        callback::soon(&slf.get().node.running(py)?, move |py| {
+            let slf = activation.bind(py);
+            let Some(cycle) = slf.get().closed(&chain) else {
+                return Ok(());
+            };
+            let withdrawn = slf.get().held().mailbox.withdraw(&reply);
+            match withdrawn {
+                Withdrawn::Queued(called) => Self::call(slf, py, &called)?,
+                Withdrawn::Held => {}
+                Withdrawn::Absent => return Ok(()),
+            }
+            slf.get().node.answer(py, &reply, &Outcome::Cycle(cycle))
+        })
     }
 
     /// End the activation because the key is not this node's any more.
@@ -1087,6 +1183,24 @@ impl Activation {
         }
     }
 
+    /// The run `id` waits for none of what it asked since it last read: the task that reads for it handed that over to
+    /// `to_self`. A new stretch begins, so an `ask` that comes back down one of those chains is queued, not refused.
+    pub fn handed(slf: &Bound<'_, Self>, py: Python<'_>, id: u64) {
+        if Self::reader(slf, py) != Some(id) {
+            return;
+        }
+        let hold = slf.get().node.runs.hold();
+        if let Some(run) = slf.get().held().run(id) {
+            run.hold = hold;
+        }
+    }
+
+    /// The run of this activation the task running now reads for, if it reads for one.
+    fn reader(slf: &Bound<'_, Self>, py: Python<'_>) -> Option<u64> {
+        let (activation, id) = slf.get().node.runs.running(py)?;
+        activation.bind(py).is(slf).then_some(id)
+    }
+
     /// The run `id` told `target` its answer. When that is the request it is on, the request is answered.
     pub fn told(&self, id: u64, target: &Target) {
         if let Some(run) = self.held().run(id)
@@ -1099,12 +1213,12 @@ impl Activation {
         }
     }
 
-    /// The cycle `deliver` closes here, when the body is waiting, down its chain, for its answer.
+    /// The cycle a message down `chain` closes here, when the body is waiting, down that chain, for its answer.
     ///
     /// A run waits from its read until the next, except while it is reading; a native body waits while an answer is
     /// out, holding its mailbox.
-    fn closed(&self, deliver: &Deliver) -> Option<String> {
-        if deliver.chain.is_empty() {
+    fn closed(&self, chain: &Chain) -> Option<String> {
+        if chain.is_empty() {
             return None;
         }
         let state = self.held();
@@ -1117,7 +1231,7 @@ impl Activation {
                 .filter(|run| run.task.is_some() && run.waiting.is_none())
                 .map(|run| run.hold)
         };
-        deliver.chain.closed(&self.entry, &self.key, holding)
+        chain.closed(&self.entry, &self.key, holding)
     }
 
     /// Hand the waiting read what arrived, or end it because nothing else will.
@@ -1308,19 +1422,37 @@ impl Activation {
             return Self::merging(slf, py, id, source);
         }
         let answer = slf.get().node.future(py)?;
+        let (scheduled, given_up) = {
+            let mut state = slf.get().held();
+            let scheduled = !state.schedules.is_empty();
+            let given_up = state.run(id).and_then(|run| {
+                run.waiting = Some(answer.clone().unbind());
+                run.deadline = None;
+                run.idle.take()
+            });
+            (scheduled, given_up)
+        };
+        // The timer of a read the body gave up on would end this one early.
+        if let Some(given_up) = given_up {
+            given_up.bind(py).call_method0("cancel")?;
+        }
+        // Schedules go off only while the key is active, so a key that has some does not idle out.
+        if !scheduled {
+            Self::idling(slf, py, id)?;
+        }
+        Ok(answer)
+    }
+
+    /// End the read the run `id` waits on once `idle_after` passes without a message.
+    fn idling(slf: &Bound<'_, Self>, py: Python<'_>, id: u64) -> PyResult<()> {
         let idle_after = slf.get().settings().idle_after.as_secs_f64();
         let timer = Self::timer(slf, idle_after, move |slf, py| Self::idle(slf, py, id))?;
         let deadline = slf.get().node.now(py)? + idle_after;
-        // The timer of a read the body gave up on would end this one early.
-        let replaced = slf.get().held().run(id).and_then(|run| {
-            run.waiting = Some(answer.clone().unbind());
+        if let Some(run) = slf.get().held().run(id) {
             run.deadline = Some(deadline);
-            run.idle.replace(timer.unbind())
-        });
-        if let Some(replaced) = replaced {
-            replaced.bind(py).call_method0("cancel")?;
+            run.idle = Some(timer.unbind());
         }
-        Ok(answer)
+        Ok(())
     }
 
     /// A read that races the mailbox with the source the body brought. Idleness does not end it.
@@ -1526,10 +1658,7 @@ impl Activation {
         yields: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         if slf.get().held().switching {
-            let Self { entry, key, .. } = slf.get();
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "{entry}/{key} became another behavior, which owns the state now"
-            )));
+            return Err(slf.get().became());
         }
         let behavior = Arc::clone(&slf.get().held().behavior);
         let pages = Self::pages_of(slf, py, &behavior, value)?;
@@ -1558,13 +1687,17 @@ impl Activation {
                 .held()
                 .pages
                 .iter()
-                .filter(|(name, _)| name.as_str() != BEHAVIOR)
+                .filter(|(name, _)| name.as_str() != BEHAVIOR && name.as_str() != SCHEDULES)
                 .map(|(name, page)| (name.clone(), page.clone()))
                 .collect::<Pages>(),
             Some(value) => Schema::write_pages(definition.state.bind(py), value)?,
         };
         if definition.name != slf.get().entry {
             pages.insert(BEHAVIOR.to_owned(), definition.name.clone().into_bytes());
+        }
+        // The behavior takes the same messages, so the schedules of the key go on under it.
+        if let Some(page) = slf.get().held().schedules_page() {
+            pages.insert(SCHEDULES.to_owned(), page);
         }
         let wrote = Wrote {
             pages,
@@ -1589,6 +1722,7 @@ impl Activation {
         let this = slf.get();
         let written = this.node.future(py)?;
         let op = this.writing(&wrote.pages, wrote.deleted);
+        this.held().sent = wrote.pages.clone();
         let landing = this.node.persist(py, &this.entry, &this.key, op)?;
         let waiting = written.clone().unbind();
         Self::then(slf, &landing, move |slf, py, landing| {
@@ -1622,11 +1756,9 @@ impl Activation {
     /// nothing of the key behind.
     pub fn delete<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if slf.get().held().switching {
-            let Self { entry, key, .. } = slf.get();
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "{entry}/{key} became another behavior, which owns the state now"
-            )));
+            return Err(slf.get().became());
         }
+        Self::cleared(slf, py)?;
         let behavior = Arc::clone(&slf.get().held().behavior);
         let (pages, value) = match &behavior.initial {
             Some(default) => (
@@ -1645,6 +1777,355 @@ impl Activation {
         let written = Self::write(slf, py, wrote)?;
         Ok(Bound::new(py, Awaited::of(written))?.into_any())
     }
+
+    // --- schedules ---
+
+    /// Schedule `message` for the key under `name`, `delay` from now and then every `every`, in place of the schedule
+    /// of that name, and give back what resolves to the schedule once the replicas have it: it goes off from then on,
+    /// while the key is active.
+    pub fn schedule<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        name: String,
+        delay: Duration,
+        every: Option<Duration>,
+        message: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let behavior = Arc::clone(&slf.get().held().behavior);
+        let messages = behavior.messages.bind(py);
+        let schedule = schedule::Schedule {
+            name: name.clone(),
+            message: Schema::write(messages, messages.get().tree().sent(), message)?,
+            due: wall().saturating_add(i64::try_from(delay.as_micros()).unwrap_or(i64::MAX)),
+            every: every.map(|every| u64::try_from(every.as_micros()).unwrap_or(u64::MAX)),
+        };
+        let (id, replaced) = {
+            let mut state = slf.get().held();
+            let id = state.scheduled;
+            state.scheduled += 1;
+            let at = state
+                .schedules
+                .iter()
+                .position(|scheduled| scheduled.schedule.name == name);
+            let replaced = at.and_then(|at| state.schedules.remove(at).timer);
+            state.schedules.push(Scheduled {
+                id,
+                schedule,
+                message: message.clone().unbind(),
+                timer: None,
+            });
+            (id, replaced)
+        };
+        if let Some(replaced) = replaced {
+            replaced.bind(py).call_method0("cancel")?;
+        }
+        let made = Bound::new(
+            py,
+            Schedule::new(
+                slf.clone().unbind(),
+                id,
+                name,
+                message.clone().unbind(),
+                every,
+            ),
+        )?
+        .unbind();
+        let landing = Self::rescheduled(slf, py)?;
+        let answer = slf.get().node.future(py)?;
+        let waiting = answer.clone().unbind();
+        Self::then(slf, &landing, move |slf, py, landing| {
+            let answer = waiting.bind(py);
+            let landed = landing.call_method0("result");
+            if let Err(failure) = &landed {
+                // What the replicas did not confirm does not go off: the next write leaves it out.
+                slf.get()
+                    .held()
+                    .schedules
+                    .retain(|scheduled| scheduled.id != id);
+                Self::unscheduled(slf, py)?;
+                if !answer.call_method0("done")?.is_truthy()? {
+                    answer.call_method1("set_exception", (failure.clone_ref(py),))?;
+                }
+                return Ok(());
+            }
+            Self::arm(slf, py, id)?;
+            if !answer.call_method0("done")?.is_truthy()? {
+                answer.call_method1("set_result", (made,))?;
+            }
+            Ok(())
+        })?;
+        Ok(Bound::new(py, Awaited::of(answer))?.into_any())
+    }
+
+    /// Cancel the schedule `id`, and give back what resolves once the replicas no longer have it. A schedule that is
+    /// over, or that another of its name replaced, has nothing left to cancel.
+    pub fn unschedule<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        id: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let removed = {
+            let mut state = slf.get().held();
+            if state.finished {
+                let Self { entry, key, .. } = slf.get();
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "the activation of {entry}/{key} is over, and its schedules with it"
+                )));
+            }
+            let at = state
+                .schedules
+                .iter()
+                .position(|scheduled| scheduled.id == id);
+            at.map(|at| state.schedules.remove(at))
+        };
+        let Some(removed) = removed else {
+            let over = slf.get().node.future(py)?;
+            over.call_method1("set_result", (py.None(),))?;
+            return Ok(Bound::new(py, Awaited::of(over))?.into_any());
+        };
+        if let Some(timer) = removed.timer {
+            timer.bind(py).call_method0("cancel")?;
+        }
+        let written = Self::rescheduled(slf, py)?;
+        Self::unscheduled(slf, py)?;
+        Ok(Bound::new(py, Awaited::of(written))?.into_any())
+    }
+
+    /// The schedules of the key, as the body lists them.
+    pub fn schedules(slf: &Bound<'_, Self>, py: Python<'_>) -> Vec<Schedule> {
+        slf.get()
+            .held()
+            .schedules
+            .iter()
+            .map(|scheduled| {
+                Schedule::new(
+                    slf.clone().unbind(),
+                    scheduled.id,
+                    scheduled.schedule.name.clone(),
+                    scheduled.message.clone_ref(py),
+                    scheduled.schedule.every.map(Duration::from_micros),
+                )
+            })
+            .collect()
+    }
+
+    /// When the schedule `id` goes off next, in microseconds since the Unix epoch, while it is not over.
+    #[must_use]
+    pub fn due(&self, id: u64) -> Option<i64> {
+        self.held()
+            .schedules
+            .iter()
+            .find(|scheduled| scheduled.id == id)
+            .map(|scheduled| scheduled.schedule.due)
+    }
+
+    /// Take up the schedules of the state the replicas answered, and arm them: one whose time passed while no node ran
+    /// the key goes off at once. A schedule this type no longer reads as a message is dropped, and reported. Every
+    /// behavior of the key takes the same messages, so the type the key started as reads them.
+    fn taken_up(slf: &Bound<'_, Self>, py: Python<'_>, behavior: &Definition) -> PyResult<()> {
+        let this = slf.get();
+        let Some(page) = this.held().pages.get(SCHEDULES).cloned() else {
+            return Ok(());
+        };
+        let schedules = match schedule::decode(&page) {
+            Ok(schedules) => schedules,
+            Err(malformed) => {
+                let why = format!("the schedules of the key do not read: {malformed}");
+                this.node.dropped(py, &this.entry, &this.key, &why);
+                return Ok(());
+            }
+        };
+        let messages = behavior.messages.bind(py);
+        for schedule in schedules {
+            let read = Schema::read(
+                messages,
+                messages.get().tree().sent(),
+                &schedule.message,
+                Some(&this.node),
+            );
+            let message = match read {
+                Ok(message) => message,
+                Err(failure) => {
+                    let failure = PyErr::from(failure);
+                    let why = format!(
+                        "the schedule {} of the key does not read as a message of its type: {}",
+                        schedule.name,
+                        failure.value(py)
+                    );
+                    this.node.dropped(py, &this.entry, &this.key, &why);
+                    continue;
+                }
+            };
+            let id = {
+                let mut state = this.held();
+                let id = state.scheduled;
+                state.scheduled += 1;
+                state.schedules.push(Scheduled {
+                    id,
+                    schedule,
+                    message: message.unbind(),
+                    timer: None,
+                });
+                id
+            };
+            Self::arm(slf, py, id)?;
+        }
+        Ok(())
+    }
+
+    /// Arm the timer of the schedule `id` for when it is due.
+    fn arm(slf: &Bound<'_, Self>, py: Python<'_>, id: u64) -> PyResult<()> {
+        let due = {
+            let state = slf.get().held();
+            if state.finished {
+                return Ok(());
+            }
+            let found = state.schedules.iter().find(|scheduled| scheduled.id == id);
+            found.map(|scheduled| scheduled.schedule.due)
+        };
+        let Some(due) = due else {
+            return Ok(());
+        };
+        let wait = Duration::from_micros(u64::try_from(due.saturating_sub(wall())).unwrap_or(0));
+        let timer = Self::timer(slf, wait.as_secs_f64(), move |slf, py| {
+            Self::fire(slf, py, id)
+        })?;
+        let replaced = {
+            let mut state = slf.get().held();
+            let found = state
+                .schedules
+                .iter_mut()
+                .find(|scheduled| scheduled.id == id);
+            found.and_then(|scheduled| scheduled.timer.replace(timer.unbind()))
+        };
+        if let Some(replaced) = replaced {
+            replaced.bind(py).call_method0("cancel")?;
+        }
+        Ok(())
+    }
+
+    /// The schedule `id` is due: the key is told its message, and the schedule goes off again at its next time, or is
+    /// over. The replicas hear which, so that the node that takes the key over next does not send it again.
+    fn fire(slf: &Bound<'_, Self>, py: Python<'_>, id: u64) -> PyResult<()> {
+        let now = wall();
+        let fired = {
+            let mut state = slf.get().held();
+            if state.ending() || state.releasing {
+                return Ok(());
+            }
+            let Some(at) = state
+                .schedules
+                .iter()
+                .position(|scheduled| scheduled.id == id)
+            else {
+                return Ok(());
+            };
+            let scheduled = &mut state.schedules[at];
+            scheduled.timer = None;
+            let message = scheduled.schedule.message.clone();
+            let next = scheduled.schedule.after(now);
+            if let Some(next) = next {
+                scheduled.schedule.due = next;
+            } else {
+                state.schedules.remove(at);
+            }
+            (message, next.is_some())
+        };
+        let (message, again) = fired;
+        let this = slf.get();
+        let told = this.node.hand(
+            py,
+            Command::Deliver(Deliver {
+                actor: this.entry.clone(),
+                key: this.key.clone(),
+                message,
+                reply: None,
+                chain: Chain::default(),
+            }),
+        );
+        if let Err(refused) = told {
+            let why = refused.value(py).to_string();
+            this.node.dropped(py, &this.entry, &this.key, &why);
+        }
+        if again {
+            Self::arm(slf, py, id)?;
+        }
+        // Nobody waits for this write: a write that fails was reported where it failed, and the next one carries the
+        // schedules as they are then.
+        let written = Self::rescheduled(slf, py)?;
+        callback::when_done(&written, |_, written| {
+            let _ = written.call_method0("exception");
+            Ok(())
+        })?;
+        if again {
+            return Ok(());
+        }
+        Self::unscheduled(slf, py)
+    }
+
+    /// Write the schedules as they are now, beside the state of the last write sent.
+    fn rescheduled<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let pages = {
+            let state = slf.get().held();
+            let mut pages = state.sent.clone();
+            pages.remove(SCHEDULES);
+            if let Some(page) = state.schedules_page() {
+                pages.insert(SCHEDULES.to_owned(), page);
+            }
+            pages
+        };
+        let wrote = Wrote {
+            pages,
+            value: None,
+            switching: false,
+            yields: false,
+            deleted: false,
+        };
+        Self::write(slf, py, wrote)
+    }
+
+    /// The key may have no schedules left, and then a read waiting with nothing to end it idles out from now.
+    fn unscheduled(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
+        let reading = {
+            let state = slf.get().held();
+            if !state.schedules.is_empty() {
+                return Ok(());
+            }
+            state
+                .run
+                .as_ref()
+                .filter(|run| run.waiting.is_some() && run.idle.is_none() && run.item.is_none())
+                .map(|run| run.id)
+        };
+        match reading {
+            Some(id) => Self::idling(slf, py, id),
+            None => Ok(()),
+        }
+    }
+
+    /// Cancel every schedule of the key.
+    fn cleared(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
+        let timers = {
+            let mut state = slf.get().held();
+            let timers = state.unarmed();
+            state.schedules.clear();
+            timers
+        };
+        for timer in timers {
+            timer.bind(py).call_method0("cancel")?;
+        }
+        Ok(())
+    }
+}
+
+/// The wall clock in microseconds since the Unix epoch, which is what a schedule is written in, since it travels
+/// between nodes.
+fn wall() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX)
+        })
 }
 
 /// A write of the body on its way to the replicas, and what it changes here once they have it.

@@ -1,5 +1,6 @@
 """Correct use of the public API. Input for pyright, never executed."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -27,6 +28,7 @@ from casty import (
     Opaque,
     Placement,
     Ref,
+    Schedule,
     State,
     Stats,
     Store,
@@ -210,6 +212,40 @@ async def auditor(ctx: Context[Account, Tick]) -> None:
     ctx.system.ref(clock, "main").tell(Subscribe(ctx.self))
     async for tick in ctx.inbox:
         assert_type(await ctx.system.ref(account, ctx.key).ask(Withdraw, tick.count), bool)
+
+
+@dataclass(frozen=True)
+class Withdrawn:
+    ok: bool
+
+
+@actor(initial=Account())
+async def treasurer(ctx: Context[Account, Tick | Withdrawn]) -> None:
+    bank = ctx.system.ref(account, ctx.key)
+    async for msg in ctx.inbox:
+        match msg:
+            case Tick(count):
+                ctx.to_self(bank.ask(Withdraw, count), Withdrawn)
+                both = asyncio.gather(bank.ask(Withdraw, 1), bank.ask(Withdraw, 2))
+                ctx.to_self(both, lambda oks: Withdrawn(all(oks)))
+                ctx.to_self(bank.ask(Withdraw, count), Withdrawn, failed=lambda _: Withdrawn(ok=False))
+                ctx.to_self(asyncio.sleep(1, Tick(count + 1)))
+            case Withdrawn():
+                pass
+
+
+@actor(initial=Account())
+async def poller(ctx: Context[Account, Tick]) -> None:
+    polling = await ctx.schedule("poll", timedelta(seconds=5), timedelta(seconds=10), Tick(1))
+    assert_type(polling, Schedule[Tick])
+    assert_type(polling.name, str)
+    assert_type(polling.message, Tick)
+    assert_type(polling.interval, timedelta | None)
+    assert_type(polling.due, datetime | None)
+    await ctx.schedule("once", timedelta(minutes=1), None, Tick(0))
+    async for tick in ctx.inbox:
+        if tick.count > 10 and (schedule := ctx.schedules.get("poll")) is not None:
+            await schedule.cancel()
 
 
 @actor(initial=tuple[str, ...](), replicas=3, write="majority")

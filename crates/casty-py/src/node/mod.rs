@@ -97,6 +97,9 @@ pub struct Node {
     activations: Mutex<HashMap<(String, String), Py<Activation>>>,
     /// Which run of a body each task reads for, which is how an `ask` or an answer knows the body it comes from.
     runs: runs::Runs,
+    /// The work handed to `to_self` that has not ended, by address: kept alive until it ends, and cancelled once the
+    /// system is out.
+    piped: Mutex<HashMap<usize, Py<PyAny>>>,
     leaving: Mutex<Option<Py<PyAny>>>,
     /// Whether this node takes no new message: it is on its way out and finishing what it is on.
     draining: AtomicBool,
@@ -140,6 +143,7 @@ impl Node {
             replies: Mutex::new(Replies::default()),
             forestalled: Mutex::new(HashMap::new()),
             runs: runs::Runs::default(),
+            piped: Mutex::new(HashMap::new()),
             activations: Mutex::new(HashMap::new()),
             leaving: Mutex::new(None),
             draining: AtomicBool::new(false),
@@ -207,11 +211,16 @@ impl Node {
         self.stopped.store(true, Ordering::SeqCst);
     }
 
-    /// Fail every `ask` still waiting for its answer: the system has stopped, and no answer reaches it any more.
+    /// Fail every `ask` still waiting for its answer, and cancel the work handed to `to_self`: the system has stopped,
+    /// and nothing reaches it any more.
     pub fn forsake(&self, py: Python<'_>) {
         let abandoned = self.replies.locked().abandon();
         for waiting in &abandoned {
             let _ = replies::forsake(py, waiting);
+        }
+        let piped: Vec<Py<PyAny>> = self.piped.locked().drain().map(|(_, work)| work).collect();
+        for work in piped {
+            let _ = work.bind(py).call_method0("cancel");
         }
     }
 
@@ -493,6 +502,39 @@ impl Node {
         call: impl FnOnce(Python<'_>) -> PyResult<()> + Send + 'static,
     ) -> PyResult<Bound<'py, PyAny>> {
         callback::later(&self.running(py)?, delay, call)
+    }
+
+    /// Await `work` on the loop, beside whoever handed it over, and call `then` with what it gives or with what it
+    /// raised. Work that is cancelled, as all of it is when the system stops, calls nothing.
+    pub fn pipe(
+        self: &Arc<Self>,
+        py: Python<'_>,
+        work: &Bound<'_, PyAny>,
+        then: impl FnOnce(Python<'_>, Result<Bound<'_, PyAny>, Bound<'_, PyAny>>) -> PyResult<()>
+        + Send
+        + 'static,
+    ) -> PyResult<()> {
+        let options = PyDict::new(py);
+        options.set_item("loop", self.running(py)?)?;
+        let future = py
+            .import("asyncio")?
+            .call_method("ensure_future", (work,), Some(&options))?;
+        let at = future.as_ptr() as usize;
+        self.piped.locked().insert(at, future.clone().unbind());
+        let node = Arc::clone(self);
+        callback::when_done(&future, move |py, future| {
+            let kept = node.piped.locked().remove(&at);
+            drop(kept);
+            if future.call_method0("cancelled")?.is_truthy()? {
+                return Ok(());
+            }
+            let error = future.call_method0("exception")?;
+            if error.is_none() {
+                then(py, Ok(future.call_method0("result")?))
+            } else {
+                then(py, Err(error))
+            }
+        })
     }
 
     /// Meet the type `actor` defines, which is the one this system runs under its name unless it met another first.

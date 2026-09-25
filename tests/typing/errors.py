@@ -4,6 +4,7 @@ Input for pyright, never executed.
 """
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Annotated, assert_never
 
 from casty import ActorSystem, Client, Collections, Context, Opaque, Ref, actor
@@ -94,6 +95,20 @@ async def save_and_become_outside_the_state_type(ctx: Context[Account, Deposit])
     await ctx.state.update(lambda _: Offset())  # error
     await ctx.become(order, Offset())  # error
     await ctx.become(account)  # error
+
+
+def hand_over_what_the_actor_does_not_take(ctx: Context[Account, Deposit]) -> None:
+    bank = ctx.system.ref(account, "a")
+    ctx.to_self(bank.ask(Withdraw, 1))  # error
+    ctx.to_self(bank.ask(Withdraw, 1), lambda ok: ok)  # error
+    ctx.to_self(bank.ask(Withdraw, 1), lambda _: Deposit(1), failed=lambda error: error)  # error
+
+
+async def schedule_what_the_actor_does_not_take(ctx: Context[Account, Deposit]) -> None:
+    await ctx.schedule("poll", timedelta(seconds=1), None, Account(1))  # error
+    await ctx.schedule("poll", 1.0, None, Deposit(1))  # error
+    await ctx.schedule("poll", timedelta(seconds=1), None, lambda: Deposit(1))  # error
+    await ctx.schedule(timedelta(seconds=1), None, Deposit(1))  # error
 
 
 @actor  # error
