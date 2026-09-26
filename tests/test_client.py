@@ -39,10 +39,11 @@ class _Tunnel:
         self.address = self._proxy.address
         self._spawn(self._proxy.serve())
 
-    def _spawn(self, work: Coroutine[None, None, None], /) -> None:
+    def _spawn(self, work: Coroutine[None, None, None], /) -> asyncio.Task[None]:
         task = asyncio.get_running_loop().create_task(work)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return task
 
     async def close(self) -> None:
         await self._proxy.close()

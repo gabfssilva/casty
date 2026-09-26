@@ -329,10 +329,11 @@ class Harness:
         self._blocked |= set(pairs)
         self._refresh()
 
-    def _spawn(self, work: Coroutine[None, None, None], /) -> None:
+    def _spawn(self, work: Coroutine[None, None, None], /) -> asyncio.Task[None]:
         task = self._tasks.create_task(work)
         self._plumbing.add(task)
         task.add_done_callback(self._plumbing.discard)
+        return task
 
     def _both_ways(self, node: Node, other: Node) -> tuple[tuple[int, str], tuple[int, str]]:
         return (node.id, other.address), (other.id, node.address)
@@ -384,7 +385,7 @@ class Proxy:
     what it held arrives after the healing, if the connection survives.
     """
 
-    def __init__(self, spawn: Callable[[Coroutine[None, None, None]], None], target: str, /) -> None:
+    def __init__(self, spawn: Callable[[Coroutine[None, None, None]], asyncio.Task[None]], target: str, /) -> None:
         # asyncio sets TCP_NODELAY only on sockets whose proto is IPPROTO_TCP, and those `create_server` makes are not:
         # without it, Nagle holds every small write back until the delayed ACK of Linux, 40 ms later.
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
@@ -435,26 +436,25 @@ class Proxy:
 
     def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._writers.add(writer)
-        self._spawn(self._forward(reader, writer))
+        # The connection closes when its pair ends, so that no transport outlives its server: a cancelled `serve`
+        # waits for every connection it accepted. A pair the harness cancels before its first step runs none of its
+        # code, and its task still ends.
+        self._spawn(self._forward(reader, writer)).add_done_callback(lambda _: writer.close())
 
     async def _forward(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         host, _, port = self._target.rpartition(":")
-        try:
-            # Blocked, the pair does not even reach the other side: a machine nobody can reach accepts no connection.
-            await self._opened()
-            # A node that died refuses the connection, and this pair ends before it starts.
-            with suppress(OSError):
-                upstream, answers = await asyncio.open_connection(host, int(port))
-                self._writers.add(answers)
-                try:
-                    async with asyncio.TaskGroup() as pumps:
-                        pumps.create_task(self._pump(reader, answers))
-                        pumps.create_task(self._pump(upstream, writer))
-                finally:
-                    answers.close()
-        finally:
-            # Both ends close even when the harness cancels this pair, so that no transport outlives its server.
-            writer.close()
+        # Blocked, the pair does not even reach the other side: a machine nobody can reach accepts no connection.
+        await self._opened()
+        # A node that died refuses the connection, and this pair ends before it starts.
+        with suppress(OSError):
+            upstream, answers = await asyncio.open_connection(host, int(port))
+            self._writers.add(answers)
+            try:
+                async with asyncio.TaskGroup() as pumps:
+                    pumps.create_task(self._pump(reader, answers))
+                    pumps.create_task(self._pump(upstream, writer))
+            finally:
+                answers.close()
 
     async def _opened(self) -> None:
         # `set` wakes every waiter even when `clear` follows in the same step, as `heal` then `isolate` does: without
