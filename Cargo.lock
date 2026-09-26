@@ -94,14 +94,14 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "casty-core"
-version = "0.30.0"
+version = "0.30.1"
 dependencies = [
  "blake2",
 ]
 
 [[package]]
 name = "casty-net"
-version = "0.30.0"
+version = "0.30.1"
 dependencies = [
  "casty-core",
  "flate2",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "casty-node"
-version = "0.30.0"
+version = "0.30.1"
 dependencies = [
  "casty-core",
  "casty-net",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "casty-py"
-version = "0.30.0"
+version = "0.30.1"
 dependencies = [
  "blake2",
  "casty-core",

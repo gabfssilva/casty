@@ -1,6 +1,6 @@
 [project]
 name = "casty"
-version = "0.30.0"
+version = "0.30.1"
 description = "A minimalist, type-safe actor framework for Python 3.12+ with built-in distributed clustering."
 readme = "README.md"
 requires-python = ">=3.12"
