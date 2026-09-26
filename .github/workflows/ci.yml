@@ -21,7 +21,9 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.13"
-          enable-cache: true
+          # No uv command runs here, so the cache directory is never made, and saving it fails the job whenever no
+          # cache was restored for the hash of uv.lock.
+          enable-cache: false
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
