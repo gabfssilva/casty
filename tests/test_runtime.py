@@ -532,6 +532,50 @@ def describe_actor_system() -> None:
                 await eventually(reaches_the_end)
                 assert requested == [0, 5]
 
+        async def it_hands_items_and_messages_in_the_order_they_arrived() -> None:
+            started = asyncio.Event()
+            opened = asyncio.Event()
+            produced = asyncio.Event()
+            released = asyncio.Event()
+            seen: list[str] = []
+
+            async def feed() -> AsyncIterator[str]:
+                started.set()
+                await opened.wait()
+                produced.set()
+                yield "item"
+                await asyncio.Event().wait()
+
+            @actor
+            async def merged(ctx: Context[None, str]) -> None:
+                async for event in ctx.merge(feed()):
+                    seen.append(event)
+                    if event == "first":
+                        await released.wait()
+
+            async with ActorSystem() as system, asyncio.timeout(5):
+                ref = system.ref(merged, "k")
+                # The first read found the mailbox empty and started pulling from the source.
+                await started.wait()
+                ref.tell("first")
+
+                async def took_the_first() -> None:
+                    assert seen == ["first"]
+
+                await eventually(took_the_first)
+                # The item is there while the body is on "first", and "second" arrives after it.
+                opened.set()
+                await produced.wait()
+                await asyncio.sleep(0.05)
+                ref.tell("second")
+                await asyncio.sleep(0.05)
+                released.set()
+
+                async def took_all() -> None:
+                    assert seen == ["first", "item", "second"]
+
+                await eventually(took_all, within=timedelta(seconds=1))
+
     def when_messages_carry_every_supported_type() -> None:
         async def it_delivers_them_unchanged() -> None:
             @actor(initial=Stash())

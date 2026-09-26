@@ -117,9 +117,12 @@ pub enum Withdrawn {
 pub struct Mailbox {
     capacity: Option<usize>,
     on_full: OnFull,
-    waiting: VecDeque<Deliver>,
+    /// Each message queued, numbered in the order it was.
+    waiting: VecDeque<(u64, Deliver)>,
     /// Where the `ask`s that found the mailbox full wait, in arrival order.
     held: VecDeque<Target>,
+    /// How many messages were queued so far, which is the number the next one takes.
+    arrived: u64,
 }
 
 impl Mailbox {
@@ -130,6 +133,7 @@ impl Mailbox {
             on_full,
             waiting: VecDeque::new(),
             held: VecDeque::new(),
+            arrived: 0,
         }
     }
 
@@ -144,13 +148,26 @@ impl Mailbox {
         self.waiting.len()
     }
 
+    /// How many messages were queued so far. Whatever arrives beside the mailbox marks when it did with it.
+    #[must_use]
+    pub fn arrived(&self) -> u64 {
+        self.arrived
+    }
+
+    /// Whether a message queued before `mark`, a count `arrived` gave, still waits.
+    #[must_use]
+    pub fn queued_before(&self, mark: u64) -> bool {
+        self.waiting.front().is_some_and(|(at, _)| *at < mark)
+    }
+
     /// Queue `deliver`, unless the mailbox is full.
     pub fn put(&mut self, deliver: Deliver) -> Put {
         if self
             .capacity
             .is_none_or(|capacity| self.waiting.len() < capacity)
         {
-            self.waiting.push_back(deliver);
+            self.waiting.push_back((self.arrived, deliver));
+            self.arrived += 1;
             return Put::Queued;
         }
         if self.on_full == OnFull::Wait
@@ -168,7 +185,7 @@ impl Mailbox {
     /// takes nothing more until a message arrives, and a caller called back before may have stopped waiting and never
     /// send again, so one left held could wait for room that is already there.
     pub fn take(&mut self) -> (Option<Deliver>, Vec<Target>) {
-        let deliver = self.waiting.pop_front();
+        let deliver = self.waiting.pop_front().map(|(_, deliver)| deliver);
         let called = match deliver {
             Some(_) => self.held.pop_front().into_iter().collect(),
             None => self.held.drain(..).collect(),
@@ -182,7 +199,7 @@ impl Mailbox {
     /// them.
     pub fn drain(&mut self) -> (Vec<Deliver>, Vec<Target>) {
         (
-            self.waiting.drain(..).collect(),
+            self.waiting.drain(..).map(|(_, deliver)| deliver).collect(),
             self.held.drain(..).collect(),
         )
     }
@@ -192,7 +209,7 @@ impl Mailbox {
         if let Some(at) = self
             .waiting
             .iter()
-            .position(|deliver| deliver.reply.as_ref() == Some(caller))
+            .position(|(_, deliver)| deliver.reply.as_ref() == Some(caller))
         {
             self.waiting.remove(at);
             return Withdrawn::Queued(self.held.pop_front().into_iter().collect());
@@ -323,6 +340,23 @@ mod tests {
         mailbox.put(deliver(1));
         assert_eq!(mailbox.withdraw(&caller(1)), Withdrawn::Absent);
         assert_eq!(mailbox.queued(), 1);
+    }
+
+    #[test]
+    fn tells_whether_a_message_queued_before_a_mark_still_waits() {
+        let mut mailbox = Mailbox::new(Some(2), OnFull::Refuse);
+        mailbox.put(deliver(1));
+        let mark = mailbox.arrived();
+        mailbox.put(deliver(2));
+        // Refused: it never queued, so it takes no number.
+        mailbox.put(deliver(3));
+        assert_eq!(mailbox.arrived(), 2);
+        assert!(mailbox.queued_before(mark));
+        assert_eq!(taken(&mut mailbox), Some(vec![1]));
+        assert!(!mailbox.queued_before(mark));
+        assert!(mailbox.queued_before(mailbox.arrived()));
+        assert_eq!(taken(&mut mailbox), Some(vec![2]));
+        assert!(!mailbox.queued_before(mailbox.arrived()));
     }
 
     #[test]

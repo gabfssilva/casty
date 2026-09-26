@@ -172,7 +172,11 @@ struct Run {
     idle: Option<Py<PyAny>>,
     /// When the read being waited on stops waiting, which a message arriving later does not undo.
     deadline: Option<f64>,
+    /// The pull of the next item of the source the run merges, while it has not been read.
     item: Option<Py<PyAny>>,
+    /// When the item arrived with no read waiting for it, as the count of the mailbox then: the messages queued before
+    /// it are read before it, and the ones after it, after.
+    arrived: Option<u64>,
     /// How the run ended while a write was in flight, which it acts on once the write has landed.
     settling: Option<Exit>,
 }
@@ -1408,6 +1412,11 @@ impl Activation {
         if ending {
             return Err(ended());
         }
+        if source.is_some()
+            && let Some(item) = Self::arrived_first(slf, id)
+        {
+            return Self::delivered(slf, py, item.bind(py));
+        }
         let deliver = Self::next(slf, py)?;
         if let Some(deliver) = deliver {
             if let Some(run) = slf.get().held().run(id) {
@@ -1472,6 +1481,7 @@ impl Activation {
             if pending.call_method0("done")?.is_truthy()? {
                 if let Some(run) = slf.get().held().run(id) {
                     run.item = None;
+                    run.arrived = None;
                 }
                 return Self::delivered(slf, py, pending);
             }
@@ -1496,6 +1506,18 @@ impl Activation {
         Ok(answer)
     }
 
+    /// The item of the source of the run `id`, taken for the next read when it arrived before every message queued.
+    fn arrived_first(slf: &Bound<'_, Self>, id: u64) -> Option<Py<PyAny>> {
+        let mut state = slf.get().held();
+        let arrived = state.run(id)?.arrived?;
+        if state.mailbox.queued_before(arrived) {
+            return None;
+        }
+        let run = state.run(id)?;
+        run.arrived = None;
+        run.item.take()
+    }
+
     /// The item a finished `anext` holds, as the answer of one read.
     fn delivered<'py>(
         slf: &Bound<'py, Self>,
@@ -1514,7 +1536,8 @@ impl Activation {
         Ok(answer)
     }
 
-    /// The source produced an item while a read of the run `id` was waiting for one.
+    /// The source produced an item: the read of the run `id` waiting for one takes it, and otherwise it waits for the
+    /// next read, marked with the messages that arrived before it.
     fn item(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -1523,10 +1546,14 @@ impl Activation {
     ) -> PyResult<()> {
         let waiting = {
             let mut state = slf.get().held();
+            let arrived = state.mailbox.arrived();
             let Some(run) = state.run(id) else {
                 return Ok(());
             };
             let Some(waiting) = run.waiting.take() else {
+                if run.item.as_ref().is_some_and(|item| item.bind(py).is(task)) {
+                    run.arrived = Some(arrived);
+                }
                 return Ok(());
             };
             run.item = None;
