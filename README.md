@@ -9,13 +9,16 @@ casty offers you a way to define distributed computation using async functions. 
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Actors](#actors)
-- [Guide](#guide)
+- [Messages](#messages)
+- [State](#state)
+- [Awaiting coroutines and blocking I/O](#awaiting-coroutines-and-blocking-io)
+- [Failures](#failures)
+- [Types](#types)
 - [Clusters](#clusters)
 - [Collections](#collections)
 - [casty as a distributed toolkit](#casty-as-a-distributed-toolkit)
 - [Observing a node](#observing-a-node)
 - [Reference](#reference)
-- [API reference](https://gabfssilva.github.io/casty/)
 - [How it works](#how-it-works)
 - [Guarantees and limits](#guarantees-and-limits)
 - [Development](#development)
@@ -41,7 +44,7 @@ uv build --wheel    # dist/casty-<version>-cp312-abi3-<platform>.whl, or cp314-c
 import asyncio
 from dataclasses import dataclass
 
-from casty import ActorSystem, Context, Ref, actor
+from casty import ActorSystem, Askable, Context, actor
 
 
 @dataclass(frozen=True)
@@ -50,8 +53,8 @@ class Greet:
 
 
 @dataclass(frozen=True)
-class Count:
-    reply_to: Ref[int]
+class Count(Askable[int]):
+    pass
 
 
 @actor(initial=0)
@@ -61,8 +64,8 @@ async def greeter(ctx: Context[int, Greet | Count]) -> None:
             case Greet(name):
                 count = await ctx.state.update(lambda count: count + 1)
                 print(f"hello, {name}! greeting #{count} from {ctx.key}")
-            case Count(reply_to):
-                reply_to.tell(ctx.state.value)
+            case Count():
+                msg.reply_to.tell(ctx.state.value)
 
 
 async def main() -> None:
@@ -70,8 +73,8 @@ async def main() -> None:
         ana = system.ref(greeter, "ana")
         ana.tell(Greet("world"))  # hello, world! greeting #1 from ana
         ana.tell(Greet("again"))  # hello, again! greeting #2 from ana
-        print(await ana.ask(Count))  # 2
-        print(await system.ref(greeter, "bia").ask(Count))  # 0
+        print(await ana.ask(Count()))  # 2
+        print(await system.ref(greeter, "bia").ask(Count()))  # 0
 
 
 asyncio.run(main())
@@ -81,7 +84,7 @@ asyncio.run(main())
 - `"ana"` and `"bia"` are keys: two actors of the same type, each with its own state and its own mailbox.
 - `system.ref(greeter, "ana")` is the address of an actor. There is nothing to spawn: the actor starts on its first message, stops when it goes idle, and its state is kept in between.
 - `ana.tell(Greet("world"))` sends a message and returns at once. The actor handles its messages one at a time, in the order they arrive.
-- `ana.ask(Count)` builds `Count(reply_to)`, sends it, and waits for what the actor tells `reply_to`. It is how code outside the actors reads from them; between actors, `tell` is the default (see [Actors](#actors)).
+- `ana.ask(Count())` sends `Count()` and waits for what the actor tells its `reply_to`. `Count` is an `Askable[int]`, a message answered with an `int`: the checker reads the type of the answer from it, and `ask` gives the message the `reply_to` the answer goes to. `ask` is how code outside the actors reads from them; between actors, `tell` is the default (see [Actors](#actors)).
 - `ctx.state.update` saves the new count and returns once it is stored.
 
 ### On a cluster
@@ -104,9 +107,9 @@ An actor is identified by its type and its key. The type is the function decorat
 
 An actor is active only while it has work. Its first message, or the first `ref` to it, activates it: casty loads its state on the node that owns the key and starts the body. The body reads messages from `ctx.inbox`, which ends after `idle_after` without messages (one minute by default). When the body returns, the actor is deactivated and its state stays stored, and the next message activates it again from that state. Only active actors hold a task and the memory of their body.
 
-An actor handles one message at a time, in the order they arrive. The body takes the next message when it reads `ctx.inbox` again, so nothing else runs on the actor in between and the body needs no locks. For the same reason, everything the body awaits before reading again holds up the messages of its key: a write until it is confirmed, an `ask` until its answer, a sleep, any I/O. A task the body starts runs beside it and holds up nothing.
+An actor handles one message at a time, in the order they arrive. The body takes the next message when it reads `ctx.inbox` again, so nothing else runs on the actor in between and the body needs no locks. For the same reason, everything the body awaits before reading again holds up the messages of its key: a write until it is confirmed, an `ask` until its answer, a sleep, any I/O. Messages keep queuing meanwhile, up to the `mailbox` of the type (see [Mailboxes](#mailboxes)). A task the body starts runs beside it and holds up nothing. A call that blocks instead of awaiting holds up every key of the node (see [Awaiting coroutines and blocking I/O](#awaiting-coroutines-and-blocking-io)).
 
-Between actors, `tell` is the default. When an actor needs an answer, `ctx.to_self(work, mapper)` gets it without holding up its key: it awaits `work` beside the body, and tells the actor what `mapper` makes of the result, as one more message. `work` is any awaitable: an `ask`, a `gather` of several, a call to a database. The actor goes on with its mailbox meanwhile, so what it has to remember until the answer arrives, such as a transfer in progress, goes in the message or in the state.
+Between actors, `tell` is the default. When an actor needs an answer, `ctx.ask(target, msg, mapper)` gets it without holding up its key: it sends `msg` and returns, and the answer comes back to the actor as one more message, the one `mapper` makes of it. The actor goes on with its mailbox meanwhile, so what it has to remember until the answer arrives, such as a transfer in progress, goes in the message or in the state.
 
 ```python
 @actor(initial=0)
@@ -114,31 +117,33 @@ async def teller(ctx: Context[int, Transfer | Withdrawn]) -> None:
     async for msg in ctx.inbox:
         match msg:
             case Transfer(source, amount):
-                withdrawal = ctx.system.ref(account, source).ask(Withdraw, amount)
-                ctx.to_self(withdrawal, partial(Withdrawn, msg))
+                source_account = ctx.system.ref(account, source)
+                ctx.ask(source_account, Withdraw(amount), lambda ok, transfer=msg: Withdrawn(transfer, ok))
             case Withdrawn(transfer, ok):
                 ...
 ```
 
-`mapper` runs when `work` ends, after the body has moved on to other messages, so a `lambda` that reads `msg` would read a later one; `functools.partial` binds it when `to_self` is called. Without `mapper`, the result is the message. `failed=` turns an exception of `work` into a message too; without it, the exception is reported as a `MessageDropped` (see [Observing a node](#observing-a-node)).
+`mapper` runs when the answer arrives, after the body has moved on to other messages, and a `lambda` reads the variables of the loop when it runs, not when `ask` is called: `transfer=msg` binds the message in hand. `failed=` turns what the `ask` raised, such as a `TimeoutError`, into a message too; without it, nothing is sent and the system reports a `MessageDropped` (see [Observing a node](#observing-a-node)). `ctx.to_self(work, mapper)` does the same for any awaitable: a `gather` of several asks, a call to a database. [Messages](#messages) covers the messages that are answered, `ask` and refs.
 
 Local variables last only as long as one run of the body. The body starts again from the last saved state after it raises, each time the actor is activated, and on another node when its key moves there, so what must survive goes in `ctx.state` (see [State](#state)).
 
-`ctx.become(other, state)` hands the key to another actor type that takes the same messages, so each state of a state machine can be a function of its own. The key and its refs stay the same, the change is saved with the state, and the next message is read by the new body. pyright checks that the state fits the new type.
+`ctx.become(other, state)` hands the key to another actor type that takes the same messages, so each state of a state machine can be a function of its own. The key and its refs stay the same, the change is saved with the state, and the next message is read by the new body. pyright checks that the state fits the new type, and `become(other)` without a state goes on from the saved one, for a type with the same state type.
 
 ```python
 @actor
 async def pending(ctx: Context[Pending, OrderMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Pay(reply_to, amount):
+            case Pay(amount):
                 await ctx.become(paid, Paid(ctx.state.value.items, amount))
-                reply_to.tell(f"paid {amount}")
-            case Ship(reply_to, _):
-                reply_to.tell("refused: not paid yet")
+                msg.reply_to.tell(f"paid {amount}")
+            case Ship():
+                msg.reply_to.tell("refused: not paid yet")
 ```
 
-A body is ordinary asyncio code, so it does not have to wait for messages: it can sleep, read a stream or run a `TaskGroup`, and `ctx.merge(source)` interleaves its mailbox with any async iterable. `Context[S]`, without a message type, declares an actor that takes no messages at all:
+The code after `become` still runs, as the answer to `Pay` does above, but `state.set` and `state.update` raise there.
+
+A body is ordinary asyncio code, so it does not have to wait for messages: it can sleep, read a stream or run a `TaskGroup`, and `ctx.merge(source)` interleaves its mailbox with any async iterable. The merge ends when `source` ends, not when the actor goes idle, and what `source` raises is raised in the body. `Context[S]`, without a message type, declares an actor that takes no messages at all:
 
 ```python
 @actor(initial=Cursor())
@@ -151,7 +156,7 @@ async def consumer(ctx: Context[Cursor]) -> None:
 system.ref(consumer, "orders-0")  # creates the key and starts the body
 ```
 
-An active actor is marked in its replicated state. If its node dies, the node that takes the key over starts the body again from the saved state, with no message sent, so work done after the last write is repeated. [`examples/01-state-machine`](examples/01-state-machine) and [`examples/08-consumers`](examples/08-consumers) run both patterns.
+An active actor is marked in its replicated state. If its node dies, the node that takes the key over starts the body again from the saved state, with no message sent, so work done after the last write is repeated. [`examples/01-state-machine`](examples/01-state-machine), [`examples/03-streams`](examples/03-streams) and [`examples/08-consumers`](examples/08-consumers) run these patterns.
 
 `ctx.schedule(name, delay, interval, message)` tells the actor `message` after `delay` and then every `interval`, or once when `interval` is `None`. A schedule is saved with the state, so it goes on after its node dies: only the node where the actor is active sends it, and an actor with schedules does not go idle. The name identifies it. Scheduling under a name in use replaces that schedule, so a body can schedule on every message that asks for it without adding a second one, and `ctx.schedules` maps each name to its schedule, which `cancel()` stops:
 
@@ -171,29 +176,71 @@ async def poller(ctx: Context[Feed, Watch | Poll | Unwatch]) -> None:
 
 Each time a schedule goes off is a message, queued like a `tell`, and a write of its next time, which the node that takes the key over goes on from. Times are kept by the wall clock, and a time missed by more than one interval is skipped. The schedules go on under the type `become` hands the key to, which takes the same messages, and `state.delete()` cancels them.
 
-## Guide
+## Messages
 
-### tell and ask
+A message is a frozen dataclass, and the `M` of `Context[S, M]` is the union of the messages an actor type takes. pyright checks each `tell` and `ask` against it, and casty serializes every message, even within one process (see [Types](#types)).
 
 ```python
 ref.tell(Deposit(50))
-ok = await ref.ask(Withdraw, 30)
+ok = await ref.ask(Withdraw(30))
 ```
 
-`tell` does not block and does not raise because of the receiver. Delivery is at most once.
+`tell` sends the message and returns at once. It does not wait for the receiver and does not raise because of it: a message that cannot be delivered is dropped, and the system reports a `MessageDropped` (see [Failures](#failures)). Delivery is at most once. The messages one node sends to one key arrive in the order they were sent, while the owner of the key does not change.
 
-`ask` takes the message class and its remaining arguments, builds the message with a reply ref as the first argument, and waits for the value told to that ref. The first field must be annotated `Ref[R]`: the checker infers the return type of `ask` from it, and casty decodes the answer with it.
+### ask
+
+`ask` sends a message and waits for its answer. A message that is answered is an `Askable[R]`, `R` being the type of its answer:
 
 ```python
 @dataclass(frozen=True)
-class Withdraw:
-    reply_to: Ref[bool]
+class Withdraw(Askable[bool]):
     amount: int
 ```
 
-`ask` raises `TimeoutError` after the `ask_timeout` of the actor type, or the system's (10 seconds by default). Keyword arguments go to the message, so a shorter deadline is set with `asyncio.timeout`. An `ask` that times out or is cancelled tells the key to stop working on its message, but what the body did before that stays (see [Cancellation](#cancellation)).
+`Askable` gives the message a field `reply_to: Ref[R]`, and the actor answers with `msg.reply_to.tell(...)`. `ask` gives the message it sends a `reply_to` of its own and returns what is told to it. pyright infers that `ask(Withdraw(30))` returns a `bool` and checks that the actor takes `Withdraw`, and casty reads the answer as a `bool`.
 
-### State
+`reply_to` is keyword-only, so `case Withdraw(amount)` matches without it. Built with `reply_to=ctx.self` and sent with `tell`, a message has its answer come to the actor as one more message, with no deadline, as the semaphore in [Collections](#collections) does. A message handed on as it arrived keeps its `reply_to`, so the actor it is handed to may answer it. One built without `reply_to` and sent with `tell` answers nobody: what is told to it is dropped.
+
+`ask` raises `TimeoutError` after the `ask_timeout` of the actor type, or the system's (10 seconds by default), and `asyncio.timeout` sets a shorter deadline. An `ask` that times out or is cancelled tells the key to stop working on its message, but what the body did before that stays (see [Cancellation](#cancellation)).
+
+### Refs
+
+A `Ref` is a value: a message or the state can hold one, and it reaches its key from whichever node reads it. `ctx.self` is the ref of the actor itself, and `ctx.system.ref(...)` reaches any other key. A topic keeps the refs of its subscribers in its state and tells each of them what it is sent:
+
+```python
+@dataclass(frozen=True)
+class Subscribe:
+    subscriber: Ref[Published]
+
+
+@actor(initial=())
+async def topic(ctx: Context[tuple[Ref[Published], ...], Subscribe | Published]) -> None:
+    async for msg in ctx.inbox:
+        match msg:
+            case Subscribe(subscriber):
+                await ctx.state.update(lambda subscribers: (*subscribers, subscriber))
+            case Published():
+                for subscriber in ctx.state.value:
+                    subscriber.tell(msg)
+```
+
+A body that awaits `ref.ask` itself holds up its key until the answer arrives, which is why `ctx.ask` is the way between actors (see [Awaiting coroutines and blocking I/O](#awaiting-coroutines-and-blocking-io)). Such an `ask` also carries the keys whose bodies wait for its answer: those waiting on the message the body is on, and the body itself until it reads again. One that comes back to such a key raises `ReentrancyError` at once, naming the cycle, instead of waiting for the deadline: a body asking its own key, or two keys asking each other. The chain names the 16 most recent keys and only the task that read the message adds to it, so a longer cycle, one through a task the body started, and two requests that each hold a key the other asks still end in `TimeoutError`. An `ask` made with `ctx.ask`, or handed to `ctx.to_self`, keeps nobody waiting: calling it ends the wait of what the body asked on its message so far, so a key its work asks may ask it back, and a cycle through an `ask` the body still awaits ends at the deadline instead.
+
+### Mailboxes
+
+Mailboxes are unbounded by default, so an actor slower than its senders accumulates messages in memory. `@actor(mailbox=n)` bounds it. A full mailbox refuses the new message (`on_full="refuse"`, the default), or, with `on_full="wait"`, holds the `ask` until there is room, within its `ask_timeout`: the message stays with its sender, which sends it again when the owner calls it back, one caller for each message taken, in the order they arrived. A `tell` to a full mailbox is dropped either way. Actors whose full mailboxes wait on each other down one chain of asks fail with `ReentrancyError`; two requests that each hold a key the other asks still end at the deadline.
+
+### Cancellation
+
+An `ask` that is cancelled, or passes its deadline, raises `CancelledError` or `TimeoutError` in the caller, as any `await` does, and the key hears of it:
+
+- a message still queued is dropped unread;
+- a caller waiting for room in a full mailbox is let go;
+- a body on the message is cancelled at the `await` it is on, and runs again, from the last confirmed state, for the next message.
+
+A cancelled `ask` asks the body to stop; it does not undo what the body did before the `await` it was on, and a write confirmed before it stays. A collection finishes the message it is on. An answer that arrived first is kept, and a cancellation that crosses the answer the body already told changes nothing.
+
+## State
 
 `ctx.state` is a `State[S]`:
 
@@ -207,16 +254,40 @@ class Withdraw:
 async def account(ctx: Context[int, AccountMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Deposit(reply_to, amount):
-                reply_to.tell(await ctx.state.update(lambda balance: balance + amount))
-            case Withdraw(reply_to, amount) if amount <= ctx.state.value:
+            case Deposit(amount):
+                msg.reply_to.tell(await ctx.state.update(lambda balance: balance + amount))
+            case Withdraw(amount) if amount <= ctx.state.value:
                 await ctx.state.set(ctx.state.value - amount)
-                reply_to.tell(True)
-            case Withdraw(reply_to, _):
-                reply_to.tell(False)
+                msg.reply_to.tell(True)
+            case Withdraw():
+                msg.reply_to.tell(False)
 ```
 
-State is kept in memory on the replicas, unless the type is durable.
+State is kept in memory on the replicas, unless the type is durable (see [Durable state](#durable-state)).
+
+### Creating keys
+
+`system.ref(actor, key)` is the only way to reach an entity, and it does not wait for anything. Obtaining a ref asks the owner to create the key, if it does not exist, and to activate it. What goes wrong with that shows in the first `ask`.
+
+A key that does not exist starts from:
+
+- `initial=` passed to `ref`, when there is one;
+- otherwise the default of the type, `@actor(initial=...)`;
+- otherwise `None`, if the state type allows it (`Context[Draft | None, M]`).
+
+A type with none of the three cannot be created, and `ref` raises `TypeError`. Both checkers report that call.
+
+```python
+@actor
+async def document(ctx: Context[str, Read]) -> None: ...
+
+
+readme = system.ref(document, "readme", initial="# casty")
+system.ref(document, "readme", initial="other")  # the key exists: its state is unchanged
+system.ref(document, "readme")  # TypeError, and an error in pyright
+```
+
+`initial` only matters for a key that does not exist. When two callers pass different values, the first to reach the owner decides.
 
 ### Durable state
 
@@ -247,131 +318,31 @@ Every activation of a durable key reads the store and goes on from the later of 
 
 `casty.sqlite.SQLiteStore(path)` is a store in one SQLite file, for a system alone or for the nodes of one machine, which may all open the same file. It is used inside `async with`, and opens, reads, writes and closes the file on a thread of its own. Nodes on several machines need a store over a database they all reach; `src/casty/sqlite.py` is the shape of one, one statement per method. `examples/11-durable-state` stops a whole cluster and reads its durable keys back on new nodes.
 
-### Creating keys
+## Awaiting coroutines and blocking I/O
 
-`system.ref(actor, key)` is the only way to reach an entity, and it does not wait for anything. Obtaining a ref asks the owner to create the key, if it does not exist, and to activate it. What goes wrong with that shows in the first `ask`.
+A body takes its next message when it reads `ctx.inbox` again, so what it waits for in between decides what waits with it. An `await` holds up the key: its messages queue until the coroutine returns, while the other keys of the node go on. A call that blocks, such as `requests.get`, `time.sleep`, a database driver without `async` or a long computation, holds up the loop, and every body of the node runs on that loop: every key of the node waits until the call returns.
 
-A key that does not exist starts from:
+A body therefore awaits its own writes and pipes everything else to itself:
 
-- `initial=` passed to `ref`, when there is one;
-- otherwise the default of the type, `@actor(initial=...)`;
-- otherwise `None`, if the state type allows it (`Context[Draft | None, M]`).
-
-A type with none of the three cannot be created, and `ref` raises `TypeError`. Both checkers report that call.
+- **Await the writes of the key**: `ctx.state.set`, `update` and `delete`, `become` and `schedule`. They return once the replicas confirm, and the next message sees what they wrote.
+- **Pipe every other coroutine** with `ctx.to_self`, or with `ctx.ask` for an `ask`: a call to another service, an `ask` to another actor, a `gather` of several. The body goes on with its mailbox, and the result comes back as a message, behind the messages that arrived before it. What the result needs of the message that started it goes with it, as `transfer=msg` does in the `teller` of [Actors](#actors).
+- **Run blocking calls in a thread**: `asyncio.to_thread` turns a call into a coroutine that runs it on a thread, piped like any other. A computation in Python holds the GIL on a thread as well, so it goes to a process, with `loop.run_in_executor` and a `ProcessPoolExecutor`, or to a thread on free-threaded 3.14t.
 
 ```python
 @actor
-async def document(ctx: Context[str, Read]) -> None: ...
-
-
-readme = system.ref(document, "readme", initial="# casty")
-system.ref(document, "readme", initial="other")  # the key exists: its state is unchanged
-system.ref(document, "readme")  # TypeError, and an error in pyright
-```
-
-`initial` only matters for a key that does not exist. When two callers pass different values, the first to reach the owner decides.
-
-### become
-
-`ctx.become(behavior, state)` hands the key to another actor type that takes the same messages, so each state of a state machine is a function of its own.
-
-```python
-@actor
-async def paid(ctx: Context[Paid, OrderMsg]) -> None:
+async def profiles(ctx: Context[Profile | None, Refresh | Fetched | Resized]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Pay(reply_to, _):
-                reply_to.tell("refused: already paid")
-            case Ship(reply_to, tracking):
-                reply_to.tell(f"shipped as {tracking}")
-
-
-@actor
-async def pending(ctx: Context[Pending, OrderMsg]) -> None:
-    async for msg in ctx.inbox:
-        match msg:
-            case Pay(reply_to, amount):
-                await ctx.become(paid, Paid(ctx.state.value.items, amount))
-                reply_to.tell(f"paid {amount}")
-            case Ship(reply_to, _):
-                reply_to.tell("refused: not paid yet")
-```
-
-- The code after `become` still runs; the next message is read by the new behavior.
-- The entity keeps its identity, `(pending, key)`, and every ref to it stays valid.
-- The change is saved with the state, so it survives restarts and moves.
-- The checker verifies that the state matches the new behavior. `become(other)` without a state requires the same state type and continues from the last saved state.
-- `state.set` and `state.update` after `become` raise.
-
-### Refs inside bodies
-
-A `Ref` is a value: it can be a field of a message or of the state. `ctx.system` reaches any entity and `ctx.self` is the ref of the entity itself.
-
-```python
-@actor(initial=0)
-async def teller(ctx: Context[int, Transfer]) -> None:
-    async for msg in ctx.inbox:
-        source = ctx.system.ref(account, msg.source)
-        target = ctx.system.ref(account, msg.target)
-        if await source.ask(Withdraw, msg.amount):
-            await target.ask(Deposit, msg.amount)
-            await ctx.state.set(ctx.state.value + 1)
-            msg.reply_to.tell(True)
-        else:
-            msg.reply_to.tell(False)
-```
-
-An `ask` made by a body carries the keys whose bodies wait for its answer: those waiting on the message the body is on, and the body itself until it reads again. One that comes back to such a key raises `ReentrancyError` at once, naming the cycle, instead of waiting for the deadline: a body asking its own key, or two keys asking each other. The chain names the 16 most recent keys and only the task that read the message adds to it, so a longer cycle, one through a task the body started, and two requests that each hold a key the other asks still end in `TimeoutError`. An `ask` handed to `ctx.to_self` keeps nobody waiting: calling it ends the wait of what the body asked on its message so far, so a key its work asks may ask it back, and a cycle through an `ask` the body still awaits ends at the deadline instead.
-
-### What holds up a key
-
-A body takes its next message when it reads `inbox` again, so everything it awaits in between holds up the messages of its key: a `state.set` until the write level confirms it, an `ask` until its answer or deadline, a sleep, any I/O. Messages keep queuing meanwhile, up to `mailbox`. Nothing else blocks it: a task the body starts runs beside it.
-
-### Cancellation
-
-An `ask` that is cancelled, or passes its deadline, raises `CancelledError` or `TimeoutError` in the caller, as any `await` does, and the key hears of it:
-
-- a message still queued is dropped unread;
-- a caller waiting for room in a full mailbox is let go;
-- a body on the message is cancelled at the `await` it is on, and runs again, from the last confirmed state, for the next message.
-
-A cancelled `ask` asks the body to stop; it does not undo what the body did before the `await` it was on, and a write confirmed before it stays. A collection finishes the message it is on. An answer that arrived first is kept, and a cancellation that crosses the answer the body already told changes nothing.
-
-### Streams and proactive actors
-
-A body is ordinary asyncio code: `asyncio.sleep`, `asyncio.timeout`, `TaskGroup` and async iteration all work.
-
-`ctx.merge(source)` yields mailbox messages and items of `source` in arrival order, until `source` ends. Idleness does not end it, and an exception from `source` propagates to the body.
-
-```python
-@actor(initial=Window())
-async def meter(ctx: Context[Window, Reading | Averages]) -> None:
-    async for event in ctx.merge(every(0.5)):  # an async generator of Tick
-        match event:
-            case Reading(value):
-                await ctx.state.set(Window((*ctx.state.value.readings, value), ctx.state.value.averages))
-            case Tick():
+            case Refresh():
+                ctx.to_self(crm.fetch(ctx.key), Fetched)  # an async client: piped as it is
+            case Fetched(profile):
+                await ctx.state.set(profile)  # a write of the key: awaited
+                ctx.to_self(asyncio.to_thread(resize, profile.avatar), Resized)  # a blocking call: piped from a thread
+            case Resized(avatar):
                 ...
-            case Averages(reply_to):
-                reply_to.tell(ctx.state.value.averages)
 ```
 
-`Context[S]` without a message type declares an actor that takes no messages:
-
-```python
-@actor(initial=Cursor())
-async def consumer(ctx: Context[Cursor]) -> None:
-    async for record in broker.stream(ctx.key, ctx.state.value.offset + 1):
-        await process(record)
-        await ctx.state.set(Cursor(record.offset))
-
-
-system.ref(consumer, "orders-0")  # creates the key and starts the body
-```
-
-An active key carries a mark in its replicated state. If its node dies, the node that takes the key over runs the body again from the saved state, with no message sent. Work done before the state is saved is repeated after a crash: at least once.
-
-### Failures
+## Failures
 
 | Situation | `ask` raises | Entity |
 |---|---|---|
@@ -388,9 +359,7 @@ For `tell`, the same situations drop the message and report a `MessageDropped` (
 
 The restart delay follows the `backoff` of the type, or the system's: `first`, multiplied by `factor` on each consecutive failure, up to `limit`. The mailbox is kept across restarts.
 
-Mailboxes are unbounded by default, so an actor slower than its senders accumulates messages in memory. `@actor(mailbox=n)` bounds it. A full mailbox refuses the new message (`on_full="refuse"`, the default), or, with `on_full="wait"`, holds the `ask` until there is room, within its `ask_timeout`: the message stays with its sender, which sends it again when the owner calls it back, one caller for each message taken, in the order they arrived. A `tell` to a full mailbox is dropped either way. Actors whose full mailboxes wait on each other down one chain of asks fail with `ReentrancyError`; two requests that each hold a key the other asks still end at the deadline.
-
-### Types
+## Types
 
 State, messages and replies are always serialized, even within one process. Types are checked when `@actor` runs, and an unsupported one raises `SchemaError` naming the field: `state: Cart.items: list[int] is not supported; use tuple[int, ...]`.
 
@@ -509,7 +478,7 @@ A `Client` sends messages to a cluster without joining it. It hosts no actors, h
 
 ```python
 async with Client(seeds=("10.0.0.4:7400",)) as client:
-    tally = await client.ref(poll, "vim").ask(Count)
+    tally = await client.ref(poll, "vim").ask(Count())
 ```
 
 `Client` and `ActorSystem` both implement the `System` protocol (`ref`, `node`). The client imports the actor types it uses, routes each message directly to the owner, and refreshes its member table every `sync_every`.
@@ -605,7 +574,7 @@ All take `replicas` (default 3). Data collections also take `write` (default `"m
 - `Semaphore` and `Lock` grant a `Lease` with a TTL in seconds, renewed only by `lease.renew(ttl)` and given back by `lease.release()`, which nothing answers: a lost release leaves the permits held until the TTL runs out. Expiry uses wall clocks, which must be synchronized. Waiters are served in order. A lease can expire under a slow holder, so the protected resource must reject tokens older than the newest it has seen.
 - `acquire` and `Barrier.wait` wait indefinitely; bound them with `asyncio.timeout`. `async with lock` is not reentrant.
 
-`Semaphore` and `Lock` are the actor `casty.collections.semaphore` behind `ask`, and a body can use that actor without waiting on it. A key takes its capacity from the `initial` its first ref is obtained with, and answers `Acquire` with `Acquired` or `Denied`, which are messages: told to `ctx.self`, the answer arrives in the inbox, and the body goes on reading meanwhile.
+`Semaphore` and `Lock` are the actor `casty.collections.semaphore` behind `ask`, and a body can use that actor without waiting on it. A key takes its capacity from the `initial` its first ref is obtained with, and answers `Acquire` with `Acquired` or `Denied`, which are messages: with `ctx.self` as its `reply_to`, the answer arrives in the inbox, and the body goes on reading meanwhile. A request with no `wait` stays in line as long as it takes, which a `ctx.ask`, bound by its deadline, would not wait for.
 
 ```python
 from casty.collections import Acquired, Denied, SemaphoreState, semaphore
@@ -617,7 +586,7 @@ async def crawler(ctx: Context[int, Crawl | Acquired | Denied]) -> None:
     async for msg in ctx.inbox:
         match msg:
             case Crawl(url):
-                fetches.tell(semaphore.Acquire(ctx.self, ttl=60, lease_id=url))
+                fetches.tell(semaphore.Acquire(ttl=60, lease_id=url, reply_to=ctx.self))
             case Acquired(url, _):
                 await fetch(url)  # at most 8 at once, across every key of every crawler
                 fetches.tell(semaphore.Release(url))
@@ -625,8 +594,8 @@ async def crawler(ctx: Context[int, Crawl | Acquired | Denied]) -> None:
                 pass
 ```
 
-- `Acquire(reply_to, n=1, ttl=30.0, wait=None, lease_id=None)`. `wait` is how long the request stays in line: `None` for as long as it takes, `0` for now or never. The semaphore names the lease when `lease_id` is `None`. Sent again under the same `lease_id`, a request keeps its place in line, and a granted one hears its grant again.
-- `Release(lease_id)` gives the permits back, or withdraws a request still waiting, and answers nothing. `Renew(reply_to, lease_id, ttl)` answers whether the lease was still held, and `Get(reply_to)` answers a `Status`.
+- `Acquire(n=1, ttl=30.0, wait=None, lease_id=None)`, an `Askable[Acquired | Denied]`. `wait` is how long the request stays in line: `None` for as long as it takes, `0` for now or never. The semaphore names the lease when `lease_id` is `None`. Sent again under the same `lease_id`, a request keeps its place in line, and a granted one hears its grant again.
+- `Release(lease_id)` gives the permits back, or withdraws a request still waiting, and answers nothing. `Renew(lease_id, ttl)` answers whether the lease was still held, and `Get()` answers a `Status`.
 - The capacity is the one of the ref that created the key; the `initial` of a later ref is ignored. A ref to a key nobody created, received in a message, meets `NotStarted`, and so does one to a key lost with every replica, since the collections are not durable, until a ref brings its capacity again. `Semaphore` and `Lock` do that themselves; a call of theirs that still finds the key missing, while it changes owner, raises `Unavailable`.
 
 ## casty as a distributed toolkit
@@ -645,8 +614,8 @@ In casty the key is the partition. Each key of a type is placed on a ring by the
 
 ```python
 @dataclass(frozen=True)
-class Lookup:
-    reply_to: Ref[Profile]
+class Lookup(Askable[Profile]):
+    pass
 
 
 @actor(idle_after=timedelta(minutes=5))
@@ -656,7 +625,7 @@ async def profile(ctx: Context[None, Lookup]) -> None:
         msg.reply_to.tell(cached)
 ```
 
-`await system.ref(profile, "ana").ask(Lookup)` activates the key on its owner, which loads the profile once and answers every lookup from memory. The value is a local variable, so it lives exactly as long as the activation: five minutes without a lookup, a move to another node or a crash drops it, and the next lookup loads it again. Nothing of it is replicated, since the state is `None`. An entry that must survive its node goes in the state instead, and costs a replicated write each time it changes. Such a type still keeps the default `replicas`: the replicas of a key are also the nodes that may own it, and a key with one replica has no owner while its node is dead, until the node is removed.
+`await system.ref(profile, "ana").ask(Lookup())` activates the key on its owner, which loads the profile once and answers every lookup from memory. The value is a local variable, so it lives exactly as long as the activation: five minutes without a lookup, a move to another node or a crash drops it, and the next lookup loads it again. Nothing of it is replicated, since the state is `None`. An entry that must survive its node goes in the state instead, and costs a replicated write each time it changes. Such a type still keeps the default `replicas`: the replicas of a key are also the nodes that may own it, and a key with one replica has no owner while its node is dead, until the node is removed.
 
 Lookups that arrive while the profile loads wait in the mailbox, since a key handles one message at a time, so the origin is asked once per activation however many callers ask at once. Other caches call this request coalescing. During a change of owner, two nodes can briefly run the same key and both load it.
 
@@ -666,29 +635,32 @@ The same property bounds the throughput of an entry: one key answers one lookup 
 
 A scheduler runs work that no request starts: a report every night, a cleanup every hour, a check of a resource every minute. The work must run somewhere, on one machine only when it has effects, and start again elsewhere when that machine fails. The usual construction is a supervisor on each machine plus a lease or a leader election in a coordination service, to decide which machine runs it.
 
-In casty such work is a key whose body does not wait for messages (see [Streams and proactive actors](#streams-and-proactive-actors)). An active key carries a mark in its replicated state, and when its node dies, the node that becomes its owner runs the body again from the last saved state, with nothing sent to it. One key is a singleton of the cluster:
+In casty such work is a key with a schedule. `ctx.schedule` saves the schedule with the state of the key, only the node where the key is active sends it, and the node that takes the key over goes on from the time it was due next (see [Actors](#actors)). One key is a singleton of the cluster:
 
 ```python
 @dataclass(frozen=True)
-class Nightly:
-    due: datetime
+class Check:
+    pass
 
 
-@actor(initial=Nightly(due=datetime(2026, 1, 1, 3, tzinfo=UTC)))
-async def nightly(ctx: Context[Nightly]) -> None:
-    while True:
-        due = ctx.state.value.due
-        await asyncio.sleep(max(0.0, (due - datetime.now(UTC)).total_seconds()))
-        await ctx.state.set(Nightly(due + timedelta(days=1)))
-        await build_report(due)
+@actor(initial=date(2026, 1, 1))  # the last day with a report
+async def nightly(ctx: Context[date, Check]) -> None:
+    await ctx.schedule("check", timedelta(0), timedelta(hours=1), Check())
+    async for _ in ctx.inbox:
+        today = datetime.now(UTC).date()
+        if ctx.state.value < today:
+            await ctx.state.set(today)
+            await build_report(today)
 
 
 system.ref(nightly, "report")  # creates the key and starts the body, once for the whole cluster
 ```
 
-The order of the last two lines of the loop decides what a failure does. Saving the next date first means a crash during the report skips that night: at most once. Building the report first means a crash before the save builds it again on the next owner: at least once. During a change of owner two nodes can briefly run the key, but with `write="majority"` only one of them can confirm the save, and a body whose save is not confirmed never reaches the line after it. With the save first, each night is claimed by at most one node.
+The key checks every hour whether the report of the day is built, and keeps the last day built in its state. Each time a schedule goes off is a message queued like a `tell` and a write of its next time: a node that dies with that message queued loses it, and a time whose write was not confirmed goes off again on the node that takes the key over. The state makes both harmless: a lost check is made up by the next one, and a repeated one finds the day built. Scheduling under the same name at the start of the body replaces the schedule instead of adding one, and checks at once on every activation.
 
-casty keeps no timers for keys that are not running, what Orleans calls reminders: a key that idles out is deactivated and wakes only on a message. A key with schedules (see [Actors](#actors)) does not idle out, and a key let go with `ActorSystem.release` takes its schedules up when a message activates it again. A scheduler of many timers, such as one expiry per session, keeps them in keys of its own, grouped by when they are due: each is a running key that sleeps until its time, tells the entities whose timers are due, and deletes its state. Every active key holds a task and memory, so the grouping sets how many of them run at once.
+The order of the two lines under the `if` decides what a failure during the report does. Saving the day first means a crash during the report skips that day: at most once. Building the report first means a crash before the save builds it again on the next owner: at least once. During a change of owner two nodes can briefly run the key, but with `write="majority"` only one of them can confirm the save, and a body whose save is not confirmed never reaches the line after it. With the save first, each day is claimed by at most one node.
+
+A schedule goes off only while its key is active, and a key with schedules does not idle out, so it holds a task and memory for as long as its schedules last. Nothing activates a key on a clock, which Orleans does with what it calls reminders: a key whose body returned, or that `ActorSystem.release` let go, takes its schedules up when a message or a `ref` activates it again. A scheduler of many timers, such as one expiry per session, keeps them in keys grouped by when they are due rather than in the keys they are for: each group is a key with a schedule that goes off once, tells the entities whose timers are due, and deletes its state. The grouping sets how many keys stay active at once.
 
 ### Brokers
 
@@ -725,7 +697,7 @@ Three things remain the tool's to handle:
 - **Exactly once.** Delivery is at most once and a body's work is at least once. An effect that must happen exactly once needs a target that recognizes a repeated request.
 - **Consensus.** Leases and leaders rest on majority writes and timing, not on consensus (see [Coordination](#coordination)).
 - **Transactions across keys.** A write changes one key. An operation over several keys goes through a key that coordinates it and undoes what it did on failure (see [Workflows](#workflows)).
-- **Timers of keys that are not running.** A key wakes on a message or when its ref is obtained, never on a clock (see [Schedulers](#schedulers)).
+- **Timers of keys that are not running.** A schedule goes off only while its key is active, and a key that is not wakes on a message or when its ref is obtained, never on a clock (see [Schedulers](#schedulers)).
 - **Pushing outside the cluster.** A `Client` can only be answered. A process that must be told things joins as a node (see [Clients](#clients)).
 - **Durable collections.** The collections are not durable. A tool that must survive losing every replica keeps its state in a durable type of its own.
 
@@ -796,8 +768,6 @@ Nothing is counted as messages go by: the activations are read when `stats()` is
 
 ## Reference
 
-The API reference, generated from the docstrings, is at <https://gabfssilva.github.io/casty/>: [casty](https://gabfssilva.github.io/casty/casty/), [casty.collections](https://gabfssilva.github.io/casty/collections/), [casty.observer](https://gabfssilva.github.io/casty/observer/) and [casty.sqlite](https://gabfssilva.github.io/casty/sqlite/).
-
 ### `@actor`
 
 | Parameter | Default | Meaning |
@@ -825,6 +795,7 @@ The API reference, generated from the docstrings, is at <https://gabfssilva.gith
 | `system` | System of the node running this activation |
 | `await become(behavior[, state])` | Hand the key to another actor type with the same messages |
 | `merge(source)` | Messages and items of `source` in arrival order, until `source` ends |
+| `ask(target, msg, mapper, failed=)` | Send `msg` to `target` and tell this entity what `mapper` makes of the answer, as a message |
 | `to_self(work[, mapper], failed=)` | Await `work` beside the body and tell this entity what it gives, as a message |
 | `await schedule(name, delay, interval, message)` | Tell this entity `message` after `delay`, then every `interval`; replaces the schedule named `name` |
 | `schedules` | The schedules of the key by name, each with `name`, `message`, `interval`, `due` and `await cancel()` |
@@ -902,7 +873,7 @@ A system without a `Cluster` is the same runtime with one node and one replica.
 
 - A dataclass is a map keyed by field name, which is what allows schema evolution.
 - A dataclass at the top of a sent value, or in a union, is written as `[name, map]`. The top is tagged because the holder of a `Ref[Deposit]` does not know the full message union of the receiver.
-- A `Ref` is written as its target, an entity `(type, key)` or a pending `ask`, and decoded bound to the receiving system.
+- A `Ref` is written as its target, an entity `(type, key)` or a pending `ask`, and decoded bound to the receiving system. The `reply_to` of an `Askable` that no `ask` sent reaches nobody, and is written as nil. `ask` writes the target of its answer in place of the `reply_to` of the message it sends, and reads the answer as the `R` of that field.
 - The state is split into pages, one per top-level field. A write sends only the pages that changed. A state that is not a dataclass is one page.
 
 ### Life of a key
@@ -914,6 +885,8 @@ A system without a `Cluster` is the same runtime with one node and one replica.
 5. When the body returns, it runs again if messages arrived and it had read at least one. Otherwise the node clears `@active` and drops the activation. The read condition keeps a body that never reads its inbox from spinning. A key whose body deleted its state and did not write again leaves nothing, and a collection key back at the state it starts from is deleted instead.
 
 `become` writes the new state with an `@behavior` page naming the new type. At the next inbox read the core cancels the old body and starts the new one on the same mailbox. Later activations read `@behavior` to pick the function.
+
+The schedules of a key are a page too, `@schedules`, carried by every write of the body. The node where the key is active arms a timer for each; when one goes off, the node queues its message and writes the next time, or the end of the schedule, without waiting for that write. A node that activates the key, after a crash or a move, arms the timers from that page, and a time that passed meanwhile goes off at once.
 
 ### Transport
 
@@ -997,6 +970,7 @@ A client is in neither the ring nor the member table. It requests the table ever
 - A failed write may reappear: if it reached fewer than W replicas, a later owner may adopt it. `Unavailable` means the operation may or may not have happened.
 - Reads are not linearizable. An isolated owner stops seeing the others `alive` about `dead_after` before they can declare it dead and take its keys over, and gives its keys up then, so it does not answer from a state they wrote past. That margin is timing, not consensus: a process paused through it, or two activations overlapping while a change of owner spreads, can still answer from a stale state.
 - Side effects in a body can repeat after a restart or a change of owner.
+- A schedule goes off on the node where its key is active, by the wall clock of that node. A change of owner can lose a time it went off, when its message was queued on a node that died, or send it again, when the write of its next time was not confirmed.
 - State lives in memory unless its type is `durable`: losing every replica of a key of any other type loses the key. A write of a `durable="write"` type that returned survives the loss of every replica and a restart of the whole cluster; with a period, losing every replica loses at most that period of writes.
 - A durable type activates only while its store answers, and with `"write"` writes only while it answers: `Unavailable` also means the store did not answer, and a write that failed there may reappear, since its replicas had confirmed it.
 - Every node of a cluster is given a store reaching the same records, and a store serves one cluster: two clusters, or a cluster and a system alone, on the same records mix their keys. The collections are not durable.
@@ -1008,11 +982,10 @@ A client is in neither the ring nor the member table. It requests the table ever
 ## Development
 
 ```sh
-uv sync                     # builds the extension and installs the dev tools
-uv run pytest -q
-cargo test --workspace
-uv run ruff check . && uv run pyright
-cargo fmt --all --check && cargo clippy --workspace --all-targets
+uv sync                              # builds the extension and installs the dev tools
+uv sync --reinstall-package casty    # rebuilds the extension after a change to the Rust code
+make check                           # what CI checks: ruff, rustfmt, clippy, pyright, both suites and the docs
+make help                            # the other targets: the suite on 3.14t, the chaos run, benchmarks, wheels
 ```
 
 The Python suite runs real systems over TCP on loopback, with real crashes and partitions made by TCP proxies. There are no mocks and no simulated clocks.

@@ -1,5 +1,5 @@
 site_name: casty
-site_description: Typed, replicated virtual actors for Python
+site_description: A minimalist, type-safe actor framework for Python 3.12+ with built-in distributed clustering.
 site_url: https://gabfssilva.github.io/casty/
 repo_url: https://github.com/gabfssilva/casty
 repo_name: gabfssilva/casty

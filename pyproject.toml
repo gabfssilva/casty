@@ -1,7 +1,7 @@
 [project]
 name = "casty"
 version = "0.30.0"
-description = "Typed, replicated virtual actors for Python"
+description = "A minimalist, type-safe actor framework for Python 3.12+ with built-in distributed clustering."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"

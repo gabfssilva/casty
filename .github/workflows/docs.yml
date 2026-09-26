@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  release:
-    types: [published]
 
 permissions:
   contents: read
@@ -24,24 +22,3 @@ jobs:
       # A docstring griffe cannot parse is a warning, and strict mode fails the build on any warning.
       - run: uv run --no-sync mkdocs build --strict
       - run: uv run --no-sync python docs/check_reference.py
-      - uses: actions/upload-pages-artifact@v5
-        if: github.event_name != 'pull_request'
-        with:
-          path: site
-
-  deploy:
-    needs: build
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    concurrency:
-      group: pages
-      cancel-in-progress: false
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v5
