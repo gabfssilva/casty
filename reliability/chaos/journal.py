@@ -20,9 +20,11 @@ from itertools import count
 from pathlib import Path
 from typing import Literal, Protocol, TypeGuard
 
-from casty import System
-from tests.support import eventually
-from tests.traffic import AMBIGUOUS
+from casty import System, Unavailable
+from reliability.support import eventually
+
+AMBIGUOUS = (Unavailable, TimeoutError)
+"""What a call that may or may not have been applied ends with, which is why the invariants are containments."""
 
 type Outcome = Literal["pending", "confirmed", "ambiguous"]
 

@@ -1,10 +1,11 @@
 """The two costs the macro benchmark hides: turning a value into bytes, and crossing the event loop.
 
-`benchmarks/performance.py` times a whole `ask`, where serialization and scheduling are mixed with the transport, the
-replication and the network. These two are what the core changes on its own, so they are measured apart and compared
-before and after the port. A whole `ask` on one node, with neither transport nor replicas, is measured too: it is what
-the bookkeeping of the core around every message, such as the chain of an `ask`, adds to. So is an `ask` that starts and
-ends an activation, which is what the reports of a node to its observer are frequent enough to weigh on.
+The performance run (`reliability/performance.py`) times a whole `ask`, where serialization and scheduling are mixed
+with the transport, the replication and the network. These two are what the core changes on its own, so they are
+measured apart and compared before and after the port. A whole `ask` on one node, with neither transport nor replicas,
+is measured too: it is what the bookkeeping of the core around every message, such as the chain of an `ask`, adds to.
+So is an `ask` that starts and ends an activation, which is what the reports of a node to its observer are frequent
+enough to weigh on.
 
 Run from the repository root:
 

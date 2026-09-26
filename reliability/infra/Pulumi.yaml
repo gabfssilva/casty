@@ -1,0 +1,9 @@
+name: casty
+description: The Kubernetes that `python -m reliability` runs the chaos and the performance runs on
+runtime:
+  name: python
+  options:
+    toolchain: uv
+# The state of every stack stays in ~/.pulumi on the machine that runs `pulumi`.
+backend:
+  url: file://~

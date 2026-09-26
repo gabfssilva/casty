@@ -1,0 +1,10 @@
+[project]
+name = "casty-infra"
+version = "0"
+description = "The Pulumi program of the Kubernetes clusters of the chaos and the performance runs"
+requires-python = ">=3.12"
+dependencies = [
+    "pulumi>=3.200",
+    "pulumi-command>=1.1",
+    "pulumi-kubernetes>=4.23",
+]

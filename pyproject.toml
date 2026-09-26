@@ -37,6 +37,7 @@ features = ["pyo3/extension-module"]
 [dependency-groups]
 dev = [
     "griffelib>=2.3.0",
+    "lightkube>=1.0.1",
     "mkdocs>=1.6.1,<2",
     "mkdocs-material>=9.7.7",
     "mkdocstrings[python]>=1.0.6",
@@ -48,9 +49,10 @@ dev = [
 ]
 
 [tool.pyright]
-include = ["src", "tests"]
-# `tests/typing` is what `test_typing` runs pyright against, one file at a time.
-exclude = ["tests/typing"]
+include = ["src", "tests", "reliability"]
+# `tests/typing` is what `test_typing` runs pyright against, one file at a time. `reliability/infra` is a project of
+# its own, with its own environment.
+exclude = ["tests/typing", "reliability/infra"]
 typeCheckingMode = "strict"
 pythonVersion = "3.12"
 # pytest-describe collects the nested test functions from locals, which pyright sees as never accessed.
@@ -62,7 +64,7 @@ executionEnvironments = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 describe_prefixes = ["describe", "when"]
-testpaths = ["tests"]
+testpaths = ["tests", "reliability"]
 
 [tool.ruff]
 line-length = 120

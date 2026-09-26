@@ -343,10 +343,10 @@ Dataclasses are encoded by field name, so two versions of the code can share a c
 uv sync                              # builds the extension and installs the dev tools
 uv sync --reinstall-package casty    # rebuilds the extension after a change to the Rust code
 make check                           # what CI checks: ruff, rustfmt, clippy, pyright, both suites and the docs
-make help                            # the other targets: the suite on 3.14t, the chaos run, benchmarks, wheels
+make help                            # the other targets: the suite on 3.14t, the chaos and performance runs, wheels
 ```
 
-The Python suite runs real systems over TCP on loopback, with crashes and partitions made by TCP proxies. `CASTY_CHAOS=1 uv run pytest tests/chaos -s` runs the chaos suite.
+The Python suite runs real systems over TCP on loopback, with crashes and partitions made by TCP proxies. `reliability/` runs clusters on Kubernetes, a kind cluster it creates and destroys by default: `make chaos` puts them under seeded faults and checks their invariants, and `make performance` measures their throughput and latency.
 
 ## License
 

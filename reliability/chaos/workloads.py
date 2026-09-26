@@ -17,21 +17,32 @@ import math
 import random
 from collections import Counter as Tally
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import timedelta
 from itertools import count, pairwise
 
 from casty import Collections, DefaultedActor, NodeId
 from casty.collections import Lease, Missing
-from tests.app import Append, Entries, Ledger, LedgerMsg, durable_ledger, ledger
-from tests.chaos.actors import Stamp, stamped
-from tests.chaos.journal import Operation, Stage, Verdict, Workload, ambiguous, settles
-from tests.chaos.schedule import SKEW
-from tests.traffic import kept
+from reliability.actors import Append, Entries, Ledger, LedgerMsg, Stamp, durable_ledger, ledger, stamped
+from reliability.chaos.journal import Operation, Stage, Verdict, Workload, ambiguous, settles
+from reliability.chaos.schedule import SKEW
+
+
+def kept(key: str, applied: Sequence[int], confirmed: AbstractSet[int], attempted: AbstractSet[int]) -> list[str]:
+    """What `applied` breaks of `confirmed ⊆ applied ⊆ attempted` and of applying each entry once, one line each."""
+    broken: list[str] = []
+    if len(set(applied)) != len(applied):
+        broken.append(f"{key} applied an entry twice: {applied}")
+    if lost := confirmed - set(applied):
+        broken.append(f"{key} lost {set(lost)}")
+    if invented := set(applied) - attempted:
+        broken.append(f"{key} invented {invented}")
+    return broken
 
 
 class Ledgers:
-    """Appends of unique entries to the keys of a ledger type: the traffic of `tests.traffic`, carried over.
+    """Appends of unique entries to the keys of a ledger type, each of which must keep them by `kept`.
 
     Any type that takes `Append` and `Entries` fits, so a ledger with other settings is put under the traffic by
     passing it as `actor`, under a `name` of its own. A type whose store keeps every write (`durable="write"`) is held
@@ -809,7 +820,7 @@ def _fenced(name: str, grants: Sequence[_Grant]) -> list[str]:
 
 
 def durable(stage: Stage, /) -> Ledgers:
-    """The ledger its store keeps too, on the SQLite file every node of the run shares: it outlives an outage."""
+    """The ledger its store keeps too, on the PostgreSQL of the run: it outlives an outage."""
     return Ledgers(stage, actor=durable_ledger, name="durable")
 
 

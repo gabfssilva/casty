@@ -1,10 +1,10 @@
-"""A chaos run: node processes, the traffic of every workload, the faults of a seeded schedule, and the invariants
+"""A chaos run: nodes in pods, the traffic of every workload, the faults of a seeded schedule, and the invariants
 checked after each fault and once more at rest.
 
 `arranged` reads what run the environment asks for, `run` runs it, and the `Report` says what came of it. Whether it
 passed or not, the output directory keeps `run.json` (the settings, the seed, the schedule and each step as it went),
-`journal.jsonl.gz` (every call of the traffic), `report.txt`, the stderr of every node process, and the SQLite store
-the nodes shared. Pointing `CHAOS_REPLAY` at a `run.json` runs its schedule again, with its seed.
+`journal.jsonl.gz` (every call of the traffic), `report.txt`, and the log of every life of every slot. Pointing
+`CHAOS_REPLAY` at a `run.json` runs its schedule again, with its seed.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-import tempfile
 from collections import Counter as Tally
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -20,11 +19,10 @@ from datetime import timedelta
 from pathlib import Path
 from typing import assert_never
 
-from tests.chaos import records
-from tests.chaos.fleet import Fleet, Stuck
-from tests.chaos.journal import Journal, Stage, Verdict, Workload
-from tests.chaos.node import open_files, timing
-from tests.chaos.schedule import (
+from reliability import records
+from reliability.chaos.fleet import Fleet
+from reliability.chaos.journal import Journal, Stage, Verdict, Workload
+from reliability.chaos.schedule import (
     FAULTS,
     Audit,
     Crash,
@@ -45,8 +43,9 @@ from tests.chaos.schedule import (
     plan,
     removal,
 )
-from tests.chaos.workloads import WORKLOADS
-from tests.cluster import Timing
+from reliability.chaos.workloads import WORKLOADS
+from reliability.node import Timing, timing
+from reliability.site import Kubernetes, Stuck
 
 KINDS = tuple(WORKLOADS)
 """The names of every workload, which is what a run puts under its traffic unless told otherwise."""
@@ -143,8 +142,7 @@ class Settings:
 def arranged(environ: Mapping[str, str], /) -> tuple[Settings, tuple[Step, ...]]:
     """The settings and the schedule of the run the environment asks for: the replay of a dump, or a new run."""
     if replay := environ.get("CHAOS_REPLAY"):
-        held = records.record(json.loads(Path(replay).read_text()))
-        return Settings.decoded(held["settings"]), tuple(decoded(step) for step in records.items(held["schedule"]))
+        return planned(json.loads(Path(replay).read_text()))
     settings = Settings.environment(environ)
     schedule = plan(
         seed=settings.seed,
@@ -157,13 +155,10 @@ def arranged(environ: Mapping[str, str], /) -> tuple[Settings, tuple[Step, ...]]
     return settings, schedule
 
 
-def destination(environ: Mapping[str, str], settings: Settings, /) -> Path:
-    """Where a run keeps what it leaves: `CHAOS_OUTPUT`, or a new temporary directory named after the seed."""
-    if chosen := environ.get("CHAOS_OUTPUT"):
-        path = Path(chosen)
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    return Path(tempfile.mkdtemp(prefix=f"casty-chaos-{settings.seed}-"))
+def planned(raw: object, /) -> tuple[Settings, tuple[Step, ...]]:
+    """The settings and the schedule a dump holds, or anything else with its `settings` and `schedule`."""
+    held = records.record(raw)
+    return Settings.decoded(held["settings"]), tuple(decoded(step) for step in records.items(held["schedule"]))
 
 
 @dataclass(frozen=True)
@@ -199,7 +194,7 @@ class Report:
 
     @property
     def replay(self) -> str:
-        return f"CASTY_CHAOS=1 CHAOS_REPLAY={self.output / 'run.json'} uv run pytest tests/chaos -s"
+        return f"CHAOS_REPLAY={self.output / 'run.json'} make chaos"
 
     def text(self) -> str:
         settings = self.settings
@@ -274,19 +269,18 @@ class Report:
         return lines or ["    none checked"]
 
 
-async def run(settings: Settings, schedule: Sequence[Step], output: Path, /) -> Report:
-    """Run `schedule` against a fleet under the traffic of `settings`, and report what came of it.
+async def run(settings: Settings, schedule: Sequence[Step], output: Path, site: Kubernetes, /) -> Report:
+    """Run `schedule` against a fleet on `site` under the traffic of `settings`, and report what came of it.
 
     However the run ends, an exception included, the report is printed and what the run leaves is written to `output`.
     """
-    open_files()
     report = Report(settings, tuple(schedule), output)
     journal = Journal()
     _say(journal, f"seed {settings.seed}: {settings.nodes} nodes, {len(schedule)} steps; output in {output}")
     ended = False
     try:
         period = timing(settings.nodes)
-        async with Fleet.running(slots=settings.slots, size=settings.nodes, timing=period, output=output) as fleet:
+        async with Fleet.running(site, size=settings.nodes, timing=period, output=output) as fleet:
             report.failure = await _drive(settings, fleet, journal, period, report)
             report.started, report.peak = fleet.started, fleet.peak
         ended = True

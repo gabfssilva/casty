@@ -1,14 +1,16 @@
 # The everyday commands of casty. `make check` runs what CI checks, on the Python of `.venv`.
 
-PY_PATHS := src tests benchmarks examples docs
+PY_PATHS := src tests reliability benchmarks examples docs
 FT_ENV := .venv-3.14t
 LINUX_TARGETS := x86_64 aarch64
+STACK ?= local
 STORES_COMPOSE := tests/stores/compose.yaml
 # The databases of $(STORES_COMPOSE), as `casty.stores.SQL` names them.
 STORES := postgres://casty:casty@127.0.0.1:55432/casty mysql://casty:casty@127.0.0.1:53306/casty \
 	mysql://casty:casty@127.0.0.1:53307/casty postgres://root@127.0.0.1:56257/casty?sslmode=disable
 .DEFAULT_GOAL := help
-.PHONY: help sync build test test-ft test-rust test-stores lint fmt typecheck docs check chaos bench wheels-linux
+.PHONY: help sync build test test-ft test-rust test-stores lint fmt typecheck docs check chaos performance bench \
+	wheels-linux
 
 help: ## List the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-13s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -55,8 +57,12 @@ docs: ## Build the reference and check every public name has its page
 
 check: lint typecheck test-rust test docs ## Everything CI checks, but 3.14t (make test-ft)
 
-chaos: build ## Chaos run, shaped by CHAOS_NODES, CHAOS_MINUTES and CHAOS_SEED
-	CASTY_CHAOS=1 uv run pytest tests/chaos -s
+# Both bring up the Kubernetes of the Pulumi stack STACK (local: a kind cluster) and destroy it when the run ends.
+chaos: ## Chaos run on Kubernetes, shaped by CHAOS_NODES, CHAOS_MINUTES and CHAOS_SEED
+	KUBE_STACK=$(STACK) uv run python -m reliability chaos
+
+performance: ## Throughput and latency on Kubernetes, shaped by PERFORMANCE_SCENARIOS and the rest
+	KUBE_STACK=$(STACK) uv run python -m reliability performance
 
 bench: build ## Micro benchmarks, into benchmarks/results/micro.json
 	uv run python -m benchmarks.micro --output benchmarks/results/micro.json

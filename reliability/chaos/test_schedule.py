@@ -1,12 +1,11 @@
-"""The planner of the chaos suite. It starts nothing, so it runs with every `pytest`."""
+"""The planner of the chaos run. It starts nothing, so it runs with every `pytest`."""
 
 from __future__ import annotations
 
 import json
 from itertools import pairwise
 
-from tests.chaos.node import timing
-from tests.chaos.schedule import (
+from reliability.chaos.schedule import (
     FAULTS,
     Audit,
     Crash,
@@ -23,6 +22,7 @@ from tests.chaos.schedule import (
     plan,
     removal,
 )
+from reliability.node import timing
 
 NODES = 20
 SLOTS = 24

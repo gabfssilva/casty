@@ -8,7 +8,7 @@ exclude-newer-span = "P7D"
 
 [[package]]
 name = "casty"
-version = "0.30.0"
+version = "0.30.1"
 source = { editable = "../" }
 
 [package.metadata]
@@ -16,6 +16,7 @@ source = { editable = "../" }
 [package.metadata.requires-dev]
 dev = [
     { name = "griffelib", specifier = ">=2.3.0" },
+    { name = "lightkube", specifier = ">=1.0.1" },
     { name = "mkdocs", specifier = ">=1.6.1,<2" },
     { name = "mkdocs-material", specifier = ">=9.7.7" },
     { name = "mkdocstrings", extras = ["python"], specifier = ">=1.0.6" },

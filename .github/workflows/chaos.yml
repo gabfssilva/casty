@@ -1,16 +1,17 @@
 name: chaos
 
-# The chaos suite runs node processes on the runner and crashes, partitions, slows and skews them for as long as
-# CHAOS_MINUTES says, so it runs every night and on demand, never on a push.
+# The chaos run starts a kind cluster on the runner, runs nodes in its pods and crashes, partitions, slows and skews
+# them for as long as CHAOS_MINUTES says, so it runs every night and on demand, never on a push. Every node is a pod on
+# one runner, so it runs fewer nodes than a run on a larger machine would.
 on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       nodes:
-        description: Node processes (CHAOS_NODES)
+        description: Nodes (CHAOS_NODES)
         type: number
-        default: 20
+        default: 10
       minutes:
         description: Minutes of faults and traffic (CHAOS_MINUTES)
         type: number
@@ -27,9 +28,8 @@ jobs:
   chaos:
     runs-on: ubuntu-latest
     env:
-      CASTY_CHAOS: "1"
       # A scheduled run has no inputs, and takes these.
-      CHAOS_NODES: ${{ inputs.nodes || 20 }}
+      CHAOS_NODES: ${{ inputs.nodes || 10 }}
       CHAOS_MINUTES: ${{ inputs.minutes || 30 }}
       # What the run leaves, pass or fail: run.json, which replays it, the journal, the report and each node's log.
       CHAOS_OUTPUT: ${{ github.workspace }}/chaos-output
@@ -41,13 +41,15 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+      # The driver plans the run with the checkout's casty; the image the nodes run builds its own.
       - run: uv sync
       # An empty CHAOS_SEED is not a seed, so it is set only when one was given.
       - if: inputs.seed != ''
         env:
           SEED: ${{ inputs.seed }}
         run: echo "CHAOS_SEED=$SEED" >> "$GITHUB_ENV"
-      - run: uv run pytest tests/chaos -s
+      # The image of the runner has the Docker, kind and Pulumi that `make chaos` brings the cluster up with.
+      - run: make chaos
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

@@ -27,9 +27,8 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import assert_never
 
-from tests.chaos import records
-from tests.chaos.node import Version, version
-from tests.cluster import Timing
+from reliability import records
+from reliability.node import Timing, Version, version
 
 
 @dataclass(frozen=True)
@@ -120,7 +119,7 @@ class Step:
 
 FAULTS = ("crash", "restart", "leave", "join", "upgrade", "outage", "partition", "isolate", "slow", "skew")
 """The kinds of fault the planner chooses from. `join` starts a machine on a free slot; `upgrade` is a step of a
-rolling deploy: a machine leaves and comes back running `tests.deploy`; `outage` restarts the whole cluster."""
+rolling deploy: a machine leaves and comes back running `reliability.deploy`; `outage` restarts the whole cluster."""
 
 SKEW = 1.5
 """The furthest a clock is set off, in seconds."""
@@ -148,7 +147,7 @@ def plan(
 
 def removal(timing: Timing) -> float:
     """Seconds from the last word of a node to its removal from the ring, at the soonest."""
-    return (timing.suspect_after + timing.dead_after + (timing.remove_after or timing.dead_after)).total_seconds()
+    return (timing.suspect_after + timing.dead_after + timing.remove_after).total_seconds()
 
 
 def kind(action: Action) -> str:

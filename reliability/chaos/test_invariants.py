@@ -1,11 +1,10 @@
-"""The checks of the chaos suite, on histories written by hand. They start nothing, so they run with every `pytest`."""
+"""The checks of the chaos run, on histories written by hand. They start nothing, so they run with every `pytest`."""
 
 from __future__ import annotations
 
 from casty import Unavailable
-from tests.chaos.journal import Operation, ambiguous
-from tests.chaos.workloads import erased, impossible
-from tests.traffic import kept
+from reliability.chaos.journal import Operation, ambiguous
+from reliability.chaos.workloads import erased, impossible, kept
 
 
 def describe_a_read_of_a_register() -> None:
