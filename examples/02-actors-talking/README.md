@@ -1,6 +1,6 @@
-# Comunicação entre atores
+# Actors talking to each other
 
-Demonstra um ator que coordena transferências consultando dois atores de conta por meio de `ctx.system.ref` e `ask`. O programa deposita um saldo inicial, tenta duas transferências e imprime os saldos finais; saque e depósito são operações separadas, sem uma transação atômica entre as contas.
+Demonstrates an actor that coordinates transfers by asking two account actors through `ctx.system.ref` and `ask`. The program deposits an initial balance, attempts two transfers and prints the final balances; the withdrawal and the deposit are separate operations, with no atomic transaction between the accounts.
 
 ```sh
 cd examples/02-actors-talking

@@ -1,8 +1,8 @@
-# Cliente externo
+# External client
 
-Demonstra um `Client` que acessa atores do cluster sem hospedar atores nem armazenar seu estado. Dois processos executam os nós, enquanto um terceiro envia votos para quatro opções e consulta a contagem e o nó responsável por cada uma; os tipos compartilhados ficam em `app.py`, e votos repetidos do mesmo eleitor na mesma opção contam apenas uma vez.
+Demonstrates a `Client` that reaches the actors of the cluster without hosting actors or storing their state. Two processes run the nodes, while a third sends votes for four options and asks for the count and the node responsible for each; the shared types are in `app.py`, and repeated votes from the same voter for the same option count only once.
 
-Precisa das portas TCP locais `7421` e `7422` livres. Execute cada bloco em um terminal separado.
+Needs local TCP ports `7421` and `7422` to be free. Run each block in a separate terminal.
 
 Terminal 1:
 
@@ -18,11 +18,11 @@ cd examples/07-client
 uv run node.py 7422
 ```
 
-Depois que os nós imprimirem `is up`, execute no terminal 3:
+Once the nodes print `is up`, run in terminal 3:
 
 ```sh
 cd examples/07-client
 uv run client.py
 ```
 
-Encerre os nós com `Ctrl+C` nos respectivos terminais.
+Stop the nodes with `Ctrl+C` in their terminals.

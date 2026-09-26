@@ -1,6 +1,6 @@
-# Falhas
+# Failures
 
-Mostra dois erros observáveis pelo chamador: `ActorFailed` após uma divisão por zero e `MailboxFull` quando uma mailbox limitada fica cheia. O programa também verifica que o ator reiniciado recupera o último estado salvo e que, num tipo sem estado inicial padrão, só o `initial` do primeiro `ref` de uma chave vale.
+Shows two errors the caller can observe: `ActorFailed` after a division by zero, and `MailboxFull` when a bounded mailbox is full. The program also checks that the restarted actor recovers the last saved state and that, in a type without a default initial state, only the `initial` of the first `ref` of a key counts.
 
 ```sh
 cd examples/04-failures

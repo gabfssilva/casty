@@ -1,8 +1,8 @@
-# Estado durável
+# Durable state
 
-Mostra um tipo declarado com `durable="write"`, cujo estado fica também no store do sistema: cada `state.set` retorna depois que o store guardou a escrita. Três nós no mesmo processo compartilham um store num arquivo SQLite (`casty.sqlite.SQLiteStore`), recebem depósitos e param todos juntos, o que perde todas as réplicas. Três nós novos iniciam sobre o mesmo arquivo e cada conta volta com o último saldo confirmado, enquanto um tipo mantido só em memória recomeça do zero. O código de `SQLiteStore`, em `src/casty/sqlite.py`, é também o formato de um store sobre qualquer outro banco: cada método é um único comando SQL.
+Shows a type declared with `durable="write"`, whose state is also kept in the store of the system: each `state.set` returns after the store has kept the write. Three nodes in the same process share a store in a SQLite file (`casty.sqlite.SQLiteStore`), take deposits and all stop together, which loses every replica. Three new nodes start on the same file and each account comes back with its last confirmed balance, while a type kept only in memory starts over from zero. The code of `SQLiteStore`, in `src/casty/sqlite.py`, is also the shape of a store over any other database: each method is a single SQL statement.
 
-Precisa das portas TCP locais `7451` a `7453` livres. O arquivo do store fica num diretório temporário.
+Needs local TCP ports `7451` to `7453` to be free. The store file is kept in a temporary directory.
 
 ```sh
 cd examples/11-durable-state

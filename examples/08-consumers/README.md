@@ -1,8 +1,8 @@
-# Consumidores
+# Consumers
 
-Executa um consumidor por partição em um cluster de três nós, usando um gerador assíncrono para simular os registros de uma fonte externa. Cada consumidor salva seu offset após processar um registro; o programa derruba o nó mais ocupado e verifica que os consumidores retomam nos sobreviventes sem intervenção do chamador, podendo repetir registros processados antes de salvar o offset.
+Runs one consumer per partition in a cluster of three nodes, using an async generator to simulate the records of an external source. Each consumer saves its offset after processing a record; the program takes down the busiest node and checks that the consumers resume on the survivors with no action from the caller, possibly repeating records processed before the offset was saved.
 
-Precisa das portas TCP locais `7431` a `7433` livres; não precisa de Kafka nem de outro broker.
+Needs local TCP ports `7431` to `7433` to be free; needs neither Kafka nor any other broker.
 
 ```sh
 cd examples/08-consumers

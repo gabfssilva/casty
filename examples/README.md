@@ -1,25 +1,25 @@
-# Exemplos
+# Examples
 
-Cada diretório é um programa que demonstra uma parte do casty. Todos usam o projeto `uv` deste diretório, que instala a versão local do casty a partir da raiz do repositório.
+Each directory is a program that demonstrates one part of casty. They all use the `uv` project of this directory, which installs the local version of casty from the root of the repository.
 
-Requer `uv`, Python 3.12 ou superior e uma toolchain Rust: na primeira execução, o `uv` compila o casty. Os comandos partem da raiz do repositório, e cada exemplo roda com `uv run` dentro do seu diretório:
+Requires `uv`, Python 3.12 or later and a Rust toolchain: on the first run, `uv` compiles casty. The commands start from the root of the repository, and each example runs with `uv run` inside its directory:
 
 ```sh
 cd examples/00-hello-world
 uv run main.py
 ```
 
-Os exemplos com vários nós iniciam todos no mesmo processo, cada um numa porta TCP local, e os encerram ao terminar. `09-docker-cluster` é a exceção: roda em contêineres e só precisa de Docker.
+The examples with several nodes start them all in the same process, each on a local TCP port, and stop them when they finish. `09-docker-cluster` is the exception: it runs in containers and needs only Docker.
 
-- [`00-hello-world`](00-hello-world): um ator com estado inicial, perguntas com `ask` e um estado por chave.
-- [`01-state-machine`](01-state-machine): um pedido como máquina de estados, em que `ctx.become` troca o comportamento sem mudar a referência.
-- [`02-actors-talking`](02-actors-talking): um ator que coordena transferências perguntando a outros atores por `ctx.system.ref`.
-- [`03-streams`](03-streams): `ctx.merge` juntando a mailbox e um gerador assíncrono no mesmo loop do ator.
-- [`04-failures`](04-failures): `ActorFailed`, `MailboxFull` e o estado que o ator mantém depois de uma falha.
-- [`05-replication`](05-replication): um estado com três réplicas que sobrevive à queda do nó que executava a chave.
-- [`06-distribution`](06-distribution): chaves distribuídas pelo anel de hash enquanto nós entram e saem do cluster.
-- [`07-client`](07-client): um `Client` que usa o cluster sem fazer parte dele, com cada nó em seu próprio processo.
-- [`08-consumers`](08-consumers): um consumidor por partição, que o cluster retoma sozinho quando seu nó cai.
-- [`09-docker-cluster`](09-docker-cluster): um cluster de trinta e três nós em Docker Compose, redimensionado durante a execução.
-- [`10-agent-per-node`](10-agent-per-node): um agente por nó, declarado com `pinned=True` e alcançado pelo endereço do nó.
-- [`11-durable-state`](11-durable-state): um estado com `durable="write"` num store SQLite, que sobrevive à parada de todos os nós.
+- [`00-hello-world`](00-hello-world): an actor with an initial state, asked with `ask`, and one state per key.
+- [`01-state-machine`](01-state-machine): an order as a state machine, where `ctx.become` changes the behavior without changing the reference.
+- [`02-actors-talking`](02-actors-talking): an actor that coordinates transfers by asking other actors through `ctx.system.ref`.
+- [`03-streams`](03-streams): `ctx.merge` joining the mailbox and an async generator in the same loop of the actor.
+- [`04-failures`](04-failures): `ActorFailed`, `MailboxFull` and the state an actor keeps after a failure.
+- [`05-replication`](05-replication): a state with three replicas that survives the loss of the node running its key.
+- [`06-distribution`](06-distribution): keys spread over the hash ring while nodes join and leave the cluster.
+- [`07-client`](07-client): a `Client` that uses the cluster without being part of it, with each node in its own process.
+- [`08-consumers`](08-consumers): one consumer per partition, which the cluster resumes on its own when its node goes down.
+- [`09-docker-cluster`](09-docker-cluster): a cluster of thirty-three nodes in Docker Compose, resized while it runs.
+- [`10-agent-per-node`](10-agent-per-node): one agent per node, declared with `pinned=True` and reached by the address of the node.
+- [`11-durable-state`](11-durable-state): a state with `durable="write"` in a SQLite store, which survives the stop of every node.

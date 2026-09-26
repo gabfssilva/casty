@@ -1,6 +1,6 @@
-# Máquina de estados
+# State machine
 
-Modela um pedido nos estados pendente, pago e enviado, cada um com seu próprio ator e tipo de estado. `ctx.become` troca o comportamento que recebe as próximas mensagens sem mudar a referência do pedido; o programa imprime as transições aceitas e as operações recusadas em cada estado.
+Models an order in the pending, paid and shipped states, each with its own actor and state type. `ctx.become` changes the behavior that receives the next messages without changing the reference to the order; the program prints the accepted transitions and the refused operations in each state.
 
 ```sh
 cd examples/01-state-machine

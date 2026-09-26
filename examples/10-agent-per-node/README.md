@@ -1,8 +1,8 @@
-# Um agente por nó
+# One agent per node
 
-Mantém um agente em cada nó de um cluster de três nós. O tipo é declarado com `pinned=True`, então cada referência nomeia o nó com `at=` em vez de deixar o anel de hash escolher: cada nó chega ao próprio agente pelo seu `NodeId`, o primeiro nó chega a todos pelos `Member` da sua tabela, e também pelo endereço `host:port` que o nó anuncia. O programa adiciona um quarto nó e mostra que nenhum agente se move; encerra o segundo nó de forma ordenada e mostra que o agente dele fica indisponível, sem que outro nó o assuma; e inicia um novo processo no mesmo endereço, onde a mesma referência volta a responder e o agente recomeça do estado `initial`.
+Keeps an agent on each node of a three-node cluster. The type is declared with `pinned=True`, so each reference names the node with `at=` instead of letting the hash ring choose: each node reaches its own agent by its `NodeId`, the first node reaches all of them by the `Member`s of its table, and also by the `host:port` address each node announces. The program adds a fourth node and shows that no agent moves; gracefully stops the second node and shows that its agent becomes unavailable, with no other node taking it over; and starts a new process at the same address, where the same reference answers again and the agent starts over from the `initial` state.
 
-Precisa das portas TCP locais `7441` a `7444` livres.
+Needs local TCP ports `7441` to `7444` to be free.
 
 ```sh
 cd examples/10-agent-per-node

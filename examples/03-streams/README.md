@@ -1,6 +1,6 @@
 # Streams
 
-Demonstra `ctx.merge` combinando mensagens da mailbox com eventos de um gerador assíncrono no mesmo loop do ator. Um medidor recebe leituras, fecha uma janela a cada meio segundo e salva sua média; ao final, o programa imprime as médias das janelas que receberam dados.
+Demonstrates `ctx.merge` combining messages from the mailbox with events from an async generator in the same loop of the actor. A meter receives readings, closes a window every half second and saves its average; at the end, the program prints the averages of the windows that received data.
 
 ```sh
 cd examples/03-streams

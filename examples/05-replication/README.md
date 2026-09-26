@@ -1,8 +1,8 @@
-# Replicação
+# Replication
 
-Inicia três nós no mesmo processo e grava um diário com três réplicas e confirmação por maioria. Depois de salvar três entradas, o programa encerra abruptamente o nó responsável pelo ator, lê as entradas em um sobrevivente e acrescenta outra, demonstrando a recuperação do estado confirmado após a perda de um nó.
+Starts three nodes in the same process and keeps a journal with three replicas and majority writes. After saving three entries, the program abruptly stops the node running the actor, reads the entries on a survivor and appends another, showing that the confirmed state is recovered after the loss of a node.
 
-Precisa das portas TCP locais `7401` a `7403` livres.
+Needs local TCP ports `7401` to `7403` to be free.
 
 ```sh
 cd examples/05-replication
