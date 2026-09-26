@@ -2,26 +2,31 @@
 
 A minimalist, type-safe actor framework for Python 3.12+ with built-in distributed clustering.
 
-casty offers you a way to define distributed computation using async functions. Each actor is a plain `async def` identified by a type and a key, with nothing to spawn or supervise: the cluster places it on a node by consistent hashing, routes its messages there, and replicates its state to a quorum of nodes. You write each actor as if it ran alone in one process, holding its state in memory and handling one message at a time, and adding nodes spreads the actors across them without changing that code.
+Write an actor as a plain `async def`, send it typed messages, and run the same code in one process or on a cluster that places each actor on a node, replicates its state to a quorum and moves it as nodes come and go.
+
+- **Typed end to end.** pyright checks every message, state and answer against the actor's annotation, and casty serializes them from it.
+- **Virtual actors.** Nothing to spawn, supervise or stop: an actor is activated by its first message and deactivated when it goes idle.
+- **Replicated state.** A write returns once a quorum of replicas confirms it, with the number of replicas and the write level chosen per actor type.
+- **No coordinator.** Consistent hashing places keys, gossip keeps the membership, and keys move with their state when nodes join, leave or crash.
+- **Durable when needed.** A type can also keep its state in a store, such as the SQLite one included.
+- **Schedules and collections.** Timers that outlive the node running them, and replicated counters, registers, dicts, sets, multimaps, queues, semaphores, locks and barriers.
+- **Rust runtime.** One compiled extension, no Python dependencies, free-threaded 3.14t included.
 
 ## Contents
 
 - [Installation](#installation)
-- [Quick start](#quick-start)
-- [Actors](#actors)
-- [Messages](#messages)
+- [The actor model](#the-actor-model)
 - [State](#state)
+- [Clustered actors](#clustered-actors)
+- [Ask](#ask)
 - [Awaiting coroutines and blocking I/O](#awaiting-coroutines-and-blocking-io)
+- [Schedulers](#schedulers)
+- [Collections](#collections)
 - [Failures](#failures)
 - [Types](#types)
-- [Clusters](#clusters)
-- [Collections](#collections)
-- [casty as a distributed toolkit](#casty-as-a-distributed-toolkit)
-- [Observing a node](#observing-a-node)
-- [Reference](#reference)
-- [How it works](#how-it-works)
 - [Guarantees and limits](#guarantees-and-limits)
 - [Development](#development)
+- [License](#license)
 
 ## Installation
 
@@ -29,22 +34,27 @@ casty offers you a way to define distributed computation using async functions. 
 uv add casty        # or: pip install casty
 ```
 
-casty needs Python 3.12 or later, free-threaded 3.14t included, and has no Python dependencies. Each platform has two wheels: one on the stable ABI (`cp312-abi3`), for every version with the GIL, and one for 3.14t (`cp314-cp314t`), which the stable ABI does not cover.
+casty needs Python 3.12 or later and has no Python dependencies. Wheels cover every version with the GIL (`cp312-abi3`) and free-threaded 3.14t (`cp314-cp314t`); on a platform without one, the install builds from source and needs Rust 1.90 or later. [`examples`](examples) has one runnable program per topic.
 
-On a platform or interpreter without a wheel, the install builds from source and needs a Rust toolchain, 1.90 or later. The same applies to installing from a checkout:
+## The actor model
 
-```sh
-uv add ./casty      # or: pip install ./casty
-uv build --wheel    # dist/casty-<version>-cp312-abi3-<platform>.whl, or cp314-cp314t on 3.14t
-```
+An actor is a unit of computation that keeps its own state and talks to others only through messages. A few rules define it:
 
-## Quick start
+- **Actors.** An actor has an address, a mailbox and a behavior. In casty the behavior is an `async def` decorated with `@actor`, the actor type, and the address is that type plus a key, a string you choose, such as a user id. `(account, "acc-1")` and `(account, "acc-2")` are two actors running the same code, each with its own state and its own mailbox.
+- **Messages.** Actors do not call each other or share memory. They send messages, immutable values queued in the mailbox of the receiver, and sending does not wait for the receiver.
+- **One message at a time.** An actor handles its messages one by one, in the order they arrive. Nothing else runs on it meanwhile, so it needs no locks.
+- **Private state.** Only the actor reads and writes its state; everything else reaches that state through messages to it.
+- **Location transparency.** A reference to an actor names it, not where it runs. A message sent through it reaches the actor in this process or on any node of a cluster, and the code is the same.
+- **Virtual actors.** casty never creates or destroys an actor. Every `(type, key)` can be addressed at any time: its first message activates it on the node that owns its key, and it is deactivated when it goes idle, with its state kept in between.
+- **Failures restart from state.** When a body raises, casty restarts it from the last saved state, after a backoff. Local variables do not survive a restart, so what must survive goes in the state.
+
+In code:
 
 ```python
 import asyncio
 from dataclasses import dataclass
 
-from casty import ActorSystem, Askable, Context, actor
+from casty import ActorSystem, Context, actor
 
 
 @dataclass(frozen=True)
@@ -52,6 +62,107 @@ class Greet:
     name: str
 
 
+@actor
+async def greeter(ctx: Context[None, Greet]) -> None:
+    async for msg in ctx.inbox:
+        print(f"hello, {msg.name}, from {ctx.key}")
+
+
+async def main() -> None:
+    async with ActorSystem() as system:
+        ana = system.ref(greeter, "ana")
+        ana.tell(Greet("world"))  # hello, world, from ana
+        ana.tell(Greet("again"))  # hello, again, from ana
+        system.ref(greeter, "bia").tell(Greet("world"))  # hello, world, from bia
+        await asyncio.sleep(1)  # tell does not wait: leaving the block stops the system and drops what is queued
+
+
+asyncio.run(main())
+```
+
+- `Context[None, Greet]` declares the state of `greeter`, none so far, and the messages it takes, each a frozen dataclass. pyright checks every `tell` against it, and casty serializes every message, even within one process.
+- `system.ref(greeter, "ana")` is a `Ref`, the address of an actor. A ref is a value: a message or a state can carry one.
+- `tell` queues the message and returns. Delivery is at most once, and the messages one node sends to one key arrive in the order they were sent.
+- The body takes the next message when it reads `ctx.inbox` again. The inbox ends after `idle_after` without messages (one minute by default), the body returns, and the actor is deactivated.
+
+## State
+
+`ctx.state` holds the state of the actor, of the type `S` of `Context[S, M]`:
+
+- `ctx.state.value` is the last saved state.
+- `await ctx.state.set(new)` replaces it, and `await ctx.state.update(change)` saves what `change` makes of it and returns the result. Both return once the replicas confirm the write, and `value` changes only then.
+- `await ctx.state.delete()` deletes it, and the key starts from its initial state again.
+
+```python
+@actor(initial=0)
+async def greeter(ctx: Context[int, Greet]) -> None:
+    async for msg in ctx.inbox:
+        count = await ctx.state.update(lambda count: count + 1)
+        print(f"hello, {msg.name}! greeting #{count} from {ctx.key}")
+```
+
+A key nothing has written starts from the `initial` given to `system.ref(actor, key, initial=...)`, otherwise from the `initial` of `@actor`, otherwise from `None` when the state type allows it. The state is serialized like the messages, so it is immutable: frozen dataclasses, tuples, `Mapping`s and `frozenset`s (see [Types](#types)).
+
+`ctx.become(other, state)` hands the key to another actor type that takes the same messages, so each state of a state machine can be a function of its own; the key and its refs stay the same ([`examples/01-state-machine`](examples/01-state-machine)).
+
+The state lives in memory on its replicas. A type declared `durable=` is also kept by the store of the system, which every node reaches, so its keys survive the loss of every replica and a restart of the whole cluster:
+
+```python
+from casty.sqlite import SQLiteStore
+
+
+@actor(initial=0, durable="write")  # or a timedelta: saved at most that long after each write
+async def account(ctx: Context[int, AccountMsg]) -> None: ...
+
+
+async with SQLiteStore("accounts.db") as store, ActorSystem(cluster=cluster, store=store) as system: ...
+```
+
+A store is any object with async `load`, `save` and `drop` (`casty.Store`). `SQLiteStore` serves the nodes of one machine; `src/casty/sqlite.py` is the shape of one over a database that several machines reach. [`examples/11-durable-state`](examples/11-durable-state) stops a cluster and reads its keys back on new nodes.
+
+## Clustered actors
+
+To run on a cluster, give the system a `Cluster`: the address it listens on and the nodes it joins through. The actors do not change.
+
+```python
+from casty import Cluster
+
+cluster = Cluster(bind="0.0.0.0:7400", advertise="10.0.0.5:7400", seeds=("10.0.0.4:7400",))
+async with ActorSystem(cluster=cluster) as system:
+    system.ref(greeter, "ana").tell(Greet("world"))  # printed on the node that runs ana
+```
+
+- Each key is placed on a node by consistent hashing, and every message for it is routed there, from whichever node sends it. There is no coordinator: every node computes the placement from its own view of the members, which gossip keeps up to date.
+- A node that meets an actor type it does not know imports it by `module:qualname`. **All nodes of a cluster run the same code**, with actor types at module scope.
+- Leaving `async with` normally is an orderly exit: the node finishes the messages in progress and hands its keys to the next replicas. A crash is detected by heartbeat, and its keys are activated elsewhere from their replicas.
+
+Each key is kept by several nodes, as many as the actor type declares:
+
+```python
+@actor(initial=Ledger(), replicas=3, write="majority")  # the defaults
+async def ledger(ctx: Context[Ledger, LedgerMsg]) -> None: ...
+```
+
+| `write` | A write returns when | Behaviour |
+|---|---|---|
+| `"majority"` | more than half of the replicas confirm | Survives the loss of a minority of the copies; the minority side of a partition cannot write |
+| `"all"` | every replica confirms | Survives the loss of all copies but one; any replica away refuses writes |
+| `"one"` | one replica confirms | Writes while any replica is reachable; a change of owner can lose confirmed writes |
+
+A `Client` sends messages to a cluster without joining it. It hosts no actors and takes no part in membership, which fits web handlers, scripts and batch jobs; it can be answered, but not told.
+
+```python
+async with Client(seeds=("10.0.0.4:7400",)) as client:
+    client.ref(greeter, "ana").tell(Greet("client"))
+```
+
+`@actor(pinned=True)` runs each key on the node its ref names, `system.ref(agent, "agent", at=member)`, with one copy, for an agent per node. `Cluster` also takes `tls` (mutual TLS against a CA), `compression` (zstd, lz4 or zlib) and `limits` (sizes of messages and frames, the same on every node). [`examples/06-distribution`](examples/06-distribution) runs a cluster on one machine and shows keys moving as nodes join and leave.
+
+## Ask
+
+`tell` does not wait for an answer. A message that has one is an `Askable[R]`, `R` being the type of its answer; it carries a `reply_to: Ref[R]`, and the actor answers by telling it:
+
+```python
 @dataclass(frozen=True)
 class Count(Askable[int]):
     pass
@@ -66,50 +177,20 @@ async def greeter(ctx: Context[int, Greet | Count]) -> None:
                 print(f"hello, {name}! greeting #{count} from {ctx.key}")
             case Count():
                 msg.reply_to.tell(ctx.state.value)
-
-
-async def main() -> None:
-    async with ActorSystem() as system:
-        ana = system.ref(greeter, "ana")
-        ana.tell(Greet("world"))  # hello, world! greeting #1 from ana
-        ana.tell(Greet("again"))  # hello, again! greeting #2 from ana
-        print(await ana.ask(Count()))  # 2
-        print(await system.ref(greeter, "bia").ask(Count()))  # 0
-
-
-asyncio.run(main())
 ```
 
-- `greeter` is an actor type. `Context[int, Greet | Count]` declares that its state is an `int` and that it receives `Greet` and `Count` messages; pyright checks both, and casty serializes them.
-- `"ana"` and `"bia"` are keys: two actors of the same type, each with its own state and its own mailbox.
-- `system.ref(greeter, "ana")` is the address of an actor. There is nothing to spawn: the actor starts on its first message, stops when it goes idle, and its state is kept in between.
-- `ana.tell(Greet("world"))` sends a message and returns at once. The actor handles its messages one at a time, in the order they arrive.
-- `ana.ask(Count())` sends `Count()` and waits for what the actor tells its `reply_to`. `Count` is an `Askable[int]`, a message answered with an `int`: the checker reads the type of the answer from it, and `ask` gives the message the `reply_to` the answer goes to. `ask` is how code outside the actors reads from them; between actors, `tell` is the default (see [Actors](#actors)).
-- `ctx.state.update` saves the new count and returns once it is stored.
-
-### On a cluster
-
-To run the same actor on a cluster, give the system a `Cluster`: the address the node listens on and the nodes it joins through. `greeter` does not change.
+`ref.ask(msg)` sends the message with a `reply_to` of its own and waits for what is told to it. pyright reads the type of the answer from the message:
 
 ```python
-from casty import Cluster
-
-cluster = Cluster(bind="10.0.0.5:7400", seeds=("10.0.0.4:7400",))
-async with ActorSystem(cluster=cluster) as system:
-    ana = system.ref(greeter, "ana")  # the same actor, from any node
+async with ActorSystem() as system:
+    ana = system.ref(greeter, "ana")
+    ana.tell(Greet("world"))
+    print(await ana.ask(Count()))  # 1
 ```
 
-Start one such node per machine. casty places each key on one of them by consistent hashing and routes every message for it there, from whichever node sends it: the `print` of `greeter` shows on the node that runs `ana`. Each write of the state is confirmed by two of the three nodes that keep a copy, which are the defaults (see [Clusters](#clusters)). [`examples/06-distribution`](examples/06-distribution) runs a cluster on one machine and shows keys moving between nodes as they join and leave.
+`reply_to` is keyword-only, so `case Count()` matches without it. `ask` raises `TimeoutError` after the `ask_timeout` of the type or of the system (10 seconds by default), and `asyncio.timeout` sets a shorter deadline.
 
-## Actors
-
-An actor is identified by its type and its key. The type is the function decorated with `@actor`; the key is a string you choose, such as an account number or a user id. `(account, "acc-1")` and `(account, "acc-2")` are two actors that run the same code, each with its own state and its own mailbox. There is no `spawn`, no parent and no actor object: `system.ref(account, "acc-1")` names the actor, and a message sent to that ref reaches it on whichever node it runs.
-
-An actor is active only while it has work. Its first message, or the first `ref` to it, activates it: casty loads its state on the node that owns the key and starts the body. The body reads messages from `ctx.inbox`, which ends after `idle_after` without messages (one minute by default). When the body returns, the actor is deactivated and its state stays stored, and the next message activates it again from that state. Only active actors hold a task and the memory of their body.
-
-An actor handles one message at a time, in the order they arrive. The body takes the next message when it reads `ctx.inbox` again, so nothing else runs on the actor in between and the body needs no locks. For the same reason, everything the body awaits before reading again holds up the messages of its key: a write until it is confirmed, an `ask` until its answer, a sleep, any I/O. Messages keep queuing meanwhile, up to the `mailbox` of the type (see [Mailboxes](#mailboxes)). A task the body starts runs beside it and holds up nothing. A call that blocks instead of awaiting holds up every key of the node (see [Awaiting coroutines and blocking I/O](#awaiting-coroutines-and-blocking-io)).
-
-Between actors, `tell` is the default. When an actor needs an answer, `ctx.ask(target, msg, mapper)` gets it without holding up its key: it sends `msg` and returns, and the answer comes back to the actor as one more message, the one `mapper` makes of it. The actor goes on with its mailbox meanwhile, so what it has to remember until the answer arrives, such as a transfer in progress, goes in the message or in the state.
+`ref.ask` is how code outside the actors reads from them. A body that awaits it holds up its key until the answer arrives, and a cycle of such asks, a key asking itself or two keys asking each other, raises `ReentrancyError` at once. Between actors, `ctx.ask(target, msg, mapper)` gets the answer without holding up the key: it sends `msg` and returns, and the answer comes back to the actor as one more message, the one `mapper` makes of it.
 
 ```python
 @actor(initial=0)
@@ -123,210 +204,15 @@ async def teller(ctx: Context[int, Transfer | Withdrawn]) -> None:
                 ...
 ```
 
-`mapper` runs when the answer arrives, after the body has moved on to other messages, and a `lambda` reads the variables of the loop when it runs, not when `ask` is called: `transfer=msg` binds the message in hand. `failed=` turns what the `ask` raised, such as a `TimeoutError`, into a message too; without it, nothing is sent and the system reports a `MessageDropped` (see [Observing a node](#observing-a-node)). `ctx.to_self(work, mapper)` does the same for any awaitable: a `gather` of several asks, a call to a database. [Messages](#messages) covers the messages that are answered, `ask` and refs.
-
-Local variables last only as long as one run of the body. The body starts again from the last saved state after it raises, each time the actor is activated, and on another node when its key moves there, so what must survive goes in `ctx.state` (see [State](#state)).
-
-`ctx.become(other, state)` hands the key to another actor type that takes the same messages, so each state of a state machine can be a function of its own. The key and its refs stay the same, the change is saved with the state, and the next message is read by the new body. pyright checks that the state fits the new type, and `become(other)` without a state goes on from the saved one, for a type with the same state type.
-
-```python
-@actor
-async def pending(ctx: Context[Pending, OrderMsg]) -> None:
-    async for msg in ctx.inbox:
-        match msg:
-            case Pay(amount):
-                await ctx.become(paid, Paid(ctx.state.value.items, amount))
-                msg.reply_to.tell(f"paid {amount}")
-            case Ship():
-                msg.reply_to.tell("refused: not paid yet")
-```
-
-The code after `become` still runs, as the answer to `Pay` does above, but `state.set` and `state.update` raise there.
-
-A body is ordinary asyncio code, so it does not have to wait for messages: it can sleep, read a stream or run a `TaskGroup`, and `ctx.merge(source)` interleaves its mailbox with any async iterable. The merge ends when `source` ends, not when the actor goes idle, and what `source` raises is raised in the body. `Context[S]`, without a message type, declares an actor that takes no messages at all:
-
-```python
-@actor(initial=Cursor())
-async def consumer(ctx: Context[Cursor]) -> None:
-    async for record in broker.stream(ctx.key, ctx.state.value.offset + 1):
-        await process(record)
-        await ctx.state.set(Cursor(record.offset))
-
-
-system.ref(consumer, "orders-0")  # creates the key and starts the body
-```
-
-An active actor is marked in its replicated state. If its node dies, the node that takes the key over starts the body again from the saved state, with no message sent, so work done after the last write is repeated. [`examples/01-state-machine`](examples/01-state-machine), [`examples/03-streams`](examples/03-streams) and [`examples/08-consumers`](examples/08-consumers) run these patterns.
-
-`ctx.schedule(name, delay, interval, message)` tells the actor `message` after `delay` and then every `interval`, or once when `interval` is `None`. A schedule is saved with the state, so it goes on after its node dies: only the node where the actor is active sends it, and an actor with schedules does not go idle. The name identifies it. Scheduling under a name in use replaces that schedule, so a body can schedule on every message that asks for it without adding a second one, and `ctx.schedules` maps each name to its schedule, which `cancel()` stops:
-
-```python
-@actor(initial=Feed())
-async def poller(ctx: Context[Feed, Watch | Poll | Unwatch]) -> None:
-    async for msg in ctx.inbox:
-        match msg:
-            case Watch(every):
-                await ctx.schedule("poll", timedelta(0), every, Poll())
-            case Poll():
-                await ctx.state.set(await fetch(ctx.key, ctx.state.value))
-            case Unwatch():
-                if (polling := ctx.schedules.get("poll")) is not None:
-                    await polling.cancel()
-```
-
-Each time a schedule goes off is a message, queued like a `tell`, and a write of its next time, which the node that takes the key over goes on from. Times are kept by the wall clock, and a time missed by more than one interval is skipped. The schedules go on under the type `become` hands the key to, which takes the same messages, and `state.delete()` cancels them.
-
-## Messages
-
-A message is a frozen dataclass, and the `M` of `Context[S, M]` is the union of the messages an actor type takes. pyright checks each `tell` and `ask` against it, and casty serializes every message, even within one process (see [Types](#types)).
-
-```python
-ref.tell(Deposit(50))
-ok = await ref.ask(Withdraw(30))
-```
-
-`tell` sends the message and returns at once. It does not wait for the receiver and does not raise because of it: a message that cannot be delivered is dropped, and the system reports a `MessageDropped` (see [Failures](#failures)). Delivery is at most once. The messages one node sends to one key arrive in the order they were sent, while the owner of the key does not change.
-
-### ask
-
-`ask` sends a message and waits for its answer. A message that is answered is an `Askable[R]`, `R` being the type of its answer:
-
-```python
-@dataclass(frozen=True)
-class Withdraw(Askable[bool]):
-    amount: int
-```
-
-`Askable` gives the message a field `reply_to: Ref[R]`, and the actor answers with `msg.reply_to.tell(...)`. `ask` gives the message it sends a `reply_to` of its own and returns what is told to it. pyright infers that `ask(Withdraw(30))` returns a `bool` and checks that the actor takes `Withdraw`, and casty reads the answer as a `bool`.
-
-`reply_to` is keyword-only, so `case Withdraw(amount)` matches without it. Built with `reply_to=ctx.self` and sent with `tell`, a message has its answer come to the actor as one more message, with no deadline, as the semaphore in [Collections](#collections) does. A message handed on as it arrived keeps its `reply_to`, so the actor it is handed to may answer it. One built without `reply_to` and sent with `tell` answers nobody: what is told to it is dropped.
-
-`ask` raises `TimeoutError` after the `ask_timeout` of the actor type, or the system's (10 seconds by default), and `asyncio.timeout` sets a shorter deadline. An `ask` that times out or is cancelled tells the key to stop working on its message, but what the body did before that stays (see [Cancellation](#cancellation)).
-
-### Refs
-
-A `Ref` is a value: a message or the state can hold one, and it reaches its key from whichever node reads it. `ctx.self` is the ref of the actor itself, and `ctx.system.ref(...)` reaches any other key. A topic keeps the refs of its subscribers in its state and tells each of them what it is sent:
-
-```python
-@dataclass(frozen=True)
-class Subscribe:
-    subscriber: Ref[Published]
-
-
-@actor(initial=())
-async def topic(ctx: Context[tuple[Ref[Published], ...], Subscribe | Published]) -> None:
-    async for msg in ctx.inbox:
-        match msg:
-            case Subscribe(subscriber):
-                await ctx.state.update(lambda subscribers: (*subscribers, subscriber))
-            case Published():
-                for subscriber in ctx.state.value:
-                    subscriber.tell(msg)
-```
-
-A body that awaits `ref.ask` itself holds up its key until the answer arrives, which is why `ctx.ask` is the way between actors (see [Awaiting coroutines and blocking I/O](#awaiting-coroutines-and-blocking-io)). Such an `ask` also carries the keys whose bodies wait for its answer: those waiting on the message the body is on, and the body itself until it reads again. One that comes back to such a key raises `ReentrancyError` at once, naming the cycle, instead of waiting for the deadline: a body asking its own key, or two keys asking each other. The chain names the 16 most recent keys and only the task that read the message adds to it, so a longer cycle, one through a task the body started, and two requests that each hold a key the other asks still end in `TimeoutError`. An `ask` made with `ctx.ask`, or handed to `ctx.to_self`, keeps nobody waiting: calling it ends the wait of what the body asked on its message so far, so a key its work asks may ask it back, and a cycle through an `ask` the body still awaits ends at the deadline instead.
-
-### Mailboxes
-
-Mailboxes are unbounded by default, so an actor slower than its senders accumulates messages in memory. `@actor(mailbox=n)` bounds it. A full mailbox refuses the new message (`on_full="refuse"`, the default), or, with `on_full="wait"`, holds the `ask` until there is room, within its `ask_timeout`: the message stays with its sender, which sends it again when the owner calls it back, one caller for each message taken, in the order they arrived. A `tell` to a full mailbox is dropped either way. Actors whose full mailboxes wait on each other down one chain of asks fail with `ReentrancyError`; two requests that each hold a key the other asks still end at the deadline.
-
-### Cancellation
-
-An `ask` that is cancelled, or passes its deadline, raises `CancelledError` or `TimeoutError` in the caller, as any `await` does, and the key hears of it:
-
-- a message still queued is dropped unread;
-- a caller waiting for room in a full mailbox is let go;
-- a body on the message is cancelled at the `await` it is on, and runs again, from the last confirmed state, for the next message.
-
-A cancelled `ask` asks the body to stop; it does not undo what the body did before the `await` it was on, and a write confirmed before it stays. A collection finishes the message it is on. An answer that arrived first is kept, and a cancellation that crosses the answer the body already told changes nothing.
-
-## State
-
-`ctx.state` is a `State[S]`:
-
-- `ctx.state.value` is the last saved state.
-- `await ctx.state.set(new)` replaces it, and returns once the write level of the type has confirmed it (see [Replication](#replication-and-write-levels)). `value` changes only then.
-- `await ctx.state.update(change)` saves what `change` makes of the current state and returns it. `change` is a function, sync or `async`, from the state to the new state.
-- `await ctx.state.delete()` deletes the state of the key on its replicas, at the write level of the type. The key is then one nothing wrote: activated again, it starts from `initial`. The body goes on from the default of its type; for a type without one, `value` raises until the next `set`. A body that ends without writing again leaves nothing of the key on any replica.
-
-```python
-@actor(initial=0)
-async def account(ctx: Context[int, AccountMsg]) -> None:
-    async for msg in ctx.inbox:
-        match msg:
-            case Deposit(amount):
-                msg.reply_to.tell(await ctx.state.update(lambda balance: balance + amount))
-            case Withdraw(amount) if amount <= ctx.state.value:
-                await ctx.state.set(ctx.state.value - amount)
-                msg.reply_to.tell(True)
-            case Withdraw():
-                msg.reply_to.tell(False)
-```
-
-State is kept in memory on the replicas, unless the type is durable (see [Durable state](#durable-state)).
-
-### Creating keys
-
-`system.ref(actor, key)` is the only way to reach an entity, and it does not wait for anything. Obtaining a ref asks the owner to create the key, if it does not exist, and to activate it. What goes wrong with that shows in the first `ask`.
-
-A key that does not exist starts from:
-
-- `initial=` passed to `ref`, when there is one;
-- otherwise the default of the type, `@actor(initial=...)`;
-- otherwise `None`, if the state type allows it (`Context[Draft | None, M]`).
-
-A type with none of the three cannot be created, and `ref` raises `TypeError`. Both checkers report that call.
-
-```python
-@actor
-async def document(ctx: Context[str, Read]) -> None: ...
-
-
-readme = system.ref(document, "readme", initial="# casty")
-system.ref(document, "readme", initial="other")  # the key exists: its state is unchanged
-system.ref(document, "readme")  # TypeError, and an error in pyright
-```
-
-`initial` only matters for a key that does not exist. When two callers pass different values, the first to reach the owner decides.
-
-### Durable state
-
-A type declared `durable=` is kept by the store of the system too: `ActorSystem(store=...)`, any object with async `load(actor, key)`, `save(actor, key, version, state)` and `drop(actor, key, version)`, shared by every node of the cluster.
-
-```python
-from casty.sqlite import SQLiteStore
-
-
-@actor(initial=0, durable="write")
-async def account(ctx: Context[int, AccountMsg]) -> None: ...
-
-
-async with SQLiteStore("accounts.db") as store, ActorSystem(cluster=cluster, store=store) as system: ...
-```
-
-| `durable` | Saved to the store |
-|---|---|
-| `None` | Never: the state is in memory only (the default) |
-| `"write"` | Every confirmed write, before `state.set` returns |
-| a `timedelta` | The latest confirmed write, at most that long after it; the last write of an activation and deletions at once. Writes return without waiting for the store. |
-
-Every activation of a durable key reads the store and goes on from the later of the replicas and the store, so a key comes back after every replica, or the whole cluster, was lost. The store keeps the record with the greatest `version` (bytes compared in order), which is how a late save of a node that lost the key never undoes a later one.
-
-- Every node of a cluster is given a store reaching the same records. A durable type does not activate on a node without one: `ask` raises `Unavailable`.
-- Store calls run as tasks on the event loop, bounded by the `write_timeout` of the type. A load that fails fails the activation, and with `"write"` a save that fails fails the write with `Unavailable`.
-- The collections are not durable.
-
-`casty.sqlite.SQLiteStore(path)` is a store in one SQLite file, for a system alone or for the nodes of one machine, which may all open the same file. It is used inside `async with`, and opens, reads, writes and closes the file on a thread of its own. Nodes on several machines need a store over a database they all reach; `src/casty/sqlite.py` is the shape of one, one statement per method. `examples/11-durable-state` stops a whole cluster and reads its durable keys back on new nodes.
+The actor goes on with its mailbox meanwhile, so what it needs when the answer arrives goes in the message: a `lambda` reads the variables of the loop when it runs, and `transfer=msg` binds the message in hand. `failed=` turns what the `ask` raised, such as a `TimeoutError`, into a message too.
 
 ## Awaiting coroutines and blocking I/O
 
-A body takes its next message when it reads `ctx.inbox` again, so what it waits for in between decides what waits with it. An `await` holds up the key: its messages queue until the coroutine returns, while the other keys of the node go on. A call that blocks, such as `requests.get`, `time.sleep`, a database driver without `async` or a long computation, holds up the loop, and every body of the node runs on that loop: every key of the node waits until the call returns.
+A body takes its next message when it reads `ctx.inbox` again, so what it waits for in between decides what waits with it. An `await` holds up the key: its messages queue until the coroutine returns, while the other keys of the node go on. A call that blocks, such as `requests.get`, `time.sleep` or a long computation, holds up the event loop, and with it every key of the node.
 
-A body therefore awaits its own writes and pipes everything else to itself:
-
-- **Await the writes of the key**: `ctx.state.set`, `update` and `delete`, `become` and `schedule`. They return once the replicas confirm, and the next message sees what they wrote.
-- **Pipe every other coroutine** with `ctx.to_self`, or with `ctx.ask` for an `ask`: a call to another service, an `ask` to another actor, a `gather` of several. The body goes on with its mailbox, and the result comes back as a message, behind the messages that arrived before it. What the result needs of the message that started it goes with it, as `transfer=msg` does in the `teller` of [Actors](#actors).
-- **Run blocking calls in a thread**: `asyncio.to_thread` turns a call into a coroutine that runs it on a thread, piped like any other. A computation in Python holds the GIL on a thread as well, so it goes to a process, with `loop.run_in_executor` and a `ProcessPoolExecutor`, or to a thread on free-threaded 3.14t.
+- **Await the writes of the key**: `state.set`, `update` and `delete`, `become` and `schedule`. The next message sees what they wrote.
+- **Pipe every other coroutine** with `ctx.to_self(work, mapper)`, or with `ctx.ask` for an ask: a call to another service, a `gather` of several asks. The body goes on with its mailbox, and the result comes back as a message.
+- **Run blocking calls in a thread** with `asyncio.to_thread`, piped like any other coroutine. A computation in Python holds the GIL on a thread as well, so it goes to a `ProcessPoolExecutor`, or to a thread on free-threaded 3.14t.
 
 ```python
 @actor
@@ -342,189 +228,35 @@ async def profiles(ctx: Context[Profile | None, Refresh | Fetched | Resized]) ->
                 ...
 ```
 
-## Failures
+A body does not have to wait for messages at all: it can read a stream or run a `TaskGroup`, and `ctx.merge(source)` interleaves its mailbox with any async iterable ([`examples/03-streams`](examples/03-streams), [`examples/08-consumers`](examples/08-consumers)).
 
-| Situation | `ask` raises | Entity |
-|---|---|---|
-| The body raised while handling the message | `ActorFailed` (actor, key, exception class and text) | Drops the message, waits the backoff, restarts from the last saved state |
-| A ref received in a message points at a key that was never created | `NotStarted` | |
-| Bounded mailbox is full, `on_full="refuse"` | `MailboxFull` | |
-| The `ask` closes a cycle: the key it goes to waits, down the chain of asks, for its answer | `ReentrancyError`, at once, naming the cycle | The message is not queued |
-| In a cluster, the message, an initial state or the answer is larger than `Limits.message` | `MessageTooLarge` | Nothing was sent |
-| Owner unreachable, too few replicas, no owner taking the message within the `write_timeout` of the type while the owner changes, or the store of a durable type not answering | `Unavailable` | The message may or may not have been processed |
-| The owner's code does not have the actor type | `UnknownActor` | |
-| The `ask` is cancelled, or gets no answer within `ask_timeout` | `CancelledError` / `TimeoutError` | The key drops the message if it is still queued, or cancels the body working on it (see [Cancellation](#cancellation)) |
+## Schedulers
 
-For `tell`, the same situations drop the message and report a `MessageDropped` (see [Observing a node](#observing-a-node)), which the default observer logs. In a cluster, a `tell` larger than `Limits.message` raises `MessageTooLarge` where it is sent.
-
-The restart delay follows the `backoff` of the type, or the system's: `first`, multiplied by `factor` on each consecutive failure, up to `limit`. The mailbox is kept across restarts.
-
-## Types
-
-State, messages and replies are always serialized, even within one process. Types are checked when `@actor` runs, and an unsupported one raises `SchemaError` naming the field: `state: Cart.items: list[int] is not supported; use tuple[int, ...]`.
-
-| Annotation | Notes |
-|---|---|
-| `None`, `bool`, `int`, `float`, `str`, `bytes` | Integers are limited to 64 bits |
-| `Literal[...]` of `str`, `int` or `bool` | |
-| `datetime` | Must be timezone-aware |
-| `date` | Days since 1970-01-01 |
-| `time` | Must be timezone-aware with a fixed offset (`timezone(...)`); a `time` with a `ZoneInfo` has none |
-| `timedelta` | Limited to 64 bits of microseconds |
-| `Decimal` | Written as its string, so it stays exact |
-| `UUID` | |
-| `Enum`, `IntEnum`, `StrEnum` | Written as the member name; a renamed member still reads old payloads if the old name stays as an alias. `Flag` is refused: use a `frozenset` of an `Enum` |
-| `PurePosixPath`, `PureWindowsPath`, `Path` | Written as its string, read as the annotated class. A `Path` is read in the receiver's flavour, so `PurePosixPath` is the portable annotation |
-| `tuple[T, ...]`, `tuple[A, B]`, `frozenset[T]` | |
-| `Mapping[K, V]` | Read back as a `dict` |
-| `@dataclass(frozen=True)`, including generic ones | |
-| Unions, `type` aliases, recursive aliases | Dataclasses in a union need distinct names. Alternatives written alike, such as `str` and an `Enum`, `int` and `date`, or `bytes` and an `Opaque` value, are refused as ambiguous |
-| `Ref[T]` | Arrives bound to the receiving system |
-| `Annotated[T, Opaque(encode, decode)]` | Any `T`: travels as the bytes `encode` returns and is read back with `decode`. casty does not read them: no schema evolution inside, no other language, and every node must decode what any other encodes |
-
-`list`, `dict`, `set`, non-frozen dataclasses, plain classes, `Any`, `object` and `Callable` are refused. `list`, `dict` and `set` are refused because mutating the state in place would change the local state without replicating it; use `tuple`, `Mapping` and `frozenset`.
-
-A type the schema refuses travels through `Opaque`:
+`ctx.schedule(name, delay, interval, message)` tells the actor `message` after `delay` and then every `interval`, or once when `interval` is `None`. The schedule is saved with the state and sent only by the node where the actor is active, so a key with a schedule is a singleton of the cluster that goes on when its node dies:
 
 ```python
-type Frame = Annotated[np.ndarray, Opaque(encode=to_bytes, decode=from_bytes)]
+@dataclass(frozen=True)
+class Check:
+    pass
+
+
+@actor(initial=date(2026, 1, 1))  # the last day with a report
+async def nightly(ctx: Context[date, Check]) -> None:
+    await ctx.schedule("check", timedelta(0), timedelta(hours=1), Check())
+    async for _ in ctx.inbox:
+        today = datetime.now(UTC).date()
+        if ctx.state.value < today:
+            await ctx.state.set(today)
+            await build_report(today)
+
+
+system.ref(nightly, "report")  # creates the key and starts the body, once for the whole cluster
 ```
 
-The checkers see `np.ndarray`; the wire carries bytes. Two values are equal when stored only if `encode` gives them the same bytes, which collection keys, `compare_and_set` and the replication of changed pages rely on. An `Annotated` without `Opaque` is read as its type.
-
-Types in a body's annotation must be defined before the decorated function.
-
-**Schema evolution.** Dataclasses are encoded by field name, so two versions of the code can share a cluster:
-
-- a missing field with a default gets the default;
-- an unknown field is ignored;
-- a missing field without a default, an unknown union member, an enum member the reader does not have or a mismatched value raises `SchemaError`;
-- an `Opaque` value is read by its `decode`, so its evolution is the caller's.
-
-An old node that saves a state written by a new node drops the fields it does not know. Renaming a dataclass that is in a union, or replacing a dataclass field type by a union containing it, is incompatible.
-
-## Clusters
-
-### Starting a node
-
-```python
-cluster = Cluster(
-    bind="0.0.0.0:7400",
-    advertise="10.0.0.5:7400",  # what other nodes dial; defaults to `bind`
-    seeds=("10.0.0.4:7400",),
-)
-
-async with ActorSystem(cluster=cluster) as system:
-    await stop.wait()
-```
-
-- Without seeds other than itself, a node starts a cluster alone. Otherwise `async with` returns once it sees another member; bound the wait with `asyncio.timeout`. A join that is cancelled, or refused, lets go of the address, the connections and the threads it took, and the system can be entered again.
-- Nodes do not list actor types. A type is named `module:qualname`, and a node imports it when the name arrives from the cluster. **All nodes of a cluster must run the same code.**
-- `system.ref(actor, key)` reaches the key from any node. `system.members` is the member table as this node sees it, with status `alive`, `leaving`, `suspect` or `dead`.
-- Nodes with a different cluster `name` or different [`Limits`](#limits) are refused with `Refused`.
-- Several `ActorSystem`s can run in one process, each on its own port.
-- The transport of each `ActorSystem` in a cluster and of each `Client` runs on a thread per core of its own. Systems given the same `Runtime` share its threads instead, which is what a process holding many clients wants:
-
-  ```python
-  runtime = Runtime(threads=4)
-  async with Client(seeds=seeds, runtime=runtime) as one, Client(seeds=others, runtime=runtime) as two:
-      ...
-  ```
-
-  A system that ends, orderly or by a crash, stops its node, its listener and its connections and leaves the runtime running for the others; the threads go when nothing holds the runtime.
-
-### Replication and write levels
-
-Consistency is chosen per actor type:
-
-```python
-@actor(initial=Ledger(), replicas=3, write="majority")  # the defaults
-async def ledger(ctx: Context[Ledger, LedgerMsg]) -> None: ...
-```
-
-`replicas` is the number of nodes that keep a copy of each key, capped by the size of the cluster. `write` is how many must confirm a write of the state:
-
-| `write` | Confirmations | Behaviour |
-|---|---|---|
-| `"majority"` | more than half | Confirmed writes survive the loss of a minority of the copies. The minority side of a partition cannot write. |
-| `"all"` | all | Confirmed writes survive the loss of all copies but one. Any replica away refuses writes. |
-| `"one"` | one | Writes while any replica is reachable. A change of owner can lose confirmed writes, and two owners can write during one. |
-
-When too few replicas answer within the `write_timeout` of the type, or the system's, `state.set` raises `Unavailable`, the body restarts and the message being handled fails with `Unavailable`.
-
-### Pinned actors
-
-A type declared with `@actor(pinned=True)` runs each key on one node, which the ref names: `at=member`, `at=node_id` or `at="10.0.0.5:7400"`, the address the node advertises.
-
-```python
-@actor(initial=Load(), pinned=True)
-async def agent(ctx: Context[Load, AgentMsg]) -> None: ...
-
-
-for member in system.members:
-    system.ref(agent, "agent", at=member).tell(Refresh())
-```
-
-- The key carries that address (`ctx.key` reads `@10.0.0.5:7400/agent`), so the ref reaches the node after it restarts.
-- The key is never moved and has one copy: `replicas` defaults to 1, and more raises `ValueError`. `ask` raises `Unavailable` while no member up advertises the address.
-- An orderly leave ends the key's activation and no other node starts it. A process that comes back on the address starts it from `initial`, or from the store for a durable type.
-- A pinned type without `at=` raises `TypeError`, and so does any other type with it.
-
-`examples/10-agent-per-node` keeps one agent per node, reached by `NodeId`, by `Member` and by address, while a node joins, one leaves and a new process starts on its address.
-
-### Clients
-
-A `Client` sends messages to a cluster without joining it. It hosts no actors, holds no state and takes no part in membership, so the number of clients does not affect the membership protocol.
-
-```python
-async with Client(seeds=("10.0.0.4:7400",)) as client:
-    tally = await client.ref(poll, "vim").ask(Count())
-```
-
-`Client` and `ActorSystem` both implement the `System` protocol (`ref`, `node`). The client imports the actor types it uses, routes each message directly to the owner, and refreshes its member table every `sync_every`.
-
-A client has no listener: it can be answered, but not sent to.
-
-- It cannot hold an entity. Every key `client.ref` reaches lives on a node.
-- It cannot receive a `tell`. The only ref that leads to a client is the `reply_to` of its own `ask`, which takes one answer, over a connection the client opened. A second `tell` to it, one after the `ask` has ended, and one from a node the client has no connection to are dropped.
-- It cannot be subscribed to anything. An entity that keeps a client's `reply_to` to report later changes reaches it once.
-
-A process that only calls into the cluster, such as a web handler, a script or a batch job, fits a `Client`. One that must be pushed to has two options:
-
-- Poll: `ask` on an interval, or keep one `ask` pending that the entity answers only when something changes, and ask again after each answer and each `TimeoutError`. The entity keeps the `reply_to` and reads on; a body that awaited the change while on the message would hold up its key, and be cancelled when the `ask` times out.
-- Run an `ActorSystem` joined to the cluster and receive in an entity, which can be told, subscribed and passed around as a `Ref`. The entity runs on whichever node owns its key, or, for a [pinned](#pinned-actors) type, on the process's own node (`at=system.node`). Either way the process becomes a member: it listens, takes part in membership, hosts its share of keys and replicas, and must run the same code as the other nodes.
-
-### Leaving, crashing and deploying
-
-- **Leaving `async with` normally is an orderly exit.** The node stops being chosen as owner, finishes the messages in progress, hands its stored state to the next replicas and leaves, within `leave_timeout`. Pending asks to it do not fail. Keys the replicas had not taken by then are reported in `HandoffEnded.abandoned`.
-- **Leaving by exception or cancellation is a crash.** The others detect it by heartbeat, and its keys are activated elsewhere from their replicas.
-- **A rolling deploy** is an orderly exit and a join, node by node, relying on schema evolution and on keys moving with their state. While a deploy introduces an actor type, keys of that type placed on old nodes raise `UnknownActor`.
-
-A restarted process is a new node, with a new incarnation and nothing in memory. A ref to a pinned key reaches the new process on the same address, where the key starts again from `initial`, or from the store for a durable type.
-
-### TLS and compression
-
-```python
-Cluster(
-    bind="0.0.0.0:7400",
-    tls=TLS(cert="node.pem", key="node.key", ca="ca.pem"),
-    compression=Compression(codecs=("zstd",), min_bytes=4096),
-)
-```
-
-With `ca`, both sides verify the peer certificate against it, and `require_client_cert=True` (the default) makes it mutual TLS. Host names are not verified: nodes are authenticated by the CA. Compression is negotiated per connection among `zstd`, `lz4` and `zlib`, and a frame shorter than `min_bytes` (4096) goes uncompressed. `address_map` maps an advertised address to the one to dial, for NAT and tunnels. It is called on the event loop at every dial, which is when a connection opens or opens again, so a tunnel that comes back on another port is followed. `Client` takes the same three parameters.
-
-### Limits
-
-```python
-Cluster(bind="0.0.0.0:7400", limits=Limits(message=32 * 1024 * 1024))
-```
-
-`Limits` sets the sizes of a connection in bytes: `message` (4 MiB) bounds one envelope between two nodes, which is a message to a key, its answer, or a message of replication; `frame` (256 KiB) bounds each piece an envelope is cut into; and `window` (256 KiB) is how much of a stream may be in flight. Each is at most 2 GiB; `message` must be at least 128 KiB, `frame` at most `message`, and `window` at least `frame`.
-
-- Every node and client must have the same limits: the handshake refuses a peer whose limits differ, and that surfaces as `Refused`. `Client` takes `limits` too.
-- A message or an initial state over `message` raises `MessageTooLarge` where it is sent, and an answer over it reaches the caller as `MessageTooLarge`, whether or not the key is on the node that sends it. A system without a cluster takes any size.
-- The state is not bound by it: a page larger than a message is cut across as many as it takes. A write raises `MessageTooLarge` only when a field has a name that leaves no room for its data in a message.
+- Scheduling under a name in use replaces that schedule, so the body above schedules on every activation without adding a second one. `ctx.schedules` maps each name to its schedule, which `cancel()` stops.
+- A key with schedules does not go idle. A schedule goes off only while its key is active: a key that is not wakes on a message or a `ref`, never on the clock.
+- Times follow the wall clock, and a time missed by more than one interval is skipped. A change of owner can lose a time or send it twice, so the body checks its state, as `nightly` does with the last day built.
+- Saving the day before building the report builds it at most once per day; building it first builds it at least once.
 
 ## Collections
 
@@ -562,422 +294,48 @@ async with collections.lock("report", ttl=60) as lease:
 All take `replicas` (default 3). Data collections also take `write` (default `"majority"`); semaphores, locks and barriers always use `"majority"`.
 
 - An absent entry is `MISSING`, distinct from a stored `None`.
-- The first operation fixes the configuration of a name. Other settings or types raise `ConfigurationError`.
-- A `Collections` answers the same object for the same name and arguments while that object is held, and checks the configuration with the cluster once for it, so keep one per system and hold what it gives you. What nobody holds is dropped, so a collection per entity name does not pile up; asked for again, it is built anew and checks again. While a name's configuration is held, asking for it with other settings raises at once.
-- Mutating calls return after the state is saved. A failed or timed-out call may have committed and is not retried.
-- The index of a dict, a set or a multimap is kept per shard in segments of about 512 keys, split as it grows, so adding a key rewrites one segment whatever the size; values listed under one multimap key stay together.
-- `scan()` on `Dict`, `Set` and `MultiMap` is an async iterator that holds one segment of the index at a time, so a collection of any size can be read. It is not a snapshot: an entry written while it runs may be seen or not, and none is seen twice. `items()` collects it into a list.
-- `Dict` stores each entry under its own key and lists the key in the index. Replacing the value of a key needs only its entry; adding or removing a key also needs the index segment of its key. `scan`, `items` and `clear` read the index a segment at a time and ask the entries of its keys at once. `size` counts the keys listed, one ask per segment: a put or removal that stopped halfway leaves a key listed without a value, which counts until the next scan drops it or the key is put or removed again.
-- A removed `Dict` key leaves nothing on the replicas. Its generations come from the wall clock, so the clocks of the nodes must agree within the time between a removal and the next put of the key.
-- `size` and `clear`, in every collection that has them, and reads of a striped `Counter` are not atomic: an entry written while they run may be counted, or survive, or not. `Set.union` reads both sets; `intersection` and `difference` read this set and ask the other about each member.
-- `Queue` keeps its items in segments of up to 1024 items or 64 KiB under keys of their own, so an operation writes one segment and the queue has no size ceiling. A segment drained for good is deleted once it idles. A lost `poll` or `drain` answer loses the removed items.
-- `Semaphore` and `Lock` grant a `Lease` with a TTL in seconds, renewed only by `lease.renew(ttl)` and given back by `lease.release()`, which nothing answers: a lost release leaves the permits held until the TTL runs out. Expiry uses wall clocks, which must be synchronized. Waiters are served in order. A lease can expire under a slow holder, so the protected resource must reject tokens older than the newest it has seen.
-- `acquire` and `Barrier.wait` wait indefinitely; bound them with `asyncio.timeout`. `async with lock` is not reentrant.
+- The first operation fixes the configuration of a name, and other settings or types raise `ConfigurationError`. Keep one `Collections` per system.
+- Mutating calls return after the state is saved. A call that failed or timed out may have committed, and is not retried.
+- `scan()` reads a `Dict`, `Set` or `MultiMap` of any size one segment at a time; it is not a snapshot. `size` and `clear` are not atomic either.
+- `Semaphore` and `Lock` grant a `Lease` with a TTL and a fencing token. Expiry uses the wall clocks of the nodes, which must agree, and a lease can expire under a slow holder, so the protected resource must reject tokens older than the newest it has seen.
+- `acquire` and `Barrier.wait` wait indefinitely; bound them with `asyncio.timeout`.
+- The collections are not durable.
 
-`Semaphore` and `Lock` are the actor `casty.collections.semaphore` behind `ask`, and a body can use that actor without waiting on it. A key takes its capacity from the `initial` its first ref is obtained with, and answers `Acquire` with `Acquired` or `Denied`, which are messages: with `ctx.self` as its `reply_to`, the answer arrives in the inbox, and the body goes on reading meanwhile. A request with no `wait` stays in line as long as it takes, which a `ctx.ask`, bound by its deadline, would not wait for.
+## Failures
 
-```python
-from casty.collections import Acquired, Denied, SemaphoreState, semaphore
-
-
-@actor(initial=0)
-async def crawler(ctx: Context[int, Crawl | Acquired | Denied]) -> None:
-    fetches = ctx.system.ref(semaphore.actor, "fetches", initial=SemaphoreState(capacity=8))
-    async for msg in ctx.inbox:
-        match msg:
-            case Crawl(url):
-                fetches.tell(semaphore.Acquire(ttl=60, lease_id=url, reply_to=ctx.self))
-            case Acquired(url, _):
-                await fetch(url)  # at most 8 at once, across every key of every crawler
-                fetches.tell(semaphore.Release(url))
-            case Denied():
-                pass
-```
-
-- `Acquire(n=1, ttl=30.0, wait=None, lease_id=None)`, an `Askable[Acquired | Denied]`. `wait` is how long the request stays in line: `None` for as long as it takes, `0` for now or never. The semaphore names the lease when `lease_id` is `None`. Sent again under the same `lease_id`, a request keeps its place in line, and a granted one hears its grant again.
-- `Release(lease_id)` gives the permits back, or withdraws a request still waiting, and answers nothing. `Renew(lease_id, ttl)` answers whether the lease was still held, and `Get()` answers a `Status`.
-- The capacity is the one of the ref that created the key; the `initial` of a later ref is ignored. A ref to a key nobody created, received in a message, meets `NotStarted`, and so does one to a key lost with every replica, since the collections are not durable, until a ref brings its capacity again. `Semaphore` and `Lock` do that themselves; a call of theirs that still finds the key missing, while it changes owner, raises `Unavailable`.
-
-## casty as a distributed toolkit
-
-By now, you're probably wondering whether casty would be a good fit for building custom clustered tools, such as schedulers, brokers, caches and so on. You're not wrong: that was indeed my initial goal.
-
-Tools like these are built from the same few parts. Each keeps state that must outlive the machine holding it, sends work to wherever that state is, keeps work running when a machine fails, and makes machines agree when only one of them may act. Usually each part comes from a separate system: a database for the state, a broker for the work, a coordination service such as ZooKeeper or etcd for leases and leader election, and a supervisor that restarts what died. Each of those has its own failure model, and the tool built on top has to reconcile them.
-
-casty puts these parts in one model. State belongs to a key, the key is placed on a node by its name, messages for it are routed there, and the cluster moves and restarts it as nodes come and go. The rest of this section goes through a few such tools: how each maps onto that model, and which of the [guarantees](#guarantees-and-limits) it inherits. One caveat up front: casty is not a consensus service, so where a tool needs linearizable reads, I'll point out where the difference shows.
-
-### Caches
-
-A distributed cache splits its entries among machines, so that the cluster holds more than one machine could, and sends each lookup to the machine holding its entry. That split is the first decision of any clustered tool. Some systems assign a fixed number of partitions to machines, as Kafka does with the partitions of a topic; others use consistent hashing, where the position of a key on a ring picks its machine and adding a machine moves only the keys next to it.
-
-In casty the key is the partition. Each key of a type is placed on a ring by the hash of its type and key, and the cluster keeps the ring, routes each message to the owner, and moves keys as nodes join and leave (see [Placement](#placement) and [Handoff](#handoff)). A cache entry is a key:
-
-```python
-@dataclass(frozen=True)
-class Lookup(Askable[Profile]):
-    pass
-
-
-@actor(idle_after=timedelta(minutes=5))
-async def profile(ctx: Context[None, Lookup]) -> None:
-    cached = await load_profile(ctx.key)
-    async for msg in ctx.inbox:
-        msg.reply_to.tell(cached)
-```
-
-`await system.ref(profile, "ana").ask(Lookup())` activates the key on its owner, which loads the profile once and answers every lookup from memory. The value is a local variable, so it lives exactly as long as the activation: five minutes without a lookup, a move to another node or a crash drops it, and the next lookup loads it again. Nothing of it is replicated, since the state is `None`. An entry that must survive its node goes in the state instead, and costs a replicated write each time it changes. Such a type still keeps the default `replicas`: the replicas of a key are also the nodes that may own it, and a key with one replica has no owner while its node is dead, until the node is removed.
-
-Lookups that arrive while the profile loads wait in the mailbox, since a key handles one message at a time, so the origin is asked once per activation however many callers ask at once. Other caches call this request coalescing. During a change of owner, two nodes can briefly run the same key and both load it.
-
-The same property bounds the throughput of an entry: one key answers one lookup at a time, on one node, however large the cluster. Keys are the unit of parallelism of whatever is built on casty, and a key that gets much more traffic than the others limits the whole type. Spreading it over more keys trades that limit for coordination between them: `counter(name, stripes=n)` sends each increment to the next of its n keys, so increments run in parallel, and a read asks all n and is not atomic.
-
-### Schedulers
-
-A scheduler runs work that no request starts: a report every night, a cleanup every hour, a check of a resource every minute. The work must run somewhere, on one machine only when it has effects, and start again elsewhere when that machine fails. The usual construction is a supervisor on each machine plus a lease or a leader election in a coordination service, to decide which machine runs it.
-
-In casty such work is a key with a schedule. `ctx.schedule` saves the schedule with the state of the key, only the node where the key is active sends it, and the node that takes the key over goes on from the time it was due next (see [Actors](#actors)). One key is a singleton of the cluster:
-
-```python
-@dataclass(frozen=True)
-class Check:
-    pass
-
-
-@actor(initial=date(2026, 1, 1))  # the last day with a report
-async def nightly(ctx: Context[date, Check]) -> None:
-    await ctx.schedule("check", timedelta(0), timedelta(hours=1), Check())
-    async for _ in ctx.inbox:
-        today = datetime.now(UTC).date()
-        if ctx.state.value < today:
-            await ctx.state.set(today)
-            await build_report(today)
-
-
-system.ref(nightly, "report")  # creates the key and starts the body, once for the whole cluster
-```
-
-The key checks every hour whether the report of the day is built, and keeps the last day built in its state. Each time a schedule goes off is a message queued like a `tell` and a write of its next time: a node that dies with that message queued loses it, and a time whose write was not confirmed goes off again on the node that takes the key over. The state makes both harmless: a lost check is made up by the next one, and a repeated one finds the day built. Scheduling under the same name at the start of the body replaces the schedule instead of adding one, and checks at once on every activation.
-
-The order of the two lines under the `if` decides what a failure during the report does. Saving the day first means a crash during the report skips that day: at most once. Building the report first means a crash before the save builds it again on the next owner: at least once. During a change of owner two nodes can briefly run the key, but with `write="majority"` only one of them can confirm the save, and a body whose save is not confirmed never reaches the line after it. With the save first, each day is claimed by at most one node.
-
-A schedule goes off only while its key is active, and a key with schedules does not idle out, so it holds a task and memory for as long as its schedules last. Nothing activates a key on a clock, which Orleans does with what it calls reminders: a key whose body returned, or that `ActorSystem.release` let go, takes its schedules up when a message or a `ref` activates it again. A scheduler of many timers, such as one expiry per session, keeps them in keys grouped by when they are due rather than in the keys they are for: each group is a key with a schedule that goes off once, tells the entities whose timers are due, and deletes its state. The grouping sets how many keys stay active at once.
-
-### Brokers
-
-A broker accepts messages from producers, keeps them, and hands them to consumers. What it promises follows from when it answers the producer and when it forgets a message. casty offers three shapes, each with its own promise.
-
-**A queue.** `Queue` (see [Collections](#collections)) answers `offer` once the item is saved at the write level, and `poll` removes the item it returns. A `poll` whose answer is lost loses the item, so each item reaches at most one consumer, at most once. It fits work whose loss is detected elsewhere, or that is cheap to redo.
-
-**A partitioned log.** A partition is a key whose state holds the messages in the order it accepted them, and which answers the producer once the write level confirms the append. A producer that retries after `Unavailable` or `TimeoutError` may send a message that was already appended, so the partition keeps the last sequence number of each producer and skips what it has seen. A consumer is a running key per group and partition, whose state is the offset it has processed up to, as in `examples/08-consumers`: it processes a message and then saves the offset, so after a crash it resumes on another node and repeats at most the messages since its last save. The order of a partition is the order in which its mailbox received the messages; from one node to one key, messages arrive in the order sent while the owner does not change. A write sends only the top-level fields of the state that changed, but each of them whole, so a log kept in one field is written whole on every append. `Queue` keeps its items in segments under keys of their own for that reason, and a log does the same.
-
-**A topic.** A key whose state holds the refs of its subscribers tells each of them every message it is sent. A subscriber is an entity, so it does not need to be active to receive: the `tell` activates it wherever it is. Delivery is at most once per subscriber, and a subscriber that must not miss a message reads a log instead. A `Client` cannot subscribe (see [Clients](#clients)).
-
-### Coordination
-
-Before reaching for a lock, check whether the operations can be messages to one key. A key handles one message at a time, so operations on it never interleave, and no lock is needed. Most of what a lock would protect inside a tool built on casty is the state of some key.
-
-`Lock`, `Semaphore` and `Barrier` are for what a key does not cover: a resource outside casty, or work spread over many keys and processes. A `Lock` grants a lease with a TTL and a fencing token that increases with each acquisition. A slow holder can outlive its lease, so the protected resource must reject tokens older than the newest it has seen, and the wall clocks of the nodes must agree. A `Semaphore` bounds how many holders run at once across the cluster, such as calls to an external API. A `Barrier` holds its parties until all of them arrive, which separates the phases of a computation spread over many workers.
-
-A leader is either the holder of a lock it keeps renewing, or the singleton key of a scheduler. ZooKeeper and etcd agree on every change through a consensus protocol. casty confirms a write by a majority under an epoch that fences any older owner, but its reads are not linearizable and the handover of a key relies on timing (see [Guarantees and limits](#guarantees-and-limits)): a process paused long enough can still act as leader after another took over. A leader in casty is therefore trusted only with effects that are fenced. Its writes to the state of its key are fenced by the epoch; an external resource needs the token of the lock.
-
-### Workflows
-
-A workflow engine runs a sequence of steps that must finish even if the machines running it fail midway: an order that charges, reserves and ships, or a migration over many records. Temporal and engines like it record the result of each step in a history and, after a failure, rebuild the workflow from it.
-
-In casty a workflow is a key of a durable type. Each step saves its result in the state before the next begins. After a crash, the new owner runs the body again from the saved state, and a body that reads the state to know which step comes next continues from there. With `durable="write"`, every saved step is also in the store, so the workflow survives the loss of every replica and a restart of the whole cluster (see [Durable state](#durable-state)). `become` gives each phase a behavior of its own, and a failed step can become a behavior that undoes the completed steps in reverse order, as a saga does.
-
-Three things remain the tool's to handle:
-
-- A step whose effect happened, but whose result was not saved, runs again. The call that makes the effect takes an idempotency key, such as the key of the workflow and the number of the step.
-- Nothing lists the store. After a restart of the whole cluster, a workflow resumes when something obtains its ref, so the tool keeps the keys of the open workflows in a durable key of its own and obtains their refs when it starts.
-- A workflow that outlives a deploy is read by the next version of its body, under the rules of [schema evolution](#types). Moving or renaming the body renames its type, and the workflows saved under the old name are no longer reached.
-
-### Where it stops
-
-- **Exactly once.** Delivery is at most once and a body's work is at least once. An effect that must happen exactly once needs a target that recognizes a repeated request.
-- **Consensus.** Leases and leaders rest on majority writes and timing, not on consensus (see [Coordination](#coordination)).
-- **Transactions across keys.** A write changes one key. An operation over several keys goes through a key that coordinates it and undoes what it did on failure (see [Workflows](#workflows)).
-- **Timers of keys that are not running.** A schedule goes off only while its key is active, and a key that is not wakes on a message or when its ref is obtained, never on a clock (see [Schedulers](#schedulers)).
-- **Pushing outside the cluster.** A `Client` can only be answered. A process that must be told things joins as a node (see [Clients](#clients)).
-- **Durable collections.** The collections are not durable. A tool that must survive losing every replica keeps its state in a durable type of its own.
-
-## Observing a node
-
-### Events
-
-`ActorSystem(observer=...)` and `Client(observer=...)` take any callable of one `casty.Event`. It is called on the event loop, one event at a time, after the step that produced the event, so it may call back into the system and must not block. An observer that raises is reported to the loop's exception handler and the node carries on.
-
-| Event | Reported when |
+| Situation | `ask` raises |
 |---|---|
-| `MemberChanged(node, status, previous)` | A member of this node's table changed status |
-| `ActivationStarted(actor, key)` | A key became active on this node |
-| `ActivationEnded(actor, key)` | A key stopped being active on this node |
-| `ActivationFailed(actor, key, error)` | A body raised and restarts, or the key cannot run here |
-| `WriteFailed(actor, key, operation, reason, message)` | Taking a key over (`activate`) or a write (`write`) failed: `unavailable`, `fenced` or `too_large` |
-| `HandoffStarted(actor, direction)` | Keys of a type started moving `in` to or `out` of this node after a change of the ring |
-| `HandoffEnded(actor, direction, abandoned)` | Nothing of the type moves in that direction any more |
-| `ConnectionLost(node)` | A connection to a node ended |
-| `MessageDropped(actor, key, reason)` | A `tell` ended on this node without reaching its key |
+| The body raised while handling the message | `ActorFailed`; the key restarts from its last saved state after the `backoff` of its type |
+| The `ask` closes a cycle of asks | `ReentrancyError` |
+| A bounded mailbox (`@actor(mailbox=n)`) is full | `MailboxFull` |
+| The message or its answer is larger than `Limits.message` | `MessageTooLarge` |
+| Owner unreachable, too few replicas, or the store of a durable type not answering | `Unavailable`: the message may or may not have been processed |
+| The owner does not have the actor type | `UnknownActor` |
+| A ref received in a message points at a key never created | `NotStarted` |
+| No answer within `ask_timeout`, or the `ask` is cancelled | `TimeoutError` / `CancelledError`; the key drops the message if still queued, or cancels the body working on it |
 
-An observer may say which kinds it takes with a method `wants(kind: type[Event]) -> bool`: the system asks it once per kind when it enters and never builds an event of a kind it declined.
+For `tell`, the same situations drop the message and report a `MessageDropped` to the observer of the system, which by default logs it. `ActorSystem(observer=...)` takes any callable of a `casty.Event`, and `system.stats()` reads what the node counts.
 
-Without an observer, a system reports to `casty.LoggingObserver`, which writes every event to the `casty` logger: dropped messages, failed bodies and writes, keys a leave went without, and members turning suspect or dead are warnings; other membership changes, lost connections and handoffs are info; activations starting and ending are debug, and the default observer takes them only when the `casty` logger takes debug records as the system enters, so a node that does not log at debug builds no event per activation. Passing an observer replaces it; to keep the logging too, call a `LoggingObserver()` from your observer.
+## Types
 
-`HandoffEnded.abandoned` names the keys an orderly leave went without: the nodes that replicate them now had not taken them within `leave_timeout`. Whatever of them only this node held left with it.
+State, messages and answers are always serialized, even within one process. Types are checked when `@actor` runs, and an unsupported one raises `SchemaError` naming the field: `state: Cart.items: list[int] is not supported; use tuple[int, ...]`.
 
-`MemberChanged(node, status, previous)` reports each change of status in this node's member table once, in the order the table made it: a crash is `suspect`, then `dead`, then `left` once `remove_after` passes on a side that sees a majority alive; an orderly shutdown is `leaving`, then `left`. The table can lag, and an event is not a consensus: it is what this node heard, through gossip, when it heard it. Two nodes see a change at different moments, a node cut off by a partition sees the changes of that time only after the heal, and a node that first hears of a later status skips the ones before it (`previous` then says `alive` for a member now `dead`). A client asks for the table every `sync_every` and reports what changed from one answer to the next. To react to membership in a loop, queue the events from the observer:
+- Supported: `None`, `bool`, `int` (64 bits), `float`, `str`, `bytes`, `Literal`, timezone-aware `datetime` and `time`, `date`, `timedelta`, `Decimal`, `UUID`, enums, paths, `tuple`, `frozenset`, `Mapping`, frozen dataclasses (generic ones too), unions, `type` aliases and `Ref[T]`.
+- Refused: `list`, `dict`, `set`, mutable dataclasses, plain classes, `Any`, `object` and `Callable`. Mutating the state in place would change it without replicating it; use `tuple`, `Mapping` and `frozenset`.
+- Any other type travels as bytes through `Annotated[T, Opaque(encode, decode)]`, which casty does not read.
 
-```python
-changes: asyncio.Queue[casty.MemberChanged] = asyncio.Queue()
-logged = casty.LoggingObserver()
-
-
-def observer(event: casty.Event, /) -> None:
-    logged(event)
-    if isinstance(event, casty.MemberChanged):
-        changes.put_nowait(event)
-
-
-async with casty.ActorSystem(cluster=cluster, observer=observer) as system:
-    while True:
-        change = await changes.get()
-        ...
-```
-
-### Stats
-
-`system.stats()` (and `client.stats()`) reads what the node counts at that moment, as a `Stats`:
-
-| Field | Meaning |
-|---|---|
-| `actors` | Every actor type the node has met, mapped to `ActorStats(active, queued, deepest)`: its activations here, the messages waiting in their mailboxes, and the most waiting in one of them |
-| `asks_in_flight` | Asks of this system, its bodies' included, waiting for an answer |
-| `connections` | Connections open now |
-| `writes_confirmed`, `writes_failed` | Writes of the keys this node owns, since the system entered |
-| `bytes_sent`, `bytes_received` | Bytes on its connections since the system entered, compressed and before TLS |
-
-Nothing is counted as messages go by: the activations are read when `stats()` is called, and the writes and bytes are counters kept by the replication and the transport, so a node that nobody reads pays nothing for them. The counters start again from zero when a node the cluster removed rejoins under a new identity. A client hosts no key and owns no write, so those count zero.
-
-### Activations, placement and release
-
-`system.activations()` lists the keys active on the node, one `Activation(actor, key, since, queued)` each, by type and key: what `stats()` counts, key by key.
-
-`await system.placement(actor, key)` answers where the key is as that node routes, as `Placement(owner, replicas)`: the replicas in ring order, and the owner, the first of them up, where a message goes and the key activates (`None` when none is up). It takes the `key` and `at=` of `ref`, and a `Client` answers it too, from the table it last synced.
-
-`await system.release(actor, key)` ends the key's activation on that node as if it had idled out: the body finishes the message it is on and ends at its next read, its writes land, the key lets go with its last write, and what reached it meanwhile goes, in order, to the activation that starts it again from its state. `key` is the key as `ctx.key` reads it. It answers `False` when the key is not active there.
-
-## Reference
-
-### `@actor`
-
-| Parameter | Default | Meaning |
-|---|---|---|
-| `initial` | none | State a key starts from. Without it, `ref` takes `initial=`, or the state type allows `None`. |
-| `replicas` | `3`, or `1` when pinned | Nodes that keep a copy of each key |
-| `write` | `"majority"` | `"one"`, `"majority"` or `"all"` |
-| `pinned` | `False` | Each key runs on the node its ref names with `at=`; one copy |
-| `mailbox` | `None` | Mailbox capacity; `None` is unbounded |
-| `on_full` | `"refuse"` | What an `ask` meets at a full bounded mailbox: `"refuse"` raises `MailboxFull`, `"wait"` waits for room within `ask_timeout`; needs `mailbox` |
-| `durable` | `None` | `"write"` saves every confirmed write to the system's store before `state.set` returns; a `timedelta` saves the latest confirmed write at most that long after it, and the last write of an activation and deletions at once. `None` keeps the state in memory only. |
-| `idle_after` | the system's | Time without messages after which `inbox` ends |
-| `ask_timeout` | the system's | Deadline of an `ask` to this type |
-| `write_timeout` | the system's | How long a write of the state or an activation waits for replicas, and a message for an owner to take it |
-| `backoff` | the system's | Delay before restarting a body that raised |
-
-### `Context[S, M]`
-
-| Member | Meaning |
-|---|---|
-| `key` | Key of this entity |
-| `state` | `State[S]`: `value`, `await set(state)`, `await update(change)`, `await delete()` |
-| `inbox` | Messages in arrival order; ends after the type's `idle_after`, or the system's, without messages |
-| `self` | Ref to this entity |
-| `system` | System of the node running this activation |
-| `await become(behavior[, state])` | Hand the key to another actor type with the same messages |
-| `merge(source)` | Messages and items of `source` in arrival order, until `source` ends |
-| `ask(target, msg, mapper, failed=)` | Send `msg` to `target` and tell this entity what `mapper` makes of the answer, as a message |
-| `to_self(work[, mapper], failed=)` | Await `work` beside the body and tell this entity what it gives, as a message |
-| `await schedule(name, delay, interval, message)` | Tell this entity `message` after `delay`, then every `interval`; replaces the schedule named `name` |
-| `schedules` | The schedules of the key by name, each with `name`, `message`, `interval`, `due` and `await cancel()` |
-
-### `ActorSystem`
-
-| Parameter | Default | Meaning |
-|---|---|---|
-| `cluster` | `None` | Without it, the system runs in this process only |
-| `idle_after` | 1 min | Time without messages after which `inbox` ends |
-| `backoff` | `Backoff(first=100ms, limit=10s, factor=2.0)` | Delay before restarting a body that raised |
-| `ask_timeout` | 10 s | Deadline of `ask` |
-| `write_timeout` | 5 s | How long a write of the state or an activation waits for replicas, and a message for an owner to take it |
-| `leave_timeout` | 30 s | Budget of an orderly exit |
-| `observer` | `None` | Called with every event of the node; `None` is a `LoggingObserver`. See [Observing a node](#observing-a-node). |
-| `store` | `None` | Where durable types keep their state outside every process (see `casty.Store`). Every node of a cluster is given one reaching the same records. |
-| `runtime` | `None` | Threads the transport runs on, shared with the systems and clients given the same `Runtime`; `None` starts a thread per core for this node alone. A system without `cluster` has no transport and uses none. See [Starting a node](#starting-a-node). |
-
-`idle_after`, `backoff`, `ask_timeout` and `write_timeout` apply to the actor types that set none.
-
-Members: `ref(actor, key, initial=..., at=...)`, `node`, `members`, `stats()`, `activations()`, `await placement(actor, key, at=...)`, `await release(actor, key)`.
-
-### `Cluster`
-
-| Parameter | Default | Meaning |
-|---|---|---|
-| `bind` | required | `host:port` to listen on; port 0 picks a free one |
-| `seeds` | `()` | Nodes to join through |
-| `advertise` | `bind` | Address other nodes dial |
-| `name` | `"casty"` | Cluster name |
-| `tls` | `None` | `TLS(cert, key, ca=None, require_client_cert=True)` |
-| `compression` | `Compression()` | `codecs=None` (all), `min_bytes=4096` |
-| `address_map` | `None` | Advertised address to dialled address |
-| `limits` | `Limits()` | `frame=256 KiB`, `message=4 MiB`, `window=256 KiB`; the same on every node and client |
-| `heartbeat` | 1 s | Ping period |
-| `suspect_after` | 5 s | Silence before `suspect`; must exceed `heartbeat` |
-| `dead_after` | 5 s | Time as `suspect` before `dead` |
-| `remove_after` | 1 min | Time as `dead` before removal; `None` disables it |
-| `anti_entropy` | 30 s | Period of the full table exchange |
-| `overlay` | `Overlay()` | `active=5`, `passive=30`, `join_walk=6`, `passive_walk=3`, `shuffle_every=10s`, `graft_after=500ms` |
-
-With the defaults a dead node is detected in about ten seconds. Above roughly fifteen nodes, raise `suspect_after`.
-
-Every timing of `ActorSystem`, `Cluster` and `Client` is a `timedelta`. A negative timing raises `ValueError`, and so does a `heartbeat`, `anti_entropy`, `overlay.graft_after`, `overlay.shuffle_every` or `sync_every` of zero.
-
-### `Client`
-
-`seeds` (required), `name`, `tls`, `compression`, `address_map`, `limits`, `ask_timeout` (10 s), `sync_every` (5 s), `observer`, `runtime`. Members: `ref`, `node`, `members`, `stats()`, `await placement(actor, key, at=...)`. A client hosts nothing and can only be answered; see [Clients](#clients).
-
-### Errors
-
-`SchemaError`, `NotStarted`, `ActorFailed`, `MailboxFull`, `Unavailable`, `UnknownActor`, `Refused`, `ReentrancyError`, `MessageTooLarge`, and the built-in `TimeoutError`. `MessageTooLarge` is a `ValueError`: a message, an initial state or an answer is larger than `Limits.message`, and nothing was sent; a state write whose field name leaves no room for its data in a message raises it too. `casty.collections` adds `ConfigurationError`. After a system exits, `ref`, `tell` and `ask` raise `RuntimeError`; `stats`, `activations`, `placement` and `release` also raise it before the system enters.
-
-## How it works
-
-### Layers
-
-```text
-Python          actor bodies, and the typed surface the checkers read
-casty-py        extension module: bridge between the asyncio loop and the core
-casty-node      services of a node: membership, placement, routing, replication, handoff
-casty-core      rules without I/O: schema, ring, member table, gossip, replica and owner logic
-casty-net       TCP transport: framing, multiplexing, flow control, TLS, compression
-```
-
-The rules of the actor model are in Rust: mailboxes, ordering, idleness, activation, restarts, `become`, replication and routing. The core calls Python only to create and cancel the task of a body, to build and read message and state objects, to import an actor type by name, to pull the next item of a `merge` source, to call the store of durable types, and to hand events to the observer. Bodies, store calls and the observer run on the asyncio loop.
-
-The protocol rules take messages in and return messages to send, with no I/O, so they are tested by simulation over random loss, delay and reordering.
-
-A system without a `Cluster` is the same runtime with one node and one replica.
-
-### Serialization
-
-`@actor` compiles the annotations of the body into a schema, a tree of converters. Encoding walks the value and the schema together and writes msgpack directly.
-
-- A dataclass is a map keyed by field name, which is what allows schema evolution.
-- A dataclass at the top of a sent value, or in a union, is written as `[name, map]`. The top is tagged because the holder of a `Ref[Deposit]` does not know the full message union of the receiver.
-- A `Ref` is written as its target, an entity `(type, key)` or a pending `ask`, and decoded bound to the receiving system. The `reply_to` of an `Askable` that no `ask` sent reaches nobody, and is written as nil. `ask` writes the target of its answer in place of the `reply_to` of the message it sends, and reads the answer as the `R` of that field.
-- The state is split into pages, one per top-level field. A write sends only the pages that changed. A state that is not a dataclass is one page.
-
-### Life of a key
-
-1. A message, or the request a `ref` sends, arrives for a key without an activation. The node creates the mailbox, queues what arrives and asks the replicas for the state.
-2. If no replica has one, and for a durable type the store has none either, the key starts from the `initial` the ref offered, or from the default of the type.
-3. The node writes the state back with an `@active` page, and creates the body task once that write is confirmed.
-4. `ctx.inbox` yields messages in arrival order and ends after `idle_after` without any.
-5. When the body returns, it runs again if messages arrived and it had read at least one. Otherwise the node clears `@active` and drops the activation. The read condition keeps a body that never reads its inbox from spinning. A key whose body deleted its state and did not write again leaves nothing, and a collection key back at the state it starts from is deleted instead.
-
-`become` writes the new state with an `@behavior` page naming the new type. At the next inbox read the core cancels the old body and starts the new one on the same mailbox. Later activations read `@behavior` to pick the function.
-
-The schedules of a key are a page too, `@schedules`, carried by every write of the body. The node where the key is active arms a timer for each; when one goes off, the node queues its message and writes the next time, or the end of the schedule, without waiting for that write. A node that activates the key, after a crash or a move, arms the timers from that page, and a time that passed meanwhile goes off at once.
-
-### Transport
-
-One TCP connection per pair of nodes, opened by whoever sends first. On simultaneous dials, the handshake keeps the connection of the node with the lower incarnation, so nothing queued is lost.
-
-- The connection is multiplexed into streams. Frames have a 12-byte header: version, type, flags, stream, length.
-- Replication has its own stream, so state transfers do not delay actor messages.
-- Flow control is per stream, with credit returned as the receiver consumes bytes. `send` never waits; envelopes without credit queue on the connection.
-- The handshake carries protocol versions, cluster name, node identity, role, offered compressors and the sizes of `Limits`. A mismatch surfaces as `Refused`.
-- A lost connection drops what was not written, and the next send redials with exponential backoff. Nothing is resent, which is the origin of at-most-once delivery.
-- Limits, by default: 256 KiB per frame, 4 MiB per message, 256 KiB initial window (`Cluster(limits=...)`, `Client(limits=...)`), keepalive after 15 s of silence. A page larger than a message is cut across as many as it takes and put back together before a replica applies it.
-
-A node identity is its advertised address plus an incarnation, a UUID new on every start. Envelopes for an incarnation that is no longer listening are dropped.
-
-### Membership
-
-- **HyParView** gives each node an active view (5 neighbours) and a passive view (30 spares). Nodes talk regularly only to their active view, so per-node cost does not grow with the cluster.
-- **Plumtree** broadcasts table changes over a tree on the active views: full events along tree edges, announcements along the others. A node that sees an announcement without the event requests it and repairs the tree.
-- **SWIM-style records** order observations by incarnation number and status, `alive < leaving < suspect < dead < left`. A wrongly suspected node refutes by raising its number.
-
-Failure detection is by heartbeat to the active view: silence for `suspect_after` makes a neighbour `suspect`, and `dead_after` without refutation makes it `dead`. Each period a node also pings the member outside its active view it has heard from least recently; otherwise the minority side of a partition would keep unreachable members as alive.
-
-A `dead` member is removed after `remove_after`, and only by a node that sees more than half of the members as `alive`. Two sides of a partition cannot both hold a majority, so the smaller side never removes the larger. A node that learns it was removed hands over its state and rejoins with a new identity.
-
-Each node also exchanges its full table with a random member every `anti_entropy`. Member records carry the actor type names the node knows, which is how type names spread.
-
-### Placement
-
-A consistent hash ring with 128 virtual nodes per node, positioned by an 8-byte BLAKE2b of the node identity and an index. A key hashes to `blake2b("type/key")`. Its replicas are the owner of the next point and the following distinct nodes, up to `replicas`. Its owner, the node that runs the body, is the first replica that is `alive` or `suspect`. Every node computes this from its own member table; there is no coordinator. A node that does not see more than half of the members `alive` owns none of its keys but the pinned ones: it may be on the small side of a partition.
-
-- **The ring does not shrink when a node is `dead`.** Otherwise each side of a partition would recompute replicas among the nodes it sees and both would accept writes.
-- **A replica set changes one node at a time.** When several members change together, the ring passes through the intermediate configurations, one member per step, in an order every node derives identically. With one replica swapped, the old owner's write quorum always overlaps the new set; with two it might not.
-
-A pinned key, `@host:port/name`, is kept by the member advertising that address and by no other, whatever the ring; its owner is that member while `alive` or `suspect`.
-
-### Routing
-
-A message goes to the owner the sender computes on the ring the member table asks for, which is where the key runs once every range on its way has arrived. The receiver checks that it is that owner in its own view, and otherwise answers `WrongOwner` with the message, which it did not deliver. The sender keeps the message and sends it again after 10 ms, waiting twice as long each time it comes back, up to a second, until the views of the two nodes meet; a message that has waited the `write_timeout` of its type in all ends in `Unavailable`. A node that has not joined yet cannot tell where a key is: it holds what it is routed until it has joined, and then sends it on to wherever its key is. A node keeps at most 100 000 waiting messages and refuses more with `Unavailable`.
-
-Messages from one node to one key use one connection and one mailbox, which preserves their order while the owner does not change. The messages of a key that wait on a node go on in the order they came, and what that node sends the key meanwhile waits behind them. With `on_full="wait"`, a message that waited for room on another node can be overtaken by a later one from the same node. A pending `ask` fails with `Unavailable` as soon as the sender sees the target as `dead`, and when the `ActorSystem` or `Client` that made it stops.
-
-An `ask` made by a body carries the chain of keys waiting on it, at most 16, and the owner checks it before the mailbox. A cancelled `ask` sends a cancellation for its request, routed like the request and through the transport even when the key is on the same node, so it queues behind it. One that still arrives first, as after a `WrongOwner` retry, is kept until the deadline of the type's `ask` and drops the request when it comes.
-
-### Replication
-
-The owner is the only writer of a key.
-
-- **Activation.** The owner picks an epoch, a round above any it knows paired with its identity, and sends `Prepare`. Each replica promises to reject older epochs and answers with what it holds. The owner takes the newest state by `(epoch, version)`, writes it back under its epoch, and starts the body once the write level confirms. That write also repairs lagging replicas.
-- **Save.** The owner sends the changed pages and the version they are based on. A replica holding exactly that base applies the delta; any other requests the full state. `state.set` returns at the W-th confirmation.
-- **Fencing.** A replica that promised a newer epoch rejects the write, which means another node took the key. The core cancels the body, so `state.set` never returns, fails the message in hand with `Unavailable`, and returns the mailbox to routing. The write is not retried, because it may have reached a replica and would be applied twice.
-- **Deletion.** A deletion writes a tombstone, fenced like a save. Each replica keeps it for `leave_timeout`, then asks the other replicas of the key whether they keep anything older (replacing an older copy with the tombstone), and forgets it once all of them have answered. An activation that finds a tombstone as the latest write starts the key from `initial`.
-- **Store.** A durable type's owner saves each write its replicas confirmed, versioned by its stamp; an activation reads the store once its replicas answered and promises again above the round the store's record was written in. A replica forgets a tombstone only once the store dropped the records it replaces.
-
-With `"majority"` and `"all"`, the replicas read at activation overlap those of every confirmed write. An activation also waits for every replica the member table does not consider dead rather than stopping at the minimum, because the overlap holds only within one replica set, and the set may be changing.
-
-### Handoff
-
-After each change of the ring or of an owner, every node sweeps what it stores and, from its own view:
-
-- **reattaches** keys stored with `@active`, owned by this node and not running;
-- **ends** activations of keys it no longer owns, returning their mailboxes to routing;
-- **hands over** keys whose replica set no longer includes it, deleting the local copy once all current replicas confirm.
-
-A node that gains a token range pulls it from the nodes of the previous ring. While the range is arriving, the node accepts writes but does not count towards quorums; otherwise empty new replicas could form a quorum alone and start a key from `initial`. The ring step is held until the transfer ends. The node that had a key of the range gives it up as soon as it sees the change, so meanwhile the messages for the key wait on the node it moves to, which takes them in the order they came once the range has arrived. One that waits longer than the `write_timeout` of its type ends in `Unavailable`.
-
-Ranges and handovers travel as numbered streams of messages that each fit in `Limits.message`. An answer missing a message is not counted and the source is asked again; each message of a handover is confirmed on its own, so the confirmation of a large handover never exceeds the limit.
-
-A pinned type has no ranges: a change of the ring pulls nothing of it and reports no `HandoffStarted`/`HandoffEnded` for it, and its keys are never handed over. They are reattached and ended like any other key, their owner being the node at the address they name while that node is `alive` or `suspect`, so an orderly leave ends them and a process that comes back on the address starts them again.
-
-An orderly exit uses the same parts: broadcast `leaving` (no longer owner, still replica), drain activations, hand over every stored key to the ring without the node, broadcast `left`.
-
-### Clients
-
-A client is in neither the ring nor the member table. It requests the table every `sync_every`, builds the same ring and sends each message to the owner in one hop. It has no listener, so answers return on the connection it opened. Its view can lag by `sync_every`, which costs one retry for a key that moved.
+Dataclasses are encoded by field name, so two versions of the code can share a cluster: a missing field takes its default, an unknown field is ignored, and a missing field without a default raises `SchemaError`. Moving or renaming an actor body renames its type, and the keys saved under the old name are no longer reached.
 
 ## Guarantees and limits
 
-- Delivery is at most once. Messages from one node to one key arrive in order while the owner does not change.
-- Two nodes may briefly run the same key, but with `"majority"` or `"all"` only one of them can save.
-- A confirmed write of the state is not lost while fewer replicas fail than the write level tolerates.
-- A failed write may reappear: if it reached fewer than W replicas, a later owner may adopt it. `Unavailable` means the operation may or may not have happened.
-- Reads are not linearizable. An isolated owner stops seeing the others `alive` about `dead_after` before they can declare it dead and take its keys over, and gives its keys up then, so it does not answer from a state they wrote past. That margin is timing, not consensus: a process paused through it, or two activations overlapping while a change of owner spreads, can still answer from a stale state.
+- Delivery is at most once. Messages from one node to one key arrive in order while the owner of the key does not change.
+- A confirmed write of the state is not lost while fewer replicas fail than the write level tolerates. A failed write may reappear, and `Unavailable` means the operation may or may not have happened.
+- Two nodes may briefly run the same key during a change of owner, but with `"majority"` or `"all"` only one of them can save.
 - Side effects in a body can repeat after a restart or a change of owner.
-- A schedule goes off on the node where its key is active, by the wall clock of that node. A change of owner can lose a time it went off, when its message was queued on a node that died, or send it again, when the write of its next time was not confirmed.
-- State lives in memory unless its type is `durable`: losing every replica of a key of any other type loses the key. A write of a `durable="write"` type that returned survives the loss of every replica and a restart of the whole cluster; with a period, losing every replica loses at most that period of writes.
-- A durable type activates only while its store answers, and with `"write"` writes only while it answers: `Unavailable` also means the store did not answer, and a write that failed there may reappear, since its replicas had confirmed it.
-- Every node of a cluster is given a store reaching the same records, and a store serves one cluster: two clusters, or a cluster and a system alone, on the same records mix their keys. The collections are not durable.
-- A confirmed deletion does not come back from a replica that missed it: the others keep their tombstone until it has answered. A copy handed over by a node that no longer replicates the key, more than twice `leave_timeout` after the deletion, could bring it back.
-- The store forgets a deleted key when the replicas forget its tombstone; a save of an older write still in flight more than twice `leave_timeout` after the deletion could put that state back in the store, where it is read only if every replica of the key is lost.
-- A key of a pinned type has one copy and is never moved: it is unavailable while its node is down, and its state, unless the type is durable, goes with the node.
-- Bodies may run in parallel on free-threaded Python. Mutable state shared between actors is not supported.
+- Reads are not linearizable: the handover of a key relies on timing, not consensus, so a process paused long enough can answer from a stale state.
+- State lives in memory unless its type is durable: losing every replica of a key of any other type loses the key. A write of a `durable="write"` type that returned survives a restart of the whole cluster.
+- Leases and schedules follow the wall clocks of the nodes, which must agree.
+- A key of a pinned type has one copy and is unavailable while its node is down.
 
 ## Development
 
@@ -988,6 +346,8 @@ make check                           # what CI checks: ruff, rustfmt, clippy, py
 make help                            # the other targets: the suite on 3.14t, the chaos run, benchmarks, wheels
 ```
 
-The Python suite runs real systems over TCP on loopback, with real crashes and partitions made by TCP proxies. There are no mocks and no simulated clocks.
+The Python suite runs real systems over TCP on loopback, with crashes and partitions made by TCP proxies. `CASTY_CHAOS=1 uv run pytest tests/chaos -s` runs the chaos suite.
 
-`CASTY_CHAOS=1 uv run pytest tests/chaos -s` runs the chaos suite: node processes on this machine crashed, restarted, drained, joined, upgraded, partitioned, isolated, slowed and clock-skewed, and the whole cluster restarted at once, on a seeded schedule, under traffic of a ledger, a ledger kept by a SQLite store, a pinned type, a counter, a dict, a set, a queue, a barrier and a lock, with the invariants checked after each fault. `CHAOS_NODES`, `CHAOS_MINUTES` and `CHAOS_SEED` shape a run; a failure prints its seed, its steps and the `CHAOS_REPLAY=…/run.json` that replays it. A plain `pytest` never starts it.
+## License
+
+MIT, see [LICENSE](LICENSE).
