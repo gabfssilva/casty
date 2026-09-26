@@ -5,15 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import assert_never
 
-from casty import Context, NodeId, Ref, actor
+from casty import Askable, Context, NodeId, actor
 from tests.app import Entries, Ledger, Listing
 
 
 @dataclass(frozen=True)
-class Stamp:
+class Stamp(Askable[NodeId]):
     """Append `entry`, and answer with the node that applied it."""
 
-    reply_to: Ref[NodeId]
     entry: int
 
 
@@ -28,10 +27,10 @@ async def stamped(ctx: Context[Ledger, StampMsg]) -> None:
     """
     async for msg in ctx.inbox:
         match msg:
-            case Stamp(reply_to, entry):
+            case Stamp(entry, reply_to=reply_to):
                 await ctx.state.set(Ledger((*ctx.state.value.entries, entry)))
                 reply_to.tell(ctx.system.node)
-            case Entries(reply_to):
+            case Entries(reply_to=reply_to):
                 reply_to.tell(Listing(ctx.state.value.entries, ctx.system.node))
             case _:
                 assert_never(msg)

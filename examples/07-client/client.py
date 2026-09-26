@@ -17,9 +17,9 @@ OPTIONS = ("vim", "emacs", "helix", "nano")
 async def main() -> None:
     async with Client(seeds=("127.0.0.1:7421",)) as client:
         for number in range(30):
-            await client.ref(poll, OPTIONS[number % len(OPTIONS)]).ask(Vote, f"voter-{number}")
+            await client.ref(poll, OPTIONS[number % len(OPTIONS)]).ask(Vote(f"voter-{number}"))
         for option in OPTIONS:
-            tally = await client.ref(poll, option).ask(Count)
+            tally = await client.ref(poll, option).ask(Count())
             print(f"{option}: {tally.votes} votes, kept on {tally.node.address}")
 
 

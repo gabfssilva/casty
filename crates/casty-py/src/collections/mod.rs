@@ -181,6 +181,7 @@ fn told(
     let mut reply = None;
     for _ in 0..len {
         match reading.name().ok()? {
+            "reply_to" if reading.nil().ok()? => reply = None,
             "reply_to" => reply = Some(reading.target().ok()?),
             name => field(name, &mut reading).ok()?,
         }

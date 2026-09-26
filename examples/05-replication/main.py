@@ -12,14 +12,13 @@ from datetime import timedelta
 
 from local_cluster import nodes
 
-from casty import ActorSystem, Context, NodeId, Ref, Unavailable, actor
+from casty import ActorSystem, Askable, Context, NodeId, Unavailable, actor
 
 PORTS = (7401, 7402, 7403)
 
 
 @dataclass(frozen=True)
-class Append:
-    reply_to: Ref[int]
+class Append(Askable[int]):
     line: str
 
 
@@ -30,8 +29,8 @@ class Page:
 
 
 @dataclass(frozen=True)
-class Read:
-    reply_to: Ref[Page]
+class Read(Askable[Page]):
+    pass
 
 
 type JournalMsg = Append | Read
@@ -43,10 +42,10 @@ type JournalMsg = Append | Read
 async def journal(ctx: Context[tuple[str, ...], JournalMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Append(reply_to, line):
+            case Append(line, reply_to=reply_to):
                 await ctx.state.set((*ctx.state.value, line))
                 reply_to.tell(len(ctx.state.value))
-            case Read(reply_to):
+            case Read(reply_to=reply_to):
                 reply_to.tell(Page(ctx.state.value, ctx.system.node))
 
 
@@ -55,7 +54,7 @@ async def read(system: ActorSystem, key: str, /) -> Page:
     while True:
         try:
             async with asyncio.timeout(1):
-                return await system.ref(journal, key).ask(Read)
+                return await system.ref(journal, key).ask(Read())
         except (Unavailable, TimeoutError):
             await asyncio.sleep(0.2)
 
@@ -73,7 +72,7 @@ async def main() -> None:
     ) as cluster:
         first = cluster.systems[0]
         for line in ("monday", "tuesday", "wednesday"):
-            await first.ref(journal, "diary").ask(Append, line)
+            await first.ref(journal, "diary").ask(Append(line))
         before = await read(first, "diary")
         print(f"{before.lines} on {before.node.address}")
 
@@ -82,7 +81,7 @@ async def main() -> None:
         survivor = cluster.systems[0]
         after = await read(survivor, "diary")
         print(f"{after.lines} on {after.node.address}")
-        print("appended:", await survivor.ref(journal, "diary").ask(Append, "thursday"), "lines")
+        print("appended:", await survivor.ref(journal, "diary").ask(Append("thursday")), "lines")
 
 
 asyncio.run(main())

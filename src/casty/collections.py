@@ -36,6 +36,7 @@ from casty import (
     Write,
     actor,
 )
+from casty.askable import Askable
 
 __all__ = [
     "MISSING",
@@ -196,17 +197,16 @@ class counter:
     """A number that goes up and down. Striped: an aggregate read is not atomic across the stripes."""
 
     @dataclass(frozen=True)
-    class Add:
-        reply_to: Ref[None]
+    class Add(Askable[None]):
         delta: int
 
     @dataclass(frozen=True)
-    class Get:
-        reply_to: Ref[int]
+    class Get(Askable[int]):
+        pass
 
     @dataclass(frozen=True)
-    class Reset:
-        reply_to: Ref[None]
+    class Reset(Askable[None]):
+        pass
 
     type Message = Add | Get | Reset
 
@@ -219,23 +219,20 @@ class register:
     """One value, replaced whole, with a compare-and-set that decides in one message."""
 
     @dataclass(frozen=True)
-    class Get:
-        reply_to: Ref[bytes | None]
+    class Get(Askable[bytes | None]):
+        pass
 
     @dataclass(frozen=True)
-    class Put:
-        reply_to: Ref[None]
+    class Put(Askable[None]):
         value: bytes
 
     @dataclass(frozen=True)
-    class CompareAndSet:
-        reply_to: Ref[bool]
+    class CompareAndSet(Askable[bool]):
         expected: bytes | None
         value: bytes
 
     @dataclass(frozen=True)
-    class GetAndSet:
-        reply_to: Ref[bytes | None]
+    class GetAndSet(Askable[bytes | None]):
         value: bytes
 
     type Message = Get | Put | CompareAndSet | GetAndSet
@@ -257,50 +254,44 @@ class table_segment:
     """
 
     @dataclass(frozen=True)
-    class Add:
-        reply_to: Ref[tuple[bool, bool] | None]
+    class Add(Askable[tuple[bool, bool] | None]):
         key: bytes
         value: bytes
 
     @dataclass(frozen=True)
-    class Get:
-        reply_to: Ref[tuple[bytes, ...] | None]
+    class Get(Askable[tuple[bytes, ...] | None]):
         key: bytes
 
     @dataclass(frozen=True)
-    class Remove:
-        reply_to: Ref[int | None]
+    class Remove(Askable[int | None]):
         key: bytes
         value: bytes | None
 
     @dataclass(frozen=True)
-    class List:
+    class List(Askable[tuple[bool, bool] | None]):
         """List a dict key under `generation`, unless it is listed under a newer one."""
 
-        reply_to: Ref[tuple[bool, bool] | None]
         key: bytes
         generation: int
 
     @dataclass(frozen=True)
-    class Unlist:
+    class Unlist(Askable[bool | None]):
         """Drop a dict key, unless it is listed under a newer generation than `generation`."""
 
-        reply_to: Ref[bool | None]
         key: bytes
         generation: int
 
     @dataclass(frozen=True)
-    class Size:
-        reply_to: Ref[tuple[int, int]]
+    class Size(Askable[tuple[int, int]]):
+        pass
 
     @dataclass(frozen=True)
-    class Scan:
-        reply_to: Ref[tuple[int, Mapping[bytes, tuple[bytes, ...]]] | None]
+    class Scan(Askable[tuple[int, Mapping[bytes, tuple[bytes, ...]]] | None]):
         position: int
 
     @dataclass(frozen=True)
-    class Clear:
-        reply_to: Ref[tuple[int, int]]
+    class Clear(Askable[tuple[int, int]]):
+        pass
 
     type Message = Add | Get | Remove | List | Unlist | Size | Scan | Clear
 
@@ -317,12 +308,11 @@ class table:
     """
 
     @dataclass(frozen=True)
-    class Segments:
-        reply_to: Ref[int]
+    class Segments(Askable[int]):
+        pass
 
     @dataclass(frozen=True)
-    class Grow:
-        reply_to: Ref[int]
+    class Grow(Askable[int]):
         seen: int
         split: Ref[table_segment.Message]
         into: Ref[table_segment.Message]
@@ -345,26 +335,24 @@ class entry:
     """
 
     @dataclass(frozen=True)
-    class Put:
-        reply_to: Ref[int]
+    class Put(Askable[int]):
         value: bytes
         listed: int
 
     @dataclass(frozen=True)
-    class Get:
-        reply_to: Ref[bytes | None]
+    class Get(Askable[bytes | None]):
+        pass
 
     @dataclass(frozen=True)
-    class Contains:
-        reply_to: Ref[bool]
+    class Contains(Askable[bool]):
+        pass
 
     @dataclass(frozen=True)
-    class Remove:
-        reply_to: Ref[tuple[bool, int]]
+    class Remove(Askable[tuple[bool, int]]):
+        pass
 
     @dataclass(frozen=True)
-    class Retire:
-        reply_to: Ref[int]
+    class Retire(Askable[int]):
         listed: int
 
     type Message = Put | Get | Contains | Remove | Retire
@@ -382,8 +370,7 @@ class queue:
     """
 
     @dataclass(frozen=True)
-    class Advance:
-        reply_to: Ref[tuple[int, int]]
+    class Advance(Askable[tuple[int, int]]):
         head: int
         tail: int
 
@@ -407,32 +394,29 @@ class queue_segment:
     """
 
     @dataclass(frozen=True)
-    class Offer:
-        reply_to: Ref[bool]
+    class Offer(Askable[bool]):
         value: bytes
         index: Ref[queue.Message]
         at: int
 
     @dataclass(frozen=True)
-    class Take:
-        reply_to: Ref[tuple[tuple[bytes, ...], bool]]
+    class Take(Askable[tuple[tuple[bytes, ...], bool]]):
         limit: int
         index: Ref[queue.Message]
         at: int
 
     @dataclass(frozen=True)
-    class Peek:
-        reply_to: Ref[tuple[tuple[bytes, ...], bool]]
+    class Peek(Askable[tuple[tuple[bytes, ...], bool]]):
         index: Ref[queue.Message]
         at: int
 
     @dataclass(frozen=True)
-    class Size:
-        reply_to: Ref[int]
+    class Size(Askable[int]):
+        pass
 
     @dataclass(frozen=True)
-    class Clear:
-        reply_to: Ref[None]
+    class Clear(Askable[None]):
+        pass
 
     type Message = Offer | Take | Peek | Size | Clear
 
@@ -453,7 +437,7 @@ class semaphore:
     """
 
     @dataclass(frozen=True)
-    class Acquire:
+    class Acquire(Askable[Acquired | Denied]):
         """Ask for `n` permits, held for `ttl` seconds once granted.
 
         `wait` is how long the request stays in line before it is denied: `None` waits until it is granted, and `0`
@@ -462,7 +446,6 @@ class semaphore:
         and once granted it is answered with the same grant.
         """
 
-        reply_to: Ref[Acquired | Denied]
         n: int = 1
         ttl: float = 30.0
         wait: float | None = None
@@ -475,18 +458,15 @@ class semaphore:
         lease_id: str
 
     @dataclass(frozen=True)
-    class Renew:
+    class Renew(Askable[bool]):
         """Hold the lease `lease_id` for `ttl` seconds from now, answering whether it was still held."""
 
-        reply_to: Ref[bool]
         lease_id: str
         ttl: float = 30.0
 
     @dataclass(frozen=True)
-    class Get:
+    class Get(Askable[Status]):
         """Ask how the semaphore stands."""
-
-        reply_to: Ref[Status]
 
     type Message = Acquire | Release | Renew | Get
 
@@ -499,20 +479,18 @@ class barrier:
     """Parties that arrive and are all released together, or time out where they wait."""
 
     @dataclass(frozen=True)
-    class Arrive:
-        reply_to: Ref[bool]
+    class Arrive(Askable[bool]):
         id: UUID
         parties: int
         until: float
 
     @dataclass(frozen=True)
-    class Cancel:
-        reply_to: Ref[bool]
+    class Cancel(Askable[bool]):
         id: UUID
 
     @dataclass(frozen=True)
-    class Waiting:
-        reply_to: Ref[int]
+    class Waiting(Askable[int]):
+        pass
 
     type Message = Arrive | Cancel | Waiting
 
@@ -620,8 +598,8 @@ class Binding:
             if self.confirmed:
                 return
             if (
-                not await self._metadata.ask(register.CompareAndSet, None, self._encoded)
-                and await self._metadata.ask(register.Get) != self._encoded
+                not await self._metadata.ask(register.CompareAndSet(None, self._encoded))
+                and await self._metadata.ask(register.Get()) != self._encoded
             ):
                 raise ConfigurationError(f"incompatible configuration for collection {self.name!r}")
             self.confirmed = True
@@ -716,13 +694,13 @@ class Counter:
         await self._binding.ready()
         shard = self._next % self._binding.shards
         self._next += 1
-        await self._binding.ref(counter.actor, shard).ask(counter.Add, delta)
+        await self._binding.ref(counter.actor, shard).ask(counter.Add(delta))
 
     async def get(self) -> int:
-        return sum(await self._binding.each(lambda shard: self._binding.ref(counter.actor, shard).ask(counter.Get)))
+        return sum(await self._binding.each(lambda shard: self._binding.ref(counter.actor, shard).ask(counter.Get())))
 
     async def reset(self) -> None:
-        await self._binding.each(lambda shard: self._binding.ref(counter.actor, shard).ask(counter.Reset))
+        await self._binding.each(lambda shard: self._binding.ref(counter.actor, shard).ask(counter.Reset()))
 
 
 class Register[T]:
@@ -735,21 +713,21 @@ class Register[T]:
 
     async def get(self) -> T | Missing:
         await self._binding.ready()
-        return self._value.optional(await self._ref.ask(register.Get))
+        return self._value.optional(await self._ref.ask(register.Get()))
 
     async def set(self, value: T) -> None:
         await self._binding.ready()
-        await self._ref.ask(register.Put, self._value.dump(value))
+        await self._ref.ask(register.Put(self._value.dump(value)))
 
     async def compare_and_set(self, expected: T | Missing, value: T) -> bool:
         """Compare encoded values and commit the replacement in one actor message."""
         await self._binding.ready()
         raw = None if isinstance(expected, Missing) else self._value.dump(expected)
-        return await self._ref.ask(register.CompareAndSet, raw, self._value.dump(value))
+        return await self._ref.ask(register.CompareAndSet(raw, self._value.dump(value)))
 
     async def get_and_set(self, value: T) -> T | Missing:
         await self._binding.ready()
-        return self._value.optional(await self._ref.ask(register.GetAndSet, self._value.dump(value)))
+        return self._value.optional(await self._ref.ask(register.GetAndSet(self._value.dump(value))))
 
 
 def _spread(raw: bytes) -> int:
@@ -800,30 +778,30 @@ class _Index:
         self._segments: dict[tuple[int, int], Ref[table_segment.Message]] = {}
 
     async def add(self, raw: bytes, value: bytes) -> bool:
-        added, full = await self._keyed(raw, lambda segment: segment.ask(table_segment.Add, raw, value))
+        added, full = await self._keyed(raw, lambda segment: segment.ask(table_segment.Add(raw, value)))
         if full:
             await self._grow(self._binding.shard(raw))
         return added
 
     async def get(self, raw: bytes) -> tuple[bytes, ...]:
-        return await self._keyed(raw, lambda segment: segment.ask(table_segment.Get, raw))
+        return await self._keyed(raw, lambda segment: segment.ask(table_segment.Get(raw)))
 
     async def remove(self, raw: bytes, value: bytes | None) -> int:
-        return await self._keyed(raw, lambda segment: segment.ask(table_segment.Remove, raw, value))
+        return await self._keyed(raw, lambda segment: segment.ask(table_segment.Remove(raw, value)))
 
     async def list_under(self, raw: bytes, generation: int) -> bool:
         """List a dict key under `generation`, and whether it is listed under it: not when it is under a newer one."""
-        listed, full = await self._keyed(raw, lambda segment: segment.ask(table_segment.List, raw, generation))
+        listed, full = await self._keyed(raw, lambda segment: segment.ask(table_segment.List(raw, generation)))
         if full:
             await self._grow(self._binding.shard(raw))
         return listed
 
     async def unlist(self, raw: bytes, generation: int) -> None:
-        await self._keyed(raw, lambda segment: segment.ask(table_segment.Unlist, raw, generation))
+        await self._keyed(raw, lambda segment: segment.ask(table_segment.Unlist(raw, generation)))
 
     async def size(self) -> int:
         """How many values the segments list, with one ask to each of them."""
-        return sum(await self.walk(lambda segment: segment.ask(table_segment.Size)))
+        return sum(await self.walk(lambda segment: segment.ask(table_segment.Size())))
 
     async def scan(self) -> AsyncIterator[Mapping[bytes, tuple[bytes, ...]]]:
         """The listings of every segment, as `segments` reads them, shard after shard."""
@@ -872,7 +850,7 @@ class _Index:
 
     async def _page(self, shard: int, position: int) -> tuple[int, Mapping[bytes, tuple[bytes, ...]]]:
         """The modulus and the listings of the segment of `shard` that holds the hash `position`."""
-        return await self._placed(shard, position, lambda segment: segment.ask(table_segment.Scan, position))
+        return await self._placed(shard, position, lambda segment: segment.ask(table_segment.Scan(position)))
 
     async def _keyed[T](self, raw: bytes, ask: Callable[[Ref[table_segment.Message]], Awaitable[T | None]]) -> T:
         """What `ask` answers at the segment that holds `raw`."""
@@ -898,7 +876,7 @@ class _Index:
         split = seen - (1 << (seen.bit_length() - 1))
         try:
             count = await self._directory(shard).ask(
-                table.Grow, seen, self._segment(shard, split), self._segment(shard, seen)
+                table.Grow(seen, self._segment(shard, split), self._segment(shard, seen))
             )
         except (TimeoutError, Unavailable, ActorFailed):
             # The write this follows went through, and the next one that finds a segment full asks again.
@@ -906,7 +884,7 @@ class _Index:
         self._counts[shard] = max(self._counts[shard], count)
 
     async def _count(self, shard: int) -> int:
-        count = await self._directory(shard).ask(table.Segments)
+        count = await self._directory(shard).ask(table.Segments())
         self._counts[shard] = max(self._counts[shard], count)
         return count
 
@@ -935,7 +913,7 @@ class _Table:
         return await self._index.size()
 
     async def clear(self) -> None:
-        await self._index.walk(lambda segment: segment.ask(table_segment.Clear))
+        await self._index.walk(lambda segment: segment.ask(table_segment.Clear()))
 
 
 class Dict[K, V]:
@@ -961,24 +939,24 @@ class Dict[K, V]:
         ref = self._entry(raw)
         # A key with no value answers the generation to list it under, and is saved when sent again naming that one.
         listed = 0
-        while listed := await ref.ask(entry.Put, data, listed):
+        while listed := await ref.ask(entry.Put(data, listed)):
             if not await self._index.list_under(raw, listed):
                 # A life of the key on a node whose clock ran ahead listed it later: the entry goes past that one.
-                await ref.ask(entry.Retire, self._under(await self._index.get(raw)))
+                await ref.ask(entry.Retire(self._under(await self._index.get(raw))))
                 listed = 0
 
     async def get(self, key: K) -> V | Missing:
         await self._binding.ready()
-        return self._value.optional(await self._entry(self._key.dump(key)).ask(entry.Get))
+        return self._value.optional(await self._entry(self._key.dump(key)).ask(entry.Get()))
 
     async def contains(self, key: K) -> bool:
         await self._binding.ready()
-        return await self._entry(self._key.dump(key)).ask(entry.Contains)
+        return await self._entry(self._key.dump(key)).ask(entry.Contains())
 
     async def remove(self, key: K) -> bool:
         await self._binding.ready()
         raw = self._key.dump(key)
-        removed, listed = await self._entry(raw).ask(entry.Remove)
+        removed, listed = await self._entry(raw).ask(entry.Remove())
         # Unlisted even when nothing was removed: it drops the listing a removal that stopped halfway left behind.
         await self._unlist(raw, listed)
         return removed
@@ -1038,18 +1016,18 @@ class Dict[K, V]:
 
     async def _value_of(self, raw: bytes, listing: tuple[bytes, ...]) -> bytes | None:
         ref = self._entry(raw)
-        value = await ref.ask(entry.Get)
+        value = await ref.ask(entry.Get())
         if value is None:
-            await self._unlist(raw, await ref.ask(entry.Retire, self._under(listing)))
+            await self._unlist(raw, await ref.ask(entry.Retire(self._under(listing))))
         return value
 
     async def _drop(self, raw: bytes, listing: tuple[bytes, ...]) -> None:
         ref = self._entry(raw)
-        _, generation = await ref.ask(entry.Remove)
+        _, generation = await ref.ask(entry.Remove())
         listed = self._under(listing)
         # A put that listed the key under a newer generation never saved its value: the entry is raised to it first.
         if generation < listed:
-            generation = await ref.ask(entry.Retire, listed)
+            generation = await ref.ask(entry.Retire(listed))
         await self._unlist(raw, generation)
 
     async def _unlist(self, raw: bytes, generation: int) -> None:
@@ -1191,7 +1169,7 @@ class Queue[T]:
         raw = self._value.dump(value)
         while True:
             tail = self._tail
-            if await self._segment(tail).ask(queue_segment.Offer, raw, self._index, tail):
+            if await self._segment(tail).ask(queue_segment.Offer(raw, self._index, tail)):
                 return
             await self._advance(self._head, tail + 1)
 
@@ -1203,7 +1181,7 @@ class Queue[T]:
         await self._binding.ready()
         while True:
             head = self._head
-            items, sealed = await self._segment(head).ask(queue_segment.Peek, self._index, head)
+            items, sealed = await self._segment(head).ask(queue_segment.Peek(self._index, head))
             if items or not sealed:
                 return self._value.load(items[0]) if items else MISSING
             await self._advance(head + 1, self._tail)
@@ -1212,7 +1190,7 @@ class Queue[T]:
         """Count the items segment by segment, with one ask to each of them."""
         await self._binding.ready()
         head, tail = await self._advance(self._head, self._tail)
-        return sum(await _each(lambda at: self._segment(at).ask(queue_segment.Size), range(head, tail + 1)))
+        return sum(await _each(lambda at: self._segment(at).ask(queue_segment.Size()), range(head, tail + 1)))
 
     async def drain(self, max_items: int) -> list[T]:
         if max_items < 0:
@@ -1222,7 +1200,7 @@ class Queue[T]:
     async def clear(self) -> None:
         await self._binding.ready()
         head, tail = await self._advance(self._head, self._tail)
-        await _each(lambda at: self._segment(at).ask(queue_segment.Clear), range(head, tail + 1))
+        await _each(lambda at: self._segment(at).ask(queue_segment.Clear()), range(head, tail + 1))
         # The segments below the tail are sealed, and now empty for good.
         await self._advance(tail, tail)
 
@@ -1232,7 +1210,7 @@ class Queue[T]:
         taken: list[bytes] = []
         while len(taken) < limit:
             head = self._head
-            items, sealed = await self._segment(head).ask(queue_segment.Take, limit - len(taken), self._index, head)
+            items, sealed = await self._segment(head).ask(queue_segment.Take(limit - len(taken), self._index, head))
             taken += items
             if len(taken) < limit:
                 # The segment is empty now: a sealed one for good, and an open one is the end of the queue.
@@ -1243,7 +1221,7 @@ class Queue[T]:
 
     async def _advance(self, head: int, tail: int) -> tuple[int, int]:
         """Move the index to at least `head` and `tail`, and learn where it is."""
-        head, tail = await self._index.ask(queue.Advance, head, tail)
+        head, tail = await self._index.ask(queue.Advance(head, tail))
         self._head = max(self._head, head)
         self._tail = max(self._tail, tail)
         self._segments = {at: segment for at, segment in self._segments.items() if at >= self._head}
@@ -1269,7 +1247,7 @@ class Lease:
     async def renew(self, ttl: float = 30.0) -> bool:
         _duration(ttl, "ttl")
         try:
-            return await self._ref.ask(semaphore.Renew, self.id, ttl)
+            return await self._ref.ask(semaphore.Renew(self.id, ttl))
         except NotStarted:
             # Every replica of the semaphore was lost, and its leases with them.
             return False
@@ -1324,7 +1302,7 @@ class Semaphore:
         await self._binding.ready()
         lease_id = str(uuid4())
         try:
-            answer = await self._asked(lambda ref: ref.ask(semaphore.Acquire, n, ttl, 0.0, lease_id))
+            answer = await self._asked(lambda ref: ref.ask(semaphore.Acquire(n, ttl, 0.0, lease_id)))
         except BaseException:
             self._ref.tell(semaphore.Release(lease_id))
             raise
@@ -1341,7 +1319,7 @@ class Semaphore:
         lease_id = str(uuid4())
 
         def acquiring(_: float) -> Awaitable[Acquired | Denied]:
-            return self._asked(lambda ref: ref.ask(semaphore.Acquire, n, ttl, _INTEREST, lease_id))
+            return self._asked(lambda ref: ref.ask(semaphore.Acquire(n, ttl, _INTEREST, lease_id)))
 
         try:
             while True:
@@ -1358,7 +1336,7 @@ class Semaphore:
 
     async def available(self) -> int:
         await self._binding.ready()
-        status = await self._asked(lambda ref: ref.ask(semaphore.Get))
+        status = await self._asked(lambda ref: ref.ask(semaphore.Get()))
         return status.available
 
 
@@ -1419,19 +1397,19 @@ class Barrier:
         await self._binding.ready()
         id = uuid4()
         try:
-            released = await _wait(lambda until: self._ref.ask(barrier.Arrive, id, self.parties, until))
+            released = await _wait(lambda until: self._ref.ask(barrier.Arrive(id, self.parties, until)))
             if not released:
                 raise TimeoutError("barrier wait timed out")
         except TimeoutError:
-            if not await _withdraw(self._ref.ask(barrier.Cancel, id), False):
+            if not await _withdraw(self._ref.ask(barrier.Cancel(id)), False):
                 raise
         except BaseException:
-            await _withdraw(self._ref.ask(barrier.Cancel, id), False)
+            await _withdraw(self._ref.ask(barrier.Cancel(id)), False)
             raise
 
     async def waiting(self) -> int:
         await self._binding.ready()
-        return await self._ref.ask(barrier.Waiting)
+        return await self._ref.ask(barrier.Waiting())
 
 
 def _kept[**P, F](build: Callable[Concatenate["Collections", P], F]) -> Callable[Concatenate["Collections", P], F]:

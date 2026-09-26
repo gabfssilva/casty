@@ -17,21 +17,20 @@ from typing import assert_never
 
 from local_cluster import nodes
 
-from casty import ActorSystem, Context, Ref, actor
+from casty import ActorSystem, Askable, Context, actor
 from casty.sqlite import SQLiteStore
 
 PORTS = (7451, 7452, 7453)
 
 
 @dataclass(frozen=True)
-class Deposit:
-    reply_to: Ref[int]
+class Deposit(Askable[int]):
     amount: int
 
 
 @dataclass(frozen=True)
-class Balance:
-    reply_to: Ref[int]
+class Balance(Askable[int]):
+    pass
 
 
 type AccountMsg = Deposit | Balance
@@ -40,10 +39,10 @@ type AccountMsg = Deposit | Balance
 async def keep_balance(ctx: Context[int, AccountMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Deposit(reply_to, amount):
+            case Deposit(amount, reply_to=reply_to):
                 await ctx.state.set(ctx.state.value + amount)
                 reply_to.tell(ctx.state.value)
-            case Balance(reply_to):
+            case Balance(reply_to=reply_to):
                 reply_to.tell(ctx.state.value)
             case _:
                 assert_never(msg)
@@ -72,14 +71,14 @@ async def cluster(store: SQLiteStore, work: Callable[[ActorSystem], Awaitable[No
 
 async def deposit(system: ActorSystem, /) -> None:
     for name, amount in (("alice", 100), ("bob", 30), ("alice", -40)):
-        print(f"account of {name}: {await system.ref(account, name).ask(Deposit, amount)}")
-    print(f"tab of carol: {await system.ref(tab, 'carol').ask(Deposit, 25)}")
+        print(f"account of {name}: {await system.ref(account, name).ask(Deposit(amount))}")
+    print(f"tab of carol: {await system.ref(tab, 'carol').ask(Deposit(25))}")
 
 
 async def balances(system: ActorSystem, /) -> None:
     for name in ("alice", "bob"):
-        print(f"account of {name}: {await system.ref(account, name).ask(Balance)}")
-    print(f"tab of carol: {await system.ref(tab, 'carol').ask(Balance)}")
+        print(f"account of {name}: {await system.ref(account, name).ask(Balance())}")
+    print(f"tab of carol: {await system.ref(tab, 'carol').ask(Balance())}")
 
 
 async def main() -> None:

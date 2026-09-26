@@ -7,12 +7,11 @@ its own mailbox; `greeter/ana` and `greeter/bia` never share anything.
 import asyncio
 from dataclasses import dataclass
 
-from casty import ActorSystem, Context, Ref, actor
+from casty import ActorSystem, Askable, Context, actor
 
 
 @dataclass(frozen=True)
-class Greet:
-    reply_to: Ref[str]
+class Greet(Askable[str]):
     name: str
 
 
@@ -28,9 +27,9 @@ async def main() -> None:
     async with ActorSystem() as system:
         ana = system.ref(greeter, "ana")
         # `ask` builds the message: the first argument of `Greet` is the ref the answer comes back through.
-        print(await ana.ask(Greet, "world"))
-        print(await ana.ask(Greet, "again"))
-        print(await system.ref(greeter, "bia").ask(Greet, "world"))
+        print(await ana.ask(Greet("world")))
+        print(await ana.ask(Greet("again")))
+        print(await system.ref(greeter, "bia").ask(Greet("world")))
 
 
 asyncio.run(main())

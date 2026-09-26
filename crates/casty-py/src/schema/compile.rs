@@ -504,8 +504,9 @@ impl<'py> Compiler<'_, 'py> {
             .getattr("__type_params__")?
             .try_iter()?
             .collect::<PyResult<_>>()?;
-        let env: Vec<(Bound<'py, PyAny>, NodeRef)> =
+        let mut env: Vec<(Bound<'py, PyAny>, NodeRef)> =
             parameters.into_iter().zip(nodes.iter().copied()).collect();
+        self.inherited(class, &path, &mut env)?;
         let mut fields = Vec::new();
         for (field, required) in introspect.dataclass_fields(class)? {
             let hint = hints.get_item(&field)?.ok_or_else(|| {
@@ -528,6 +529,47 @@ impl<'py> Compiler<'_, 'py> {
             qualname,
             fields,
         }))
+    }
+
+    /// Bind the type parameters of the generic classes `class` derives from to what its bases give them, so that a
+    /// field a base declares reads as the subclass says: the `R` of `Askable[R]` is `bool` in `Withdraw(Askable[bool])`.
+    fn inherited(
+        &mut self,
+        class: &Bound<'py, PyType>,
+        path: &[String],
+        env: &mut Vec<(Bound<'py, PyAny>, NodeRef)>,
+    ) -> Outcome<()> {
+        let introspect = self.introspect;
+        // `__orig_bases__` is inherited like any attribute: only the class's own names its bases.
+        let named = class
+            .getattr("__dict__")?
+            .call_method1("get", ("__orig_bases__",))?;
+        let bases = if named.is_none() {
+            class.getattr("__bases__")?
+        } else {
+            named
+        };
+        for base in bases.try_iter()? {
+            let base = base?;
+            let origin = introspect.origin(&base)?;
+            let generic = !origin.is_none();
+            let Ok(parent) = (if generic { origin } else { base.clone() }).cast_into::<PyType>()
+            else {
+                continue;
+            };
+            if generic {
+                let parameters: Vec<Bound<'py, PyAny>> = parent
+                    .getattr("__type_params__")?
+                    .try_iter()?
+                    .collect::<PyResult<_>>()?;
+                for (parameter, argument) in parameters.into_iter().zip(introspect.args(&base)?) {
+                    let node = self.compile(&argument, path, env)?;
+                    env.push((parameter, node));
+                }
+            }
+            self.inherited(&parent, path, env)?;
+        }
+        Ok(())
     }
 
     /// Keep `class` in the table beside the tree, and give back where it is.

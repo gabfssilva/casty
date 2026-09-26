@@ -64,7 +64,7 @@ class Ledgers:
         journal = self._stage.journal
         operation = journal.begin(self.name, key, "append", entry)
         try:
-            confirmed = await self._stage.senders[sender].ref(self._actor, key).ask(Append, entry)
+            confirmed = await self._stage.senders[sender].ref(self._actor, key).ask(Append(entry))
         except Exception as error:
             if not ambiguous(error):
                 raise
@@ -86,7 +86,7 @@ class Ledgers:
 
         async def kept_by(key: str) -> None:
             confirmed = frozenset(self._confirmed[key])
-            listing = await system.ref(self._actor, key).ask(Entries)
+            listing = await system.ref(self._actor, key).ask(Entries())
             broken = kept(key, listing.entries, confirmed, self._attempted[key])
             assert not broken, "; ".join(broken)
 
@@ -125,7 +125,7 @@ class Pinned:
         journal = self._stage.journal
         operation = journal.begin(self.name, f"@{address}/{name}", "stamp", entry)
         try:
-            node = await self._stage.senders[sender].ref(stamped, name, at=address).ask(Stamp, entry)
+            node = await self._stage.senders[sender].ref(stamped, name, at=address).ask(Stamp(entry))
         except Exception as error:
             if not ambiguous(error):
                 raise
@@ -149,7 +149,7 @@ class Pinned:
         async def kept_there(key: tuple[str, str]) -> None:
             address, name = key
             confirmed = {node: frozenset(entries) for node, entries in self._confirmed.get(key, {}).items()}
-            listing = await system.ref(stamped, name, at=address).ask(Entries)
+            listing = await system.ref(stamped, name, at=address).ask(Entries())
             assert listing.node.address == address, f"@{address}/{name} was answered by {listing.node}"
             mine = confirmed.get(listing.node, frozenset())
             broken = kept(f"@{address}/{name}", listing.entries, mine, self._attempted[key])

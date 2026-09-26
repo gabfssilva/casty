@@ -35,5 +35,6 @@ fn _casty(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<schema::Schema>()?;
     module.add_function(wrap_pyfunction!(actor::actor, module)?)?;
     module.add_function(wrap_pyfunction!(node::replicas, module)?)?;
+    module.add_function(wrap_pyfunction!(refs::nobody, module)?)?;
     Ok(())
 }

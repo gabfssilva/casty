@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, assert_never
 
 import pytest
 
-from casty import Client, Compression, Context, Limits, MessageTooLarge, Ref, Refused, actor
+from casty import Askable, Client, Compression, Context, Limits, MessageTooLarge, Refused, actor
 from tests.app import Locate
 from tests.cluster import NARROW, Harness, Node
 
@@ -14,14 +14,12 @@ OVER = 4 * MIB + 1
 
 
 @dataclass(frozen=True)
-class Echo:
-    reply_to: Ref[bytes]
+class Echo(Askable[bytes]):
     payload: bytes
 
 
 @dataclass(frozen=True)
-class Grow:
-    reply_to: Ref[bytes]
+class Grow(Askable[bytes]):
     size: int
 
 
@@ -38,13 +36,13 @@ async def echo(ctx: Context[bytes, EchoMsg]) -> None:
     """Answers what it was sent, or as many bytes as it is asked for, and says where it runs."""
     async for msg in ctx.inbox:
         match msg:
-            case Echo(reply_to, payload):
+            case Echo(payload, reply_to=reply_to):
                 reply_to.tell(payload)
-            case Grow(reply_to, size):
+            case Grow(size, reply_to=reply_to):
                 reply_to.tell(bytes(size))
             case Keep():
                 pass
-            case Locate(reply_to):
+            case Locate(reply_to=reply_to):
                 reply_to.tell(ctx.system.node)
             case _:
                 assert_never(msg)
@@ -66,8 +64,8 @@ else:
 
 
 @dataclass(frozen=True)
-class Widen:
-    reply_to: Ref[str]
+class Widen(Askable[str]):
+    pass
 
 
 @actor
@@ -116,8 +114,8 @@ def describe_limits() -> None:
                 key = await _key_on(b, a)
                 client = await harness.client()
 
-                assert await a.system.ref(echo, key).ask(Echo, payload) == payload
-                assert await client.ref(echo, key).ask(Echo, payload) == payload
+                assert await a.system.ref(echo, key).ask(Echo(payload)) == payload
+                assert await client.ref(echo, key).ask(Echo(payload)) == payload
 
     def when_the_nodes_keep_the_defaults() -> None:
         @OWNERS
@@ -130,16 +128,16 @@ def describe_limits() -> None:
 
                 # Raised where it is sent, not the `TimeoutError` of an answer that never comes.
                 with pytest.raises(MessageTooLarge, match=r"message to .* limits\.message of 4194304"):
-                    await ref.ask(Echo, bytes(OVER))
+                    await ref.ask(Echo(bytes(OVER)))
                 with pytest.raises(MessageTooLarge, match=r"message to .* limits\.message of 4194304"):
                     ref.tell(Keep(bytes(OVER)))
                 with pytest.raises(MessageTooLarge, match=r"initial state of .* limits\.message of 4194304"):
                     a.system.ref(echo, key, initial=bytes(OVER))
                 with pytest.raises(MessageTooLarge, match=r"limits\.message of 4194304"):
-                    await client.ref(echo, key).ask(Echo, bytes(OVER))
+                    await client.ref(echo, key).ask(Echo(bytes(OVER)))
                 # Refused before it reached the wire, so the connection it would have broken still carries the rest.
-                assert await ref.ask(Echo, b"after") == b"after"
-                assert await client.ref(echo, key).ask(Echo, b"after") == b"after"
+                assert await ref.ask(Echo(b"after")) == b"after"
+                assert await client.ref(echo, key).ask(Echo(b"after")) == b"after"
 
         @OWNERS
         async def it_fails_the_ask_whose_answer_is_over_4_mib_and_the_body_goes_on(owner: int) -> None:
@@ -149,11 +147,11 @@ def describe_limits() -> None:
                 client = await harness.client()
 
                 with pytest.raises(MessageTooLarge, match=r"answer takes \d+ bytes .* limits\.message of 4194304"):
-                    await a.system.ref(echo, key).ask(Grow, OVER)
+                    await a.system.ref(echo, key).ask(Grow(OVER))
                 with pytest.raises(MessageTooLarge, match=r"answer takes \d+ bytes .* limits\.message of 4194304"):
-                    await client.ref(echo, key).ask(Grow, OVER)
-                assert await a.system.ref(echo, key).ask(Grow, 3) == bytes(3)
-                assert await client.ref(echo, key).ask(Grow, 3) == bytes(3)
+                    await client.ref(echo, key).ask(Grow(OVER))
+                assert await a.system.ref(echo, key).ask(Grow(3)) == bytes(3)
+                assert await client.ref(echo, key).ask(Grow(3)) == bytes(3)
 
     def when_compression_sets_min_bytes() -> None:
         async def it_sends_uncompressed_every_frame_shorter_than_it() -> None:
@@ -168,7 +166,7 @@ def describe_limits() -> None:
                     ref = a.system.ref(echo, await _key_on(b, a))
                     before = harness.forwarded
 
-                    assert await ref.ask(Echo, payload) == payload
+                    assert await ref.ask(Echo(payload)) == payload
                     sent[min_bytes] = harness.forwarded - before
 
             # The payload crosses twice, there and back.
@@ -180,11 +178,11 @@ def describe_limits() -> None:
             async with Harness.start(2, limits=NARROW) as harness:
                 ref = harness.nodes[0].system.ref(narrow, "k")
 
-                refused = await ref.ask(Widen)
+                refused = await ref.ask(Widen())
                 assert WIDE in refused
                 assert "Limits.message" in refused
                 # Nothing was written, so the key is still what it was.
-                assert await ref.ask(Widen) == refused
+                assert await ref.ask(Widen()) == refused
 
     def when_a_client_has_other_limits_than_the_cluster() -> None:
         async def it_is_refused_naming_the_limits() -> None:
@@ -200,7 +198,7 @@ async def _key_on(node: Node, asked_from: Node, /) -> str:
     """The first of `k-0`, `k-1`, … whose owner is `node`, seen from `asked_from`."""
     for index in range(_TRIES):
         key = f"k-{index}"
-        if await asked_from.system.ref(echo, key).ask(Locate) == node.system.node:
+        if await asked_from.system.ref(echo, key).ask(Locate()) == node.system.node:
             return key
     raise AssertionError(f"none of the first {_TRIES} keys is owned by {node.address}")
 

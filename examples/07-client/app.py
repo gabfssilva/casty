@@ -3,12 +3,11 @@
 from dataclasses import dataclass
 from typing import assert_never
 
-from casty import Context, NodeId, Ref, actor
+from casty import Askable, Context, NodeId, actor
 
 
 @dataclass(frozen=True)
-class Vote:
-    reply_to: Ref[int]
+class Vote(Askable[int]):
     voter: str
 
 
@@ -19,8 +18,8 @@ class Tally:
 
 
 @dataclass(frozen=True)
-class Count:
-    reply_to: Ref[Tally]
+class Count(Askable[Tally]):
+    pass
 
 
 type PollMsg = Vote | Count
@@ -33,10 +32,10 @@ async def poll(ctx: Context[frozenset[str], PollMsg]) -> None:
     """One poll option: who voted for it. A set, so a voter asking twice counts once."""
     async for msg in ctx.inbox:
         match msg:
-            case Vote(reply_to, voter):
+            case Vote(voter, reply_to=reply_to):
                 await ctx.state.set(ctx.state.value | {voter})
                 reply_to.tell(len(ctx.state.value))
-            case Count(reply_to):
+            case Count(reply_to=reply_to):
                 reply_to.tell(Tally(len(ctx.state.value), ctx.system.node))
             case _:
                 assert_never(msg)

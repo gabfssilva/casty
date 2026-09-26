@@ -45,8 +45,8 @@ def describe_runtime() -> None:
             async with Harness.start(3, runtime=Runtime(threads=2)) as harness:
                 client = await harness.client()
                 ref = client.ref(account, "shared")
-                await ref.ask(Deposit, 5)
-                assert await harness.nodes[0].system.ref(account, "shared").ask(Balance) == 5
+                await ref.ask(Deposit(5))
+                assert await harness.nodes[0].system.ref(account, "shared").ask(Balance()) == 5
 
         async def it_leaves_nothing_of_a_node_that_crashed_or_left_while_the_others_go_on() -> None:
             async with Harness.start(3, runtime=Runtime(threads=2)) as harness:
@@ -64,7 +64,7 @@ def describe_runtime() -> None:
 
                     # A key the node that ended owned answers again once the others have taken it over.
                     async def _still_served() -> None:
-                        await ref.ask(Balance)
+                        await ref.ask(Balance())
 
                     await eventually(_still_served, WITHIN)
 

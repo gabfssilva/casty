@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Annotated, assert_never
 
 import pytest
 
-from casty import ActorSystem, Context, NodeId, Opaque, Ref, SchemaError, actor
+from casty import ActorSystem, Askable, Context, NodeId, Opaque, Ref, SchemaError, actor
 from tests import app
 from tests.cluster import Harness, Node
 from tests.support import eventually
@@ -172,8 +172,7 @@ class Sketch:
 
 
 @dataclass(frozen=True)
-class Draw:
-    reply_to: Ref[bool]
+class Draw(Askable[bool]):
     stroke: int
 
 
@@ -184,8 +183,8 @@ class Drawing:
 
 
 @dataclass(frozen=True)
-class Look:
-    reply_to: Ref[Drawing]
+class Look(Askable[Drawing]):
+    pass
 
 
 type SketchMsg = Draw | Look
@@ -195,10 +194,10 @@ type SketchMsg = Draw | Look
 async def sketch(ctx: Context[Sketch, SketchMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Draw(reply_to, stroke):
+            case Draw(stroke, reply_to=reply_to):
                 await ctx.state.set(Sketch([*ctx.state.value.strokes, stroke], ctx.state.value.source))
                 reply_to.tell(True)
-            case Look(reply_to):
+            case Look(reply_to=reply_to):
                 reply_to.tell(Drawing(ctx.state.value.strokes, ctx.system.node))
             case _:
                 assert_never(msg)
@@ -537,13 +536,13 @@ def describe_opaque_values() -> None:
                 key = await _drawn_on(b, a)
                 gone = b.system.node
                 for stroke in (3, 1, 2):
-                    assert await a.system.ref(sketch, key).ask(Draw, stroke)
+                    assert await a.system.ref(sketch, key).ask(Draw(stroke))
 
                 harness.isolate(b)
                 await harness.crash(b)
 
                 async def another_node_answers_with_every_stroke() -> None:
-                    drawing = await a.system.ref(sketch, key).ask(Look)
+                    drawing = await a.system.ref(sketch, key).ask(Look())
                     assert drawing.strokes == [3, 1, 2]
                     assert drawing.node != gone
 
@@ -573,7 +572,7 @@ async def _drawn_on(owner: Node, asked_from: Node) -> str:
     """The first of `s-0`, `s-1`, … whose owner is `owner`, seen from `asked_from`."""
     for index in range(100):
         key = f"s-{index}"
-        drawing = await asked_from.system.ref(sketch, key).ask(Look)
+        drawing = await asked_from.system.ref(sketch, key).ask(Look())
         if drawing.node == owner.system.node:
             return key
     raise AssertionError(f"none of the first 100 keys is owned by {owner.address}")

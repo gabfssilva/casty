@@ -9,7 +9,7 @@ from typing import assert_never
 
 import pytest
 
-from casty import ActorSystem, Context, Ref, Store, Unavailable, actor
+from casty import ActorSystem, Askable, Context, Store, Unavailable, actor
 from casty.sqlite import SQLiteStore
 from tests.app import Append, Entries, durable_ledger, ledger
 from tests.cluster import WITHIN, Harness, Node
@@ -18,19 +18,18 @@ from tests.traffic import kept
 
 
 @dataclass(frozen=True)
-class Add:
-    reply_to: Ref[int]
+class Add(Askable[int]):
     amount: int
 
 
 @dataclass(frozen=True)
-class Total:
-    reply_to: Ref[int]
+class Total(Askable[int]):
+    pass
 
 
 @dataclass(frozen=True)
-class Forget:
-    reply_to: Ref[bool]
+class Forget(Askable[bool]):
+    pass
 
 
 type TallyMsg = Add | Total | Forget
@@ -39,12 +38,12 @@ type TallyMsg = Add | Total | Forget
 async def _counted(ctx: Context[int, TallyMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Add(reply_to, amount):
+            case Add(amount, reply_to=reply_to):
                 await ctx.state.set(ctx.state.value + amount)
                 reply_to.tell(ctx.state.value)
-            case Total(reply_to):
+            case Total(reply_to=reply_to):
                 reply_to.tell(ctx.state.value)
-            case Forget(reply_to):
+            case Forget(reply_to=reply_to):
                 await ctx.state.delete()
                 reply_to.tell(True)
             case _:
@@ -93,34 +92,34 @@ def describe_a_durable_type() -> None:
             store = Records()
             async with ActorSystem(store=store) as system:
                 for key in ("a", "b"):
-                    await system.ref(tally, key).ask(Add, 5)
-                    await system.ref(tally, key).ask(Add, 7)
+                    await system.ref(tally, key).ask(Add(5))
+                    await system.ref(tally, key).ask(Add(7))
 
             async with ActorSystem(store=store) as system:
-                assert await system.ref(tally, "a").ask(Total) == 12
-                assert await system.ref(tally, "b").ask(Add, 1) == 13
+                assert await system.ref(tally, "a").ask(Total()) == 12
+                assert await system.ref(tally, "b").ask(Add(1)) == 13
 
             # What the second one wrote was kept over what the first one did.
             async with ActorSystem(store=store) as system:
-                assert await system.ref(tally, "b").ask(Total) == 13
+                assert await system.ref(tally, "b").ask(Total()) == 13
 
         async def it_starts_a_deleted_key_from_its_initial_state() -> None:
             store = Records()
             async with ActorSystem(store=store) as system:
                 ref = system.ref(tally, "gone")
-                await ref.ask(Add, 5)
-                assert await ref.ask(Forget) is True
+                await ref.ask(Add(5))
+                assert await ref.ask(Forget()) is True
 
             async with ActorSystem(store=store) as system:
-                assert await system.ref(tally, "gone").ask(Total) == 0
+                assert await system.ref(tally, "gone").ask(Total()) == 0
 
         async def it_keeps_nothing_of_a_type_that_is_not_durable() -> None:
             store = Records()
             async with ActorSystem(store=store) as system:
-                await system.ref(forgetful, "f").ask(Add, 5)
+                await system.ref(forgetful, "f").ask(Add(5))
 
             async with ActorSystem(store=store) as system:
-                assert await system.ref(forgetful, "f").ask(Total) == 0
+                assert await system.ref(forgetful, "f").ask(Total()) == 0
             assert store.records == {}
 
     def when_the_store_does_not_keep_a_write() -> None:
@@ -128,15 +127,15 @@ def describe_a_durable_type() -> None:
             store = Records()
             async with ActorSystem(store=store) as system:
                 ref = system.ref(tally, "t-1")
-                assert await ref.ask(Add, 1) == 1
+                assert await ref.ask(Add(1)) == 1
                 store.failing = True
                 with pytest.raises(Unavailable):
-                    await ref.ask(Add, 1)
+                    await ref.ask(Add(1))
                 store.failing = False
-                assert await ref.ask(Add, 2) == 3
+                assert await ref.ask(Add(2)) == 3
 
             async with ActorSystem(store=store) as system:
-                assert await system.ref(tally, "t-1").ask(Total) == 3
+                assert await system.ref(tally, "t-1").ask(Total()) == 3
 
     def when_a_type_saves_on_a_schedule() -> None:
         async def it_answers_at_once_and_saves_the_last_write_once_the_period_is_over() -> None:
@@ -144,7 +143,7 @@ def describe_a_durable_type() -> None:
             async with ActorSystem(store=store) as system:
                 ref = system.ref(lazy, "l-1")
                 for _ in range(3):
-                    await ref.ask(Add, 1)
+                    await ref.ask(Add(1))
                 assert store.saves == 0
 
                 async def saved_once() -> None:
@@ -153,27 +152,27 @@ def describe_a_durable_type() -> None:
                 await eventually(saved_once)
 
             async with ActorSystem(store=store) as system:
-                assert await system.ref(lazy, "l-1").ask(Total) == 3
+                assert await system.ref(lazy, "l-1").ask(Total()) == 3
 
     def when_the_system_has_no_store() -> None:
         async def it_does_not_activate_a_durable_type() -> None:
             async with ActorSystem() as system:
                 with pytest.raises(Unavailable):
-                    await system.ref(tally, "t-1").ask(Total)
+                    await system.ref(tally, "t-1").ask(Total())
 
     def when_the_nodes_of_a_cluster_share_a_store() -> None:
         async def it_keeps_every_write_their_replicas_confirmed_and_fails_the_ones_it_does_not() -> None:
             store = Records()
             async with Harness.start(3, store=store) as harness:
                 ref = harness.nodes[0].system.ref(tally, "c-1")
-                assert await ref.ask(Add, 4) == 4
-                assert await ref.ask(Add, 5) == 9
+                assert await ref.ask(Add(4)) == 4
+                assert await ref.ask(Add(5)) == 9
                 assert (tally.name, "c-1") in store.records
                 saved = store.saves
 
                 store.failing = True
                 with pytest.raises(Unavailable):
-                    await ref.ask(Add, 1)
+                    await ref.ask(Add(1))
                 assert store.saves == saved
 
     def when_a_node_meets_it_while_it_joins() -> None:
@@ -184,7 +183,7 @@ def describe_a_durable_type() -> None:
                 # What a replication message or a command reaching the node before it has entered makes it do.
                 b = await harness.add(joining=lambda system: system._resolve(tally.name))  # pyright: ignore[reportPrivateUsage]
                 key = await _placed_on(b, a)
-                assert await a.system.ref(tally, key).ask(Add, 4) == 4
+                assert await a.system.ref(tally, key).ask(Add(4)) == 4
                 assert (tally.name, key) in store.records
 
 
@@ -246,15 +245,15 @@ def describe_a_cluster_on_a_sqlite_store() -> None:
                 for index, (key, entries) in enumerate(keys.items()):
                     ref = harness.nodes[index % 3].system.ref(durable_ledger, key)
                     for entry in entries:
-                        assert await ref.ask(Append, entry)
-                assert await harness.nodes[0].system.ref(ledger, "memory").ask(Append, 1)
+                        assert await ref.ask(Append(entry))
+                assert await harness.nodes[0].system.ref(ledger, "memory").ask(Append(1))
 
             # Leaving the harness stopped every node: no process holds a replica of any key any more.
             async with SQLiteStore(path) as store, Harness.start(3, store=store) as harness:
                 for index, (key, entries) in enumerate(keys.items()):
-                    listing = await harness.nodes[(index + 1) % 3].system.ref(durable_ledger, key).ask(Entries)
+                    listing = await harness.nodes[(index + 1) % 3].system.ref(durable_ledger, key).ask(Entries())
                     assert listing.entries == entries, key
-                assert (await harness.nodes[0].system.ref(ledger, "memory").ask(Entries)).entries == ()
+                assert (await harness.nodes[0].system.ref(ledger, "memory").ask(Entries())).entries == ()
 
     def when_keys_were_written_while_a_node_was_down() -> None:
         async def it_reads_them_back_once_every_node_crashed_and_new_ones_started(tmp_path: Path) -> None:
@@ -270,7 +269,7 @@ def describe_a_cluster_on_a_sqlite_store() -> None:
                 async def appended() -> None:
                     entry = next(entries)
                     attempted[key].add(entry)
-                    assert await system.ref(durable_ledger, key).ask(Append, entry)
+                    assert await system.ref(durable_ledger, key).ask(Append(entry))
                     confirmed[key].add(entry)
 
                 await eventually(appended, WITHIN)
@@ -288,7 +287,7 @@ def describe_a_cluster_on_a_sqlite_store() -> None:
 
             async with SQLiteStore(path) as store, Harness.start(3, store=store) as harness:
                 for key in keys:
-                    listing = await harness.nodes[0].system.ref(durable_ledger, key).ask(Entries)
+                    listing = await harness.nodes[0].system.ref(durable_ledger, key).ask(Entries())
                     broken = kept(key, listing.entries, confirmed[key], attempted[key])
                     assert not broken, "; ".join(broken)
 

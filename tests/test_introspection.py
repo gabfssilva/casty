@@ -20,7 +20,7 @@ def describe_introspection() -> None:
         async def it_lists_a_key_after_an_ask_and_not_after_it_idles_out() -> None:
             async with ActorSystem(idle_after=timedelta(milliseconds=300)) as system:
                 before = datetime.now(UTC)
-                assert await system.ref(touched, "t-1").ask(Touch)
+                assert await system.ref(touched, "t-1").ask(Touch())
 
                 [listed] = system.activations()
                 assert (listed.actor, listed.key, listed.queued) == (touched.name, "t-1", 0)
@@ -35,8 +35,8 @@ def describe_introspection() -> None:
             latch = LATCHES["b-1"] = LATCHES["b-2"] = Latch()
 
             async with ActorSystem() as system:
-                asking = [asyncio.create_task(system.ref(gated, "b-2").ask(Bump)) for _ in range(3)]
-                asking += [asyncio.create_task(system.ref(gated, "b-1").ask(Bump)) for _ in range(2)]
+                asking = [asyncio.create_task(system.ref(gated, "b-2").ask(Bump())) for _ in range(3)]
+                asking += [asyncio.create_task(system.ref(gated, "b-1").ask(Bump())) for _ in range(2)]
 
                 # Each body holds the message it took, and the others wait in its mailbox.
                 async def the_mailboxes_hold_the_rest() -> None:
@@ -82,7 +82,7 @@ def describe_introspection() -> None:
                     for node in harness.nodes:
                         assert await node.system.placement(post, "worker", at=target.address) == named
                     assert await client.placement(post, "worker", at=target.address) == named
-                    assert await client.ref(post, "worker", at=target.address).ask(Locate) == target.system.node
+                    assert await client.ref(post, "worker", at=target.address).ask(Locate()) == target.system.node
                     assert (post.name, f"@{target.address}/worker") in _listed(target)
 
         async def it_answers_a_client_with_the_node_the_client_sends_to() -> None:
@@ -91,17 +91,17 @@ def describe_introspection() -> None:
                 for key in ("acc-1", "acc-2", "acc-3"):
                     placed = await client.placement(account, key)
                     assert placed == await harness.nodes[0].system.placement(account, key)
-                    assert (await client.ref(account, key).ask(Where)).node == placed.owner
+                    assert (await client.ref(account, key).ask(Where())).node == placed.owner
 
     def when_a_key_is_released() -> None:
         async def it_ends_the_activation_and_the_next_message_starts_it_from_its_state() -> None:
             async with ActorSystem() as system:
                 entry = system.ref(account, "a-1")
-                assert await entry.ask(Deposit, 5) == 5
+                assert await entry.ask(Deposit(5)) == 5
 
                 assert await system.release(account, "a-1")
                 assert system.activations() == ()
-                assert await entry.ask(Balance) == 5
+                assert await entry.ask(Balance()) == 5
                 assert [row.key for row in system.activations()] == ["a-1"]
 
         async def it_answers_false_when_the_key_has_no_activation_here() -> None:
@@ -113,7 +113,7 @@ def describe_introspection() -> None:
 
             async with ActorSystem() as system:
                 entry = system.ref(gated, "r-1")
-                asking = [asyncio.create_task(entry.ask(Bump)) for _ in range(3)]
+                asking = [asyncio.create_task(entry.ask(Bump())) for _ in range(3)]
 
                 async def one_held_two_queued() -> None:
                     assert [(row.key, row.queued) for row in system.activations()] == [("r-1", 2)]
@@ -137,7 +137,7 @@ def describe_introspection() -> None:
         async def it_lets_a_key_go_only_on_the_node_that_runs_it() -> None:
             async with Harness.start(3) as harness:
                 entry = harness.nodes[0].system.ref(account, "a-1")
-                assert await entry.ask(Deposit, 3) == 3
+                assert await entry.ask(Deposit(3)) == 3
                 owner = (await harness.nodes[0].system.placement(account, "a-1")).owner
                 running = next(node for node in harness.nodes if node.system.node == owner)
                 others = [node for node in harness.nodes if node is not running]
@@ -145,7 +145,7 @@ def describe_introspection() -> None:
                 assert [await node.system.release(account, "a-1") for node in others] == [False, False]
                 assert await running.system.release(account, "a-1")
                 assert (account.name, "a-1") not in _listed(running)
-                assert await entry.ask(Deposit, 4) == 7
+                assert await entry.ask(Deposit(4)) == 7
                 assert (account.name, "a-1") in _listed(running)
 
     def when_the_system_has_not_entered() -> None:
@@ -170,7 +170,7 @@ async def _placed_where_they_run(harness: Harness, keys: list[str]) -> None:
             assert placed.owner is not None
             assert (placed.owner, len(placed.replicas)) == (placed.replicas[0], 3)
             for node in harness.nodes:
-                assert (await node.system.ref(account, key).ask(Where)).node == placed.owner
+                assert (await node.system.ref(account, key).ask(Where())).node == placed.owner
             running = {node.system.node for node in harness.nodes if (account.name, key) in _listed(node)}
             assert running == {placed.owner}
 

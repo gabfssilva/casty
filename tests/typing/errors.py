@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Annotated, assert_never
 
-from casty import ActorSystem, Client, Collections, Context, Opaque, Ref, actor
+from casty import ActorSystem, Askable, Client, Collections, Context, Opaque, Ref, actor
 from casty.collections import SemaphoreState, semaphore
 
 
@@ -17,8 +17,7 @@ class Deposit:
 
 
 @dataclass(frozen=True)
-class Withdraw:
-    reply_to: Ref[bool]
+class Withdraw(Askable[bool]):
     amount: int
 
 
@@ -47,7 +46,7 @@ async def account(ctx: Context[Account, AccountMsg]) -> None:
         match msg:
             case Deposit(amount):
                 await ctx.state.set(Account(ctx.state.value.balance + amount))
-            case Withdraw(reply_to, amount):
+            case Withdraw(amount, reply_to=reply_to):
                 reply_to.tell("no")  # error
             case _:
                 assert_never(msg)
@@ -71,19 +70,19 @@ def tell_outside_the_message_type(system: ActorSystem) -> None:
 
 
 async def ask_with_wrong_arguments(system: ActorSystem) -> bool:
-    return await system.ref(account, "a").ask(Withdraw, "30")  # error
+    return await system.ref(account, "a").ask(Withdraw("30"))  # error
 
 
 async def ask_with_wrong_keyword_arguments(system: ActorSystem) -> bool:
-    return await system.ref(account, "a").ask(Withdraw, amount="30")  # error
+    return await system.ref(account, "a").ask(Withdraw(amount="30"))  # error
 
 
 async def ask_without_required_arguments(system: ActorSystem) -> bool:
-    return await system.ref(account, "a").ask(Withdraw)  # error
+    return await system.ref(account, "a").ask(Withdraw())  # error
 
 
 async def ask_into_the_wrong_type(system: ActorSystem) -> str:
-    return await system.ref(account, "a").ask(Withdraw, 30)  # error
+    return await system.ref(account, "a").ask(Withdraw(30))  # error
 
 
 def widen_a_ref(deposits: Ref[Deposit]) -> Ref[AccountMsg]:
@@ -99,9 +98,24 @@ async def save_and_become_outside_the_state_type(ctx: Context[Account, Deposit])
 
 def hand_over_what_the_actor_does_not_take(ctx: Context[Account, Deposit]) -> None:
     bank = ctx.system.ref(account, "a")
-    ctx.to_self(bank.ask(Withdraw, 1))  # error
-    ctx.to_self(bank.ask(Withdraw, 1), lambda ok: ok)  # error
-    ctx.to_self(bank.ask(Withdraw, 1), lambda _: Deposit(1), failed=lambda error: error)  # error
+    ctx.to_self(bank.ask(Withdraw(1)))  # error
+    ctx.to_self(bank.ask(Withdraw(1)), lambda ok: ok)  # error
+    ctx.to_self(bank.ask(Withdraw(1)), lambda _: Deposit(1), failed=lambda error: error)  # error
+
+
+async def ask_what_is_not_askable(system: ActorSystem) -> None:
+    await system.ref(account, "a").ask(Deposit(1))  # error
+    await system.ref(account, "a").ask(Withdraw)  # error
+
+
+def ask_through_the_context_what_does_not_fit(ctx: Context[Account, Deposit]) -> None:
+    bank = ctx.system.ref(account, "a")
+    ctx.ask(bank, Deposit(1), lambda _: Deposit(1))  # error
+    ctx.ask(bank, semaphore.Get(), lambda _: Deposit(1))  # error
+    ctx.ask(bank, Withdraw(1), lambda ok: ok)  # error
+    ctx.ask(bank, Withdraw(1), lambda ok: Deposit(ok.upper()))  # error
+    ctx.ask(bank, Withdraw(1), lambda _: Deposit(1), failed=lambda error: error)  # error
+    ctx.ask(bank, Withdraw(1))  # error
 
 
 async def schedule_what_the_actor_does_not_take(ctx: Context[Account, Deposit]) -> None:
@@ -153,7 +167,7 @@ async def invalid_collection_types(system: ActorSystem) -> None:
 
 async def answers_the_semaphore_cannot_tell(ctx: Context[Account, Deposit]) -> None:
     pool = ctx.system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=1))
-    pool.tell(semaphore.Acquire(ctx.self))  # error
+    pool.tell(semaphore.Acquire(reply_to=ctx.self))  # error
 
 
 def packed(numbers: list[int]) -> bytes:

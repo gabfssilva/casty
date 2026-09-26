@@ -70,6 +70,18 @@ impl Schema {
         Ok(out)
     }
 
+    /// `msg`, an `Askable`, written at `at` with `reply` as its `reply_to`, and the node its answers are read with.
+    pub fn write_asking(
+        slf: &Bound<'_, Self>,
+        at: NodeRef,
+        msg: &Bound<'_, PyAny>,
+        reply: &casty_core::node::Target,
+    ) -> failure::Outcome<(Vec<u8>, Option<NodeRef>)> {
+        let mut out = Vec::new();
+        let answers = dump::dump_asking(slf.get(), at, msg, reply, &mut out)?;
+        Ok((out, answers))
+    }
+
     /// The value `data` holds under the node `at`, with the refs in it bound to `node`.
     pub fn read<'py>(
         slf: &Bound<'py, Self>,
@@ -135,30 +147,4 @@ impl Schema {
     pub fn values(&self) -> &values::Values {
         &self.values
     }
-}
-
-/// The schema of the answer to `ask(build, ...)`, from the annotation of the first parameter of `build`.
-pub fn reply_schema(py: Python<'_>, build: &Bound<'_, PyAny>) -> PyResult<Schema> {
-    let reference = py.get_type::<crate::refs::Ref>();
-    let introspect = Introspect::new(py, reference.clone().into_any())?;
-    let shape = || {
-        let written = build
-            .repr()
-            .map_or_else(|_| "the builder".to_owned(), |text| text.to_string());
-        pyo3::exceptions::PyTypeError::new_err(format!(
-            "the first parameter of {written} must be annotated as Ref[R]"
-        ))
-    };
-    let parameters = introspect.parameters(build)?;
-    let Some(first) = parameters.first() else {
-        return Err(shape());
-    };
-    if !introspect.origin(first)?.is(&reference) {
-        return Err(shape());
-    }
-    let args = introspect.args(first)?;
-    let Some(answer) = args.first() else {
-        return Err(shape());
-    };
-    Ok(Schema::compiled(&introspect, answer, false)?)
 }

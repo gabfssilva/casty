@@ -120,7 +120,7 @@ class Traffic:
         entry = next(self._ids)
         self._attempted[key].add(entry)
         try:
-            confirmed = await sender.ref(ledger, key).ask(Append, entry)
+            confirmed = await sender.ref(ledger, key).ask(Append(entry))
         except AMBIGUOUS as error:
             self._refused.append(f"{key}: {type(error).__name__}: {error}")
             return
@@ -140,5 +140,5 @@ class Traffic:
     async def _entries(self, key: str, /) -> Listing:
         for sender in self._senders():
             with suppress(*AMBIGUOUS):
-                return await sender.ref(ledger, key).ask(Entries)
+                return await sender.ref(ledger, key).ask(Entries())
         raise AssertionError(f"nothing answered for {key}")

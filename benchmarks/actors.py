@@ -1,18 +1,16 @@
 from dataclasses import dataclass
 from typing import assert_never
 
-from casty import Context, Ref, actor
+from casty import Askable, Context, actor
 
 
 @dataclass(frozen=True)
-class Read:
-    reply_to: Ref[int]
+class Read(Askable[int]):
     payload: bytes
 
 
 @dataclass(frozen=True)
-class Increment:
-    reply_to: Ref[int]
+class Increment(Askable[int]):
     payload: bytes
 
 
@@ -20,9 +18,9 @@ class Increment:
 async def counter(ctx: Context[int, Read | Increment]) -> None:
     async for message in ctx.inbox:
         match message:
-            case Read(reply_to, _):
+            case Read(_, reply_to=reply_to):
                 reply_to.tell(ctx.state.value)
-            case Increment(reply_to, _):
+            case Increment(_, reply_to=reply_to):
                 await ctx.state.set(ctx.state.value + 1)
                 reply_to.tell(ctx.state.value)
             case _:

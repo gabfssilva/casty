@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use casty_core::mailbox::{Command, Deliver, OnFull};
 use casty_core::outcome::Outcome;
+use casty_core::schema::ir::NodeRef;
 use pyo3::prelude::*;
 
 use crate::lock::Locked;
@@ -15,8 +16,9 @@ use crate::schema::Schema;
 #[derive(Debug)]
 pub struct Waiting {
     pub future: Py<PyAny>,
-    /// What the answer is read with. A native body asks for the effect and not for the value, and has none.
-    pub schema: Option<Py<Schema>>,
+    /// What the answer is read with: the tree of the message the request went in, and the node of its `reply_to`. A
+    /// native body asks for the effect and not for the value, and has none.
+    pub schema: Option<(Py<Schema>, NodeRef)>,
     /// The timer that ends the request at its `timeout`, cancelled when the answer arrives first.
     pub deadline: Option<Py<PyAny>>,
     /// The actor and key the request was sent to, which is where its cancellation goes.
@@ -155,13 +157,11 @@ pub fn settle(
     match answered(py, outcome) {
         Ok(data) => {
             // A native body reads the answer itself, as the bytes it travelled as.
-            let Some(schema) = &waiting.schema else {
+            let Some((schema, at)) = &waiting.schema else {
                 future.call_method1("set_result", (pyo3::types::PyBytes::new(py, data),))?;
                 return Ok(());
             };
-            let schema = schema.bind(py);
-            let sent = schema.get().tree().sent();
-            match Schema::read(schema, sent, data, Some(node)) {
+            match Schema::read(schema.bind(py), *at, data, Some(node)) {
                 Ok(value) => future.call_method1("set_result", (value,))?,
                 Err(failure) => future.call_method1("set_exception", (PyErr::from(failure),))?,
             };

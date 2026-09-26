@@ -14,7 +14,7 @@ def describe_stats() -> None:
         async def it_counts_the_keys_active_until_they_idle_out() -> None:
             async with ActorSystem(idle_after=timedelta(seconds=1)) as system:
                 for index in range(3):
-                    assert await system.ref(touched, f"t-{index}").ask(Touch)
+                    assert await system.ref(touched, f"t-{index}").ask(Touch())
                     assert system.stats().actors[touched.name].active == index + 1
 
                 async def every_key_idled_out() -> None:
@@ -27,8 +27,8 @@ def describe_stats() -> None:
             latch = LATCHES["g-1"] = LATCHES["g-2"] = Latch()
 
             async with ActorSystem() as system:
-                asking = [asyncio.create_task(system.ref(gated, "g-1").ask(Bump)) for _ in range(4)]
-                asking += [asyncio.create_task(system.ref(gated, "g-2").ask(Bump)) for _ in range(2)]
+                asking = [asyncio.create_task(system.ref(gated, "g-1").ask(Bump())) for _ in range(4)]
+                asking += [asyncio.create_task(system.ref(gated, "g-2").ask(Bump())) for _ in range(2)]
 
                 # Each body holds the message it took, and the others wait in its mailbox.
                 async def the_mailboxes_hold_the_rest() -> None:
@@ -48,7 +48,7 @@ def describe_stats() -> None:
             async with ActorSystem() as system:
                 entry = system.ref(account, "a-1")
                 for amount in (1, 2, 3):
-                    await entry.ask(Deposit, amount)
+                    await entry.ask(Deposit(amount))
 
                 stats = system.stats()
                 assert (stats.writes_confirmed, stats.writes_failed) == (3, 0)
@@ -63,9 +63,9 @@ def describe_stats() -> None:
             async with Harness.start(3) as harness:
                 systems = [node.system for node in harness.nodes]
                 entry = systems[0].ref(account, "a-1")
-                assert [await entry.ask(Deposit, amount) for amount in (1, 2, 3)] == [1, 3, 6]
+                assert [await entry.ask(Deposit(amount)) for amount in (1, 2, 3)] == [1, 3, 6]
                 client = await harness.client()
-                assert await client.ref(account, "a-1").ask(Deposit, 4) == 10
+                assert await client.ref(account, "a-1").ask(Deposit(4)) == 10
 
                 every = [system.stats() for system in systems]
                 # Only the owner writes, once per deposit: taking the key over is not a write.

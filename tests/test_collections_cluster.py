@@ -210,7 +210,7 @@ def describe_distributed_collections() -> None:
 
             async def abandoned() -> bool:
                 try:
-                    return await ref.ask(barrier.Arrive, uuid4(), 2, time.time() + 0.5)
+                    return await ref.ask(barrier.Arrive(uuid4(), 2, time.time() + 0.5))
                 except Unavailable:
                     return False
 
@@ -296,7 +296,7 @@ def describe_distributed_collections() -> None:
                 producer = group.create_task(produce())
                 await eventually(backlog_spans_segments, timedelta(seconds=60))
                 group.create_task(consume(producer))
-                _, tail = await index.ask(queue.Advance, 0, 0)
+                _, tail = await index.ask(queue.Advance(0, 0))
                 segments = configured(queue_segment.actor, 3, "majority")
                 owner = _holder(harness, segments, f"queue:4:jobs:{tail}")
                 victim = next(node for node in harness.nodes if node.system.node == owner)

@@ -40,10 +40,10 @@ async def post(ctx: Context[Account, PostMsg]) -> None:
     """An account that runs on the node its ref names: its one copy is there, and no change of the ring moves it."""
     async for msg in ctx.inbox:
         match msg:
-            case Deposit(reply_to, amount):
+            case Deposit(amount, reply_to=reply_to):
                 await ctx.state.set(Account(ctx.state.value.balance + amount))
                 reply_to.tell(ctx.state.value.balance)
-            case Where(reply_to):
+            case Where(reply_to=reply_to):
                 reply_to.tell(Location(ctx.state.value.balance, ctx.system.node))
             case _:
                 assert_never(msg)
@@ -159,7 +159,7 @@ def describe_handoff() -> None:
             timing = replace(FAST, suspect_after=timedelta(hours=1), leave_timeout=timedelta(milliseconds=500))
             async with Harness.start(2, timing=timing, observer=lambda source: events[source].append) as harness:
                 going, kept = harness.nodes
-                assert await going.system.ref(ledger, "l-1").ask(Append, 1)
+                assert await going.system.ref(ledger, "l-1").ask(Append(1))
                 harness.isolate(kept)
                 await harness.leave(going)
 
@@ -176,12 +176,12 @@ def describe_handoff() -> None:
                 asking = homes[0].system
                 pinned = [(home, name) for home in homes for name in NAMES]
                 deposited = await asyncio.gather(
-                    *(asking.ref(post, name, at=home.address).ask(Deposit, 1) for home, name in pinned)
+                    *(asking.ref(post, name, at=home.address).ask(Deposit(1)) for home, name in pinned)
                 )
                 assert deposited == [1] * len(pinned)
                 # Every node runs a type the ring places as well, whose ranges the change below moves.
                 for node in harness.nodes:
-                    assert await node.system.ref(account, f"a-{node.id}").ask(Deposit, 1) == 1
+                    assert await node.system.ref(account, f"a-{node.id}").ask(Deposit(1)) == 1
                 left = going.system.node
                 # The others gain the ranges it had: they pull those of `account`, and none of `post`.
                 await harness.leave(going)
@@ -195,7 +195,7 @@ def describe_handoff() -> None:
 
                 await eventually(the_ranges_arrived, WITHIN)
                 found = await asyncio.gather(
-                    *(asking.ref(post, name, at=home.address).ask(Where) for home, name in pinned)
+                    *(asking.ref(post, name, at=home.address).ask(Where()) for home, name in pinned)
                 )
                 assert found == [Location(1, home.system.node) for home, _ in pinned]
 
@@ -219,7 +219,7 @@ def describe_handoff() -> None:
             async with Harness.start(3, observer=lambda source: events[source].append) as harness:
                 asking, gone, _ = harness.nodes
                 for name in NAMES:
-                    assert await asking.system.ref(post, name, at=gone.address).ask(Deposit, 1) == 1
+                    assert await asking.system.ref(post, name, at=gone.address).ask(Deposit(1)) == 1
                 lost = gone.system.node
                 harness.isolate(gone)
                 await harness.crash(gone)
@@ -252,7 +252,7 @@ def describe_handoff() -> None:
                 asking, restarting, _ = harness.nodes
                 refs = [asking.system.ref(post, name, at=restarting.address) for name in NAMES]
                 for ref in refs:
-                    assert await ref.ask(Deposit, 5) == 5
+                    assert await ref.ask(Deposit(5)) == 5
                 old = restarting.system.node
                 await harness.crash(restarting)
                 revived = await harness.add(address=restarting.address)
@@ -266,14 +266,14 @@ def describe_handoff() -> None:
                 # The refs taken before the crash name the address: they reach the new process, where the keys start
                 # over, since their one copy died with the process before it.
                 for ref in refs:
-                    assert await ref.ask(Where) == Location(0, revived.system.node)
+                    assert await ref.ask(Where()) == Location(0, revived.system.node)
 
         async def it_ends_them_when_their_node_leaves_and_owes_them_to_nobody() -> None:
             events: defaultdict[int, list[Event]] = defaultdict(list)
             async with Harness.start(3, observer=lambda source: events[source].append) as harness:
                 asking, going, _ = harness.nodes
                 for name in NAMES:
-                    assert await asking.system.ref(post, name, at=going.address).ask(Deposit, 1) == 1
+                    assert await asking.system.ref(post, name, at=going.address).ask(Deposit(1)) == 1
                 await harness.leave(going)
                 await _everyone_sees(harness, 2)
                 await _refused(harness, going)
@@ -299,7 +299,7 @@ def describe_handoff() -> None:
 
 async def _located(system: ActorSystem, keys: tuple[str, ...], /) -> dict[str, NodeId]:
     """The node each of `keys` runs on, asked from `system`: a key that was not running starts."""
-    found = await asyncio.gather(*(system.ref(account, key).ask(Where) for key in keys))
+    found = await asyncio.gather(*(system.ref(account, key).ask(Where()) for key in keys))
     return {key: location.node for key, location in zip(keys, found, strict=True)}
 
 
@@ -345,7 +345,7 @@ async def _refused(harness: Harness, gone: Node, /) -> None:
     for node in harness.nodes:
         for name in NAMES:
             with pytest.raises(Unavailable):
-                await node.system.ref(post, name, at=gone.address).ask(Where)
+                await node.system.ref(post, name, at=gone.address).ask(Where())
 
 
 async def _everyone_sees(harness: Harness, count: int, /) -> None:

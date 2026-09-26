@@ -57,6 +57,8 @@ actor = _core.actor
 replicas = _core.replicas
 
 
+# `Askable` makes a ref as it is defined, which reads names of `casty`: it comes once they are bound.
+from casty.askable import Askable  # noqa: E402
 from casty.collections import Collections as Collections  # noqa: E402
 from casty.observer import (  # noqa: E402
     Activation,
@@ -87,6 +89,7 @@ __all__ = [
     "ActorFailed",
     "ActorStats",
     "ActorSystem",
+    "Askable",
     "Backoff",
     "Body",
     "Client",

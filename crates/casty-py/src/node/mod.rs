@@ -22,6 +22,7 @@ use casty_core::chain::Chain;
 use casty_core::mailbox::Start;
 use casty_core::node::{NodeId, Target};
 use casty_core::outcome::Outcome;
+use casty_core::schema::ir::NodeRef;
 use casty_core::store::{LocalStore, Pages};
 use casty_net::endpoint::TooLarge;
 use pyo3::prelude::*;
@@ -38,9 +39,6 @@ use catalog::Catalog;
 use cluster::{Ending, Entered, Joined, Taken};
 use observe::{Kind, Observed, Wanted};
 use replies::{Replies, Waiting};
-
-/// The schema of the answer of each `ask` builder, held by the builder it was read from.
-type Answers = HashMap<usize, (Py<PyAny>, Py<Schema>)>;
 
 /// The periods a system runs by.
 #[derive(Debug, Clone, Copy)]
@@ -85,7 +83,6 @@ pub struct Node {
     writes: Mutex<Option<Py<Writes>>>,
     running: Mutex<Option<Py<PyAny>>>,
     system: Mutex<Option<Py<PyAny>>>,
-    answers: Mutex<Answers>,
     catalog: Mutex<Catalog>,
     store: Mutex<LocalStore>,
     /// The store the system was built with, which keeps the state of the durable types outside the process.
@@ -137,7 +134,6 @@ impl Node {
             writes: Mutex::new(None),
             running: Mutex::new(None),
             system: Mutex::new(None),
-            answers: Mutex::new(HashMap::new()),
             catalog: Mutex::new(Catalog::default()),
             store: Mutex::new(LocalStore::default()),
             replies: Mutex::new(Replies::default()),
@@ -458,25 +454,6 @@ impl Node {
                 "the system has not started",
             )),
         }
-    }
-
-    /// The schema of the answer of `ask(build, ...)`, from the annotation of the first parameter of `build`.
-    pub fn answers(&self, py: Python<'_>, build: &Bound<'_, PyAny>) -> PyResult<Py<Schema>> {
-        let at = build.as_ptr() as usize;
-        {
-            let answers = self.answers.locked();
-            if let Some((held, schema)) = answers.get(&at)
-                && held.bind(py).is(build)
-            {
-                return Ok(schema.clone_ref(py));
-            }
-        }
-        let schema = crate::schema::reply_schema(py, build)?;
-        let schema = Bound::new(py, schema)?.unbind();
-        self.answers
-            .locked()
-            .insert(at, (build.clone().unbind(), schema.clone_ref(py)));
-        Ok(schema)
     }
 
     pub fn future<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -973,22 +950,34 @@ impl Node {
         }
     }
 
-    /// Start waiting for an answer, decoded with `schema`, and give back the id it comes addressed to.
+    /// The id the answer of a request comes addressed to, taken before the request is written, since it names it.
     #[must_use]
-    pub fn request(&self, py: Python<'_>, schema: &Py<Schema>, future: &Bound<'_, PyAny>) -> i64 {
-        self.waited(future, Some(schema.clone_ref(py)))
+    pub fn reply(&self) -> i64 {
+        self.replies.locked().take()
+    }
+
+    /// Start waiting for the answer to `id`, read with the node `at` of `schema`.
+    pub fn request(
+        &self,
+        py: Python<'_>,
+        id: i64,
+        schema: &Py<Schema>,
+        at: NodeRef,
+        future: &Bound<'_, PyAny>,
+    ) {
+        self.waited(id, future, Some((schema.clone_ref(py), at)));
     }
 
     /// Start waiting for an answer that no schema reads, which is what a native body asks for: it reads the bytes.
     #[must_use]
     pub fn awaited(&self, future: &Bound<'_, PyAny>) -> i64 {
-        self.waited(future, None)
+        let id = self.reply();
+        self.waited(id, future, None);
+        id
     }
 
-    fn waited(&self, future: &Bound<'_, PyAny>, schema: Option<Py<Schema>>) -> i64 {
-        let mut replies = self.replies.locked();
-        let id = replies.take();
-        replies.wait(
+    fn waited(&self, id: i64, future: &Bound<'_, PyAny>, schema: Option<(Py<Schema>, NodeRef)>) {
+        self.replies.locked().wait(
             id,
             Waiting {
                 future: future.clone().unbind(),
@@ -998,7 +987,6 @@ impl Node {
                 again: None,
             },
         );
-        id
     }
 
     pub fn deadline(&self, id: i64, timer: &Bound<'_, PyAny>) {
@@ -1443,8 +1431,10 @@ system_methods!(ActorSystem {
         reply_to: &Bound<'_, Ref>,
     ) -> PyResult<()> {
         let definition = Definition::of(actor)?;
-        self.node
-            .cancelled(py, &definition.name, key, reply_to.get().target())
+        let Some(request) = reply_to.get().target() else {
+            return Ok(());
+        };
+        self.node.cancelled(py, &definition.name, key, request)
     }
 
     /// Watch the pages this node writes from here on.

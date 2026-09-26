@@ -8,24 +8,22 @@ import asyncio
 from dataclasses import dataclass
 from typing import assert_never
 
-from casty import ActorSystem, Context, Ref, actor
+from casty import ActorSystem, Askable, Context, actor
 
 
 @dataclass(frozen=True)
-class Deposit:
-    reply_to: Ref[int]
+class Deposit(Askable[int]):
     amount: int
 
 
 @dataclass(frozen=True)
-class Withdraw:
-    reply_to: Ref[bool]
+class Withdraw(Askable[bool]):
     amount: int
 
 
 @dataclass(frozen=True)
-class Balance:
-    reply_to: Ref[int]
+class Balance(Askable[int]):
+    pass
 
 
 type AccountMsg = Deposit | Withdraw | Balance
@@ -35,23 +33,22 @@ type AccountMsg = Deposit | Withdraw | Balance
 async def account(ctx: Context[int, AccountMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Deposit(reply_to, amount):
+            case Deposit(amount, reply_to=reply_to):
                 await ctx.state.set(ctx.state.value + amount)
                 reply_to.tell(ctx.state.value)
-            case Withdraw(reply_to, amount) if amount <= ctx.state.value:
+            case Withdraw(amount, reply_to=reply_to) if amount <= ctx.state.value:
                 await ctx.state.set(ctx.state.value - amount)
                 reply_to.tell(True)
-            case Withdraw(reply_to, _):
+            case Withdraw(_, reply_to=reply_to):
                 reply_to.tell(False)
-            case Balance(reply_to):
+            case Balance(reply_to=reply_to):
                 reply_to.tell(ctx.state.value)
             case _:
                 assert_never(msg)
 
 
 @dataclass(frozen=True)
-class Transfer:
-    reply_to: Ref[str]
+class Transfer(Askable[str]):
     source: str
     target: str
     amount: int
@@ -67,8 +64,8 @@ async def teller(ctx: Context[int, Transfer]) -> None:
     async for msg in ctx.inbox:
         source = ctx.system.ref(account, msg.source)
         target = ctx.system.ref(account, msg.target)
-        if await source.ask(Withdraw, msg.amount):
-            await target.ask(Deposit, msg.amount)
+        if await source.ask(Withdraw(msg.amount)):
+            await target.ask(Deposit(msg.amount))
             await ctx.state.set(ctx.state.value + 1)
             msg.reply_to.tell(f"moved {msg.amount} from {msg.source} to {msg.target} (transfer #{ctx.state.value})")
         else:
@@ -78,11 +75,11 @@ async def teller(ctx: Context[int, Transfer]) -> None:
 async def main() -> None:
     async with ActorSystem() as system:
         ana, bia = system.ref(account, "ana"), system.ref(account, "bia")
-        await ana.ask(Deposit, 100)
+        await ana.ask(Deposit(100))
         desk = system.ref(teller, "desk-1")
-        print(await desk.ask(Transfer, "ana", "bia", 70))
-        print(await desk.ask(Transfer, "ana", "bia", 70))
-        print(f"ana={await ana.ask(Balance)} bia={await bia.ask(Balance)}")
+        print(await desk.ask(Transfer("ana", "bia", 70)))
+        print(await desk.ask(Transfer("ana", "bia", 70)))
+        print(f"ana={await ana.ask(Balance())} bia={await bia.ask(Balance())}")
 
 
 asyncio.run(main())

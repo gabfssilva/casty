@@ -13,7 +13,7 @@ from typing import assert_never
 
 from local_cluster import nodes
 
-from casty import ActorSystem, Context, NodeId, Ref, Unavailable, actor
+from casty import ActorSystem, Askable, Context, NodeId, Unavailable, actor
 
 PORTS = (7411, 7412, 7413, 7414)
 KEYS = tuple(f"cart-{index}" for index in range(12))
@@ -22,8 +22,7 @@ EMPTY_CART: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
-class Add:
-    reply_to: Ref[int]
+class Add(Askable[int]):
     item: str
 
 
@@ -34,8 +33,8 @@ class Located:
 
 
 @dataclass(frozen=True)
-class Locate:
-    reply_to: Ref[Located]
+class Locate(Askable[Located]):
+    pass
 
 
 type CartMsg = Add | Locate
@@ -45,10 +44,10 @@ type CartMsg = Add | Locate
 async def cart(ctx: Context[tuple[str, ...], CartMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Add(reply_to, item):
+            case Add(item, reply_to=reply_to):
                 await ctx.state.set((*ctx.state.value, item))
                 reply_to.tell(len(ctx.state.value))
-            case Locate(reply_to):
+            case Locate(reply_to=reply_to):
                 reply_to.tell(Located(ctx.state.value, ctx.system.node))
             case _:
                 assert_never(msg)
@@ -59,7 +58,7 @@ async def locate(system: ActorSystem, key: str, /) -> Located:
     while True:
         try:
             async with asyncio.timeout(1):
-                return await system.ref(cart, key).ask(Locate)
+                return await system.ref(cart, key).ask(Locate())
         except (Unavailable, TimeoutError):
             await asyncio.sleep(0.1)
 
@@ -76,8 +75,8 @@ async def main() -> None:
         systems = cluster.systems
         # Each message enters through a different node. None of them is told where the cart is.
         for index, key in enumerate(KEYS):
-            await systems[index % 3].ref(cart, key).ask(Add, "book")
-            await systems[(index + 1) % 3].ref(cart, key).ask(Add, "pen")
+            await systems[index % 3].ref(cart, key).ask(Add("book"))
+            await systems[(index + 1) % 3].ref(cart, key).ask(Add("pen"))
         await report("three nodes", systems[0])
 
         await cluster.start(PORTS[3])

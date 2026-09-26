@@ -10,10 +10,10 @@ from casty import (
     ActivationStarted,
     ActorFailed,
     ActorSystem,
+    Askable,
     Context,
     Event,
     MessageDropped,
-    Ref,
     Unavailable,
     actor,
 )
@@ -46,8 +46,8 @@ class Choosy(Recorder):
 
 
 @dataclass(frozen=True)
-class Crash:
-    reply_to: Ref[bool]
+class Crash(Askable[bool]):
+    pass
 
 
 @actor(initial=Idle())
@@ -65,7 +65,7 @@ def describe_observer() -> None:
                 a, b, c, d = harness.nodes
                 key = await _key_on(a)
                 with pytest.raises(ActorFailed):
-                    await a.system.ref(brittle, "b-1").ask(Crash)
+                    await a.system.ref(brittle, "b-1").ask(Crash())
                 napping = await _placed_on(a)
                 # One message runs or waits, and a mailbox of one holds the next: the third has nowhere to go.
                 for _ in range(3):
@@ -73,7 +73,7 @@ def describe_observer() -> None:
 
                 harness.partition({a}, {b, c, d})
                 with pytest.raises(Unavailable):
-                    await a.system.ref(ledger, key).ask(Append, 100)
+                    await a.system.ref(ledger, key).ask(Append(100))
                 harness.heal()
 
                 harness.isolate(d)
@@ -91,7 +91,7 @@ def describe_observer() -> None:
             recorder = Recorder()
 
             async with ActorSystem(observer=recorder, idle_after=timedelta(milliseconds=50)) as system:
-                assert await system.ref(account, "a-1").ask(Deposit, 1) == 1
+                assert await system.ref(account, "a-1").ask(Deposit(1)) == 1
 
                 async def it_started_and_ended() -> None:
                     assert recorder.events == [
@@ -109,7 +109,7 @@ def describe_observer() -> None:
                 raise RuntimeError(f"the observer broke on {event}")
 
             async with ActorSystem(observer=broken) as system:
-                assert await system.ref(account, "a-1").ask(Deposit, 1) == 1
+                assert await system.ref(account, "a-1").ask(Deposit(1)) == 1
 
                 async def the_failure_was_logged() -> None:
                     assert any(
@@ -118,8 +118,8 @@ def describe_observer() -> None:
                     )
 
                 await eventually(the_failure_was_logged)
-                assert await system.ref(account, "a-2").ask(Deposit, 2) == 2
-                assert await system.ref(account, "a-1").ask(Deposit, 1) == 2
+                assert await system.ref(account, "a-2").ask(Deposit(2)) == 2
+                assert await system.ref(account, "a-1").ask(Deposit(1)) == 2
 
     def when_the_observer_says_which_kinds_it_takes() -> None:
         async def it_is_given_no_event_of_another_kind() -> None:
@@ -143,7 +143,7 @@ async def _key_on(node: Node) -> str:
     """The first of `k-0`, `k-1`, … whose owner is `node`, asked from it: every key asked leaves a ledger behind."""
     for index in range(_TRIES):
         key = f"k-{index}"
-        if (await node.system.ref(ledger, key).ask(Entries)).node == node.system.node:
+        if (await node.system.ref(ledger, key).ask(Entries())).node == node.system.node:
             return key
     raise AssertionError(f"none of the first {_TRIES} keys is owned by {node.address}")
 

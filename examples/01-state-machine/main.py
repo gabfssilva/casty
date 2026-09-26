@@ -9,7 +9,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import assert_never
 
-from casty import ActorSystem, Context, Ref, actor
+from casty import ActorSystem, Askable, Context, actor
 
 
 @dataclass(frozen=True)
@@ -29,14 +29,12 @@ class Shipped:
 
 
 @dataclass(frozen=True)
-class Pay:
-    reply_to: Ref[str]
+class Pay(Askable[str]):
     amount: int
 
 
 @dataclass(frozen=True)
-class Ship:
-    reply_to: Ref[str]
+class Ship(Askable[str]):
     tracking: str
 
 
@@ -53,9 +51,9 @@ async def shipped(ctx: Context[Shipped, OrderMsg]) -> None:
 async def paid(ctx: Context[Paid, OrderMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Pay(reply_to, _):
+            case Pay(_, reply_to=reply_to):
                 reply_to.tell("refused: already paid")
-            case Ship(reply_to, tracking):
+            case Ship(tracking, reply_to=reply_to):
                 await ctx.become(shipped, Shipped(tracking))
                 reply_to.tell(f"shipped {len(ctx.state.value.items)} item(s) as {tracking}")
             case _:
@@ -67,12 +65,12 @@ async def pending(ctx: Context[Pending, OrderMsg]) -> None:
     """Where an order starts. No default `initial`: the ref that creates it says which items it has."""
     async for msg in ctx.inbox:
         match msg:
-            case Pay(reply_to, amount):
+            case Pay(amount, reply_to=reply_to):
                 # The state is of the type of `paid`, and the checker holds the two together. The code after this
                 # line still runs here; the next message is read by `paid`.
                 await ctx.become(paid, Paid(ctx.state.value.items, amount))
                 reply_to.tell(f"paid {amount} for {', '.join(ctx.state.value.items)}")
-            case Ship(reply_to, _):
+            case Ship(_, reply_to=reply_to):
                 reply_to.tell("refused: not paid yet")
             case _:
                 assert_never(msg)
@@ -81,11 +79,11 @@ async def pending(ctx: Context[Pending, OrderMsg]) -> None:
 async def main() -> None:
     async with ActorSystem() as system:
         ref = system.ref(pending, "order-1", initial=Pending(("keyboard", "mouse")))
-        print(await ref.ask(Ship, "BR123"))
-        print(await ref.ask(Pay, 450))
-        print(await ref.ask(Pay, 450))
-        print(await ref.ask(Ship, "BR123"))
-        print(await ref.ask(Ship, "BR999"))
+        print(await ref.ask(Ship("BR123")))
+        print(await ref.ask(Pay(450)))
+        print(await ref.ask(Pay(450)))
+        print(await ref.ask(Ship("BR123")))
+        print(await ref.ask(Ship("BR999")))
 
 
 asyncio.run(main())

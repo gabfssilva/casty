@@ -32,10 +32,10 @@ def describe_routing() -> None:
                 async with asyncio.TaskGroup() as depositing:
                     for node in harness.nodes:
                         for key in keys:
-                            depositing.create_task(node.system.ref(account, key).ask(Deposit, 1))
+                            depositing.create_task(node.system.ref(account, key).ask(Deposit(1)))
 
                 first = harness.nodes[0].system
-                located = [await first.ref(account, key).ask(Where) for key in keys]
+                located = [await first.ref(account, key).ask(Where()) for key in keys]
 
                 # The state of a key lives only where it is active, so a second activation would answer its own sum.
                 assert [where.balance for where in located] == [3] * _KEYS
@@ -48,16 +48,16 @@ def describe_routing() -> None:
             for size in (1, 3):
                 async with Harness.start(size) as harness:
                     for key in keys:
-                        await harness.nodes[0].system.ref(account, key).ask(Deposit, 1)
+                        await harness.nodes[0].system.ref(account, key).ask(Deposit(1))
 
                     await harness.add()
                     async with asyncio.TaskGroup() as depositing:
                         for node in harness.nodes:
                             for key in keys:
-                                depositing.create_task(node.system.ref(account, key).ask(Deposit, 1))
+                                depositing.create_task(node.system.ref(account, key).ask(Deposit(1)))
 
                     first = harness.nodes[0].system
-                    located = [await first.ref(account, key).ask(Where) for key in keys]
+                    located = [await first.ref(account, key).ask(Where()) for key in keys]
                     assert [where.balance for where in located] == [size + 2] * _KEYS
 
     def when_a_node_sends_many_messages_to_a_remote_key() -> None:
@@ -66,13 +66,13 @@ def describe_routing() -> None:
                 a, b = harness.nodes
 
                 async def answered_from(key: str) -> NodeId:
-                    return (await a.system.ref(notes, key).ask(Notes)).node
+                    return (await a.system.ref(notes, key).ask(Notes())).node
 
                 key = await _key_on(b, answered_from)
                 for value in range(_MANY):
                     a.system.ref(notes, key).tell(Note(value))
 
-                written = await a.system.ref(notes, key).ask(Notes)
+                written = await a.system.ref(notes, key).ask(Notes())
 
                 assert written.node == b.system.node
                 assert written.notes == tuple(range(_MANY))
@@ -85,10 +85,10 @@ def describe_routing() -> None:
                 a, b, _ = harness.nodes
 
                 async def answered_from(key: str) -> NodeId:
-                    return await a.system.ref(gate, key).ask(Locate)
+                    return await a.system.ref(gate, key).ask(Locate())
 
                 key = await _key_on(b, answered_from)
-                waiting = asyncio.ensure_future(a.system.ref(gate, key).ask(Hold))
+                waiting = asyncio.ensure_future(a.system.ref(gate, key).ask(Hold()))
                 harness.isolate(b)
                 await harness.crash(b)
 
@@ -106,10 +106,10 @@ def describe_routing() -> None:
                 a, b = harness.nodes
 
                 async def answered_from(key: str) -> NodeId:
-                    return await a.system.ref(gate, key).ask(Locate)
+                    return await a.system.ref(gate, key).ask(Locate())
 
                 key = await _key_on(b, answered_from)
-                waiting = asyncio.ensure_future(a.system.ref(gate, key).ask(Hold))
+                waiting = asyncio.ensure_future(a.system.ref(gate, key).ask(Hold()))
                 await harness.leave(a)
 
                 with pytest.raises(Unavailable, match="stopped"):
@@ -121,7 +121,7 @@ def describe_routing() -> None:
             async with Harness.start(3) as harness:
                 a = harness.nodes[0]
                 # Only `a` ever names the type. The others meet it by its name, and import it from there.
-                ledgers = [await a.system.ref(ledger, f"l-{index}").ask(Entries) for index in range(_SPREAD)]
+                ledgers = [await a.system.ref(ledger, f"l-{index}").ask(Entries()) for index in range(_SPREAD)]
                 assert {listing.node for listing in ledgers} == {node.system.node for node in harness.nodes}
 
                 async def every_member_has_the_type() -> None:
@@ -141,7 +141,7 @@ def describe_routing() -> None:
             async with Harness.start(3) as harness:
                 a = harness.nodes[0].system
                 answers = await asyncio.gather(
-                    *(a.ref(unreleased, f"k-{index}").ask(Locate) for index in range(_SPREAD)), return_exceptions=True
+                    *(a.ref(unreleased, f"k-{index}").ask(Locate()) for index in range(_SPREAD)), return_exceptions=True
                 )
                 assert {answer for answer in answers if isinstance(answer, NodeId)} == {a.node}
                 assert any(isinstance(answer, UnknownActor) for answer in answers)
@@ -185,7 +185,7 @@ def describe_routing() -> None:
                     # The node named in each of the ways a caller holds it, from every node.
                     for at in (target.address, target.system.node, member):
                         for node in harness.nodes:
-                            assert await node.system.ref(station, "worker", at=at).ask(Locate) == target.system.node
+                            assert await node.system.ref(station, "worker", at=at).ask(Locate()) == target.system.node
 
                 pinned = {f"@{node.address}/worker": node.system.node for node in harness.nodes}
                 assert Counter(key for key, _ in _STARTED) == dict.fromkeys(pinned, 1)
@@ -196,7 +196,7 @@ def describe_routing() -> None:
             async with Harness.start(3) as harness:
                 asking, going, third = harness.nodes
                 for node in harness.nodes:
-                    assert await asking.system.ref(station, "worker", at=node.address).ask(Locate) == node.system.node
+                    assert await asking.system.ref(station, "worker", at=node.address).ask(Locate()) == node.system.node
 
                 joined = await asyncio.gather(harness.add(), harness.add())
                 pinned = {f"@{node.address}/worker": node.system.node for node in (asking, going, third, *joined)}
@@ -204,10 +204,10 @@ def describe_routing() -> None:
                 await _sees_only(asking, harness.nodes)
 
                 for node in harness.nodes:
-                    assert await asking.system.ref(station, "worker", at=node.address).ask(Locate) == node.system.node
+                    assert await asking.system.ref(station, "worker", at=node.address).ask(Locate()) == node.system.node
                 # The key of the node that left is taken by no other.
                 with pytest.raises(Unavailable):
-                    await asking.system.ref(station, "worker", at=going.address).ask(Locate)
+                    await asking.system.ref(station, "worker", at=going.address).ask(Locate())
 
                 assert Counter(key for key, _ in _STARTED) == dict.fromkeys(pinned, 1)
                 assert dict(_STARTED) == pinned
@@ -216,14 +216,14 @@ def describe_routing() -> None:
             async with Harness.start(3) as harness:
                 client = await harness.client()
                 for node in harness.nodes:
-                    assert await client.ref(station, "worker", at=node.address).ask(Locate) == node.system.node
+                    assert await client.ref(station, "worker", at=node.address).ask(Locate()) == node.system.node
 
         async def it_follows_its_node_through_a_restart_on_the_same_address() -> None:
             async with Harness.start(3) as harness:
                 asking, restarting, _ = harness.nodes
                 old = restarting.system.node
                 ref = asking.system.ref(station, "worker", at=restarting.address)
-                assert await ref.ask(Locate) == old
+                assert await ref.ask(Locate()) == old
 
                 await harness.crash(restarting)
                 revived = await harness.add(address=restarting.address)
@@ -235,7 +235,7 @@ def describe_routing() -> None:
 
                 await eventually(replaced, WITHIN)
                 # The same ref: it names the address, which outlives the incarnation that was running there.
-                assert await ref.ask(Locate) == revived.system.node
+                assert await ref.ask(Locate()) == revived.system.node
 
 
 async def _sees_only(node: Node, nodes: tuple[Node, ...]) -> None:

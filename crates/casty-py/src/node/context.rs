@@ -31,6 +31,41 @@ impl Context {
             run,
         }
     }
+
+    /// Await `work` beside the body, and tell this entity what `mapper` makes of what it gives, or what `failed`
+    /// makes of what it raised. `what` names the work in the `MessageDropped` of what nothing mapped.
+    fn handed(
+        &self,
+        py: Python<'_>,
+        work: &Bound<'_, PyAny>,
+        what: &str,
+        mapper: Option<Py<PyAny>>,
+        failed: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let activation = self.activation.bind(py);
+        Activation::handed(activation, py, self.run);
+        let itself = Bound::new(py, self.itself(py))?.unbind();
+        let actor = activation.get().entry().to_owned();
+        let key = activation.get().key().to_owned();
+        let node = self.node.clone();
+        let what = what.to_owned();
+        self.node.pipe(py, work, move |py, done| {
+            let message = match (done, mapper, failed) {
+                (Ok(value), Some(mapper), _) => mapper.bind(py).call1((value,)),
+                (Ok(value), None, _) => Ok(value),
+                (Err(error), _, Some(failed)) => failed.bind(py).call1((error,)),
+                (Err(error), _, None) => {
+                    node.dropped(py, &actor, &key, &raised(&what, &error)?);
+                    return Ok(());
+                }
+            };
+            let told = message.and_then(|message| itself.bind(py).call_method1("tell", (message,)));
+            if let Err(error) = told {
+                node.dropped(py, &actor, &key, &error.value(py).to_string());
+            }
+            Ok(())
+        })
+    }
 }
 
 #[pymethods]
@@ -112,28 +147,23 @@ impl Context {
         mapper: Option<Py<PyAny>>,
         failed: Option<Py<PyAny>>,
     ) -> PyResult<()> {
-        let activation = self.activation.bind(py);
-        Activation::handed(activation, py, self.run);
-        let itself = Bound::new(py, self.itself(py))?.unbind();
-        let actor = activation.get().entry().to_owned();
-        let key = activation.get().key().to_owned();
-        let node = self.node.clone();
-        self.node.pipe(py, work, move |py, done| {
-            let message = match (done, mapper, failed) {
-                (Ok(value), Some(mapper), _) => mapper.bind(py).call1((value,)),
-                (Ok(value), None, _) => Ok(value),
-                (Err(error), _, Some(failed)) => failed.bind(py).call1((error,)),
-                (Err(error), _, None) => {
-                    node.dropped(py, &actor, &key, &raised(&error)?);
-                    return Ok(());
-                }
-            };
-            let told = message.and_then(|message| itself.bind(py).call_method1("tell", (message,)));
-            if let Err(error) = told {
-                node.dropped(py, &actor, &key, &error.value(py).to_string());
-            }
-            Ok(())
-        })
+        self.handed(py, work, "the work handed to to_self", mapper, failed)
+    }
+
+    /// Send `msg`, an `Askable`, to `target`, and tell this entity what `mapper` makes of the answer, or what
+    /// `failed` makes of what the `ask` raised.
+    #[pyo3(signature = (target, msg, /, mapper, *, failed = None))]
+    fn ask(
+        &self,
+        py: Python<'_>,
+        target: &Bound<'_, Ref>,
+        msg: &Bound<'_, PyAny>,
+        mapper: Py<PyAny>,
+        failed: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let asked = target.call_method1("ask", (msg,))?;
+        let what = format!("the ask to {}", target.repr()?);
+        self.handed(py, &asked, &what, Some(mapper), failed)
     }
 
     /// Tell this entity `message` `delay` from now, and then every `interval`, while the key is active; once, without
@@ -329,14 +359,14 @@ impl Inbox {
     }
 }
 
-/// Why work handed to `to_self` without `failed` sent nothing: the class of what it raised, and its text.
-fn raised(error: &Bound<'_, PyAny>) -> PyResult<String> {
+/// Why work handed over without `failed` sent nothing: `what` it was, the class of what it raised, and its text.
+fn raised(what: &str, error: &Bound<'_, PyAny>) -> PyResult<String> {
     let class: String = error.get_type().getattr("__name__")?.extract()?;
     let text: String = error.str()?.extract()?;
     Ok(if text.is_empty() {
-        format!("the work handed to to_self raised {class}")
+        format!("{what} raised {class}")
     } else {
-        format!("the work handed to to_self raised {class}: {text}")
+        format!("{what} raised {class}: {text}")
     })
 }
 

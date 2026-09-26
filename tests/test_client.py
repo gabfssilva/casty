@@ -66,13 +66,13 @@ def describe_client() -> None:
                 client = await harness.client()
                 nodes = {node.system.node for node in harness.nodes}
 
-                assert await client.ref(order, "o-1", initial=Pending()).ask(Pay, 10) is True
-                assert await client.ref(order, "o-1", initial=Pending()).ask(Pay, 10) is False
+                assert await client.ref(order, "o-1", initial=Pending()).ask(Pay(10)) is True
+                assert await client.ref(order, "o-1", initial=Pending()).ask(Pay(10)) is False
 
-                located = [await client.ref(account, f"acc-{index}").ask(Where) for index in range(_KEYS)]
+                located = [await client.ref(account, f"acc-{index}").ask(Where()) for index in range(_KEYS)]
                 for value in range(_MANY):
                     client.ref(notes, "n-1").tell(Note(value))
-                written = await client.ref(notes, "n-1").ask(Notes)
+                written = await client.ref(notes, "n-1").ask(Notes())
 
                 assert {where.node for where in located} == nodes
                 # One connection and one mailbox per owner: the client is as ordered a sender as a node is.
@@ -104,8 +104,8 @@ def describe_client() -> None:
             async with Harness.start(1) as harness:
                 client = await harness.client()
                 (node,) = harness.nodes
-                assert await client.ref(gate, "g-1").ask(Locate) == node.system.node
-                waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold))
+                assert await client.ref(gate, "g-1").ask(Locate()) == node.system.node
+                waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold()))
 
                 await harness.crash(node)
 
@@ -120,8 +120,8 @@ def describe_client() -> None:
             async with Harness.start(1) as harness:
                 client = await harness.client()
                 (node,) = harness.nodes
-                waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold))
-                assert await client.ref(gate, "g-2").ask(Locate) == node.system.node
+                waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold()))
+                assert await client.ref(gate, "g-2").ask(Locate()) == node.system.node
 
                 await harness.crash(node)
                 restarted = await harness.add(address=node.address)
@@ -131,7 +131,7 @@ def describe_client() -> None:
                         await waiting
 
                 async def the_new_process_answers() -> None:
-                    assert await client.ref(gate, "g-2").ask(Locate) == restarted.system.node
+                    assert await client.ref(gate, "g-2").ask(Locate()) == restarted.system.node
 
                 await eventually(the_new_process_answers, _BEFORE_ASK_TIMEOUT)
 
@@ -140,12 +140,12 @@ def describe_client() -> None:
             async with Harness.start(1) as harness:
                 client = await harness.client()
                 (node,) = harness.nodes
-                waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold))
-                assert await client.ref(gate, "g-2").ask(Locate) == node.system.node
+                waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold()))
+                assert await client.ref(gate, "g-2").ask(Locate()) == node.system.node
 
                 await harness.sever()
 
-                assert await client.ref(gate, "g-3").ask(Locate) == node.system.node
+                assert await client.ref(gate, "g-3").ask(Locate()) == node.system.node
                 await asyncio.sleep(_BEFORE_ASK_TIMEOUT.total_seconds() / 3)
                 assert not waiting.done()
                 assert [member.status for member in client.members] == ["alive"]
@@ -156,8 +156,8 @@ def describe_client() -> None:
             async with Harness.start(1) as harness:
                 (node,) = harness.nodes
                 async with Client(seeds=(node.address,), ask_timeout=timedelta(minutes=1)) as client:
-                    waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold))
-                    assert await client.ref(gate, "g-2").ask(Locate) == node.system.node
+                    waiting = asyncio.ensure_future(client.ref(gate, "g-1").ask(Hold()))
+                    assert await client.ref(gate, "g-2").ask(Locate()) == node.system.node
 
                 with pytest.raises(Unavailable, match="stopped"):
                     async with asyncio.timeout(WITHIN.total_seconds()):
@@ -189,7 +189,7 @@ def describe_client() -> None:
                             sync_every=FAST.sync_every,
                         ) as client,
                     ):
-                        assert await client.ref(account, "mended").ask(Balance) == 0
+                        assert await client.ref(account, "mended").ask(Balance()) == 0
 
         async def it_follows_a_tunnel_that_comes_back_on_another_port() -> None:
             async with Harness.start(1) as harness:
@@ -205,13 +205,13 @@ def describe_client() -> None:
                         sync_every=FAST.sync_every,
                     ) as client:
                         ref = client.ref(account, "tunnelled")
-                        await ref.ask(Deposit, 1)
+                        await ref.ask(Deposit(1))
                         await first.close()
                         second = _Tunnel(target)
                         routes[target] = second.address
 
                         async def _reached() -> None:
-                            assert await ref.ask(Balance) == 1
+                            assert await ref.ask(Balance()) == 1
 
                         await eventually(_reached, WITHIN)
                 finally:
@@ -252,7 +252,7 @@ async def _owner_of_most_keys(client: Client, keys: tuple[str, ...], among: tupl
     owners: Counter[NodeId] = Counter()
     for key in keys:
         with suppress(Unavailable, TimeoutError):
-            owners[(await client.ref(ledger, key).ask(Entries)).node] += 1
+            owners[(await client.ref(ledger, key).ask(Entries())).node] += 1
     busiest = max(among, key=lambda node: owners[node.system.node])
     assert owners[busiest.system.node] > 0, f"none of the {len(keys)} keys answered from a node that started"
     return busiest

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import assert_never
 
-from casty import ActorSystem, Context, Ref, actor
+from casty import ActorSystem, Askable, Context, actor
 
 
 @dataclass(frozen=True)
@@ -27,8 +27,8 @@ class Reading:
 
 
 @dataclass(frozen=True)
-class Averages:
-    reply_to: Ref[tuple[float, ...]]
+class Averages(Askable[tuple[float, ...]]):
+    pass
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,7 @@ async def meter(ctx: Context[Window, MeterMsg]) -> None:
                 await ctx.state.set(Window((), (*ctx.state.value.averages, average)))
             case Tick():
                 pass
-            case Averages(reply_to):
+            case Averages(reply_to=reply_to):
                 reply_to.tell(ctx.state.value.averages)
             case _:
                 assert_never(event)
@@ -69,7 +69,7 @@ async def main() -> None:
             kitchen.tell(Reading(20 + value / 2))
             await asyncio.sleep(0.1)
         await asyncio.sleep(0.6)
-        print([round(average, 2) for average in await kitchen.ask(Averages)])
+        print([round(average, 2) for average in await kitchen.ask(Averages())])
 
 
 asyncio.run(main())

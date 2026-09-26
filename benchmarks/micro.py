@@ -95,7 +95,7 @@ async def measure_ask(name: str, ref: Ref[Read], /, *, duration: float, batch: i
     asks = 0
     while time.perf_counter() < deadline:
         for _ in range(batch):
-            await ref.ask(Read, b"")
+            await ref.ask(Read(b""))
         asks += batch
     return Measurement.of(name, asks, time.perf_counter() - started)
 
@@ -112,7 +112,7 @@ async def measure_activation(name: str, /, *, duration: float, batch: int = 100)
         asks = 0
         while time.perf_counter() < deadline:
             for index in range(asks, asks + batch):
-                await system.ref(counter, f"k-{index}").ask(Read, b"")
+                await system.ref(counter, f"k-{index}").ask(Read(b""))
             asks += batch
         return Measurement.of(name, asks, time.perf_counter() - started)
 
@@ -126,8 +126,8 @@ async def run(*, duration: float) -> tuple[Measurement, ...]:
         messages = system._schema(Increment)
         states = system._schema(int)
 
-        small = Increment(ref, b"")
-        large = Increment(ref, b"x" * 1024)
+        small = Increment(b"", reply_to=ref)
+        large = Increment(b"x" * 1024, reply_to=ref)
         wire = {
             "message": encode(messages, small),
             "message-1kib": encode(messages, large),

@@ -7,7 +7,7 @@ from typing import assert_never
 
 import pytest
 
-from casty import Context, DefaultedActor, NodeId, Ref, Unavailable, actor
+from casty import Askable, Context, DefaultedActor, NodeId, Unavailable, actor
 from tests.app import Append, Entries, Ledger, LedgerMsg, Pay, Pending, ledger, loose, order
 from tests.cluster import FAST, NARROW, WITHIN, Harness, Node
 from tests.support import eventually
@@ -21,8 +21,7 @@ class Blob:
 
 
 @dataclass(frozen=True)
-class Fill:
-    reply_to: Ref[int]
+class Fill(Askable[int]):
     size: int
 
 
@@ -34,27 +33,26 @@ class Summary:
 
 
 @dataclass(frozen=True)
-class Digest:
-    reply_to: Ref[Summary]
+class Digest(Askable[Summary]):
+    pass
 
 
 type BlobMsg = Fill | Digest
 
 
 @dataclass(frozen=True)
-class Deposit:
-    reply_to: Ref[int]
+class Deposit(Askable[int]):
     amount: int
 
 
 @dataclass(frozen=True)
-class Balance:
-    reply_to: Ref[tuple[int, NodeId]]
+class Balance(Askable[tuple[int, NodeId]]):
+    pass
 
 
 @dataclass(frozen=True)
-class Close:
-    reply_to: Ref[None]
+class Close(Askable[None]):
+    pass
 
 
 type SessionMsg = Deposit | Balance | Close
@@ -65,11 +63,11 @@ async def session(ctx: Context[int, SessionMsg]) -> None:
     """A balance that `Close` deletes, going on from 0."""
     async for msg in ctx.inbox:
         match msg:
-            case Deposit(reply_to, amount):
+            case Deposit(amount, reply_to=reply_to):
                 reply_to.tell(await ctx.state.update(lambda held: held + amount))
-            case Balance(reply_to):
+            case Balance(reply_to=reply_to):
                 reply_to.tell((ctx.state.value, ctx.system.node))
-            case Close(reply_to):
+            case Close(reply_to=reply_to):
                 await ctx.state.delete()
                 reply_to.tell(None)
             case _:
@@ -87,13 +85,13 @@ class Tick:
 
 
 @dataclass(frozen=True)
-class StartTicking:
-    reply_to: Ref[None]
+class StartTicking(Askable[None]):
+    pass
 
 
 @dataclass(frozen=True)
-class Ticked:
-    reply_to: Ref[tuple[tuple[NodeId, ...], NodeId]]
+class Ticked(Askable[tuple[tuple[NodeId, ...], NodeId]]):
+    pass
 
 
 type TickerMsg = StartTicking | Tick | Ticked
@@ -104,12 +102,12 @@ async def ticker(ctx: Context[Ticking, TickerMsg]) -> None:
     """Keeps the node each `Tick` of its schedule reached."""
     async for msg in ctx.inbox:
         match msg:
-            case StartTicking(reply_to):
+            case StartTicking(reply_to=reply_to):
                 await ctx.schedule("tick", timedelta(milliseconds=50), timedelta(milliseconds=50), Tick())
                 reply_to.tell(None)
             case Tick():
                 await ctx.state.set(Ticking((*ctx.state.value.nodes, ctx.system.node)))
-            case Ticked(reply_to):
+            case Ticked(reply_to=reply_to):
                 reply_to.tell((ctx.state.value.nodes, ctx.system.node))
             case _:
                 assert_never(msg)
@@ -120,10 +118,10 @@ async def blob(ctx: Context[Blob, BlobMsg]) -> None:
     """Keeps one field larger than a message, built here so that no message has to carry it."""
     async for msg in ctx.inbox:
         match msg:
-            case Fill(reply_to, size):
+            case Fill(size, reply_to=reply_to):
                 await ctx.state.set(Blob(_pattern(size)))
                 reply_to.tell(len(ctx.state.value.data))
-            case Digest(reply_to):
+            case Digest(reply_to=reply_to):
                 data = ctx.state.value.data
                 reply_to.tell(Summary(len(data), hashlib.sha256(data).hexdigest(), ctx.system.node))
             case _:
@@ -138,13 +136,13 @@ def describe_replication() -> None:
                 key = await _key_on(b, a)
                 gone = b.system.node
                 for entry in range(1, 11):
-                    assert await a.system.ref(ledger, key).ask(Append, entry)
+                    assert await a.system.ref(ledger, key).ask(Append(entry))
 
                 harness.isolate(b)
                 await harness.crash(b)
 
                 async def another_node_answers_with_everything() -> None:
-                    listing = await a.system.ref(ledger, key).ask(Entries)
+                    listing = await a.system.ref(ledger, key).ask(Entries())
                     assert listing.entries == tuple(range(1, 11))
                     assert listing.node != gone
 
@@ -156,12 +154,12 @@ def describe_replication() -> None:
                 a, b, c = harness.nodes
                 key = await _key_on(a, a)
                 for entry in range(1, 6):
-                    assert await a.system.ref(ledger, key).ask(Append, entry)
+                    assert await a.system.ref(ledger, key).ask(Append(entry))
 
                 harness.partition({a}, {b, c})
 
                 with pytest.raises(Unavailable):
-                    await a.system.ref(ledger, key).ask(Append, 100)
+                    await a.system.ref(ledger, key).ask(Append(100))
 
                 tried: list[int] = []
                 confirmed: list[int] = []
@@ -171,7 +169,7 @@ def describe_replication() -> None:
                     # blocked proxy delivers what it held on the healing.
                     entry = 10 + len(tried)
                     tried.append(entry)
-                    assert await b.system.ref(ledger, key).ask(Append, entry)
+                    assert await b.system.ref(ledger, key).ask(Append(entry))
                     confirmed.append(entry)
 
                 await eventually(the_majority_appends, WITHIN)
@@ -179,7 +177,7 @@ def describe_replication() -> None:
 
                 async def every_node_answers_with_the_majority_state() -> None:
                     for node in (a, b, c):
-                        entries = (await node.system.ref(ledger, key).ask(Entries)).entries
+                        entries = (await node.system.ref(ledger, key).ask(Entries())).entries
                         assert entries[:5] == tuple(range(1, 6))
                         assert len(set(entries)) == len(entries), f"an entry was applied twice: {entries}"
                         assert set(confirmed) <= set(entries) <= {*range(1, 6), *tried}
@@ -192,7 +190,7 @@ def describe_replication() -> None:
                 a, b, c = harness.nodes
                 key = await _key_on(a, a)
                 for entry in range(1, 6):
-                    assert await a.system.ref(ledger, key).ask(Append, entry)
+                    assert await a.system.ref(ledger, key).ask(Append(entry))
 
                 harness.partition({a}, {b, c})
 
@@ -201,7 +199,7 @@ def describe_replication() -> None:
                     assert (await b.system.placement(ledger, key)).owner not in (None, a.system.node)
 
                 await eventually(the_majority_owns_the_key, WITHIN)
-                assert await b.system.ref(ledger, key).ask(Append, 6)
+                assert await b.system.ref(ledger, key).ask(Append(6))
                 harness.heal()
 
                 # A read writes nothing, so no fence stops an activation `a` kept from before: whichever node answers,
@@ -209,7 +207,7 @@ def describe_replication() -> None:
                 deadline = asyncio.get_running_loop().time() + WITHIN.total_seconds()
                 while True:
                     with suppress(Unavailable, TimeoutError):
-                        listing = await b.system.ref(ledger, key).ask(Entries)
+                        listing = await b.system.ref(ledger, key).ask(Entries())
                         assert listing.entries == tuple(range(1, 7)), f"{listing.node} answered {listing.entries}"
                         if listing.node == a.system.node:
                             break
@@ -224,7 +222,7 @@ def describe_replication() -> None:
                 a, b, c = harness.nodes
                 key = await _key_on(a, a)
                 for entry in range(1, 6):
-                    assert await a.system.ref(ledger, key).ask(Append, entry)
+                    assert await a.system.ref(ledger, key).ask(Append(entry))
 
                 harness.partition({a}, {b, c})
                 tried: list[int] = []
@@ -235,7 +233,7 @@ def describe_replication() -> None:
                     # as a repetition that no rule was broken to produce.
                     entry = 10 + len(tried)
                     tried.append(entry)
-                    assert await node.system.ref(ledger, key).ask(Append, entry)
+                    assert await node.system.ref(ledger, key).ask(Append(entry))
                     confirmed.append(entry)
 
                 await eventually(lambda: appends(b), WITHIN)
@@ -252,7 +250,7 @@ def describe_replication() -> None:
 
                 async def every_node_answers_with_what_the_majority_confirmed() -> None:
                     for node in (a, b, c):
-                        entries = (await node.system.ref(ledger, key).ask(Entries)).entries
+                        entries = (await node.system.ref(ledger, key).ask(Entries())).entries
                         where = f"{node.address} answered {entries}"
                         # Without the fencing, the old owner writes its own state over the one the majority built, and
                         # what it confirmed there is gone.
@@ -271,7 +269,7 @@ def describe_replication() -> None:
                 harness.partition({a}, {b, c})
 
                 # What survives the healing is not asserted: `one` promises nothing about it.
-                assert await a.system.ref(loose, key).ask(Append, 1)
+                assert await a.system.ref(loose, key).ask(Append(1))
 
     def when_a_key_that_became_another_behavior_loses_its_machine() -> None:
         async def it_comes_back_on_another_node_as_the_behavior_it_became() -> None:
@@ -279,14 +277,14 @@ def describe_replication() -> None:
             async with Harness.start(3) as harness:
                 a, gone, _ = harness.nodes
                 for key in orders:
-                    assert await a.system.ref(order, key, initial=Pending()).ask(Pay, 10) is True
+                    assert await a.system.ref(order, key, initial=Pending()).ask(Pay(10)) is True
                 harness.isolate(gone)
                 await harness.crash(gone)
 
                 async def every_order_is_still_paid() -> None:
                     # `True` would be an order that came back pending, and paid twice.
                     for key in orders:
-                        assert await a.system.ref(order, key, initial=Pending()).ask(Pay, 10) is False, key
+                        assert await a.system.ref(order, key, initial=Pending()).ask(Pay(10)) is False, key
 
                 await eventually(every_order_is_still_paid, WITHIN)
 
@@ -296,10 +294,10 @@ def describe_replication() -> None:
                 a, b, _ = harness.nodes
                 key = await _ticker_on(b, a)
                 gone = b.system.node
-                await a.system.ref(ticker, key).ask(StartTicking)
+                await a.system.ref(ticker, key).ask(StartTicking())
 
                 async def ticking_there() -> None:
-                    nodes, _ = await a.system.ref(ticker, key).ask(Ticked)
+                    nodes, _ = await a.system.ref(ticker, key).ask(Ticked())
                     assert gone in nodes
 
                 await eventually(ticking_there, WITHIN)
@@ -307,7 +305,7 @@ def describe_replication() -> None:
                 await harness.crash(b)
 
                 async def ticking_elsewhere() -> None:
-                    nodes, _ = await a.system.ref(ticker, key).ask(Ticked)
+                    nodes, _ = await a.system.ref(ticker, key).ask(Ticked())
                     assert len(set(nodes) - {gone}) == 1
 
                 await eventually(ticking_elsewhere, WITHIN)
@@ -320,13 +318,13 @@ def describe_replication() -> None:
                 a, b, _ = harness.nodes
                 key = await _blob_on(b, a)
                 gone = b.system.node
-                assert await a.system.ref(blob, key).ask(Fill, size) == size
+                assert await a.system.ref(blob, key).ask(Fill(size)) == size
 
                 harness.isolate(b)
                 await harness.crash(b)
 
                 async def another_node_reads_it_back() -> None:
-                    summary = await a.system.ref(blob, key).ask(Digest)
+                    summary = await a.system.ref(blob, key).ask(Digest())
                     assert summary.node != gone
                     assert (summary.size, summary.sha256) == (size, written)
 
@@ -338,12 +336,12 @@ def describe_replication() -> None:
                 a, b, _ = harness.nodes
                 key = await _session_on(b, a)
                 gone = b.system.node
-                assert await a.system.ref(session, key).ask(Deposit, 5) == 5
+                assert await a.system.ref(session, key).ask(Deposit(5)) == 5
 
-                await a.system.ref(session, key).ask(Close)
+                await a.system.ref(session, key).ask(Close())
 
                 # The body goes on from the default of its type.
-                assert (await a.system.ref(session, key).ask(Balance))[0] == 0
+                assert (await a.system.ref(session, key).ask(Balance()))[0] == 0
 
                 async def no_node_keeps_a_page_of_it() -> None:
                     for node in harness.nodes:
@@ -362,18 +360,18 @@ def describe_replication() -> None:
                 await harness.crash(b)
 
                 async def another_node_starts_it_from_initial() -> None:
-                    balance, node = await a.system.ref(session, key).ask(Balance)
+                    balance, node = await a.system.ref(session, key).ask(Balance())
                     assert node != gone
                     assert balance == 0
 
                 await eventually(another_node_starts_it_from_initial, WITHIN)
-                assert await a.system.ref(session, key).ask(Deposit, 2) == 2
+                assert await a.system.ref(session, key).ask(Deposit(2)) == 2
 
 
 async def _appended(node: Node, key: str, entry: int) -> bool:
     """Whether `entry` was applied, or refused because the key had moved on while this node was away."""
     try:
-        return await node.system.ref(ledger, key).ask(Append, entry)
+        return await node.system.ref(ledger, key).ask(Append(entry))
     except Unavailable:
         return False
 
@@ -382,7 +380,7 @@ async def _key_on(node: Node, asked_from: Node, definition: DefaultedActor[Ledge
     """The first of `k-0`, `k-1`, … whose owner is `node`, seen from `asked_from`."""
     for index in range(_TRIES):
         key = f"k-{index}"
-        listing = await asked_from.system.ref(definition, key).ask(Entries)
+        listing = await asked_from.system.ref(definition, key).ask(Entries())
         if listing.node == node.system.node:
             return key
     raise AssertionError(f"none of the first {_TRIES} keys is owned by {node.address}")
@@ -392,7 +390,7 @@ async def _session_on(node: Node, asked_from: Node) -> str:
     """The first of `s-0`, `s-1`, … whose owner for `session` is `node`, seen from `asked_from`."""
     for index in range(_TRIES):
         key = f"s-{index}"
-        _, owner = await asked_from.system.ref(session, key).ask(Balance)
+        _, owner = await asked_from.system.ref(session, key).ask(Balance())
         if owner == node.system.node:
             return key
     raise AssertionError(f"none of the first {_TRIES} keys is owned by {node.address}")
@@ -402,7 +400,7 @@ async def _ticker_on(node: Node, asked_from: Node) -> str:
     """The first of `t-0`, `t-1`, … whose owner for `ticker` is `node`, seen from `asked_from`."""
     for index in range(_TRIES):
         key = f"t-{index}"
-        _, owner = await asked_from.system.ref(ticker, key).ask(Ticked)
+        _, owner = await asked_from.system.ref(ticker, key).ask(Ticked())
         if owner == node.system.node:
             return key
     raise AssertionError(f"none of the first {_TRIES} keys is owned by {node.address}")
@@ -412,7 +410,7 @@ async def _blob_on(node: Node, asked_from: Node) -> str:
     """The first of `k-0`, `k-1`, … whose owner for `blob` is `node`, seen from `asked_from`."""
     for index in range(_TRIES):
         key = f"k-{index}"
-        if (await asked_from.system.ref(blob, key).ask(Digest)).node == node.system.node:
+        if (await asked_from.system.ref(blob, key).ask(Digest())).node == node.system.node:
             return key
     raise AssertionError(f"none of the first {_TRIES} keys is owned by {node.address}")
 

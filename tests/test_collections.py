@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import pytest
 
-from casty import ActorSystem, Collections, Context, NotStarted, Ref, Unavailable, actor
+from casty import ActorSystem, Askable, Collections, Context, NotStarted, Ref, Unavailable, actor
 from casty import collections as kinds
 from casty.collections import (
     MISSING,
@@ -58,8 +58,8 @@ class Take:
 
 
 @dataclass(frozen=True)
-class Heard:
-    reply_to: Ref[tuple[str, ...]]
+class Heard(Askable[tuple[str, ...]]):
+    pass
 
 
 @actor(initial=0)
@@ -69,12 +69,12 @@ async def worker(ctx: Context[int, Take | Heard | Acquired | Denied]) -> None:
     async for msg in ctx.inbox:
         match msg:
             case Take(wait):
-                pool.tell(semaphore.Acquire(ctx.self, wait=wait, lease_id=ctx.key))
+                pool.tell(semaphore.Acquire(wait=wait, lease_id=ctx.key, reply_to=ctx.self))
             case Acquired(lease_id, _):
                 heard.append(f"acquired {lease_id}")
             case Denied(lease_id):
                 heard.append(f"denied {lease_id}")
-            case Heard(reply_to):
+            case Heard(reply_to=reply_to):
                 reply_to.tell(tuple(heard))
 
 
@@ -82,54 +82,54 @@ def describe_counter_actor() -> None:
     async def it_serializes_additions_and_resets_the_named_counter() -> None:
         async with ActorSystem() as system:
             ref = system.ref(counter.actor, "requests")
-            assert await ref.ask(counter.Get) == 0
+            assert await ref.ask(counter.Get()) == 0
             async with asyncio.TaskGroup() as group:
                 for _ in range(100):
-                    group.create_task(ref.ask(counter.Add, 1))
+                    group.create_task(ref.ask(counter.Add(1)))
 
-            assert await ref.ask(counter.Get) == 100
-            await ref.ask(counter.Add, -7)
-            assert await ref.ask(counter.Get) == 93
-            assert await system.ref(counter.actor, "other").ask(counter.Get) == 0
-            await ref.ask(counter.Reset)
-            assert await ref.ask(counter.Get) == 0
+            assert await ref.ask(counter.Get()) == 100
+            await ref.ask(counter.Add(-7))
+            assert await ref.ask(counter.Get()) == 93
+            assert await system.ref(counter.actor, "other").ask(counter.Get()) == 0
+            await ref.ask(counter.Reset())
+            assert await ref.ask(counter.Get()) == 0
 
 
 def describe_semaphore_actor() -> None:
     async def it_tells_an_actor_its_grant_while_the_actor_goes_on_reading() -> None:
         async with ActorSystem() as system:
             pool = system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=1))
-            held = await pool.ask(semaphore.Acquire)
+            held = await pool.ask(semaphore.Acquire())
             assert isinstance(held, Acquired)
             first = system.ref(worker, "first")
             first.tell(Take(None))
-            assert await first.ask(Heard) == ()
+            assert await first.ask(Heard()) == ()
             second = system.ref(worker, "second")
             second.tell(Take(0.0))
 
             async def second_is_denied() -> None:
-                assert await second.ask(Heard) == ("denied second",)
+                assert await second.ask(Heard()) == ("denied second",)
 
             await eventually(second_is_denied)
-            assert await pool.ask(semaphore.Get) == Status(capacity=1, available=0, waiting=1)
+            assert await pool.ask(semaphore.Get()) == Status(capacity=1, available=0, waiting=1)
             pool.tell(semaphore.Release(held.lease_id))
 
             async def first_acquires() -> None:
-                assert await first.ask(Heard) == ("acquired first",)
+                assert await first.ask(Heard()) == ("acquired first",)
 
             await eventually(first_acquires)
-            assert await pool.ask(semaphore.Get) == Status(capacity=1, available=0, waiting=0)
+            assert await pool.ask(semaphore.Get()) == Status(capacity=1, available=0, waiting=0)
 
     async def it_names_a_lease_nobody_named_and_answers_a_request_sent_again_with_its_grant() -> None:
         async with ActorSystem() as system:
             pool = system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=2))
-            named = await pool.ask(semaphore.Acquire)
-            chosen = await pool.ask(semaphore.Acquire, lease_id="mine")
+            named = await pool.ask(semaphore.Acquire())
+            chosen = await pool.ask(semaphore.Acquire(lease_id="mine"))
             assert isinstance(named, Acquired)
             assert chosen == Acquired("mine", named.token + 1)
             assert named.lease_id != "mine"
-            assert await pool.ask(semaphore.Acquire, lease_id="mine") == chosen
-            denied = await pool.ask(semaphore.Acquire, wait=0)
+            assert await pool.ask(semaphore.Acquire(lease_id="mine")) == chosen
+            denied = await pool.ask(semaphore.Acquire(wait=0))
             assert isinstance(denied, Denied)
             assert denied.lease_id not in {named.lease_id, "mine"}
 
@@ -137,28 +137,28 @@ def describe_semaphore_actor() -> None:
         async with ActorSystem() as system:
             system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=1))
             again = system.ref(semaphore.actor, "pool", initial=SemaphoreState(capacity=5))
-            assert await again.ask(semaphore.Get) == Status(capacity=1, available=1, waiting=0)
+            assert await again.ask(semaphore.Get()) == Status(capacity=1, available=1, waiting=0)
 
 
 def describe_register_actor() -> None:
     async def it_allows_only_one_competing_compare_and_set() -> None:
         async with ActorSystem() as system:
             ref = system.ref(register.actor, "leader")
-            assert await ref.ask(register.Get) is None
+            assert await ref.ask(register.Get()) is None
             async with asyncio.TaskGroup() as group:
                 attempts = [
-                    group.create_task(ref.ask(register.CompareAndSet, None, str(i).encode())) for i in range(20)
+                    group.create_task(ref.ask(register.CompareAndSet(None, str(i).encode()))) for i in range(20)
                 ]
 
             assert sum(attempt.result() for attempt in attempts) == 1
-            winner = await ref.ask(register.Get)
+            winner = await ref.ask(register.Get())
             assert winner is not None
-            assert await ref.ask(register.GetAndSet, b"next") == winner
-            assert await ref.ask(register.Get) == b"next"
-            assert not await ref.ask(register.CompareAndSet, winner, b"stale")
-            await ref.ask(register.Put, b"")
-            assert await ref.ask(register.Get) == b""
-            assert await system.ref(register.actor, "other").ask(register.Get) is None
+            assert await ref.ask(register.GetAndSet(b"next")) == winner
+            assert await ref.ask(register.Get()) == b"next"
+            assert not await ref.ask(register.CompareAndSet(winner, b"stale"))
+            await ref.ask(register.Put(b""))
+            assert await ref.ask(register.Get()) == b""
+            assert await system.ref(register.actor, "other").ask(register.Get()) is None
 
 
 def describe_collections() -> None:
@@ -233,10 +233,10 @@ print(system._encode(schema, values).hex())
     ) -> None:
         compared = 0
 
-        def compare_and_set(reply_to: Ref[bool], expected: bytes | None, value: bytes) -> register.CompareAndSet:
+        def compare_and_set(expected: bytes | None, value: bytes) -> register.CompareAndSet:
             nonlocal compared
             compared += 1
-            return register.CompareAndSet(reply_to, expected, value)
+            return register.CompareAndSet(expected, value)
 
         # Every binding asks its metadata register through `register`, which now counts the compare-and-sets.
         monkeypatch.setattr(
@@ -777,19 +777,19 @@ print(system._encode(schema, values).hex())
     async def it_expires_abandoned_requests_without_granting_or_counting_them() -> None:
         async with ActorSystem() as system:
             permits = system.ref(semaphore.actor, "raw", initial=SemaphoreState(capacity=1))
-            held = await permits.ask(semaphore.Acquire)
+            held = await permits.ask(semaphore.Acquire())
             assert isinstance(held, Acquired)
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(0.005):
-                    await permits.ask(semaphore.Acquire, wait=0.02)
+                    await permits.ask(semaphore.Acquire(wait=0.02))
             round = system.ref(barrier.actor, "raw")
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(0.005):
-                    await round.ask(barrier.Arrive, uuid4(), 2, time.time() + 0.02)
+                    await round.ask(barrier.Arrive(uuid4(), 2, time.time() + 0.02))
             await asyncio.sleep(0.04)
             permits.tell(semaphore.Release(held.lease_id))
-            assert await permits.ask(semaphore.Get) == Status(capacity=1, available=1, waiting=0)
-            assert await round.ask(barrier.Waiting) == 0
+            assert await permits.ask(semaphore.Get()) == Status(capacity=1, available=1, waiting=0)
+            assert await round.ask(barrier.Waiting()) == 0
 
     async def it_does_not_replay_queue_removals_after_a_local_timeout() -> None:
         async with ActorSystem() as system:

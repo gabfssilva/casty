@@ -8,7 +8,7 @@ use casty_core::node::Target;
 use casty_core::outcome::Outcome;
 use casty_core::schema::ir::NodeRef;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple, PyType};
+use pyo3::types::PyType;
 
 use crate::awaited::Awaited;
 use crate::node::Node;
@@ -22,7 +22,9 @@ use crate::schema::Schema;
 #[pyclass(frozen, eq, hash, module = "casty._casty")]
 #[derive(Debug)]
 pub struct Ref {
-    target: Target,
+    /// An entity, or the `ask` that waits for an answer. Nothing for the ref that reaches nobody, the `reply_to` of an
+    /// `Askable` that no `ask` sent: what is told to it is dropped.
+    target: Option<Target>,
     schema: Py<Schema>,
     messages: NodeRef,
     /// The node that made it. Without one, or once that node has stopped, the ref reaches nothing.
@@ -38,7 +40,18 @@ impl Ref {
         node: Option<Arc<Node>>,
     ) -> Self {
         Self {
-            target,
+            target: Some(target),
+            schema,
+            messages,
+            node,
+        }
+    }
+
+    /// The ref that reaches nobody, whose answers are written as `messages` of `schema` says.
+    #[must_use]
+    pub fn nobody(schema: Py<Schema>, messages: NodeRef, node: Option<Arc<Node>>) -> Self {
+        Self {
+            target: None,
             schema,
             messages,
             node,
@@ -58,8 +71,8 @@ impl Ref {
     }
 
     #[must_use]
-    pub fn target(&self) -> &Target {
-        &self.target
+    pub fn target(&self) -> Option<&Target> {
+        self.target.as_ref()
     }
 
     /// The node this ref reaches, or the error a ref of a system that has stopped raises.
@@ -78,7 +91,8 @@ impl Ref {
         reply: Option<Target>,
     ) -> PyResult<()> {
         match &self.target {
-            Target::Entity { actor, key } => {
+            None => Ok(()),
+            Some(Target::Entity { actor, key }) => {
                 // Only an `ask` keeps its sender waiting.
                 let chain = match reply {
                     Some(_) => node.chain(py),
@@ -95,7 +109,7 @@ impl Ref {
                     }),
                 )
             }
-            answered @ Target::Reply { .. } => {
+            Some(answered @ Target::Reply { .. }) => {
                 node.told(py, answered);
                 node.answer(py, answered, &Outcome::Value(data))
             }
@@ -119,40 +133,40 @@ impl core::hash::Hash for Ref {
 impl Ref {
     /// Send `msg` without waiting. Delivery is at most once.
     fn tell(&self, py: Python<'_>, msg: &Bound<'_, PyAny>) -> PyResult<()> {
+        if self.target.is_none() {
+            return Ok(());
+        }
         let node = self.reachable()?;
         let data = Schema::write(self.schema.bind(py), self.messages, msg)?;
         self.send(py, node, data, None)
     }
 
-    /// Send `build(reply_to, *args, **kwargs)` and wait for the value told to `reply_to`.
-    #[pyo3(signature = (build, /, *args, **kwargs))]
-    fn ask<'py>(
-        &self,
-        py: Python<'py>,
-        build: &Bound<'py, PyAny>,
-        args: &Bound<'py, PyTuple>,
-        kwargs: Option<&Bound<'py, PyDict>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    /// Send `msg`, an `Askable`, with a `reply_to` of its own, and wait for the value told to it.
+    fn ask<'py>(&self, py: Python<'py>, msg: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let Some(asked) = &self.target else {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "nobody is asked: this ref reaches nothing",
+            ));
+        };
         let node = self.reachable()?;
-        let schema = node.answers(py, build)?;
-        let answer = node.future(py)?;
-        let id = node.request(py, &schema, &answer);
-        let target = Target::Reply {
+        let id = node.reply();
+        let reply = Target::Reply {
             node: node.id(),
             id,
         };
-        let messages = schema.get().tree().sent();
-        let reply_to = Bound::new(
-            py,
-            Self::new(target.clone(), schema, messages, Some(node.clone())),
-        )?;
-        let mut all: Vec<Bound<'py, PyAny>> = vec![reply_to.into_any()];
-        all.extend(args.iter());
-        let msg = build.call(PyTuple::new(py, all)?, kwargs)?;
-        let data = Schema::write(self.schema.bind(py), self.messages, &msg)?;
-        let within = crate::node::replies::timeout(py, node, &self.target);
+        let (data, answers) =
+            Schema::write_asking(self.schema.bind(py), self.messages, msg, &reply)?;
+        let Some(answers) = answers else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "{} has no reply_to to answer to; a message sent by ask is an Askable",
+                msg.repr()?
+            )));
+        };
+        let answer = node.future(py)?;
+        node.request(py, id, &self.schema, answers, &answer);
+        let within = crate::node::replies::timeout(py, node, asked);
         crate::node::armed(py, node, id, within)?;
-        self.send(py, node, data, Some(target))?;
+        self.send(py, node, data, Some(reply))?;
         Ok(Bound::new(py, Awaited::answer(answer, node, id))?.into_any())
     }
 
@@ -166,11 +180,24 @@ impl Ref {
 
     fn __repr__(&self) -> String {
         match &self.target {
-            Target::Entity { actor, key } => format!("Ref({actor}/{key})"),
-            Target::Reply { node, id } => {
+            None => "Ref(nobody)".to_owned(),
+            Some(Target::Entity { actor, key }) => format!("Ref({actor}/{key})"),
+            Some(Target::Reply { node, id }) => {
                 let address = node.address.as_deref().unwrap_or("local");
                 format!("Ref(reply {id} to {address})")
             }
         }
     }
+}
+
+/// The ref that reaches nobody, which is the `reply_to` of an `Askable` that no `ask` sent.
+#[pyfunction]
+pub fn nobody(py: Python<'_>) -> PyResult<Ref> {
+    let schema = Schema::of(py, &py.None().into_bound(py), false)?;
+    let messages = schema.tree().sent();
+    Ok(Ref::nobody(
+        Bound::new(py, schema)?.unbind(),
+        messages,
+        None,
+    ))
 }

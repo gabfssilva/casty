@@ -9,7 +9,7 @@ not send takes its default.
 from dataclasses import dataclass
 from typing import assert_never
 
-from casty import Context, NodeId, Ref, actor
+from casty import Askable, Context, NodeId, actor
 
 
 @dataclass(frozen=True)
@@ -19,8 +19,7 @@ class Ledger:
 
 
 @dataclass(frozen=True)
-class Append:
-    reply_to: Ref[bool]
+class Append(Askable[bool]):
     entry: int
     tags: tuple[str, ...] = ()
 
@@ -33,8 +32,8 @@ class Listing:
 
 
 @dataclass(frozen=True)
-class Entries:
-    reply_to: Ref[Listing]
+class Entries(Askable[Listing]):
+    pass
 
 
 type LedgerMsg = Append | Entries
@@ -43,10 +42,10 @@ type LedgerMsg = Append | Entries
 async def _ledger(ctx: Context[Ledger, LedgerMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Append(reply_to, entry, tags):
+            case Append(entry, tags, reply_to=reply_to):
                 await ctx.state.set(Ledger((*ctx.state.value.entries, entry), (*ctx.state.value.tags, *tags)))
                 reply_to.tell(True)
-            case Entries(reply_to):
+            case Entries(reply_to=reply_to):
                 reply_to.tell(Listing(ctx.state.value.entries, ctx.system.node, ctx.state.value.tags))
             case _:
                 assert_never(msg)
@@ -64,8 +63,8 @@ class Audit:
 
 
 @dataclass(frozen=True)
-class Check:
-    reply_to: Ref[NodeId]
+class Check(Askable[NodeId]):
+    pass
 
 
 @actor(initial=Audit())

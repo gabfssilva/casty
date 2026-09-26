@@ -89,7 +89,7 @@ def describe_shutdown() -> None:
                 tasks.create_task(_run(system, stop, exited))
                 await eventually(_started(system))
                 kept, noted = system.ref(gated, "key"), system.ref(notes, "key")
-                answer = asyncio.ensure_future(kept.ask(Bump))
+                answer = asyncio.ensure_future(kept.ask(Bump()))
                 await latch.held.wait()
                 stop.set()
                 await asyncio.sleep(0.1)
@@ -106,7 +106,7 @@ def describe_shutdown() -> None:
             with pytest.raises(RuntimeError):
                 noted.tell(Note(1))
             with pytest.raises(RuntimeError):
-                await kept.ask(Bump)
+                await kept.ask(Bump())
 
         async def it_exits_after_leave_timeout_if_the_body_is_stuck() -> None:
             latch = LATCHES["key"] = Latch()
@@ -116,7 +116,7 @@ def describe_shutdown() -> None:
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(_run(system, stop, exited))
                 await eventually(_started(system))
-                answer = asyncio.ensure_future(system.ref(gated, "key").ask(Bump))
+                answer = asyncio.ensure_future(system.ref(gated, "key").ask(Bump()))
                 await latch.held.wait()
                 stop.set()
                 async with asyncio.timeout(timedelta(seconds=5).total_seconds()):
@@ -139,14 +139,14 @@ def describe_rolling_deploy() -> None:
                         fresh.append(await harness.add(version=(deploy.ledger,)))
                         await eventually(_converged(harness))
                         # A type only the new version brings in is reachable through a node of the old one.
-                        await node.system.ref(deploy.audit, f"audit-{node.id}").ask(deploy.Check)
+                        await node.system.ref(deploy.audit, f"audit-{node.id}").ask(deploy.Check())
                         await harness.leave(node)
                         await traffic.settle(timedelta(milliseconds=250))
                 await traffic.verify()
                 # The field the old version never wrote is written and read once every node is on the new one.
                 served = fresh[-1].system
-                assert await served.ref(deploy.ledger, "tagged").ask(deploy.Append, 1, ("audited",)) is True
-                listing = await served.ref(deploy.ledger, "tagged").ask(deploy.Entries)
+                assert await served.ref(deploy.ledger, "tagged").ask(deploy.Append(1, ("audited",))) is True
+                listing = await served.ref(deploy.ledger, "tagged").ask(deploy.Entries())
                 assert listing.entries == (1,)
                 assert listing.tags == ("audited",)
 

@@ -504,6 +504,11 @@ impl<'py> Loader<'_, 'py> {
         reader: &mut Reader<'_>,
     ) -> Outcome<Bound<'py, PyAny>> {
         let py = self.schema.py();
+        if let Kind::None = kind {
+            reader.read_nil()?;
+            let nobody = Ref::nobody(self.schema.clone().unbind(), messages, self.node.cloned());
+            return Ok(Bound::new(py, nobody)?.into_any());
+        }
         let Kind::List = kind else {
             return Err(wrong("ref", kind));
         };

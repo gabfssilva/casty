@@ -10,18 +10,17 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import assert_never
 
-from casty import ActorFailed, ActorSystem, Backoff, Context, MailboxFull, Ref, actor
+from casty import ActorFailed, ActorSystem, Askable, Backoff, Context, MailboxFull, actor
 
 
 @dataclass(frozen=True)
-class Divide:
-    reply_to: Ref[float]
+class Divide(Askable[float]):
     by: int
 
 
 @dataclass(frozen=True)
-class Value:
-    reply_to: Ref[float]
+class Value(Askable[float]):
+    pass
 
 
 type CalculatorMsg = Divide | Value
@@ -31,18 +30,18 @@ type CalculatorMsg = Divide | Value
 async def calculator(ctx: Context[float, CalculatorMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Divide(reply_to, by):
+            case Divide(by, reply_to=reply_to):
                 await ctx.state.set(ctx.state.value / by)
                 reply_to.tell(ctx.state.value)
-            case Value(reply_to):
+            case Value(reply_to=reply_to):
                 reply_to.tell(ctx.state.value)
             case _:
                 assert_never(msg)
 
 
 @dataclass(frozen=True)
-class Read:
-    reply_to: Ref[str]
+class Read(Askable[str]):
+    pass
 
 
 @actor
@@ -52,8 +51,7 @@ async def document(ctx: Context[str, Read]) -> None:
 
 
 @dataclass(frozen=True)
-class Work:
-    reply_to: Ref[int]
+class Work(Askable[int]):
     job: int
 
 
@@ -69,18 +67,18 @@ async def main() -> None:
     backoff = Backoff(first=timedelta(milliseconds=50), limit=timedelta(seconds=1))
     async with ActorSystem(backoff=backoff) as system:
         calc = system.ref(calculator, "calc")
-        print("100 / 4 =", await calc.ask(Divide, 4))
+        print("100 / 4 =", await calc.ask(Divide(4)))
         try:
-            await calc.ask(Divide, 0)
+            await calc.ask(Divide(0))
         except ActorFailed as failed:
             print(f"failed: {failed.error} ({failed.message})")
-        print("still there, with the last saved state:", await calc.ask(Value))
+        print("still there, with the last saved state:", await calc.ask(Value()))
 
-        print("content:", await system.ref(document, "readme", initial="# casty").ask(Read))
-        print("still:", await system.ref(document, "readme", initial="something else").ask(Read))
+        print("content:", await system.ref(document, "readme", initial="# casty").ask(Read()))
+        print("still:", await system.ref(document, "readme", initial="something else").ask(Read()))
 
         busy = system.ref(worker, "w")
-        results = await asyncio.gather(*(busy.ask(Work, job) for job in range(6)), return_exceptions=True)
+        results = await asyncio.gather(*(busy.ask(Work(job)) for job in range(6)), return_exceptions=True)
         done = [result for result in results if isinstance(result, int)]
         refused = [result for result in results if isinstance(result, MailboxFull)]
         print(f"jobs done: {done}, refused by the full mailbox: {len(refused)}")

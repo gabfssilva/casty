@@ -20,8 +20,8 @@ async def locate(client: Client, key: str, /) -> Seen | None:
     """Hit the page and ask where it is. A page that is changing hands is skipped this round, not waited for."""
     try:
         async with asyncio.timeout(5):
-            await client.ref(page, key).ask(Hit)
-            return await client.ref(page, key).ask(Locate)
+            await client.ref(page, key).ask(Hit())
+            return await client.ref(page, key).ask(Locate())
     except (Unavailable, TimeoutError):
         return None
 

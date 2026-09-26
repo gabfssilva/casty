@@ -41,8 +41,8 @@ async def pages(bound: Binding) -> list[Mapping[bytes, tuple[bytes, ...]]]:
     """What every segment of every shard lists, each asked from its own number, which is a hash it holds."""
     found: list[Mapping[bytes, tuple[bytes, ...]]] = []
     for shard in range(bound.shards):
-        for at in range(await bound.ref(table.actor, shard).ask(table.Segments)):
-            page = await bound.ref(table_segment.actor, f"{shard}.{at}").ask(table_segment.Scan, at)
+        for at in range(await bound.ref(table.actor, shard).ask(table.Segments())):
+            page = await bound.ref(table_segment.actor, f"{shard}.{at}").ask(table_segment.Scan(at))
             assert page is not None
             found.append(page[1])
     return found
@@ -105,21 +105,21 @@ def describe_dict_entries() -> None:
             await bound.ready()
             raw = Value(str, bound.system).dump("unfinished")
             # A put that listed its key and stopped before it sent the value again.
-            listed = await bound.ref(entry.actor, f"key:{raw.hex()}").ask(entry.Put, b"", 0)
+            listed = await bound.ref(entry.actor, f"key:{raw.hex()}").ask(entry.Put(b"", 0))
             assert listed > 0
-            await first_segment(bound).ask(table_segment.List, raw, listed)
+            await first_segment(bound).ask(table_segment.List(raw, listed))
             assert list(await listings(bound)) == [raw]
 
             assert await entries.get("unfinished") == MISSING
             assert await entries.items() == []
             assert await listings(bound) == {}
-            await first_segment(bound).ask(table_segment.List, raw, listed)
+            await first_segment(bound).ask(table_segment.List(raw, listed))
             # `size` counts listings and asks no entry: the listing counts until a scan drops it.
             assert await entries.size() == 1
             assert [pair async for pair in entries.scan()] == []
             assert await listings(bound) == {}
             assert await entries.size() == 0
-            await first_segment(bound).ask(table_segment.List, raw, listed)
+            await first_segment(bound).ask(table_segment.List(raw, listed))
             await entries.clear()
             assert await listings(bound) == {}
             await entries.put("unfinished", "complete")
@@ -133,7 +133,7 @@ def describe_dict_entries() -> None:
             await entries.put("key", "first")
             assert await entries.remove("key")
             assert not await entries.remove("key")
-            assert await first_segment(bound).ask(table_segment.Get, raw) == ()
+            assert await first_segment(bound).ask(table_segment.Get(raw)) == ()
             assert await entries.size() == 0
             assert not await entries.contains("key")
             await entries.put("key", "second")
@@ -178,11 +178,11 @@ def describe_dict_entries() -> None:
             raw = Value(str, bound.system).dump("key")
             await entries.put("key", "first")
             # The first half of a removal: the value is gone, and the unlisting has not reached the index yet.
-            removed, listed = await bound.ref(entry.actor, f"key:{raw.hex()}").ask(entry.Remove)
+            removed, listed = await bound.ref(entry.actor, f"key:{raw.hex()}").ask(entry.Remove())
             assert removed
             await entries.put("key", "second")
             # The unlisting arrives now, under the generation the first put listed the key with.
-            assert await first_segment(bound).ask(table_segment.Unlist, raw, listed) is False
+            assert await first_segment(bound).ask(table_segment.Unlist(raw, listed)) is False
             assert await entries.items() == [("key", "second")]
             assert await entries.remove("key")
             assert await listings(bound) == {}
@@ -195,9 +195,9 @@ def describe_dict_entries() -> None:
             raw = Value(str, bound.system).dump("key")
             # A life of the key on a node whose clock ran an hour ahead, removed with its unlisting still on the way.
             ahead = time.time_ns() // 1_000 + 3_600_000_000
-            await first_segment(bound).ask(table_segment.List, raw, ahead)
+            await first_segment(bound).ask(table_segment.List(raw, ahead))
             await entries.put("key", "value")
-            assert await first_segment(bound).ask(table_segment.Unlist, raw, ahead) is False
+            assert await first_segment(bound).ask(table_segment.Unlist(raw, ahead)) is False
             assert await entries.items() == [("key", "value")]
             assert await entries.remove("key")
             assert await listings(bound) == {}
@@ -228,7 +228,7 @@ def describe_dict_entries() -> None:
             entries = Dict(bound, int, int)
             for i in range(3_000):
                 await entries.put(i, i * 2)
-            assert await bound.ref(table.actor).ask(table.Segments) > 4
+            assert await bound.ref(table.actor).ask(table.Segments()) > 4
             assert await entries.size() == 3_000
             assert dict(await entries.items()) == {i: i * 2 for i in range(3_000)}
             # A facade that has not seen the splits reaches every key through the directory.
@@ -266,7 +266,7 @@ def describe_dict_entries() -> None:
             entries = Dict(bound, int, int)
             for i in range(10_000):
                 await entries.put(i, i)
-            segments = [await bound.ref(table.actor, shard).ask(table.Segments) for shard in range(bound.shards)]
+            segments = [await bound.ref(table.actor, shard).ask(table.Segments()) for shard in range(bound.shards)]
             asked = counted(monkeypatch, "entry", "table", "table_segment")
 
             assert await entries.size() == 10_000
@@ -322,7 +322,7 @@ def describe_dict_entries() -> None:
             entries = Dict(bound, int, int)
             for i in range(600):
                 await entries.put(i, i)
-            assert await bound.ref(table.actor).ask(table.Segments) == 2
+            assert await bound.ref(table.actor).ask(table.Segments()) == 2
             seen: list[int] = []
             async for key, value in entries.scan():
                 assert value == key
@@ -331,7 +331,7 @@ def describe_dict_entries() -> None:
                     for i in range(600, 6_000):
                         await entries.put(i, i)
                 seen.append(key)
-            assert await bound.ref(table.actor).ask(table.Segments) > 8
+            assert await bound.ref(table.actor).ask(table.Segments()) > 8
             assert len(seen) == len(set(seen))
             assert set(range(600)) <= set(seen) <= set(range(6_000))
             # Keys put where the scan had not been yet are found there.
@@ -388,12 +388,12 @@ def describe_dict_entries() -> None:
             raw = Value(str, old.system).dump("key")
             value = Value(str, old.system).dump("saved")
             segment = old.ref(table_segment.actor, f"{old.shard(raw)}.0")
-            await segment.ask(table_segment.Add, raw, value)
+            await segment.ask(table_segment.Add(raw, value))
 
             with pytest.raises(ConfigurationError):
                 await Collections(system).dict("old", key=str, value=str).get("key")
 
-            assert await segment.ask(table_segment.Get, raw) == (value,)
+            assert await segment.ask(table_segment.Get(raw)) == (value,)
 
     async def it_keeps_dictionary_names_and_encoded_keys_separate() -> None:
         async with ActorSystem() as system:

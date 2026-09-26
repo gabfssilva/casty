@@ -96,9 +96,9 @@ async def exercise(
             before = time.monotonic()
             try:
                 if operation == "read":
-                    await ref.ask(Read, payload)
+                    await ref.ask(Read(payload))
                 else:
-                    await ref.ask(Increment, payload)
+                    await ref.ask(Increment(payload))
             except (Unavailable, TimeoutError, MailboxFull):
                 errors += 1
             else:
@@ -147,7 +147,7 @@ async def worker(options: Options) -> None:
     target = Client(seeds=(options.seed,)) if options.servers else ActorSystem()
     async with target as system:
         for index in range(options.keys):
-            await system.ref(counter, f"bench:{index}").ask(Read, b"x" * 64)
+            await system.ref(counter, f"bench:{index}").ask(Read(b"x" * 64))
         await exercise(
             system,
             options.operation,

@@ -11,6 +11,7 @@ from typing import Generic, Never, Protocol, Self, overload, runtime_checkable
 
 from typing_extensions import TypeVar
 
+from casty.askable import Askable as Askable
 from casty.collections import Collections as Collections
 from casty.model import TLS as TLS
 from casty.model import ActorDefinition as ActorDefinition
@@ -112,13 +113,16 @@ class Ref[M](Protocol):
         an `ask`, an answer that large reaches the one asking as `MessageTooLarge` instead.
         """
 
-    async def ask[R, **P](self, build: MessageBuilder[P, R, M], /, *args: P.args, **kwargs: P.kwargs) -> R:
-        """Send `build(reply_to, *args, **kwargs)` and wait for the value told to `reply_to`.
+    async def ask[R](self, msg: _Asked[M, R], /) -> R:
+        """Send `msg` and wait for the value told to its `reply_to`.
 
-        The first parameter of `build` must be annotated as `Ref[R]`, because the reply is decoded with that
-        annotation. Raises `TimeoutError` after the `ask_timeout` of the actor type, or the system's when the type
-        sets none; keyword arguments go to `build`, so a shorter deadline is set with `asyncio.timeout`. In a cluster,
-        raises `MessageTooLarge` at once when the message or its answer is larger than `Limits.message`.
+        `msg` is an `Askable[R]`, `Withdraw(30)` for a `class Withdraw(Askable[bool])`, and one of the messages of this
+        ref: the checker infers the answer from it, and the core reads the answer as the `R` of its `reply_to`. The
+        `ask` gives the message a `reply_to` of its own, whatever it held; the value passed in is not changed.
+
+        Raises `TimeoutError` after the `ask_timeout` of the actor type, or the system's when the type sets none; a
+        shorter deadline is set with `asyncio.timeout`. In a cluster, raises `MessageTooLarge` at once when the
+        message or its answer is larger than `Limits.message`.
 
         An `ask` cancelled, or past its deadline, raises `CancelledError` or `TimeoutError` here as any await does, and
         the key hears that nobody waits: a message still queued is dropped unread, and a body working on it is
@@ -136,11 +140,14 @@ class Ref[M](Protocol):
         beside it keep nobody waiting.
         """
 
-@runtime_checkable
-class MessageBuilder[**P, R, M](Protocol):
-    """What `ask` sends: a message built around the ref its answer comes back to."""
+class _Asked[M, R](Protocol):
+    """An `Askable[R]` that is also an `M`: `Askable._asked` gives the message's own type and its answer together.
 
-    def __call__(self, reply_to: Ref[R], /, *args: P.args, **kwargs: P.kwargs) -> M: ...
+    The type system has no intersection, and a bound cannot name another type parameter, so the two are read from one
+    method, whose `tuple` is covariant in both.
+    """
+
+    def _asked(self) -> tuple[M, R]: ...
 
 @runtime_checkable
 class Schedule[M](Protocol):
@@ -288,6 +295,29 @@ class Context(Protocol[_S, _Received]):
         """Messages and items of `source` in arrival order, until `source` ends.
 
         Idleness does not end it, and an exception raised by `source` propagates to the body.
+        """
+
+    def ask[Q, R](
+        self,
+        target: Ref[Q],
+        msg: _Asked[Q, R],
+        /,
+        mapper: Callable[[R], _Received],
+        *,
+        failed: Callable[[Exception], _Received] | None = None,
+    ) -> None:
+        """Send `msg` to `target`, and tell this entity what `mapper` makes of the answer. Returns at once.
+
+        It is `to_self(target.ask(msg), mapper, failed=failed)`: the body goes on reading its messages while the answer
+        is on its way, and the answer arrives as one more message, behind those that arrived before it. `mapper` runs
+        when the answer arrives, after the body has moved on, and a `lambda` reads the variables of the loop then, not
+        when `ask` was called: one that needs the message in hand binds it as a default,
+        `lambda ok, transfer=msg: Withdrawn(transfer, ok)`.
+
+        When the `ask` raises, as `TimeoutError`, `Unavailable` or `ActorFailed`, `failed` makes the message of what
+        it raised. Without `failed` nothing is sent and the system reports a `MessageDropped`, so a body that waits for
+        the answer to go on never hears of it. What `ask` raises at once, as `SchemaError` or `MessageTooLarge`, is
+        raised here.
         """
 
     @overload
@@ -723,6 +753,7 @@ __all__ = [
     "ActorFailed",
     "ActorStats",
     "ActorSystem",
+    "Askable",
     "Backoff",
     "Body",
     "Client",

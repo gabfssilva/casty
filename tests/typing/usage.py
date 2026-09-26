@@ -10,6 +10,7 @@ from casty import (
     Activation,
     Actor,
     ActorSystem,
+    Askable,
     Backoff,
     Client,
     Cluster,
@@ -62,8 +63,7 @@ class Deposit:
 
 
 @dataclass(frozen=True)
-class Withdraw:
-    reply_to: Ref[bool]
+class Withdraw(Askable[bool]):
     amount: int
 
 
@@ -81,7 +81,7 @@ async def account(ctx: Context[Account, AccountMsg]) -> None:
         match msg:
             case Deposit(amount):
                 await ctx.state.set(replace(ctx.state.value, balance=ctx.state.value.balance + amount))
-            case Withdraw(reply_to, amount):
+            case Withdraw(amount, reply_to=reply_to):
                 if amount > ctx.state.value.balance:
                     reply_to.tell(False)
                     continue
@@ -102,8 +102,7 @@ class Paid:
 
 
 @dataclass(frozen=True)
-class Pay:
-    reply_to: Ref[bool]
+class Pay(Askable[bool]):
     amount: int
 
 
@@ -211,7 +210,7 @@ async def clock(ctx: Context[Offset, Subscribe]) -> None:
 async def auditor(ctx: Context[Account, Tick]) -> None:
     ctx.system.ref(clock, "main").tell(Subscribe(ctx.self))
     async for tick in ctx.inbox:
-        assert_type(await ctx.system.ref(account, ctx.key).ask(Withdraw, tick.count), bool)
+        assert_type(await ctx.system.ref(account, ctx.key).ask(Withdraw(tick.count)), bool)
 
 
 @dataclass(frozen=True)
@@ -225,11 +224,14 @@ async def treasurer(ctx: Context[Account, Tick | Withdrawn]) -> None:
     async for msg in ctx.inbox:
         match msg:
             case Tick(count):
-                ctx.to_self(bank.ask(Withdraw, count), Withdrawn)
-                both = asyncio.gather(bank.ask(Withdraw, 1), bank.ask(Withdraw, 2))
+                ctx.to_self(bank.ask(Withdraw(count)), Withdrawn)
+                both = asyncio.gather(bank.ask(Withdraw(1)), bank.ask(Withdraw(2)))
                 ctx.to_self(both, lambda oks: Withdrawn(all(oks)))
-                ctx.to_self(bank.ask(Withdraw, count), Withdrawn, failed=lambda _: Withdrawn(ok=False))
+                ctx.to_self(bank.ask(Withdraw(count)), Withdrawn, failed=lambda _: Withdrawn(ok=False))
                 ctx.to_self(asyncio.sleep(1, Tick(count + 1)))
+                ctx.ask(bank, Withdraw(count), Withdrawn)
+                ctx.ask(bank, Withdraw(count), mapper=Withdrawn, failed=lambda _: Withdrawn(ok=False))
+                ctx.ask(bank, Withdraw(count), lambda ok, tick=msg: Withdrawn(ok and tick.count > 0))
             case Withdrawn():
                 pass
 
@@ -310,11 +312,12 @@ async def main() -> None:
         assert_type(system.ref(journal, "diary"), Ref[AccountMsg])
         acc = system.ref(account, "acc-1")
         assert_type(acc, Ref[AccountMsg])
-        assert_type(await acc.ask(Withdraw, 30), bool)
-        assert_type(await acc.ask(Withdraw, amount=30), bool)
+        assert_type(await acc.ask(Withdraw(30)), bool)
+        assert_type(await acc.ask(Withdraw(amount=30)), bool)
+        assert_type(Withdraw(30).reply_to, Ref[bool])
         acc.tell(Deposit(10))
         try:
-            await acc.ask(Withdraw, 30)
+            await acc.ask(Withdraw(30))
         except MessageTooLarge as refused:
             assert_type(refused, MessageTooLarge)
         assert_type(system.ref(order, "o-1", initial=Pending()), Ref[Pay])
@@ -379,7 +382,7 @@ async def collection_types(system: System) -> None:
     assert_type(collections.barrier("round", parties=3), Barrier)
 
     async with Client(seeds=("10.0.0.4:7400",), limits=Limits(message=32 * 1024 * 1024)) as client:
-        assert_type(await client.ref(account, "acc-1").ask(Withdraw, 30), bool)
+        assert_type(await client.ref(account, "acc-1").ask(Withdraw(30)), bool)
 
 
 @actor(initial=0)
@@ -388,15 +391,15 @@ async def pooled(ctx: Context[int, Deposit | Acquired | Denied]) -> None:
     async for msg in ctx.inbox:
         match msg:
             case Deposit():
-                pool.tell(semaphore.Acquire(ctx.self, n=2, ttl=10.0, wait=5.0))
+                pool.tell(semaphore.Acquire(n=2, ttl=10.0, wait=5.0, reply_to=ctx.self))
             case Acquired(lease_id, token):
                 assert_type(token, int)
                 pool.tell(semaphore.Release(lease_id))
             case Denied():
                 pass
-    assert_type(await pool.ask(semaphore.Acquire, lease_id="mine"), Acquired | Denied)
-    assert_type(await pool.ask(semaphore.Renew, "mine", 10.0), bool)
-    assert_type(await pool.ask(semaphore.Get), Status)
+    assert_type(await pool.ask(semaphore.Acquire(lease_id="mine")), Acquired | Denied)
+    assert_type(await pool.ask(semaphore.Renew("mine", 10.0)), bool)
+    assert_type(await pool.ask(semaphore.Get()), Status)
 
 
 def packed(numbers: list[int]) -> bytes:
@@ -416,8 +419,7 @@ class Sketch:
 
 
 @dataclass(frozen=True)
-class Stroke:
-    reply_to: Ref[Numbers]
+class Stroke(Askable[Numbers]):
     value: int
 
 
@@ -432,4 +434,4 @@ async def sketch(ctx: Context[Sketch, Stroke]) -> None:
 
 async def opaque_types(system: System) -> None:
     assert_type(Opaque(encode=packed, decode=unpacked), Opaque[list[int]])
-    assert_type(await system.ref(sketch, "s-1").ask(Stroke, 3), list[int])
+    assert_type(await system.ref(sketch, "s-1").ask(Stroke(3)), list[int])

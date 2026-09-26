@@ -34,6 +34,8 @@ them under the same names.
 
 ::: casty.Ref
 
+::: casty.Askable
+
 ## Systems
 
 ::: casty.ActorSystem

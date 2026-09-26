@@ -1,5 +1,7 @@
 //! A Python value straight to msgpack, without a structure in between.
 
+use core::cell::Cell;
+
 use casty_core::node::Target;
 use casty_core::schema::ir::{
     Container, Dataclass, Enum, Literal, Native, Node, NodeRef, Opaque, Union,
@@ -21,11 +23,46 @@ pub fn dump(
     value: &Bound<'_, PyAny>,
     out: &mut Vec<u8>,
 ) -> Outcome<()> {
-    Writer { schema }.write(at, value, out)
+    Writer {
+        schema,
+        asking: None,
+    }
+    .write(at, value, out)
+}
+
+/// Write `value`, an `Askable`, as `dump` does, with `reply` in place of its `reply_to`, and give back the node of
+/// that field: the type of what is told to it, which is how the answer to the `ask` is read. Nothing when the value
+/// has no such field.
+pub fn dump_asking(
+    schema: &Schema,
+    at: NodeRef,
+    value: &Bound<'_, PyAny>,
+    reply: &Target,
+    out: &mut Vec<u8>,
+) -> Outcome<Option<NodeRef>> {
+    let writer = Writer {
+        schema,
+        asking: Some(Asking {
+            reply,
+            started: Cell::new(false),
+            answers: Cell::new(None),
+        }),
+    };
+    writer.write(at, value, out)?;
+    Ok(writer.asking.and_then(|asking| asking.answers.get()))
 }
 
 struct Writer<'a> {
     schema: &'a Schema,
+    asking: Option<Asking<'a>>,
+}
+
+/// The `reply_to` an `ask` gives the message it sends, which only the message itself takes, not a value inside it.
+struct Asking<'a> {
+    reply: &'a Target,
+    /// Whether the message has been reached, which is the first dataclass written.
+    started: Cell<bool>,
+    answers: Cell<Option<NodeRef>>,
 }
 
 impl Writer<'_> {
@@ -330,9 +367,21 @@ impl Writer<'_> {
         if !value.is_instance(class)? {
             return Err(wrong(&dataclass.qualname, value)?);
         }
+        let asking = self
+            .asking
+            .as_ref()
+            .filter(|asking| !asking.started.replace(true));
         msgpack::write_map_len(out, dataclass.fields.len());
         for field in &dataclass.fields {
             msgpack::write_str(out, &field.name);
+            if let Some(asking) = asking
+                && field.name == "reply_to"
+                && let Node::Ref(answers) = self.schema.tree().node(field.node)
+            {
+                target(asking.reply, out);
+                asking.answers.set(Some(*answers));
+                continue;
+            }
             self.write(field.node, &value.getattr(field.name.as_str())?, out)
                 .map_err(|failure| failure.under(&field.name))?;
         }
@@ -376,22 +425,8 @@ impl Writer<'_> {
             );
         };
         match reference.get().target() {
-            Target::Entity { actor, key } => {
-                msgpack::write_array_len(out, 3);
-                msgpack::write_str(out, "e");
-                msgpack::write_str(out, actor);
-                msgpack::write_str(out, key);
-            }
-            Target::Reply { node, id } => {
-                msgpack::write_array_len(out, 4);
-                msgpack::write_str(out, "r");
-                match &node.address {
-                    Some(address) => msgpack::write_str(out, address),
-                    None => msgpack::write_nil(out),
-                }
-                msgpack::write_bin(out, &node.incarnation);
-                msgpack::write_int(out, Int::Signed(*id));
-            }
+            Some(reached) => target(reached, out),
+            None => msgpack::write_nil(out),
         }
         Ok(())
     }
@@ -518,4 +553,26 @@ fn utc_offset(what: &str, value: &Bound<'_, PyAny>) -> Outcome<i64> {
 fn seconds(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
     let (days, seconds, _) = parts(delta)?;
     Ok(days * 86_400 + seconds)
+}
+
+/// What a ref is written as: the entity it names, or the node and id of the `ask` that waits on it.
+fn target(target: &Target, out: &mut Vec<u8>) {
+    match target {
+        Target::Entity { actor, key } => {
+            msgpack::write_array_len(out, 3);
+            msgpack::write_str(out, "e");
+            msgpack::write_str(out, actor);
+            msgpack::write_str(out, key);
+        }
+        Target::Reply { node, id } => {
+            msgpack::write_array_len(out, 4);
+            msgpack::write_str(out, "r");
+            match &node.address {
+                Some(address) => msgpack::write_str(out, address),
+                None => msgpack::write_nil(out),
+            }
+            msgpack::write_bin(out, &node.incarnation);
+            msgpack::write_int(out, Int::Signed(*id));
+        }
+    }
 }

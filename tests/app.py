@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Never, assert_never
 
-from casty import Context, NodeId, Ref, actor
+from casty import Askable, Context, NodeId, actor
 
 
 @dataclass(frozen=True)
@@ -15,14 +15,13 @@ class Account:
 
 
 @dataclass(frozen=True)
-class Deposit:
-    reply_to: Ref[int]
+class Deposit(Askable[int]):
     amount: int
 
 
 @dataclass(frozen=True)
-class Balance:
-    reply_to: Ref[int]
+class Balance(Askable[int]):
+    pass
 
 
 @dataclass(frozen=True)
@@ -32,8 +31,8 @@ class Location:
 
 
 @dataclass(frozen=True)
-class Where:
-    reply_to: Ref[Location]
+class Where(Askable[Location]):
+    pass
 
 
 type AccountMsg = Deposit | Balance | Where
@@ -43,12 +42,12 @@ type AccountMsg = Deposit | Balance | Where
 async def account(ctx: Context[Account, AccountMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Deposit(reply_to, amount):
+            case Deposit(amount, reply_to=reply_to):
                 await ctx.state.set(Account(ctx.state.value.balance + amount))
                 reply_to.tell(ctx.state.value.balance)
-            case Balance(reply_to):
+            case Balance(reply_to=reply_to):
                 reply_to.tell(ctx.state.value.balance)
-            case Where(reply_to):
+            case Where(reply_to=reply_to):
                 reply_to.tell(Location(ctx.state.value.balance, ctx.system.node))
             case _:
                 assert_never(msg)
@@ -68,8 +67,7 @@ type Order = Pending | Paid
 
 
 @dataclass(frozen=True)
-class Pay:
-    reply_to: Ref[bool]
+class Pay(Askable[bool]):
     amount: int
 
 
@@ -92,8 +90,7 @@ class Ledger:
 
 
 @dataclass(frozen=True)
-class Append:
-    reply_to: Ref[bool]
+class Append(Askable[bool]):
     entry: int
 
 
@@ -104,8 +101,8 @@ class Listing:
 
 
 @dataclass(frozen=True)
-class Entries:
-    reply_to: Ref[Listing]
+class Entries(Askable[Listing]):
+    pass
 
 
 type LedgerMsg = Append | Entries
@@ -114,10 +111,10 @@ type LedgerMsg = Append | Entries
 async def _entries(ctx: Context[Ledger, LedgerMsg]) -> None:
     async for msg in ctx.inbox:
         match msg:
-            case Append(reply_to, entry):
+            case Append(entry, reply_to=reply_to):
                 await ctx.state.set(Ledger((*ctx.state.value.entries, entry)))
                 reply_to.tell(True)
-            case Entries(reply_to):
+            case Entries(reply_to=reply_to):
                 reply_to.tell(Listing(ctx.state.value.entries, ctx.system.node))
             case _:
                 assert_never(msg)
@@ -158,8 +155,8 @@ class Written:
 
 
 @dataclass(frozen=True)
-class Notes:
-    reply_to: Ref[Written]
+class Notes(Askable[Written]):
+    pass
 
 
 type NotesMsg = Note | Notes
@@ -171,7 +168,7 @@ async def notes(ctx: Context[Notebook, NotesMsg]) -> None:
         match msg:
             case Note(value):
                 await ctx.state.set(Notebook((*ctx.state.value.notes, value)))
-            case Notes(reply_to):
+            case Notes(reply_to=reply_to):
                 reply_to.tell(Written(ctx.state.value.notes, ctx.system.node))
             case _:
                 assert_never(msg)
@@ -234,13 +231,13 @@ class Gate:
 
 
 @dataclass(frozen=True)
-class Locate:
-    reply_to: Ref[NodeId]
+class Locate(Askable[NodeId]):
+    pass
 
 
 @dataclass(frozen=True)
-class Hold:
-    reply_to: Ref[bool]
+class Hold(Askable[bool]):
+    pass
 
 
 type GateMsg = Locate | Hold
@@ -251,7 +248,7 @@ async def gate(ctx: Context[Gate, GateMsg]) -> None:
     """Says where it is, and never answers `Hold`: an `ask` that stays in flight until something else ends it."""
     async for msg in ctx.inbox:
         match msg:
-            case Locate(reply_to):
+            case Locate(reply_to=reply_to):
                 reply_to.tell(ctx.system.node)
             case Hold():
                 await asyncio.Event().wait()
@@ -277,8 +274,8 @@ async def sleepy(ctx: Context[Idle, Nap]) -> None:
 
 
 @dataclass(frozen=True)
-class Touch:
-    reply_to: Ref[bool]
+class Touch(Askable[bool]):
+    pass
 
 
 @actor(initial=Idle())
@@ -300,8 +297,8 @@ LATCHES: dict[str, Latch] = {}
 
 
 @dataclass(frozen=True)
-class Bump:
-    reply_to: Ref[int]
+class Bump(Askable[int]):
+    pass
 
 
 @actor(initial=0)

@@ -45,8 +45,8 @@ def describe_the_threads_of_the_transport() -> None:
         with _running_python() as running:
             async with Harness.start(2, store=Records()) as harness:
                 client = await harness.client()
-                assert await client.ref(account, "a").ask(Deposit, 5) == 5
-                assert await harness.nodes[1].system.ref(durable_ledger, "l").ask(Append, 1)
+                assert await client.ref(account, "a").ask(Deposit(5)) == 5
+                assert await harness.nodes[1].system.ref(durable_ledger, "l").ask(Append(1))
                 await harness.leave(harness.nodes[1])
 
         assert running == {threading.get_ident()}
@@ -57,7 +57,7 @@ def describe_the_threads_of_the_transport() -> None:
             with patch.object(asyncio.get_running_loop(), "add_reader", side_effect=NotImplementedError) as refused:
                 async with Harness.start(2) as harness:
                     client = await harness.client()
-                    assert await client.ref(account, "a").ask(Deposit, 5) == 5
+                    assert await client.ref(account, "a").ask(Deposit(5)) == 5
 
             assert refused.called
 
@@ -66,7 +66,7 @@ def describe_the_threads_of_the_transport() -> None:
             before = _descriptors()
             for _ in range(3):
                 async with ActorSystem(cluster=Cluster(bind="127.0.0.1:0")) as system:
-                    assert await system.ref(account, "a").ask(Deposit, 1) >= 1
+                    assert await system.ref(account, "a").ask(Deposit(1)) >= 1
 
             async def closed() -> None:
                 assert _descriptors() == before
