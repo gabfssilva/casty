@@ -27,6 +27,7 @@ use pyo3::prelude::*;
 
 use super::inbox::Inbox;
 use super::observe::Observed;
+use super::storage::Store;
 use super::{Node, Op};
 use crate::actor::period;
 use crate::lock::Locked;
@@ -85,7 +86,7 @@ impl Joined {
         let host: Arc<dyn Host> = Arc::new(Bridge {
             node: Arc::downgrade(node),
             inbox: inbox.clone(),
-            store: node.storage(py).map(Arc::new),
+            store: node.storage(py).map(|store| Store::of(store.bind(py))),
         });
         if let Some(map) = map {
             let mapping = Arc::new(Mapping {
@@ -393,7 +394,7 @@ struct Bridge {
     node: Weak<Node>,
     inbox: Inbox,
     /// What keeps the state of the durable types, when the system was built with a store.
-    store: Option<Arc<Py<PyAny>>>,
+    store: Option<Store>,
 }
 
 impl core::fmt::Debug for Bridge {
@@ -471,13 +472,27 @@ impl Host for Bridge {
     }
 
     fn store(&self, node: &Cluster, request: Storing) {
-        let Some(store) = &self.store else {
-            node.from_store(request.id, Err(super::storage::NO_STORE.to_owned()));
-            return;
-        };
-        let (store, node) = (Arc::clone(store), node.clone());
-        self.inbox
-            .send(move |py| super::storage::hand(py, store.bind(py), &node, &request));
+        match &self.store {
+            None => node.from_store(request.id, Err(super::storage::NO_STORE.to_owned())),
+            Some(Store::Sql(sql)) => {
+                let (node, id) = (node.clone(), request.id);
+                let Storing {
+                    actor,
+                    key,
+                    storage,
+                    within,
+                    ..
+                } = request;
+                sql.get().carry(actor, key, storage, within, move |kept| {
+                    node.from_store(id, kept);
+                });
+            }
+            Some(Store::Python(store)) => {
+                let (store, node) = (Arc::clone(store), node.clone());
+                self.inbox
+                    .send(move |py| super::storage::hand(py, store.bind(py), &node, &request));
+            }
+        }
     }
 }
 

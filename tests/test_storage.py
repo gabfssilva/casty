@@ -1,20 +1,37 @@
 """The store of a system: the state of a durable type outlives the process that wrote it, and every replica."""
 
+import asyncio
+import os
 from dataclasses import dataclass
 from datetime import timedelta
 from itertools import count
 from operator import methodcaller
 from pathlib import Path
+from random import Random
 from typing import assert_never
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 import pytest
 
 from casty import ActorSystem, Askable, Context, Store, Unavailable, actor
-from casty.sqlite import SQLiteStore
+from casty.stores import SQL
 from tests.app import Append, Entries, durable_ledger, ledger
 from tests.cluster import WITHIN, Harness, Node
 from tests.support import Records, eventually
 from tests.traffic import kept
+
+STORES = ["sqlite", *os.environ.get("CASTY_STORES", "").split()]
+"""Where the tests of a store run: a SQLite file of each test, and each database whose URL `CASTY_STORES` lists."""
+
+
+def _named(where: str, /) -> str:
+    """`where` without the user and password its URL may carry."""
+    parts = urlsplit(where)
+    return where if not parts.scheme else f"{parts.scheme}-{parts.hostname}-{parts.port}"
+
+
+_each_store = pytest.mark.parametrize("where", STORES, ids=_named)
 
 
 @dataclass(frozen=True)
@@ -187,61 +204,139 @@ def describe_a_durable_type() -> None:
                 assert (tally.name, key) in store.records
 
 
-def describe_the_sqlite_store() -> None:
-    async def it_opens_its_file_only_once_entered(tmp_path: Path) -> None:
+def describe_a_store() -> None:
+    @_each_store
+    async def it_keeps_of_the_saves_of_a_key_the_one_of_the_greatest_version(where: str, tmp_path: Path) -> None:
+        async with _opened(where, tmp_path) as store:
+            actor = _actor()
+            assert await store.load(actor, "k") is None
+            await store.save(actor, "k", _version(2), b"two")
+            await store.save(actor, "k", _version(1), b"one")
+            assert await store.load(actor, "k") == (_version(2), b"two")
+            await store.save(actor, "k", _version(3), None)
+            assert await store.load(actor, "k") == (_version(3), None)
+            assert await store.load(actor, "other") is None
+            assert await store.load(_actor(), "k") is None
+
+    @_each_store
+    async def it_forgets_a_record_only_when_it_is_not_later_than_the_drop(where: str, tmp_path: Path) -> None:
+        async with _opened(where, tmp_path) as store:
+            actor = _actor()
+            await store.save(actor, "k", _version(2), None)
+            await store.drop(actor, "k", _version(1))
+            assert await store.load(actor, "k") == (_version(2), None)
+            await store.drop(actor, "k", _version(2))
+            assert await store.load(actor, "k") is None
+            await store.drop(actor, "k", _version(3))
+            await store.save(actor, "k", _version(1), b"again")
+            assert await store.load(actor, "k") == (_version(1), b"again")
+
+    @_each_store
+    async def it_orders_versions_as_unsigned_bytes(where: str, tmp_path: Path) -> None:
+        async with _opened(where, tmp_path) as store:
+            actor = _actor()
+            low, high = b"\x7f" + b"\xff" * 31, b"\x80" + b"\x00" * 31
+            await store.save(actor, "k", high, b"high")
+            await store.save(actor, "k", low, b"low")
+            assert await store.load(actor, "k") == (high, b"high")
+
+    @_each_store
+    async def it_keeps_apart_keys_a_collation_or_a_separator_would_confuse(where: str, tmp_path: Path) -> None:
+        async with _opened(where, tmp_path) as store:
+            actor = _actor()
+            keys = [(actor, "key"), (actor, "Key"), (actor, "kéy"), (actor, "key ")]
+            keys += [(f"{actor}/a", "b"), (actor, "a/b")]
+            for order, (owner, key) in enumerate(keys, start=1):
+                await store.save(owner, key, _version(order), key.encode())
+            for order, (owner, key) in enumerate(keys, start=1):
+                assert await store.load(owner, key) == (_version(order), key.encode()), (owner, key)
+
+    @_each_store
+    async def it_keeps_long_keys_and_large_states(where: str, tmp_path: Path) -> None:
+        async with _opened(where, tmp_path) as store:
+            actor, key, state = _actor(), "k" * 10_000, bytes(range(256)) * 4096
+            await store.save(actor, key, _version(1), state)
+            assert await store.load(actor, key) == (_version(1), state)
+
+    @_each_store
+    async def it_keeps_the_greatest_of_saves_racing_for_one_key(where: str, tmp_path: Path) -> None:
+        async with _opened(where, tmp_path) as store, _opened(where, tmp_path) as other:
+            actor, orders = _actor(), list(range(1, 41))
+            Random(7).shuffle(orders)
+            async with asyncio.TaskGroup() as saving:
+                for index, order in enumerate(orders):
+                    saving.create_task((store, other)[index % 2].save(actor, "k", _version(order), b"%d" % order))
+            assert await store.load(actor, "k") == (_version(40), b"40")
+
+    @_each_store
+    async def it_shares_its_records_with_every_store_on_the_same_database(where: str, tmp_path: Path) -> None:
+        actor = _actor()
+        async with _opened(where, tmp_path) as one, _opened(where, tmp_path) as other:
+            assert isinstance(one, Store)
+            await one.save(actor, "k", _version(1), b"one")
+            assert await other.load(actor, "k") == (_version(1), b"one")
+            await other.save(actor, "k", _version(3), b"three")
+            await one.save(actor, "k", _version(2), b"late")
+            assert await one.load(actor, "k") == (_version(3), b"three")
+
+        async with _opened(where, tmp_path) as reopened:
+            assert await reopened.load(actor, "k") == (_version(3), b"three")
+
+
+def describe_the_sql_store() -> None:
+    async def it_opens_its_database_only_once_entered(tmp_path: Path) -> None:
         path = tmp_path / "records.db"
-        store = SQLiteStore(path)
+        store = SQL(f"sqlite://{path}?mode=rwc")
         assert not path.exists()
         async with store:
             assert path.exists()
 
-    def when_it_was_not_entered() -> None:
-        async def it_refuses_every_statement(tmp_path: Path) -> None:
-            store = SQLiteStore(tmp_path / "records.db")
+    def when_it_was_not_entered_or_was_left() -> None:
+        async def it_refuses_every_call(tmp_path: Path) -> None:
+            store = _opened("sqlite", tmp_path)
             with pytest.raises(RuntimeError, match="async with"):
                 await store.load("a", "k")
             async with store:
                 assert await store.load("a", "k") is None
+            with pytest.raises(RuntimeError, match="async with"):
+                await store.save("a", "k", _version(1), None)
 
-    async def it_keeps_of_the_saves_of_a_key_the_one_of_the_greatest_version(tmp_path: Path) -> None:
-        async with SQLiteStore(tmp_path / "records.db") as store:
-            assert await store.load("a", "k") is None
-            await store.save("a", "k", _version(2), b"two")
-            await store.save("a", "k", _version(1), b"one")
-            assert await store.load("a", "k") == (_version(2), b"two")
-            await store.save("a", "k", _version(3), None)
-            assert await store.load("a", "k") == (_version(3), None)
-            assert await store.load("a", "other") is None
-            assert await store.load("b", "k") is None
+    def when_its_url_names_a_database_it_does_not_know() -> None:
+        async def it_refuses_to_open() -> None:
+            with pytest.raises(ValueError, match="redis"):
+                async with SQL("redis://localhost"):
+                    pass
 
-    async def it_forgets_a_record_only_when_it_is_not_later_than_the_drop(tmp_path: Path) -> None:
-        async with SQLiteStore(tmp_path / "records.db") as store:
-            await store.save("a", "k", _version(2), None)
-            await store.drop("a", "k", _version(1))
-            assert await store.load("a", "k") == (_version(2), None)
-            await store.drop("a", "k", _version(2))
-            assert await store.load("a", "k") is None
-
-    async def it_shares_its_records_with_every_store_on_the_same_file(tmp_path: Path) -> None:
-        path = tmp_path / "records.db"
-        async with SQLiteStore(path) as one, SQLiteStore(path) as other:
-            assert isinstance(one, Store)
-            await one.save("a", "k", _version(1), b"one")
-            assert await other.load("a", "k") == (_version(1), b"one")
-            await other.save("a", "k", _version(3), b"three")
-            await one.save("a", "k", _version(2), b"late")
-            assert await one.load("a", "k") == (_version(3), b"three")
-
-        async with SQLiteStore(path) as reopened:
-            assert await reopened.load("a", "k") == (_version(3), b"three")
+    def when_its_database_cannot_be_reached() -> None:
+        async def it_raises_connection_error(tmp_path: Path) -> None:
+            with pytest.raises(ConnectionError, match="could not open"):
+                async with SQL(f"sqlite://{tmp_path / 'missing' / 'records.db'}?mode=rwc"):
+                    pass
 
 
-def describe_a_cluster_on_a_sqlite_store() -> None:
-    def when_every_node_stops_and_as_many_new_ones_start_on_its_file() -> None:
-        async def it_reads_every_durable_key_back_as_last_confirmed(tmp_path: Path) -> None:
-            path = tmp_path / "records.db"
-            keys = {f"k-{index}": (index, index + 100, index + 200) for index in range(24)}
-            async with SQLiteStore(path) as store, Harness.start(3, store=store) as harness:
+def describe_a_system_alone_on_a_store() -> None:
+    def when_it_stops_and_another_starts_on_the_same_database() -> None:
+        @_each_store
+        async def it_takes_every_key_back_as_the_one_before_left_it(where: str, tmp_path: Path) -> None:
+            keys = [f"{uuid4().hex}-{index}" for index in range(4)]
+            async with _opened(where, tmp_path) as store, ActorSystem(store=store) as system:
+                for key in keys:
+                    await system.ref(tally, key).ask(Add(5))
+                assert await system.ref(tally, keys[0]).ask(Forget()) is True
+
+            async with _opened(where, tmp_path) as store, ActorSystem(store=store) as system:
+                assert await system.ref(tally, keys[0]).ask(Total()) == 0
+                for key in keys[1:]:
+                    assert await system.ref(tally, key).ask(Add(1)) == 6
+
+
+def describe_a_cluster_on_a_store() -> None:
+    def when_every_node_stops_and_as_many_new_ones_start_on_its_database() -> None:
+        @_each_store
+        async def it_reads_every_durable_key_back_as_last_confirmed(where: str, tmp_path: Path) -> None:
+            run = uuid4().hex
+            keys = {f"{run}-{index}": (index, index + 100, index + 200) for index in range(24)}
+            async with _opened(where, tmp_path) as store, Harness.start(3, store=store) as harness:
                 for index, (key, entries) in enumerate(keys.items()):
                     ref = harness.nodes[index % 3].system.ref(durable_ledger, key)
                     for entry in entries:
@@ -249,16 +344,17 @@ def describe_a_cluster_on_a_sqlite_store() -> None:
                 assert await harness.nodes[0].system.ref(ledger, "memory").ask(Append(1))
 
             # Leaving the harness stopped every node: no process holds a replica of any key any more.
-            async with SQLiteStore(path) as store, Harness.start(3, store=store) as harness:
+            async with _opened(where, tmp_path) as store, Harness.start(3, store=store) as harness:
                 for index, (key, entries) in enumerate(keys.items()):
                     listing = await harness.nodes[(index + 1) % 3].system.ref(durable_ledger, key).ask(Entries())
                     assert listing.entries == entries, key
                 assert (await harness.nodes[0].system.ref(ledger, "memory").ask(Entries())).entries == ()
 
     def when_keys_were_written_while_a_node_was_down() -> None:
-        async def it_reads_them_back_once_every_node_crashed_and_new_ones_started(tmp_path: Path) -> None:
-            path = tmp_path / "records.db"
-            keys = [f"k-{index}" for index in range(12)]
+        @_each_store
+        async def it_reads_them_back_once_every_node_crashed_and_new_ones_started(where: str, tmp_path: Path) -> None:
+            run = uuid4().hex
+            keys = [f"{run}-{index}" for index in range(12)]
             entries = count(1)
             attempted: dict[str, set[int]] = {key: set() for key in keys}
             confirmed: dict[str, set[int]] = {key: set() for key in keys}
@@ -274,7 +370,7 @@ def describe_a_cluster_on_a_sqlite_store() -> None:
 
                 await eventually(appended, WITHIN)
 
-            async with SQLiteStore(path) as store, Harness.start(3, store=store) as harness:
+            async with _opened(where, tmp_path) as store, Harness.start(3, store=store) as harness:
                 a, b, c = harness.nodes
                 for key in keys[:8]:
                     await append(a.system, key)
@@ -285,7 +381,7 @@ def describe_a_cluster_on_a_sqlite_store() -> None:
                 await harness.crash(a)
                 await harness.crash(b)
 
-            async with SQLiteStore(path) as store, Harness.start(3, store=store) as harness:
+            async with _opened(where, tmp_path) as store, Harness.start(3, store=store) as harness:
                 for key in keys:
                     listing = await harness.nodes[0].system.ref(durable_ledger, key).ask(Entries())
                     broken = kept(key, listing.entries, confirmed[key], attempted[key])
@@ -307,6 +403,16 @@ async def _placed_on(node: Node, by: Node) -> str:
         if (await by.system.placement(tally, key)).owner == node.system.node:
             return key
     raise AssertionError(f"none of the first 64 keys is placed on {node.address} by {by.address}")
+
+
+def _opened(where: str, tmp_path: Path, /) -> SQL:
+    """A store over the database `where` names: a SQLite file of the test, or the URL of another database."""
+    return SQL(f"sqlite://{tmp_path / 'records.db'}?mode=rwc" if where == "sqlite" else where)
+
+
+def _actor() -> str:
+    """An actor no other test and no earlier run wrote, since a database of `CASTY_STORES` outlives them."""
+    return f"tests.storage:{uuid4().hex}"
 
 
 def _version(order: int, /) -> bytes:

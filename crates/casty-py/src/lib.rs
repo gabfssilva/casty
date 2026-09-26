@@ -10,6 +10,7 @@ mod node;
 mod refs;
 mod runtime;
 mod schema;
+mod stores;
 
 use pyo3::prelude::*;
 
@@ -33,6 +34,7 @@ fn _casty(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<refs::Ref>()?;
     module.add_class::<runtime::Runtime>()?;
     module.add_class::<schema::Schema>()?;
+    module.add_class::<stores::Sql>()?;
     module.add_function(wrap_pyfunction!(actor::actor, module)?)?;
     module.add_function(wrap_pyfunction!(node::replicas, module)?)?;
     module.add_function(wrap_pyfunction!(refs::nobody, module)?)?;

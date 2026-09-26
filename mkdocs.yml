@@ -35,7 +35,7 @@ nav:
   - casty: casty.md
   - casty.collections: collections.md
   - casty.observer: observer.md
-  - casty.sqlite: sqlite.md
+  - casty.stores: stores.md
 
 markdown_extensions:
   - pymdownx.highlight

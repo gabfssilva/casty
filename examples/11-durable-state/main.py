@@ -1,10 +1,10 @@
 """State that outlives every node. Run with `uv run main.py`.
 
 A type declared with `durable="write"` is kept by the store of the system as well as by its replicas, and `state.set`
-returns once the store has the write. The store here is `casty.sqlite.SQLiteStore`, one SQLite file shared by the
-three nodes of this process; nodes on several machines would share a database they all reach instead. The nodes take
-a few deposits and all stop, which loses every replica. Three new nodes start on the same file, and every account is
-where the first three left it, while a type kept in memory only starts over.
+returns once the store has the write. The store here is `casty.stores.SQL` over one SQLite file, shared by the three
+nodes of this process; nodes on several machines would share a database they all reach instead, by its URL. The nodes
+take a few deposits and all stop, which loses every replica. Three new nodes start on the same file, and every account
+is where the first three left it, while a type kept in memory only starts over.
 """
 
 import asyncio
@@ -18,7 +18,7 @@ from typing import assert_never
 from local_cluster import nodes
 
 from casty import ActorSystem, Askable, Context, actor
-from casty.sqlite import SQLiteStore
+from casty.stores import SQL
 
 PORTS = (7451, 7452, 7453)
 
@@ -61,7 +61,7 @@ async def tab(ctx: Context[int, AccountMsg]) -> None:
     await keep_balance(ctx)
 
 
-async def cluster(store: SQLiteStore, work: Callable[[ActorSystem], Awaitable[None]], /) -> None:
+async def cluster(store: SQL, work: Callable[[ActorSystem], Awaitable[None]], /) -> None:
     """Start three nodes on `store` together, hand the first one to `work`, then stop all three."""
     # Every node is given the store: a durable type does not activate on a node without one. The cluster is stopped
     # whole, with nobody left to take the keys of a leaving node, so the wait for someone to take them is kept short.
@@ -83,12 +83,12 @@ async def balances(system: ActorSystem, /) -> None:
 
 async def main() -> None:
     with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "state.db"
-        async with SQLiteStore(path) as store:
+        url = f"sqlite://{Path(directory) / 'state.db'}?mode=rwc"
+        async with SQL(url) as store:
             await cluster(store, deposit)
         print("every node stopped, and every replica with it; the file is what is left")
         # The file opened again, as new processes on this machine would.
-        async with SQLiteStore(path) as store:
+        async with SQL(url) as store:
             await cluster(store, balances)
 
 

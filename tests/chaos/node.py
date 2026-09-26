@@ -27,7 +27,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 from casty import ActorDefinition, ActorSystem, Cluster, NodeId
-from casty.sqlite import SQLiteStore
+from casty.stores import SQL
 from tests import deploy
 from tests.chaos import records
 from tests.cluster import FAST, OVERLAY, Proxy, Timing, Versioned
@@ -271,7 +271,7 @@ async def main(launch: Launch, /) -> None:
     clock = Clock()
     period = timing(launch.size)
     with patch.object(time, "time", clock.time):
-        async with SQLiteStore(launch.store) as store, asyncio.TaskGroup() as tasks:
+        async with SQL(f"sqlite://{launch.store}?mode=rwc") as store, asyncio.TaskGroup() as tasks:
             links = Links(tasks)
             try:
                 cluster = Cluster(

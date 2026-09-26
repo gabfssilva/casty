@@ -1,0 +1,25 @@
+[package]
+name = "casty-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blake2 = { version = "0.10", default-features = false }
+# 0.9 needs Rust 1.94. The TLS of rustls on ring, as the transport's, with the roots of webpki: nothing to find on the
+# machine, and a database whose certificate another authority signed names its root in the URL.
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "any",
+    "mysql",
+    "postgres",
+    "runtime-tokio",
+    "sqlite",
+    "tls-rustls-ring-webpki",
+] }
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

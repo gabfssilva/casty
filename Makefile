@@ -3,9 +3,12 @@
 PY_PATHS := src tests benchmarks examples docs
 FT_ENV := .venv-3.14t
 LINUX_TARGETS := x86_64 aarch64
-
+STORES_COMPOSE := tests/stores/compose.yaml
+# The databases of $(STORES_COMPOSE), as `casty.stores.SQL` names them.
+STORES := postgres://casty:casty@127.0.0.1:55432/casty mysql://casty:casty@127.0.0.1:53306/casty \
+	mysql://casty:casty@127.0.0.1:53307/casty postgres://root@127.0.0.1:56257/casty?sslmode=disable
 .DEFAULT_GOAL := help
-.PHONY: help sync build test test-ft test-rust lint fmt typecheck docs check chaos bench wheels-linux
+.PHONY: help sync build test test-ft test-rust test-stores lint fmt typecheck docs check chaos bench wheels-linux
 
 help: ## List the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-13s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -25,6 +28,13 @@ test-ft: ## Python suite on free-threaded 3.14t, in its own environment
 
 test-rust: ## Rust suite
 	cargo test --all-targets
+
+# The databases are removed however the tests end: an interruption exits the shell, and the exit removes them.
+test-stores: build ## The store tests on SQLite and on PostgreSQL, MySQL, MariaDB and CockroachDB in containers
+	trap 'docker compose --file $(STORES_COMPOSE) down --volumes' EXIT; trap 'exit 130' INT TERM; \
+	docker compose --file $(STORES_COMPOSE) up --detach --wait && \
+	CASTY_STORES="$(STORES)" cargo test -p casty-store && \
+	CASTY_STORES="$(STORES)" uv run pytest -q tests/test_storage.py
 
 lint: ## ruff, rustfmt and clippy, with warnings as errors as in CI
 	uv run ruff check $(PY_PATHS)

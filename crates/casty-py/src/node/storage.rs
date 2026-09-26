@@ -6,6 +6,10 @@
 //! it answered is handed back by a callback, to the node of a cluster through its channel, or to the key of a system
 //! running alone.
 //!
+//! A `casty.stores.SQL` lives on a thread of its own instead: the node of a cluster calls it from its task
+//! (`crate::stores`), and only a system running alone goes through its Python methods, on the loop, as it does with any
+//! other store.
+//!
 //! Alone, the process is the only writer of its keys. The store is read the first time a key is activated in the
 //! process, and what the process holds after that is newer. A deleted key keeps its tombstone here, in place of the
 //! state the store may still keep, until the store has forgotten the deletion, `leave_timeout` after it.
@@ -15,6 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use casty_core::replication::messages::Stamp;
+use casty_core::schema::msgpack::Malformed;
 use casty_core::store::{Durable, Pages, Storage, Stored, version};
 use casty_node::events::{Event, Operation};
 use casty_node::node::Node as Cluster;
@@ -27,6 +32,7 @@ use super::callback;
 use super::cluster::Taken;
 use super::observe::Observed;
 use super::{Node, Op};
+use crate::stores::Sql;
 
 /// What a durable type asks of the store of a system running alone: when it keeps the writes, and how long a call to
 /// it may take, in seconds.
@@ -42,6 +48,24 @@ type Then = Box<dyn FnOnce(Python<'_>, StoreAnswer) -> PyResult<()> + Send>;
 /// Why a system without a store takes no durable type.
 pub const NO_STORE: &str =
     "this system has no store, which a durable type needs: pass store= to its ActorSystem";
+
+/// The store of a system as the node of a cluster calls it: on the loop, or from the task of the node when the store
+/// needs neither the loop nor the interpreter.
+#[derive(Debug)]
+pub enum Store {
+    Python(Arc<Py<PyAny>>),
+    Sql(Py<Sql>),
+}
+
+impl Store {
+    #[must_use]
+    pub fn of(store: &Bound<'_, PyAny>) -> Self {
+        match store.cast::<Sql>() {
+            Ok(sql) => Self::Sql(sql.clone().unbind()),
+            Err(_) => Self::Python(Arc::new(store.clone().unbind())),
+        }
+    }
+}
 
 /// The store a system was built with, which has the three methods of `casty.Store`, or nothing.
 pub fn storing(store: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Py<PyAny>>> {
@@ -160,15 +184,26 @@ fn record(answered: &Bound<'_, PyAny>) -> StoreAnswer {
     };
     Stored::read(&written, state.as_deref())
         .map(Some)
-        .map_err(|malformed| {
-            format!("load answered a record this version of casty cannot read: {malformed}")
-        })
+        .map_err(unreadable)
+}
+
+/// Why a record `load` answered is not one: it is not what this version of casty writes.
+#[must_use]
+#[allow(clippy::needless_pass_by_value)]
+pub fn unreadable(malformed: Malformed) -> String {
+    format!("load answered a record this version of casty cannot read: {malformed}")
+}
+
+/// Why a call to the store that took longer than `within` seconds failed.
+#[must_use]
+pub fn late(within: f64) -> String {
+    format!("it did not answer within {within} s")
 }
 
 /// What a call to the store that failed says of why.
 fn described(py: Python<'_>, failed: &PyErr, within: f64) -> String {
     if failed.is_instance_of::<PyTimeoutError>(py) {
-        return format!("it did not answer within {within} s");
+        return late(within);
     }
     let name = failed
         .get_type(py)

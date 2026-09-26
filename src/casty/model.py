@@ -437,7 +437,7 @@ class Store(Protocol):
     has not returned by then is cancelled and counts as failed. A load that fails fails the activation, and a save
     that fails fails the write of a type saved on every write.
 
-    `casty.sqlite.SQLiteStore` is one in a SQLite file, for a system alone or the nodes of one machine.
+    `casty.stores.SQL` is one over a SQL database, which the nodes of a cluster call from their own threads.
     """
 
     async def load(self, actor: str, key: str, /) -> tuple[bytes, bytes | None] | None:

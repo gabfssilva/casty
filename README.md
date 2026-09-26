@@ -8,7 +8,7 @@ Write an actor as a plain `async def`, send it typed messages, and run the same 
 - **Virtual actors.** Nothing to spawn, supervise or stop: an actor is activated by its first message and deactivated when it goes idle.
 - **Replicated state.** A write returns once a quorum of replicas confirms it, with the number of replicas and the write level chosen per actor type.
 - **No coordinator.** Consistent hashing places keys, gossip keeps the membership, and keys move with their state when nodes join, leave or crash.
-- **Durable when needed.** A type can also keep its state in a store, such as the SQLite one included.
+- **Durable when needed.** A type can also keep its state in a store, such as `casty.stores.SQL` over PostgreSQL, MySQL or SQLite.
 - **Schedules and collections.** Timers that outlive the node running them, and replicated counters, registers, dicts, sets, multimaps, queues, semaphores, locks and barriers.
 - **Rust runtime.** One compiled extension, no Python dependencies, free-threaded 3.14t included.
 
@@ -108,17 +108,17 @@ A key nothing has written starts from the `initial` given to `system.ref(actor, 
 The state lives in memory on its replicas. A type declared `durable=` is also kept by the store of the system, which every node reaches, so its keys survive the loss of every replica and a restart of the whole cluster:
 
 ```python
-from casty.sqlite import SQLiteStore
+from casty.stores import SQL
 
 
 @actor(initial=0, durable="write")  # or a timedelta: saved at most that long after each write
 async def account(ctx: Context[int, AccountMsg]) -> None: ...
 
 
-async with SQLiteStore("accounts.db") as store, ActorSystem(cluster=cluster, store=store) as system: ...
+async with SQL("postgres://casty@db/casty") as store, ActorSystem(cluster=cluster, store=store) as system: ...
 ```
 
-A store is any object with async `load`, `save` and `drop` (`casty.Store`). `SQLiteStore` serves the nodes of one machine; `src/casty/sqlite.py` is the shape of one over a database that several machines reach. [`examples/11-durable-state`](examples/11-durable-state) stops a cluster and reads its keys back on new nodes.
+A store is any object with async `load`, `save` and `drop` (`casty.Store`). `casty.stores.SQL` is one in Rust over PostgreSQL, MySQL, MariaDB or SQLite and the databases that speak their protocols, chosen by the scheme of its URL, which the nodes of a cluster call from their own threads, without the event loop. A SQLite file (`sqlite://path?mode=rwc`) serves the nodes of one machine; nodes on several machines share a database they all reach. [`examples/11-durable-state`](examples/11-durable-state) stops a cluster and reads its keys back on new nodes.
 
 ## Clustered actors
 

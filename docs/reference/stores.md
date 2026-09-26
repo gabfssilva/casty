@@ -1,10 +1,10 @@
-# casty.sqlite
+# casty.stores
 
-::: casty.sqlite
+::: casty.stores
     options:
       members: false
       show_root_heading: false
 
-::: casty.sqlite.SQLiteStore
+::: casty.stores.SQL
     options:
       heading_level: 2

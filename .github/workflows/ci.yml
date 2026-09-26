@@ -51,3 +51,16 @@ jobs:
       # A test still running after two minutes prints the stack of every thread, and `-v` names each test before it
       # runs: what a hung job leaves behind.
       - run: uv run pytest -v -o faulthandler_timeout=120
+
+  # The store tests on PostgreSQL, MySQL, MariaDB and CockroachDB, which `tests/stores/compose.yaml` starts.
+  stores:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: make test-stores

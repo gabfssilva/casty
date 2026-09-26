@@ -1,0 +1,2 @@
+# Names of databases, which the documentation of a store writes as names and not as code.
+doc-valid-idents = ["MariaDB", "MySQL", "PostgreSQL", "SQLite", ".."]

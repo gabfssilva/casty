@@ -1,0 +1,43 @@
+# The databases `casty.stores.SQL` is tested on besides SQLite: `make test-stores` starts them, hands their URLs to the
+# tests of `casty-store` and to `tests/test_storage.py` through `CASTY_STORES`, and removes them when those end. Their
+# ports are away from the defaults, which a database of this machine may hold.
+name: casty-stores
+
+services:
+  postgres:
+    image: postgres:17
+    environment: { POSTGRES_USER: casty, POSTGRES_PASSWORD: casty, POSTGRES_DB: casty }
+    ports: ["55432:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "--username=casty", "--dbname=casty"]
+      interval: 1s
+      retries: 60
+
+  mysql:
+    image: mysql:8.4
+    environment: { MYSQL_USER: casty, MYSQL_PASSWORD: casty, MYSQL_DATABASE: casty, MYSQL_ROOT_PASSWORD: casty }
+    ports: ["53306:3306"]
+    healthcheck:
+      # Over TCP: the server that initializes the database listens on no port, and is not the one tests reach.
+      test: ["CMD", "mysqladmin", "ping", "--host=127.0.0.1", "--user=casty", "--password=casty"]
+      interval: 1s
+      retries: 120
+
+  mariadb:
+    image: mariadb:11
+    environment: { MARIADB_USER: casty, MARIADB_PASSWORD: casty, MARIADB_DATABASE: casty, MARIADB_ROOT_PASSWORD: casty }
+    ports: ["53307:3306"]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 1s
+      retries: 120
+
+  cockroach:
+    image: cockroachdb/cockroach:latest-v25.2
+    command: start-single-node --insecure
+    environment: { COCKROACH_DATABASE: casty }
+    ports: ["56257:26257"]
+    healthcheck:
+      test: ["CMD", "/cockroach/cockroach", "sql", "--insecure", "--execute=SHOW TABLES FROM casty"]
+      interval: 1s
+      retries: 120
