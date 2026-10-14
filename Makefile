@@ -1,7 +1,8 @@
 # The everyday commands of casty. `make check` runs what CI checks, on the Python of `.venv`.
 
 PY_PATHS := src tests reliability benchmarks examples docs
-FT_ENV := .venv-3.14t
+FT ?= 3.15t
+FT_ENV := .venv-$(FT)
 LINUX_TARGETS := x86_64 aarch64
 STACK ?= local
 STORES_COMPOSE := tests/stores/compose.yaml
@@ -24,9 +25,9 @@ build: ## Rebuild the extension: uv does not rebuild it after a Rust change
 test: build ## Python suite
 	uv run pytest -q
 
-test-ft: ## Python suite on free-threaded 3.14t, in its own environment
-	UV_PROJECT_ENVIRONMENT=$(FT_ENV) uv sync --python 3.14t --reinstall-package casty
-	UV_PROJECT_ENVIRONMENT=$(FT_ENV) uv run --python 3.14t pytest -q
+test-ft: ## Python suite on free-threaded Python, FT (3.15t by default), in its own environment
+	UV_PROJECT_ENVIRONMENT=$(FT_ENV) uv sync --python $(FT) --reinstall-package casty
+	UV_PROJECT_ENVIRONMENT=$(FT_ENV) uv run --python $(FT) pytest -q
 
 test-rust: ## Rust suite
 	cargo test --all-targets
@@ -55,7 +56,7 @@ docs: ## Build the reference and check every public name has its page
 	uv run mkdocs build --strict
 	uv run python docs/check_reference.py
 
-check: lint typecheck test-rust test docs ## Everything CI checks, but 3.14t (make test-ft)
+check: lint typecheck test-rust test docs ## Everything CI checks, but the free-threaded suite (make test-ft)
 
 # Both bring up the Kubernetes of the Pulumi stack STACK (local: a kind cluster) and destroy it when the run ends.
 chaos: ## Chaos run on Kubernetes, shaped by CHAOS_NODES, CHAOS_MINUTES and CHAOS_SEED
