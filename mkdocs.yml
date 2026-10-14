@@ -1,9 +1,13 @@
 site_name: casty
-site_description: A minimalist, type-safe actor framework for Python 3.12+ with built-in distributed clustering.
+site_description: A typed virtual actor framework for concurrent and distributed programming in Python.
 site_url: https://gabfssilva.github.io/casty/
 repo_url: https://github.com/gabfssilva/casty
 repo_name: gabfssilva/casty
-docs_dir: docs/reference
+docs_dir: docs
+exclude_docs: |
+  /check_reference.py
+  /griffe_overloads.py
+  /__pycache__/
 strict: true
 validation:
   omitted_files: warn
@@ -32,10 +36,22 @@ theme:
 
 nav:
   - Overview: index.md
-  - casty: casty.md
-  - casty.collections: collections.md
-  - casty.observer: observer.md
-  - casty.stores: stores.md
+  - Introduction: 01-intro.md
+  - The actor model: 02-model-actor.md
+  - State: 03-state.md
+  - Clustering: 04-clustering.md
+  - Replication: 05-replication.md
+  - Handoff: 06-handoff.md
+  - Messaging: 07-messaging.md
+  - Schedules: 08-schedulers.md
+  - Collections: 09-collections.md
+  - Failures and guarantees: 10-failures.md
+  - Development: 11-development.md
+  - API reference:
+      - casty: casty.md
+      - casty.collections: collections.md
+      - casty.observer: observer.md
+      - casty.stores: stores.md
 
 markdown_extensions:
   - pymdownx.highlight

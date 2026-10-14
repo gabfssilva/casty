@@ -2,7 +2,7 @@
 
 `mkdocs build --strict` fails on a `::: path` it cannot resolve, and renders a name without a docstring in silence.
 This checks what the build cannot: that each name of `casty.__all__` has a docstring, and that some page of
-`docs/reference` renders it. The names are read from the sources as the build reads them, without importing the
+`docs` renders it. The names are read from the sources as the build reads them, without importing the
 compiled extension.
 """
 
@@ -23,7 +23,7 @@ def problems() -> list[str]:
     casty = griffe.load("casty", search_paths=[ROOT / "src"], allow_inspection=False, extensions=overloads)
     if casty.exports is None:
         return ["casty declares no __all__"]
-    pages = (page.read_text(encoding="utf-8") for page in (ROOT / "docs" / "reference").glob("*.md"))
+    pages = (page.read_text(encoding="utf-8") for page in (ROOT / "docs").glob("*.md"))
     rendered = {path for page in pages for path in re.findall(r"^::: (\S+)\s*$", page, re.MULTILINE)}
     found: list[str] = []
     for name in map(str, casty.exports):
