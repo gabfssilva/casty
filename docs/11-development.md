@@ -22,7 +22,7 @@ Run the checks used by CI:
 make check
 ```
 
-`make check` runs Ruff, rustfmt, clippy, strict Pyright, the Rust and Python suites, and documentation checks. `make test-ft` uses a separate environment for free-threaded Python, 3.15t by default and `FT=3.14t` for the other. `make help` lists the remaining targets.
+`make check` runs Ruff, rustfmt, clippy, strict Pyrefly, the Rust and Python suites, and documentation checks. `make test-ft` uses a separate environment for free-threaded Python, 3.15t by default and `FT=3.14t` for the other. `make help` lists the remaining targets.
 
 ## Finding the implementation
 

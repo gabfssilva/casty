@@ -198,7 +198,7 @@ def describe_a_durable_type() -> None:
             async with Harness.start(1, store=store) as harness:
                 [a] = harness.nodes
                 # What a replication message or a command reaching the node before it has entered makes it do.
-                b = await harness.add(joining=lambda system: system._resolve(tally.name))  # pyright: ignore[reportPrivateUsage]
+                b = await harness.add(joining=lambda system: system._resolve(tally.name))
                 key = await _placed_on(b, a)
                 assert await a.system.ref(tally, key).ask(Add(4)) == 4
                 assert (tally.name, key) in store.records

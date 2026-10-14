@@ -49,8 +49,8 @@ fmt: ## Format Python and Rust
 	uv run ruff format $(PY_PATHS)
 	cargo fmt --all
 
-typecheck: ## pyright, strict
-	uv run pyright
+typecheck: ## pyrefly, strict
+	uv run pyrefly check
 
 docs: ## Build the reference and check every public name has its page
 	uv run mkdocs build --strict

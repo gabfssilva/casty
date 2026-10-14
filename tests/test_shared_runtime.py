@@ -21,7 +21,7 @@ def _free(address: str) -> bool:
 
 
 async def _idle(runtime: Runtime) -> None:
-    assert runtime._tasks() == 0  # pyright: ignore[reportPrivateUsage]
+    assert runtime._tasks() == 0
 
 
 async def _released(address: str) -> None:
@@ -55,7 +55,7 @@ def describe_runtime() -> None:
                 for end in (harness.crash, harness.leave):
                     apart = Runtime(threads=1)
                     node = await harness.add(runtime=apart)
-                    assert apart._tasks() > 0  # pyright: ignore[reportPrivateUsage]
+                    assert apart._tasks() > 0
 
                     await end(node)
 

@@ -18,15 +18,14 @@ def describe_public_api_types() -> None:
         assert {line for line, _ in errors(path)} == marked_lines(path)
 
     def it_declares_the_api_in_the_grammar_of_python_3_12() -> None:
-        # pyright accepts newer syntax in a stub whatever its `pythonVersion`; the parser of 3.12, which mypy uses
-        # there, does not.
+        # mypy parses a stub with the grammar of the Python it targets: newer syntax here fails its users on 3.12.
         ast.parse((ROOT / "src/casty/__init__.pyi").read_text(), feature_version=(3, 12))
 
 
 def errors(path: Path) -> list[tuple[int, str]]:
-    """Errors that pyright reports in `path`, as line number and message."""
-    command = ["pyright", "--project", str(TYPING), "--pythonpath", sys.executable, str(path)]
-    line = re.compile(rf"^\s*{re.escape(str(ROOT / path))}:(\d+):\d+ - error: (.*)$")
+    """Errors that pyrefly reports in `path`, as line number and message."""
+    command = ["pyrefly", "check", "--python-interpreter-path", sys.executable, "--output-format=min-text", str(path)]
+    line = re.compile(rf"^ERROR {re.escape(str(path))}:(\d+):\S+ (.*)$")
     output = subprocess.run([sys.executable, "-m", *command], cwd=ROOT, capture_output=True, text=True).stdout
     return [(int(found[1]), found[2]) for found in map(line.match, output.splitlines()) if found]
 

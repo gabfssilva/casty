@@ -1,6 +1,6 @@
-"""Incorrect use of the public API. Each line ending in `# error` must be reported by pyright, and no other line.
+"""Incorrect use of the public API. Each line ending in `# error` must be reported by pyrefly, and no other line.
 
-Input for pyright, never executed.
+Input for pyrefly, never executed.
 """
 
 from dataclasses import dataclass

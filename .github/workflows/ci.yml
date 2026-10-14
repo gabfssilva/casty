@@ -47,7 +47,7 @@ jobs:
       - run: uv sync
       - run: uv run ruff check src tests reliability benchmarks examples docs
       - run: uv run ruff format --check src tests reliability benchmarks examples docs
-      - run: uv run pyright
+      - run: uv run pyrefly check
       # A test still running after two minutes prints the stack of every thread, and `-v` names each test before it
       # runs: what a hung job leaves behind.
       - run: uv run pytest -v -o faulthandler_timeout=120

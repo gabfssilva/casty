@@ -544,15 +544,15 @@ class Value[T]:
     """
 
     def __init__(self, annotation: type[T], system: System) -> None:
-        self._schema = system._schema(annotation)  # pyright: ignore[reportPrivateUsage]
+        self._schema = system._schema(annotation)
         self._system = system
 
     def dump(self, value: T) -> bytes:
-        return self._system._encode(self._schema, value)  # pyright: ignore[reportPrivateUsage]
+        return self._system._encode(self._schema, value)
 
     def load(self, raw: bytes) -> T:
         # The schema was compiled from the annotation of `T`, so what comes back out of it is one.
-        return cast("T", self._system._decode(self._schema, raw))  # pyright: ignore[reportPrivateUsage]
+        return cast("T", self._system._decode(self._schema, raw))
 
     def optional(self, raw: bytes | None) -> T | Missing:
         return MISSING if raw is None else self.load(raw)

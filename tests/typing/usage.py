@@ -1,4 +1,4 @@
-"""Correct use of the public API. Input for pyright, never executed."""
+"""Correct use of the public API. Input for pyrefly, never executed."""
 
 import asyncio
 from collections.abc import AsyncIterator

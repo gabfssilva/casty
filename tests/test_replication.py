@@ -345,12 +345,12 @@ def describe_replication() -> None:
 
                 async def no_node_keeps_a_page_of_it() -> None:
                     for node in harness.nodes:
-                        stored = await node.system._stored()  # pyright: ignore[reportPrivateUsage]
+                        stored = await node.system._stored()
                         assert all(deleted for actor, held, deleted in stored if (actor, held) == (session.name, key))
 
                 async def no_node_keeps_anything_of_it() -> None:
                     for node in harness.nodes:
-                        stored = await node.system._stored()  # pyright: ignore[reportPrivateUsage]
+                        stored = await node.system._stored()
                         assert (session.name, key) not in {(actor, held) for actor, held, _ in stored}
 
                 await eventually(no_node_keeps_a_page_of_it, WITHIN)

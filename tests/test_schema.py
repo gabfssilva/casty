@@ -322,12 +322,12 @@ UNSUPPORTED = [
 
 def encoded(annotation: object, value: object) -> bytes:
     system = ActorSystem()
-    return system._encode(system._schema(annotation), value)  # pyright: ignore[reportPrivateUsage]
+    return system._encode(system._schema(annotation), value)
 
 
 def decoded(annotation: object, data: bytes) -> object:
     system = ActorSystem()
-    return system._decode(system._schema(annotation), data)  # pyright: ignore[reportPrivateUsage]
+    return system._decode(system._schema(annotation), data)
 
 
 def round_trip(annotation: object, value: object) -> object:

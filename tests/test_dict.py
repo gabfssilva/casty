@@ -13,7 +13,7 @@ import pytest
 from casty import ActorFailed, ActorSystem, Collections, Ref
 from casty import collections as kinds
 from casty.collections import (
-    _PROBES,  # pyright: ignore[reportPrivateUsage]
+    _PROBES,
     MISSING,
     Binding,
     ConfigurationError,
@@ -85,7 +85,7 @@ def counted(monkeypatch: pytest.MonkeyPatch, *names: str) -> Counter[str]:
 def describe_dict_entries() -> None:
     async def it_serializes_only_the_changed_value_even_with_one_index_shard() -> None:
         async with ActorSystem() as system:
-            writes = system._writes()  # pyright: ignore[reportPrivateUsage]
+            writes = system._writes()
             entries = Dict(binding(system), str, str)
             values = {str(i): f"value-{i}:" + "x" * 1000 for i in range(20)}
             for key, value in values.items():
@@ -204,7 +204,7 @@ def describe_dict_entries() -> None:
 
     async def it_leaves_no_visible_value_when_save_fails_after_registration() -> None:
         async with ActorSystem() as system:
-            writes = system._writes()  # pyright: ignore[reportPrivateUsage]
+            writes = system._writes()
             bound = binding(system)
             entries = Dict(bound, str, str)
             writes.fail_on = Value(str, bound.system).dump("uncommitted")
@@ -284,7 +284,7 @@ def describe_dict_entries() -> None:
             sizes = [len(page) for page in await pages(bound)]
             assert len(sizes) > 4
             probing = peak = 0
-            value_of = entries._value_of  # pyright: ignore[reportPrivateUsage]
+            value_of = entries._value_of
 
             async def watched(raw: bytes, listed: tuple[bytes, ...]) -> bytes | None:
                 nonlocal probing, peak
@@ -339,7 +339,7 @@ def describe_dict_entries() -> None:
 
     async def it_writes_as_much_to_add_a_key_to_a_large_dict_as_to_a_small_one() -> None:
         async with ActorSystem() as system:
-            writes = system._writes()  # pyright: ignore[reportPrivateUsage]
+            writes = system._writes()
             entries = Dict(Binding(system, "dict", "flat", replicas=3, write="majority", shards=1), int, int)
 
             async def written(keys: range) -> int:
@@ -412,7 +412,7 @@ def describe_dict_entries() -> None:
 async def stored_entries(system: ActorSystem, bound: Binding) -> list[tuple[str, bool]]:
     """The keys of the entries of `bound` whose state `system` keeps, and whether it keeps only their tombstone."""
     actor = configured(entry.actor, bound.replicas, bound.write).name
-    stored = await system._stored()  # pyright: ignore[reportPrivateUsage]
+    stored = await system._stored()
     return [(key, deleted) for held, key, deleted in stored if held == actor]
 
 

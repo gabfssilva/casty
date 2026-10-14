@@ -25,8 +25,8 @@ from casty.collections import (
     Queue,
     SemaphoreState,
     Status,
-    _after,  # pyright: ignore[reportPrivateUsage]
-    _place,  # pyright: ignore[reportPrivateUsage]
+    _after,
+    _place,
     barrier,
     configured,
     counter,
@@ -298,7 +298,7 @@ print(system._encode(schema, values).hex())
             await counter.add()
             actor = kinds.configured(kinds.counter.actor, 5, "all")
             # A node that never touched the type finds it by its name, with the configuration the name carries.
-            resolved = ActorSystem()._resolve(actor.name)  # pyright: ignore[reportPrivateUsage]
+            resolved = ActorSystem()._resolve(actor.name)
             assert resolved is not None
             assert (resolved.name, resolved.replicas, resolved.write) == (actor.name, 5, "all")
 
@@ -472,7 +472,7 @@ print(system._encode(schema, values).hex())
 
     async def it_writes_as_much_per_member_added_to_a_large_set_as_to_a_small_one() -> None:
         async with ActorSystem() as system:
-            writes = system._writes()  # pyright: ignore[reportPrivateUsage]
+            writes = system._writes()
             members = Collections(system).set("flat", value=int, shards=1)
 
             async def written(values: range) -> int:
@@ -509,7 +509,7 @@ print(system._encode(schema, values).hex())
 
     async def it_keeps_fifo_order_over_100k_items_writing_at_most_a_segment_per_operation() -> None:
         async with ActorSystem() as system:
-            writes = system._writes()  # pyright: ignore[reportPrivateUsage]
+            writes = system._writes()
             queue = Collections(system).queue("jobs", value=int)
             largest = 0
             for i in range(100_000):
@@ -529,7 +529,7 @@ print(system._encode(schema, values).hex())
 
     async def it_writes_as_much_per_offer_to_a_long_queue_as_to_a_short_one() -> None:
         async with ActorSystem() as system:
-            writes = system._writes()  # pyright: ignore[reportPrivateUsage]
+            writes = system._writes()
             queue = Collections(system).queue("jobs", value=bytes)
 
             async def written(offers: int) -> int:
@@ -588,7 +588,7 @@ print(system._encode(schema, values).hex())
             actor = configured(queue_segment.actor, 3, "majority").name
 
             async def only_the_tail_is_kept() -> None:
-                stored = await system._stored()  # pyright: ignore[reportPrivateUsage]
+                stored = await system._stored()
                 segments = [key for held, key, _ in stored if held == actor]
                 assert len(segments) == 1, segments
 
@@ -828,7 +828,7 @@ print(system._encode(schema, values).hex())
                 raise NotStarted("casty.collections:semaphore_3_majority/permits was not started")
 
             with pytest.raises(Unavailable):
-                await permits._asked(missing)  # pyright: ignore[reportPrivateUsage]
+                await permits._asked(missing)
             assert asked == 2
 
     async def it_does_not_resubmit_a_wait_after_its_interest_expired(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -845,5 +845,5 @@ print(system._encode(schema, values).hex())
             return 123
 
         with pytest.raises(TimeoutError):
-            await kinds._wait(stalled)  # pyright: ignore[reportPrivateUsage]
+            await kinds._wait(stalled)
         assert attempts == 1

@@ -244,7 +244,7 @@ def system(launch: Launch, /, *, store: Store | None) -> ActorSystem:
     # A node finds a type by importing it, and this image holds every version. The ones learned here are met before
     # the cluster names them, so this node runs them and not what the import would bring.
     for definition in VERSIONS[launch.version]:
-        node._learn(definition)  # pyright: ignore[reportPrivateUsage]
+        node._learn(definition)
     return node
 
 
