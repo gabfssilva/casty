@@ -479,7 +479,7 @@ mod tests {
 
         assert!(written.before(&deletion));
         assert!(store.knows("a", "k"));
-        assert!(store.active().is_empty());
+        assert_eq!(store.active(), []);
         assert_eq!(store.kept(), vec![("a".to_owned(), "k".to_owned(), true)]);
         assert!(store.activate("a", "k", None).is_none());
         store.purge("a", "k", &written);
@@ -488,7 +488,7 @@ mod tests {
             "a stamp that is not the deletion purged it"
         );
         store.purge("a", "k", &deletion);
-        assert!(store.kept().is_empty());
+        assert_eq!(store.kept(), []);
 
         // A key activated again before the purge goes on above its deletion, and the purge leaves it alone.
         let deletion = store.tombstone("a", "j");
@@ -529,7 +529,7 @@ mod tests {
     fn a_key_nothing_created_does_not_exist() {
         let mut store = LocalStore::default();
         assert!(store.activate("a", "k", None).is_none());
-        assert!(store.active().is_empty());
+        assert_eq!(store.active(), []);
     }
 
     #[test]
@@ -549,7 +549,7 @@ mod tests {
         let mut store = LocalStore::default();
         store.activate("a", "k", Some(pages(0))).unwrap();
         store.commit("a", "k", pages(3), false);
-        assert!(store.active().is_empty());
+        assert_eq!(store.active(), []);
         assert_eq!(store.activate("a", "k", None).unwrap().pages, pages(3));
     }
 
@@ -561,8 +561,8 @@ mod tests {
 
         store.delete("a", "k");
 
-        assert!(store.kept().is_empty());
-        assert!(store.active().is_empty());
+        assert_eq!(store.kept(), []);
+        assert_eq!(store.active(), []);
         assert!(store.activate("a", "k", None).is_none());
         let again = store.activate("a", "k", Some(pages(1))).unwrap();
         assert!(again.created);

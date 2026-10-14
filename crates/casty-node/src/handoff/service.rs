@@ -1124,7 +1124,7 @@ mod tests {
             giver.receive(message, &mut kept);
         }
         assert!(!giver.owing(), "{:?} are still owed", giver.owed());
-        assert!(kept.keys(ACTOR).is_empty());
+        assert_eq!(kept.keys(ACTOR), Vec::<String>::new());
         let mut held = receiving.keys(ACTOR);
         held.sort();
         assert_eq!(held, keys);
@@ -1367,7 +1367,7 @@ mod tests {
                 giver.receive(pull, &mut kept);
             }
         }
-        assert!(kept.keys(ACTOR).is_empty());
+        assert_eq!(kept.keys(ACTOR), Vec::<String>::new());
         assert!(!giver.owing());
     }
 }

@@ -1047,7 +1047,7 @@ mod tests {
             ),
             false,
         );
-        assert!(replica.laid().is_empty());
+        assert_eq!(replica.laid(), []);
         let deletion = stamp(&held[1], 1, 2);
 
         let reply = replica.receive(whole("account", "a", deletion.clone(), tombstone()), false);
@@ -1124,8 +1124,8 @@ mod tests {
             ),
             "{answered:?}"
         );
-        assert!(empty.keys("account").is_empty());
-        assert!(empty.laid().is_empty());
+        assert_eq!(empty.keys("account"), Vec::<String>::new());
+        assert_eq!(empty.laid(), []);
 
         // A key written again after the deletion keeps what it holds.
         let mut later = Replica::new(held[0].clone(), 1024);
@@ -1136,7 +1136,7 @@ mod tests {
         );
         later.receive(bury("a", deletion, &held[2]), false);
         assert_eq!(later.copies("account", "a")[0].pages, rewritten);
-        assert!(later.laid().is_empty());
+        assert_eq!(later.laid(), []);
     }
 
     #[test]
@@ -1150,8 +1150,8 @@ mod tests {
         assert_eq!(replica.deleted("account", "a"), Some(&deletion));
 
         replica.purge("account", "a", &deletion);
-        assert!(replica.keys("account").is_empty());
-        assert!(replica.kept().is_empty());
+        assert_eq!(replica.keys("account"), Vec::<String>::new());
+        assert_eq!(replica.kept(), []);
 
         // What a key holds that is not a tombstone is never purged.
         let written = stamp(&held[1], 1, 1);

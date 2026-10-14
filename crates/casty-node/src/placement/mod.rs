@@ -623,11 +623,7 @@ mod tests {
             .cloned()
             .collect();
         placement.update(&alive(&others), &counts());
-        assert!(
-            placement
-                .replicas(ACTOR, &key, &counts(), &transfers)
-                .is_empty()
-        );
+        assert_eq!(placement.replicas(ACTOR, &key, &counts(), &transfers), []);
         assert_eq!(placement.owner(ACTOR, &key, &counts(), &transfers), None);
         // An address no member ever advertised is the same case.
         let nowhere = pin("10.9.9.9:7400", "worker");

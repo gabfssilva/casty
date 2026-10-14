@@ -377,7 +377,7 @@ mod tests {
         let held = &members[3];
         let covered = ring.ranges_of(held, REPLICAS);
 
-        assert!(!covered.is_empty());
+        assert_ne!(covered, []);
         // The ranges do not touch: no range ends where another starts.
         let starts: BTreeSet<Token> = covered.iter().map(|span| span.start).collect();
         let ends: BTreeSet<Token> = covered.iter().map(|span| span.end).collect();
@@ -445,14 +445,14 @@ mod tests {
         assert_eq!(covered.len(), 1);
         assert!(covered[0].holds(0));
         assert!(covered[0].holds(Token::MAX));
-        assert!(chain(&ring, &Ring::build(only, VNODES), VNODES).is_empty());
+        assert_eq!(chain(&ring, &Ring::build(only, VNODES), VNODES), []);
     }
 
     #[test]
     fn an_empty_ring_places_nothing() {
         let ring = Ring::build(Vec::new(), VNODES);
-        assert!(ring.nodes().is_empty());
-        assert!(ring.replicas(token("account", "a"), REPLICAS).is_empty());
+        assert_eq!(ring.nodes(), []);
+        assert_eq!(ring.replicas(token("account", "a"), REPLICAS), []);
     }
 
     #[test]

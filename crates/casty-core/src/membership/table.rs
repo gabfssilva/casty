@@ -386,7 +386,7 @@ mod tests {
         held.know(&BTreeSet::from(["order".to_owned()]), 0.0);
         held.merge(heard(2, 0, Status::Left), 0.0);
 
-        assert!(held.transitions().is_empty());
+        assert_eq!(held.transitions(), []);
     }
 
     #[test]
@@ -611,7 +611,7 @@ mod tests {
 
         assert_eq!(dead.len(), 4);
         // One of five alive is not a majority, so nothing is taken out of the cluster on this side.
-        assert!(held.expire(5.0).is_empty());
+        assert_eq!(held.expire(5.0), []);
     }
 
     #[test]

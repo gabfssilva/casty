@@ -160,8 +160,8 @@ mod tests {
 
         // `a` is marked and owned here; `b` carries no mark; `c` is owned by the other node.
         assert_eq!(done.reattach, vec![at("a")]);
-        assert!(done.end.is_empty());
-        assert!(done.given.is_empty());
+        assert_eq!(done.end, []);
+        assert_eq!(done.given, []);
     }
 
     #[test]
@@ -181,7 +181,7 @@ mod tests {
 
         assert_eq!(done.end, vec![at("a")]);
         // A key that is already running here is not brought back again.
-        assert!(done.reattach.is_empty());
+        assert_eq!(done.reattach, []);
     }
 
     #[test]

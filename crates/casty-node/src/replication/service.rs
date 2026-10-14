@@ -1293,7 +1293,7 @@ mod tests {
             replication.replica().kept().is_empty(),
             "the tombstone outlived every answer"
         );
-        assert!(replication.burying(now + LINGER * 4).is_empty());
+        assert_eq!(replication.burying(now + LINGER * 4), []);
     }
 
     /// A replica still filling the range of the key may yet be handed a copy older than the deletion, so its answer
@@ -1347,7 +1347,7 @@ mod tests {
         assert!(replication.replica().deleted(ACTOR, KEY).is_some());
         assert_eq!(replication.burying(now + LINGER * 3), vec![entity()]);
         replication.bury(&entity(), &ids, false);
-        assert!(replication.replica().kept().is_empty());
+        assert_eq!(replication.replica().kept(), []);
     }
 
     /// A node the ring took the key off leaves its tombstone to the handover, which drops it once the nodes that
@@ -1376,12 +1376,12 @@ mod tests {
         assert_eq!(replication.burying(now + LINGER), vec![entity()]);
         replication.bury(&entity(), &ids[1..], false);
 
-        assert!(replication.take().is_empty());
+        assert_eq!(replication.take(), []);
         assert!(replication.replica().deleted(ACTOR, KEY).is_some());
 
         // The handover took it away, and the tombstone is not asked about again.
         replication.replica_mut().drop(ACTOR, KEY);
-        assert!(replication.burying(now + LINGER * 2).is_empty());
+        assert_eq!(replication.burying(now + LINGER * 2), []);
         assert_eq!(replication.due(), None);
     }
 
@@ -1415,7 +1415,7 @@ mod tests {
             replication.take().is_empty(),
             "a key with no other replica asked someone"
         );
-        assert!(replication.replica().kept().is_empty());
+        assert_eq!(replication.replica().kept(), []);
     }
 
     /// The owner of a key keeps the last state it wrote. A key that lets go has nothing left to write, so its owner
@@ -1950,7 +1950,7 @@ mod tests {
 
         let due = replication.due().expect("a save is planned");
         replication.fired(due - Duration::from_millis(1));
-        assert!(replication.storing().is_empty());
+        assert_eq!(replication.storing(), []);
         replication.fired(due);
         let asked = records.answer(&mut replication);
         assert_eq!(asked.len(), 1, "{asked:?}");
@@ -2060,7 +2060,7 @@ mod tests {
         assert_eq!(replication.burying(now + LINGER * 3), vec![entity()]);
         replication.bury(&entity(), &ids, true);
         records.answer(&mut replication);
-        assert!(replication.replica().kept().is_empty());
+        assert_eq!(replication.replica().kept(), []);
         assert!(records.0.is_empty(), "the store kept the deletion");
     }
 
@@ -2202,7 +2202,7 @@ mod tests {
 
         replication.activate(ACTOR, KEY, Some(pages(b"one")), &around(&ids), answer, now);
         let _ = replication.take();
-        assert!(replication.observed().is_empty());
+        assert_eq!(replication.observed(), []);
         replication.fired(now + Duration::from_secs(5));
 
         assert!(matches!(

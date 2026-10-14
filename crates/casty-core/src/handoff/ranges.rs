@@ -208,7 +208,7 @@ mod tests {
         let only = rolls.nodes(1);
         let ring = Ring::build(only.clone(), VNODES);
 
-        assert!(gained(&ring, &ring, &only[0], REPLICAS).is_empty());
+        assert_eq!(gained(&ring, &ring, &only[0], REPLICAS), []);
         // The whole circle against nothing is the whole circle.
         let empty = Ring::build(Vec::new(), VNODES);
         let whole = gained(&empty, &ring, &only[0], REPLICAS);

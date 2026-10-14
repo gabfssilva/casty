@@ -320,7 +320,7 @@ mod tests {
             ..member(&ids[0], Status::Alive)
         };
 
-        assert!(diff(&[member(&ids[0], Status::Alive)], &[grown]).is_empty());
+        assert_eq!(diff(&[member(&ids[0], Status::Alive)], &[grown]), []);
     }
 
     fn record(node: &NodeId, status: Status) -> Record {
@@ -365,7 +365,7 @@ mod tests {
         // Another member still lists it up, which says nothing about whether this client reaches it.
         directory.receive(&table(&ids[0], &ids[..2]), 0.0);
         assert_eq!(statuses(&directory), vec![Status::Alive, Status::Dead]);
-        assert!(directory.transitions().is_empty());
+        assert_eq!(directory.transitions(), []);
 
         directory.receive(&table(&ids[1], &ids[..2]), 0.0);
 

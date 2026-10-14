@@ -662,7 +662,7 @@ mod tests {
         assert!(!unlist(&mut held, 1)?);
         assert_eq!(Bucket::of(&held).entries.len(), 1);
         assert!(unlist(&mut held, 2)?);
-        assert!(Bucket::of(&held).entries.is_empty());
+        assert_eq!(Bucket::of(&held).entries, []);
         Ok(())
     }
 
@@ -678,7 +678,7 @@ mod tests {
         assert!(!unlist(&mut held, 1)?);
         assert!(unlist(&mut held, 2)?);
         assert!(!unlist(&mut held, 2)?);
-        assert!(Bucket::of(&held).entries.is_empty());
+        assert_eq!(Bucket::of(&held).entries, []);
         Ok(())
     }
 
