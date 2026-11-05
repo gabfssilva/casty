@@ -1181,9 +1181,10 @@ impl Activation {
             key: self.key.clone(),
             hold: run.hold,
         };
+        let depth = self.node.settings.reentrancy_depth;
         match &run.current {
-            Some(current) if !run.answered => current.chain.then(link),
-            _ => Chain::default().then(link),
+            Some(current) if !run.answered => current.chain.then(link, depth),
+            _ => Chain::default().then(link, depth),
         }
     }
 
@@ -2404,9 +2405,10 @@ impl Activation {
                 key: slf.get().key.clone(),
                 hold: state.hold,
             };
+            let depth = slf.get().node.settings.reentrancy_depth;
             match &state.current {
-                Some(current) => current.chain.then(link),
-                None => Chain::default().then(link),
+                Some(current) => current.chain.then(link, depth),
+                None => Chain::default().then(link, depth),
             }
         };
         let Target::Entity { actor, key } = &ask.to else {

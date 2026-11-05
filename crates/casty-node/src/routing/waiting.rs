@@ -18,12 +18,6 @@ use tokio::time::Instant;
 
 use super::wire::{Cancel, Routed};
 
-/// How many messages a node keeps at most.
-pub const LIMIT: usize = 100_000;
-
-/// How often a node looks again at what waits, for what is due to go and what is past its deadline.
-const TICK: Duration = Duration::from_millis(10);
-
 #[derive(Debug)]
 struct Entry {
     routed: Routed,
@@ -48,17 +42,20 @@ pub struct Waiting {
     keys: BTreeMap<(String, String), VecDeque<Entry>>,
     count: usize,
     limit: usize,
+    /// How often all of it is looked at again, for what is due to go and what is past its deadline.
+    every: Duration,
     /// When all of it was last looked at.
     looked: Option<Instant>,
 }
 
 impl Waiting {
     #[must_use]
-    pub fn new(limit: usize) -> Self {
+    pub fn new(limit: usize, every: Duration) -> Self {
         Self {
             keys: BTreeMap::new(),
             count: 0,
             limit,
+            every,
             looked: None,
         }
     }
@@ -67,6 +64,12 @@ impl Waiting {
     #[must_use]
     pub fn holds(&self, actor: &str, key: &str) -> bool {
         self.keys.contains_key(&(actor.to_owned(), key.to_owned()))
+    }
+
+    /// How many messages may wait at most.
+    #[must_use]
+    pub fn limit(&self) -> usize {
+        self.limit
     }
 
     /// Whether `limit` messages wait already, so that no more may.
@@ -157,12 +160,12 @@ impl Waiting {
         self.looked = Some(now);
     }
 
-    /// When to look at every key again: a tick after the last look, and never while nothing waits.
+    /// When to look at every key again: `every` after the last look, and never while nothing waits.
     #[must_use]
     pub fn due(&self) -> Option<Instant> {
         self.looked
             .filter(|_| self.count > 0)
-            .map(|looked| looked + TICK)
+            .map(|looked| looked + self.every)
     }
 }
 
@@ -181,6 +184,7 @@ mod tests {
 
     const ACTOR: &str = "tests.app:account";
     const TIMEOUT: Duration = Duration::from_secs(5);
+    const EVERY: Duration = Duration::from_millis(10);
 
     fn node(seed: u64) -> NodeId {
         Rolls::seeded(seed).nodes(1).remove(0)
@@ -207,7 +211,7 @@ mod tests {
     fn what_waits_for_a_key_stays_while_the_key_holds_it_and_goes_in_order_once_it_does_not() {
         let origin = &node(71);
         let now = Instant::now();
-        let mut waiting = Waiting::new(10);
+        let mut waiting = Waiting::new(10, EVERY);
         for id in 0..3 {
             waiting.keep(routed(origin, "acc-1", id), now, Duration::ZERO, TIMEOUT);
         }
@@ -230,7 +234,7 @@ mod tests {
         let origin = &node(72);
         let now = Instant::now();
         let delay = Duration::from_millis(40);
-        let mut waiting = Waiting::new(10);
+        let mut waiting = Waiting::new(10, EVERY);
         waiting.keep(routed(origin, "acc-1", 1), now, delay, TIMEOUT);
         waiting.keep(routed(origin, "acc-1", 2), now, Duration::ZERO, TIMEOUT);
 
@@ -248,7 +252,7 @@ mod tests {
     fn a_message_past_its_deadline_leaves_even_while_its_key_holds_it() {
         let origin = &node(73);
         let now = Instant::now();
-        let mut waiting = Waiting::new(10);
+        let mut waiting = Waiting::new(10, EVERY);
         waiting.keep(routed(origin, "acc-1", 1), now, Duration::ZERO, TIMEOUT);
         waiting.keep(
             routed(origin, "acc-1", 2),
@@ -268,7 +272,7 @@ mod tests {
     fn a_cancellation_drops_the_request_it_names_and_leaves_the_rest() {
         let origin = &node(74);
         let now = Instant::now();
-        let mut waiting = Waiting::new(10);
+        let mut waiting = Waiting::new(10, EVERY);
         for id in 1..=2 {
             waiting.keep(routed(origin, "acc-1", id), now, Duration::ZERO, TIMEOUT);
         }
@@ -294,7 +298,7 @@ mod tests {
     fn nothing_more_waits_once_the_limit_does_and_a_look_is_due_a_tick_after_the_last() {
         let origin = &node(75);
         let now = Instant::now();
-        let mut waiting = Waiting::new(2);
+        let mut waiting = Waiting::new(2, EVERY);
         assert_eq!(waiting.due(), None);
         assert!(!waiting.full());
         for id in 0..2 {

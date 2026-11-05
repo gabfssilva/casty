@@ -2,15 +2,13 @@
 //!
 //! Events go as gossip to eager peers and as an announcement to lazy ones. A duplicate gossip prunes its sender to
 //! lazy. An event announced and not received within `graft_after` grafts an announcer back to eager; the announcers
-//! are asked in turn until the event arrives. Instants are monotonic seconds passed by the caller.
+//! are asked in turn until the event arrives, and an event is forgotten `forget_after` after it was seen. Instants are
+//! monotonic seconds passed by the caller.
 
 use std::collections::HashMap;
 
 use super::table::Record;
 use crate::node::{NodeId, Send};
-
-/// An event forgotten a minute after it was seen.
-const FORGET_AFTER: f64 = 60.0;
 
 /// Which event this is: the node that broadcast it, and how many it had broadcast before.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -51,6 +49,9 @@ struct Missing {
 pub struct Broadcaster {
     node: NodeId,
     graft_after: f64,
+    /// How long an event is remembered after it was seen, and an announced one asked for: a copy that arrives later
+    /// is a new event.
+    forget_after: f64,
     sequence: u64,
     /// Peers in the order they were learned, each eager or lazy. Small enough that a list is the right shape.
     peers: Vec<(NodeId, bool)>,
@@ -60,10 +61,11 @@ pub struct Broadcaster {
 
 impl Broadcaster {
     #[must_use]
-    pub fn new(node: NodeId, graft_after: f64) -> Self {
+    pub fn new(node: NodeId, graft_after: f64, forget_after: f64) -> Self {
         Self {
             node,
             graft_after,
+            forget_after,
             sequence: 0,
             peers: Vec::new(),
             seen: HashMap::new(),
@@ -183,12 +185,12 @@ impl Broadcaster {
         }
     }
 
-    /// Send the grafts that are due, and forget events older than a minute.
+    /// Send the grafts that are due, and forget events seen longer than `forget_after` ago.
     pub fn tick(&mut self, now: f64) -> Vec<Send<Broadcast>> {
         let mut grafts = Vec::new();
         let mut asked: Vec<NodeId> = Vec::new();
         self.missing.retain(|(_, missing)| {
-            !missing.announcers.is_empty() && now - missing.since < FORGET_AFTER
+            !missing.announcers.is_empty() && now - missing.since < self.forget_after
         });
         for (event, missing) in &mut self.missing {
             if missing.deadline <= now {
@@ -205,7 +207,8 @@ impl Broadcaster {
         for announcer in &asked {
             self.mark(announcer, true);
         }
-        self.seen.retain(|_, seen| now - seen.at < FORGET_AFTER);
+        self.seen
+            .retain(|_, seen| now - seen.at < self.forget_after);
         grafts
     }
 
@@ -244,6 +247,7 @@ mod tests {
     use crate::rolls::Rolls;
 
     const GRAFT_AFTER: f64 = 0.5;
+    const FORGET_AFTER: f64 = 60.0;
 
     fn types() -> BTreeSet<String> {
         BTreeSet::from(["account".to_owned()])
@@ -268,7 +272,7 @@ mod tests {
             let ids = rolls.nodes(size);
             let mut broadcasters: Vec<Broadcaster> = ids
                 .iter()
-                .map(|node| Broadcaster::new(node.clone(), GRAFT_AFTER))
+                .map(|node| Broadcaster::new(node.clone(), GRAFT_AFTER, FORGET_AFTER))
                 .collect();
             for (a, b) in bridgeless(size, &mut rolls) {
                 broadcasters[a].neighbor_up(ids[b].clone());
@@ -428,7 +432,7 @@ mod tests {
     #[test]
     fn a_duplicate_gossip_prunes_the_peer_that_sent_it() {
         let ids = Rolls::seeded(3).nodes(3);
-        let mut broadcaster = Broadcaster::new(ids[0].clone(), GRAFT_AFTER);
+        let mut broadcaster = Broadcaster::new(ids[0].clone(), GRAFT_AFTER, FORGET_AFTER);
         broadcaster.neighbor_up(ids[1].clone());
         broadcaster.neighbor_up(ids[2].clone());
         let event = Broadcast::Gossip {
@@ -465,7 +469,7 @@ mod tests {
     #[test]
     fn an_announcement_that_is_not_followed_by_the_event_grafts_its_announcer() {
         let ids = Rolls::seeded(4).nodes(2);
-        let mut broadcaster = Broadcaster::new(ids[0].clone(), GRAFT_AFTER);
+        let mut broadcaster = Broadcaster::new(ids[0].clone(), GRAFT_AFTER, FORGET_AFTER);
         broadcaster.neighbor_up(ids[1].clone());
         let id = EventId {
             node: ids[1].clone(),

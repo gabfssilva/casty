@@ -3,6 +3,7 @@
 Each is a `casty.Store`, which the nodes of a cluster call from their own threads, without the event loop.
 """
 
+from datetime import timedelta
 from typing import Self
 
 __all__ = ["SQL"]
@@ -30,9 +31,26 @@ class SQL:
         The database, by the scheme of its driver: `postgres://user:password@host/database`,
         `mysql://user:password@host/database`, or `sqlite://path?mode=rwc` for a file made when it does not exist.
         Not `sqlite::memory:`: each connection of the store would open a database of its own.
+    max_connections
+        The most connections open at once, which bounds how many calls run against the database together.
+    acquire_timeout
+        How long a call waits for a connection while all of them are in use, before it raises `Unavailable`.
+    idle_timeout
+        How long a connection stays open unused before it is closed. `None` keeps it.
+    max_lifetime
+        How long a connection stays open before it is closed and replaced. `None` keeps it.
     """
 
-    def __init__(self, url: str, /) -> None: ...
+    def __init__(
+        self,
+        url: str,
+        /,
+        *,
+        max_connections: int = 10,
+        acquire_timeout: timedelta = timedelta(seconds=30),
+        idle_timeout: timedelta | None = timedelta(minutes=10),
+        max_lifetime: timedelta | None = timedelta(minutes=30),
+    ) -> None: ...
     async def __aenter__(self) -> Self: ...
     async def __aexit__(self, *exc: object) -> None: ...
     async def load(self, actor: str, key: str, /) -> tuple[bytes, bytes | None] | None:

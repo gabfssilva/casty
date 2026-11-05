@@ -12,6 +12,7 @@
 //! that save kept, and goes again when its own is later. What differs between the databases is the table, whose binary
 //! types each names its own way, and the placeholders of PostgreSQL.
 
+use core::time::Duration;
 use std::fmt::Write as _;
 
 use blake2::digest::consts::U32;
@@ -45,6 +46,27 @@ const SQLITE_TABLE: &str = "CREATE TABLE IF NOT EXISTS casty_records (
     id BLOB PRIMARY KEY, actor TEXT NOT NULL, actor_key TEXT NOT NULL, version BLOB NOT NULL, state BLOB
 ) WITHOUT ROWID";
 
+/// The connections a store keeps to its database: at most `max_connections` at once, each waited for up to
+/// `acquire_timeout` when all are in use, closed after `idle_timeout` unused or `max_lifetime` open, never when `None`.
+#[derive(Debug, Clone, Copy)]
+pub struct Pool {
+    pub max_connections: u32,
+    pub acquire_timeout: Duration,
+    pub idle_timeout: Option<Duration>,
+    pub max_lifetime: Option<Duration>,
+}
+
+impl Default for Pool {
+    fn default() -> Self {
+        Self {
+            max_connections: 10,
+            acquire_timeout: Duration::from_secs(30),
+            idle_timeout: Some(Duration::from_secs(10 * 60)),
+            max_lifetime: Some(Duration::from_secs(30 * 60)),
+        }
+    }
+}
+
 /// The records of one database, reached through a pool of connections to it.
 #[derive(Debug)]
 pub struct Sql {
@@ -75,11 +97,17 @@ impl Statements {
 }
 
 impl Sql {
-    /// Connect to the database `url` names, and make its table when it has none. A URL whose scheme names none of
-    /// the databases this knows is a `Configuration` error.
-    pub async fn open(url: &str) -> Result<Self, Error> {
+    /// Connect to the database `url` names over the connections `pool` says, and make its table when it has none. A
+    /// URL whose scheme names none of the databases this knows is a `Configuration` error.
+    pub async fn open(url: &str, pool: Pool) -> Result<Self, Error> {
         install_default_drivers();
-        let pool = AnyPoolOptions::new().connect(url).await?;
+        let pool = AnyPoolOptions::new()
+            .max_connections(pool.max_connections)
+            .acquire_timeout(pool.acquire_timeout)
+            .idle_timeout(pool.idle_timeout)
+            .max_lifetime(pool.max_lifetime)
+            .connect(url)
+            .await?;
         match Self::over(&pool).await {
             Ok(statements) => Ok(Self { pool, statements }),
             Err(failed) => {
@@ -252,7 +280,9 @@ mod tests {
     /// A store on a new file named after `test`, and the file.
     async fn opened(test: &str) -> (Scratch, Sql) {
         let file = Scratch::new(test);
-        let store = Sql::open(&file.url()).await.expect("a new file opens");
+        let store = Sql::open(&file.url(), Pool::default())
+            .await
+            .expect("a new file opens");
         (file, store)
     }
 
@@ -344,7 +374,7 @@ mod tests {
             let mut opening = JoinSet::new();
             for _ in 0..16 {
                 let url = url.clone();
-                opening.spawn(async move { Sql::open(&url).await });
+                opening.spawn(async move { Sql::open(&url, Pool::default()).await });
             }
             while let Some(opened) = opening.join_next().await {
                 let store = opened
@@ -357,7 +387,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_url_of_another_database_is_refused() {
-        let refused = Sql::open("redis://localhost").await.unwrap_err();
+        let refused = Sql::open("redis://localhost", Pool::default())
+            .await
+            .unwrap_err();
         assert!(matches!(refused, Error::Configuration(_)), "{refused}");
     }
 

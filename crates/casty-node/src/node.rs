@@ -42,7 +42,7 @@ use crate::replication::service::{
 };
 use crate::replication::wire::{self as replication};
 use crate::routing::service::{Decision, Place, Routing, cancelling, refuse};
-use crate::routing::waiting::{self, LIMIT, Waiting};
+use crate::routing::waiting::{self, Waiting};
 use crate::routing::wire::{self as routing, Answer, Cancel, Routed};
 
 const MEMBERSHIP: &str = "membership";
@@ -82,10 +82,23 @@ pub struct Cluster {
     pub limits: Limits,
     /// How long an activation or a write waits for the replicas of its key, and a message for an owner that takes it.
     pub write_timeout: core::time::Duration,
-    /// How long a node waits before asking again for what another one owes it.
-    pub backoff: Backoff,
+    /// How long a node waits before asking again for a range another one owes it, a little longer each time.
+    pub handoff_retry: Backoff,
     /// How long a node that is leaving waits for the nodes that replicate its keys now to take them.
     pub leave_timeout: core::time::Duration,
+    /// How long taking a key over waits for every replica that is not dead before it decides with the ones that
+    /// answered, if they are a read quorum; short of one, it waits on for the quorum alone.
+    pub replica_grace: core::time::Duration,
+    /// How long taking a key over waits before it promises again: after another owner fenced it, or while a replica
+    /// that answered is still receiving the range of the key.
+    pub replica_retry: core::time::Duration,
+    /// How long a message the node it went to sent back waits before it goes again, a little longer each time.
+    pub reroute: Backoff,
+    /// How often the messages a node holds for their keys are looked at again.
+    pub recheck_every: core::time::Duration,
+    /// How many messages a node holds at most, for keys whose range has not arrived or sent back to it; past that it
+    /// refuses them.
+    pub hold_limit: usize,
 }
 
 impl core::fmt::Debug for Cluster {
@@ -100,6 +113,19 @@ impl core::fmt::Debug for Cluster {
 }
 
 impl Cluster {
+    /// The replication of the node `id`. A tombstone lingers as long as a handover is given: an older copy of the key
+    /// it fences may be on its way to a replica for that long.
+    fn replication(&self, id: NodeId) -> Replication {
+        Replication::new(
+            id,
+            self.limits.message - ENVELOPE,
+            self.write_timeout,
+            self.leave_timeout,
+            self.replica_grace,
+            self.replica_retry,
+        )
+    }
+
     #[must_use]
     pub fn at(bind: &str) -> Self {
         Self {
@@ -115,8 +141,17 @@ impl Cluster {
             address_map: None,
             limits: Limits::default(),
             write_timeout: core::time::Duration::from_secs(5),
-            backoff: Backoff::default(),
+            handoff_retry: Backoff::default(),
             leave_timeout: core::time::Duration::from_secs(30),
+            replica_grace: core::time::Duration::from_millis(200),
+            replica_retry: core::time::Duration::from_millis(50),
+            reroute: Backoff {
+                first: core::time::Duration::from_millis(10),
+                limit: core::time::Duration::from_secs(1),
+                factor: 2.0,
+            },
+            recheck_every: core::time::Duration::from_millis(10),
+            hold_limit: 100_000,
         }
     }
 }
@@ -646,14 +681,7 @@ impl Running {
         };
         let (members, watching) = watch::channel(membership.members());
         let (entered, joining) = oneshot::channel();
-        // A tombstone lingers as long as a handover is given: an older copy of the key it fences may be on its way to
-        // a replica for that long.
-        let replication = Replication::new(
-            id.clone(),
-            cluster.limits.message - ENVELOPE,
-            cluster.write_timeout,
-            cluster.leave_timeout,
-        );
+        let replication = cluster.replication(id.clone());
         let node = Node {
             inner: Arc::new(Reach {
                 id,
@@ -677,9 +705,9 @@ impl Running {
                 handoff: Handoff::new(
                     node.id().clone(),
                     cluster.limits.message - ENVELOPE,
-                    cluster.backoff,
+                    cluster.handoff_retry,
                 ),
-                routing: Routing::new(node.id().clone()),
+                routing: Routing::new(node.id().clone(), cluster.reroute),
                 replication,
                 kinds,
                 running: BTreeSet::new(),
@@ -687,7 +715,7 @@ impl Running {
                 told: false,
                 standing: Standing::new(cluster.timings.dead_after / 2),
                 toward: HashMap::new(),
-                waiting: Waiting::new(LIMIT),
+                waiting: Waiting::new(cluster.hold_limit, cluster.recheck_every),
             },
             cluster.timings,
             members,
@@ -970,7 +998,10 @@ impl Held {
             self.toward.remove(id);
         }
         if self.waiting.full() {
-            let why = format!("{LIMIT} messages wait on this node for their keys already");
+            let why = format!(
+                "{} messages wait on this node for their keys already",
+                self.waiting.limit()
+            );
             self.act(sender, refuse(routed.command, Outcome::unreached, &why));
             return;
         }

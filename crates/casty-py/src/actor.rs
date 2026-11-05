@@ -78,11 +78,11 @@ fn durability(durable: &Bound<'_, PyAny>) -> PyResult<Durable> {
     }
 }
 
-/// A `casty.Backoff`, as a type or a system declares it.
-pub fn backed_off(backoff: &Bound<'_, PyAny>) -> PyResult<Backoff> {
+/// A `casty.Backoff`, as the parameter `name` declares it.
+pub fn backed_off(name: &str, backoff: &Bound<'_, PyAny>) -> PyResult<Backoff> {
     Ok(Backoff {
-        first: period("backoff.first", &backoff.getattr("first")?)?,
-        limit: period("backoff.limit", &backoff.getattr("limit")?)?,
+        first: period(&format!("{name}.first"), &backoff.getattr("first")?)?,
+        limit: period(&format!("{name}.limit"), &backoff.getattr("limit")?)?,
         factor: backoff.getattr("factor")?.extract()?,
     })
 }
@@ -410,7 +410,9 @@ pub fn actor(
         write_timeout: write_timeout
             .map(|value| period("write_timeout", value))
             .transpose()?,
-        backoff: backoff.map(backed_off).transpose()?,
+        backoff: backoff
+            .map(|backoff| backed_off("backoff", backoff))
+            .transpose()?,
         durable: durable
             .filter(|durable| !durable.is_none())
             .map(durability)

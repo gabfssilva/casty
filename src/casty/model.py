@@ -169,7 +169,9 @@ class Overlay:
     """Sizes and periods of the membership overlay.
 
     `join_walk` is how far a join is forwarded; `passive_walk` is how far a shuffle walks, and the point of a join walk
-    where the new node enters passive views.
+    where the new node enters passive views. `shuffle_active` and `shuffle_passive` are how many nodes of each view a
+    shuffle carries, which is how fast passive views turn over. `forget_after` is how long a node remembers an event of
+    the broadcast after it saw it: a copy that arrives later is taken for a new event and passed on again.
     """
 
     active: int = 5
@@ -178,12 +180,68 @@ class Overlay:
     passive_walk: int = 3
     shuffle_every: timedelta = timedelta(seconds=10)
     graft_after: timedelta = timedelta(milliseconds=500)
+    forget_after: timedelta = timedelta(minutes=1)
+    shuffle_active: int = 3
+    shuffle_passive: int = 4
 
     def __post_init__(self) -> None:
         if self.active < 1:
             raise ValueError(f"overlay.active is {self.active}: a node with no neighbor reaches nobody")
         if self.passive < self.active:
             raise ValueError(f"overlay.passive is {self.passive}, below overlay.active of {self.active}")
+        for name, count in (("shuffle_active", self.shuffle_active), ("shuffle_passive", self.shuffle_passive)):
+            if count < 0:
+                raise ValueError(f"overlay.{name} is {count}, and a shuffle carries no fewer than no node")
+        if self.shuffle_active + self.shuffle_passive < 1:
+            raise ValueError(
+                "overlay.shuffle_active and overlay.shuffle_passive are 0, and a shuffle of no node renews nothing"
+            )
+
+
+@dataclass(frozen=True)
+class Transport:
+    """Periods and buffers of the connections of a node or a client.
+
+    Attributes
+    ----------
+    dial
+        How long opening a TCP connection may take.
+    handshake
+        How long the TLS handshake and the exchange of hellos of a new connection may take, each, and how long an
+        orderly shutdown waits for what its connections still have to send.
+    keepalive_after
+        Silence on a connection after which it is pinged.
+    keepalive_timeout
+        How long a pinged connection has to answer before it is closed.
+    redial
+        Wait before dialing again an address the last dial to failed. It grows on each failure in a row, and each wait
+        is spread by `redial_jitter` either way.
+    redial_jitter
+        The part of each `redial` wait it is spread by either way, from 0 to 1, so that nodes that lost a peer at once
+        do not dial it again at once.
+    address_map_timeout
+        How long a dial waits for `address_map` to answer before it dials the advertised address as it is.
+    read_buffer
+        Bytes a connection reads from its socket at once, held for every connection.
+    """
+
+    dial: timedelta = timedelta(seconds=5)
+    handshake: timedelta = timedelta(seconds=5)
+    keepalive_after: timedelta = timedelta(seconds=15)
+    keepalive_timeout: timedelta = timedelta(seconds=5)
+    redial: Backoff = Backoff(first=timedelta(milliseconds=100), limit=timedelta(seconds=15))
+    redial_jitter: float = 0.25
+    address_map_timeout: timedelta = timedelta(seconds=5)
+    read_buffer: int = 256 * 1024
+
+    def __post_init__(self) -> None:
+        # Negated so that NaN, which no comparison holds for, is refused as well.
+        if not 0 <= self.redial_jitter <= 1:
+            raise ValueError(
+                f"transport.redial_jitter is {self.redial_jitter}, and a wait is spread by 0 to 1 of itself"
+            )
+        if self.read_buffer < 1:
+            raise ValueError(f"transport.read_buffer is {self.read_buffer}, and a connection reads at least a byte")
 
 
 @dataclass(frozen=True)
@@ -226,6 +284,30 @@ class Cluster:
         Period of the exchange of the whole member table with a random member.
     overlay
         Sizes and periods of the membership overlay.
+    transport
+        Periods of the connections.
+    forget_left_after
+        Time a member that left stays in the member table, so that an older record of it that arrives late does not
+        bring it back.
+    replica_grace
+        How long an activation, or a write to replicas the ring just moved the key to, waits for every replica that
+        is not `dead` before it decides with the ones that answered, if they are a read quorum. Short of one, it waits
+        on for the quorum alone while a replica that is not `dead` has not answered, until `write_timeout`; with all
+        of them answered, it fails with `Unavailable` at once.
+    replica_retry
+        How long an activation waits before it asks the replicas again: after another owner promised a later epoch,
+        or while a replica that answered is still receiving the range of the key.
+    reroute
+        Wait before a message goes again after the node it went to sent it back, the two placing its key apart. It
+        grows on each return, and the message fails once it has waited `write_timeout` in all.
+    recheck_every
+        How often a node looks again at the messages it holds: those for a key whose range has not arrived yet, and
+        those sent back, which go again once `reroute` says.
+    hold_limit
+        How many of those messages a node holds at most. One more fails with `Unavailable` at once.
+    handoff_retry
+        Wait before a node asks again for a range another node owes it, the copies of the keys the ring moved to it.
+        It grows on each try in a row that does not bring the range.
     """
 
     bind: str
@@ -242,9 +324,19 @@ class Cluster:
     remove_after: timedelta | None = timedelta(minutes=1)
     anti_entropy: timedelta = timedelta(seconds=30)
     overlay: Overlay = Overlay()
+    transport: Transport = Transport()
+    forget_left_after: timedelta = timedelta(minutes=1)
+    replica_grace: timedelta = timedelta(milliseconds=200)
+    replica_retry: timedelta = timedelta(milliseconds=50)
+    reroute: Backoff = Backoff(first=timedelta(milliseconds=10), limit=timedelta(seconds=1))
+    recheck_every: timedelta = timedelta(milliseconds=10)
+    hold_limit: int = 100_000
+    handoff_retry: Backoff = Backoff()
 
     def __post_init__(self) -> None:
         address("bind", self.bind)
+        if self.hold_limit < 1:
+            raise ValueError(f"hold_limit is {self.hold_limit}, and a node would refuse every message it holds")
         if self.advertise is not None:
             address("advertise", self.advertise)
         for seed in self.seeds:

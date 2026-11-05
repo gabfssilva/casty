@@ -356,10 +356,10 @@ fn read_command(reading: &mut Reading<'_>) -> Result<Command> {
     }
 }
 
-/// The callers of an `ask`, cut to the bound of a chain whatever the sender wrote.
+/// The callers of an `ask`, as many as the sender wrote: a body here cuts them to its own depth when it asks on.
 fn read_chain(reading: &mut Reading<'_>) -> Result<Chain> {
     let count = reading.items()?;
-    let mut links = Vec::with_capacity(count.min(casty_core::chain::BOUND));
+    let mut links = Vec::new();
     for _ in 0..count {
         let fields = reading.fields()?;
         let mut actor = None;
@@ -436,7 +436,7 @@ fn read_outcome(reading: &mut Reading<'_>) -> Result<Outcome> {
 
 #[cfg(test)]
 mod tests {
-    use casty_core::chain::{BOUND, Chain, Link};
+    use casty_core::chain::{Chain, Link};
     use casty_core::mailbox::{Command, Deliver, Start};
     use casty_core::node::{NodeId, Target};
     use casty_core::outcome::Outcome;
@@ -449,14 +449,20 @@ mod tests {
         routed_size,
     };
 
+    /// The depth the chains of these tests are cut to.
+    const DEPTH: usize = 16;
+
     /// A chain of `hops` callers, each a key of its own.
     fn chained(hops: u64) -> Chain {
         (0..hops).fold(Chain::default(), |chain, hop| {
-            chain.then(Link {
-                actor: "tests.app:hop".to_owned(),
-                key: format!("h-{hop:04}"),
-                hold: u64::MAX - hop,
-            })
+            chain.then(
+                Link {
+                    actor: "tests.app:hop".to_owned(),
+                    key: format!("h-{hop:04}"),
+                    hold: u64::MAX - hop,
+                },
+                DEPTH,
+            )
         })
     }
 
@@ -523,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chain_costs_nothing_when_empty_and_stays_within_its_bound_however_deep() {
+    fn a_chain_costs_nothing_when_empty_and_stays_within_its_depth_however_deep() {
         let ids = Rolls::seeded(63).nodes(1);
         let routed = |chain: Chain| {
             encode(&Message::Routed(Routed {
@@ -539,12 +545,12 @@ mod tests {
             }))
             .len()
         };
-        let bound = u64::try_from(BOUND).unwrap();
+        let bound = u64::try_from(DEPTH).unwrap();
         let full = routed(chained(bound));
         assert!(routed(chained(1)) > routed(Chain::default()));
         assert_eq!(routed(chained(bound * 10)), full);
 
-        // A sender that writes more than the bound is read as its most recent callers only.
+        // A sender that writes a deeper chain than this node asks with is read as it wrote it.
         let mut writer = Writer::new();
         writer.tagged("Routed", 3);
         writer.name("command");
@@ -558,8 +564,8 @@ mod tests {
         writer.name("reply");
         writer.nil();
         writer.name("chain");
-        writer.items(BOUND + 2);
-        for hop in 0..BOUND + 2 {
+        writer.items(DEPTH + 2);
+        for hop in 0..DEPTH + 2 {
             writer.fields(3);
             writer.name("actor");
             writer.text("a");
@@ -577,10 +583,10 @@ mod tests {
             ..
         })) = decode(&writer.finish())
         else {
-            panic!("a chain longer than the bound is still a message");
+            panic!("a chain deeper than this node asks with is still a message");
         };
-        assert_eq!(deliver.chain.links().len(), BOUND);
-        assert_eq!(deliver.chain.links()[0].key, "2");
+        assert_eq!(deliver.chain.links().len(), DEPTH + 2);
+        assert_eq!(deliver.chain.links()[0].key, "0");
     }
 
     #[test]
@@ -636,7 +642,7 @@ mod tests {
                     key: "acc-1".to_owned(),
                     message: payload.clone(),
                     reply: Some(reply.clone()),
-                    chain: chained(u64::try_from(BOUND).unwrap()),
+                    chain: chained(u64::try_from(DEPTH).unwrap()),
                 }),
                 Command::Deliver(Deliver {
                     actor: "tests.app:account".to_owned(),

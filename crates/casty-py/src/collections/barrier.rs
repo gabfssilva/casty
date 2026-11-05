@@ -11,7 +11,8 @@ const GENERATION: &str = "generation";
 const PENDING: &str = "pending";
 const COMPLETED: &str = "completed";
 
-/// How long a generation that was released is remembered, so that a party asking again hears it went through.
+/// How long a generation that was released is remembered, so that a party asking again hears it went through, when the
+/// arrival names no time of its own; the facade sends `release_memory` of its `Collections`.
 const REMEMBERED: f64 = 30.0;
 
 #[derive(Debug)]
@@ -44,7 +45,7 @@ impl Native for Barrier {
         }
         let mut waiting = None;
         if let Some(message) = given.message() {
-            let (mut id, mut parties, mut until) = (None, None, None);
+            let (mut id, mut parties, mut until, mut remember) = (None, None, None, None);
             let (tag, reply) = fields(message, |name, reading| {
                 match name {
                     "id" => id = Some(uuid(reading)?),
@@ -54,6 +55,7 @@ impl Native for Barrier {
                         );
                     }
                     "until" => until = Some(reading.float()?),
+                    "remember" => remember = Some(reading.float()?),
                     _ => reading.skip()?,
                 }
                 Ok(())
@@ -66,7 +68,12 @@ impl Native for Barrier {
                     } else if until <= at {
                         turn.replies.push((reply, truth(false)));
                     } else {
-                        let party = Party { id, reply, until };
+                        let party = Party {
+                            id,
+                            reply,
+                            until,
+                            remember: remember.unwrap_or(REMEMBERED),
+                        };
                         match state.pending.iter().position(|held| held.id == id) {
                             Some(at) => state.pending[at] = party,
                             None => state.pending.push(party),
@@ -83,7 +90,7 @@ impl Native for Barrier {
                                     .cloned()
                                     .chain(state.pending.iter().map(|party| Completed {
                                         id: party.id,
-                                        until: party.until.max(at + REMEMBERED),
+                                        until: party.until.max(at + party.remember),
                                     }))
                                     .collect(),
                                 pending: Vec::new(),
@@ -126,6 +133,8 @@ struct Party {
     id: [u8; 16],
     reply: Target,
     until: f64,
+    /// How long its release is remembered once the barrier lets it through.
+    remember: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -179,11 +188,13 @@ fn read_pending(page: &[u8]) -> Result<Vec<Party>> {
         let mut id = None;
         let mut reply = None;
         let mut until = 0.0;
+        let mut remember = REMEMBERED;
         for _ in 0..fields {
             match reading.name()? {
                 "id" => id = Some(uuid(&mut reading)?),
                 "reply_to" => reply = Some(reading.target()?),
                 "until" => until = reading.float()?,
+                "remember" => remember = reading.float()?,
                 _ => reading.skip()?,
             }
         }
@@ -191,6 +202,7 @@ fn read_pending(page: &[u8]) -> Result<Vec<Party>> {
             id: id.ok_or(Malformed::Truncated)?,
             reply: reply.ok_or(Malformed::Truncated)?,
             until,
+            remember,
         });
     }
     Ok(parties)
@@ -223,13 +235,15 @@ fn saved(state: &State) -> Pages {
     let mut pending = Writer::new();
     pending.items(state.pending.len());
     for party in &state.pending {
-        pending.fields(3);
+        pending.fields(4);
         pending.name("id");
         pending.bytes(&party.id);
         pending.name("reply_to");
         pending.target(&party.reply);
         pending.name("until");
         pending.float(party.until);
+        pending.name("remember");
+        pending.float(party.remember);
     }
     let mut completed = Writer::new();
     completed.items(state.completed.len());

@@ -13,7 +13,6 @@ import pytest
 from casty import ActorFailed, ActorSystem, Collections, Ref
 from casty import collections as kinds
 from casty.collections import (
-    _PROBES,
     MISSING,
     Binding,
     ConfigurationError,
@@ -86,13 +85,13 @@ def describe_dict_entries() -> None:
     async def it_serializes_only_the_changed_value_even_with_one_index_shard() -> None:
         async with ActorSystem() as system:
             writes = system._writes()
-            entries = Dict(binding(system), str, str)
+            entries = Dict(binding(system), str, str, 512)
             values = {str(i): f"value-{i}:" + "x" * 1000 for i in range(20)}
             for key, value in values.items():
                 await entries.put(key, value)
             writes.payloads.clear()
 
-            await Dict(binding(system), str, str).put("0", "updated")
+            await Dict(binding(system), str, str, 512).put("0", "updated")
 
             assert not any(value.encode() in payload for value in values.values() for payload in writes.payloads)
             assert await entries.get("0") == "updated"
@@ -101,25 +100,25 @@ def describe_dict_entries() -> None:
     async def it_drops_a_listing_whose_value_was_never_saved_when_a_walk_finds_it() -> None:
         async with ActorSystem() as system:
             bound = binding(system)
-            entries = Dict(bound, str, str)
+            entries = Dict(bound, str, str, 512)
             await bound.ready()
             raw = Value(str, bound.system).dump("unfinished")
             # A put that listed its key and stopped before it sent the value again.
             listed = await bound.ref(entry.actor, f"key:{raw.hex()}").ask(entry.Put(b"", 0))
             assert listed > 0
-            await first_segment(bound).ask(table_segment.List(raw, listed))
+            await first_segment(bound).ask(table_segment.List(raw, listed, 512))
             assert list(await listings(bound)) == [raw]
 
             assert await entries.get("unfinished") == MISSING
             assert await entries.items() == []
             assert await listings(bound) == {}
-            await first_segment(bound).ask(table_segment.List(raw, listed))
+            await first_segment(bound).ask(table_segment.List(raw, listed, 512))
             # `size` counts listings and asks no entry: the listing counts until a scan drops it.
             assert await entries.size() == 1
             assert [pair async for pair in entries.scan()] == []
             assert await listings(bound) == {}
             assert await entries.size() == 0
-            await first_segment(bound).ask(table_segment.List(raw, listed))
+            await first_segment(bound).ask(table_segment.List(raw, listed, 512))
             await entries.clear()
             assert await listings(bound) == {}
             await entries.put("unfinished", "complete")
@@ -128,7 +127,7 @@ def describe_dict_entries() -> None:
     async def it_unlists_a_removed_key_and_lists_it_again_when_it_is_put_back() -> None:
         async with ActorSystem() as system:
             bound = binding(system)
-            entries = Dict(bound, str, str)
+            entries = Dict(bound, str, str, 512)
             raw = Value(str, bound.system).dump("key")
             await entries.put("key", "first")
             assert await entries.remove("key")
@@ -159,7 +158,7 @@ def describe_dict_entries() -> None:
         async with ActorSystem() as system:
             # 750 keys a shard, which splits each of them.
             bound = Binding(system, "dict", "many", replicas=3, write="majority", shards=2)
-            entries = Dict(bound, int, int)
+            entries = Dict(bound, int, int, 512)
             for i in range(1_500):
                 await entries.put(i, i)
             assert await entries.size() == 1_500
@@ -174,7 +173,7 @@ def describe_dict_entries() -> None:
     async def it_keeps_a_key_put_back_listed_when_the_unlisting_of_its_removal_arrives_late() -> None:
         async with ActorSystem() as system:
             bound = binding(system)
-            entries = Dict(bound, str, str)
+            entries = Dict(bound, str, str, 512)
             raw = Value(str, bound.system).dump("key")
             await entries.put("key", "first")
             # The first half of a removal: the value is gone, and the unlisting has not reached the index yet.
@@ -190,12 +189,12 @@ def describe_dict_entries() -> None:
     async def it_keeps_a_key_listed_when_an_earlier_life_of_it_listed_under_a_clock_that_ran_ahead() -> None:
         async with ActorSystem() as system:
             bound = binding(system)
-            entries = Dict(bound, str, str)
+            entries = Dict(bound, str, str, 512)
             await bound.ready()
             raw = Value(str, bound.system).dump("key")
             # A life of the key on a node whose clock ran an hour ahead, removed with its unlisting still on the way.
             ahead = time.time_ns() // 1_000 + 3_600_000_000
-            await first_segment(bound).ask(table_segment.List(raw, ahead))
+            await first_segment(bound).ask(table_segment.List(raw, ahead, 512))
             await entries.put("key", "value")
             assert await first_segment(bound).ask(table_segment.Unlist(raw, ahead)) is False
             assert await entries.items() == [("key", "value")]
@@ -206,7 +205,7 @@ def describe_dict_entries() -> None:
         async with ActorSystem() as system:
             writes = system._writes()
             bound = binding(system)
-            entries = Dict(bound, str, str)
+            entries = Dict(bound, str, str, 512)
             writes.fail_on = Value(str, bound.system).dump("uncommitted")
             with pytest.raises(ActorFailed, match="value save failed"):
                 await entries.put("key", "uncommitted")
@@ -225,14 +224,14 @@ def describe_dict_entries() -> None:
     async def it_splits_a_shard_into_segments_and_finds_every_key_after() -> None:
         async with ActorSystem() as system:
             bound = Binding(system, "dict", "split", replicas=3, write="majority", shards=1)
-            entries = Dict(bound, int, int)
+            entries = Dict(bound, int, int, 512)
             for i in range(3_000):
                 await entries.put(i, i * 2)
             assert await bound.ref(table.actor).ask(table.Segments()) > 4
             assert await entries.size() == 3_000
             assert dict(await entries.items()) == {i: i * 2 for i in range(3_000)}
             # A facade that has not seen the splits reaches every key through the directory.
-            late = Dict(bound, int, int)
+            late = Dict(bound, int, int, 512)
             for i in range(0, 3_000, 2):
                 assert await late.remove(i)
             await late.put(-1, -2)
@@ -243,7 +242,7 @@ def describe_dict_entries() -> None:
     async def it_keeps_every_key_when_writers_split_the_index_at_once() -> None:
         async with ActorSystem() as system:
             bound = Binding(system, "dict", "busy", replicas=3, write="majority", shards=1)
-            writers = [Dict(bound, int, int) for _ in range(8)]
+            writers = [Dict(bound, int, int, 512) for _ in range(8)]
             keys = 4_000
 
             async def fill(first: int) -> None:
@@ -263,7 +262,7 @@ def describe_dict_entries() -> None:
     ) -> None:
         async with ActorSystem() as system:
             bound = Binding(system, "dict", "counted", replicas=3, write="majority", shards=16)
-            entries = Dict(bound, int, int)
+            entries = Dict(bound, int, int, 512)
             for i in range(10_000):
                 await entries.put(i, i)
             segments = [await bound.ref(table.actor, shard).ask(table.Segments()) for shard in range(bound.shards)]
@@ -277,8 +276,8 @@ def describe_dict_entries() -> None:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         async with ActorSystem() as system:
-            bound = Binding(system, "dict", "paged", replicas=3, write="majority", shards=1)
-            entries = Dict(bound, int, int)
+            bound = Binding(system, "dict", "paged", replicas=3, write="majority", shards=1, probes=16)
+            entries = Dict(bound, int, int, 512)
             for i in range(3_000):
                 await entries.put(i, -i)
             sizes = [len(page) for page in await pages(bound)]
@@ -301,16 +300,16 @@ def describe_dict_entries() -> None:
             asked = counted(monkeypatch, "entry", "table_segment")
             scan = entries.scan()
             first = await anext(scan)
-            # Only the first segment was read, and every key of it was asked for its value, `_PROBES` at a time.
+            # Only the first segment was read, and every key of it was asked for its value, `probes` at a time.
             assert asked["table_segment.Scan"] == 1
             assert asked["entry.Get"] == sizes[0]
-            assert peak == min(_PROBES, sizes[0])
+            assert peak == min(16, sizes[0])
             rest = [pair async for pair in scan]
             assert dict([first, *rest]) == {i: -i for i in range(3_000)}
             assert len(rest) == 2_999
             assert asked["table_segment.Scan"] == len(sizes)
             assert asked["entry.Get"] == 3_000
-            assert peak == min(_PROBES, max(sizes))
+            assert peak == min(16, max(sizes))
 
             await entries.clear()
             assert await listings(bound) == {}
@@ -319,7 +318,7 @@ def describe_dict_entries() -> None:
     async def it_scans_each_key_there_throughout_once_while_splits_move_keys_around_it() -> None:
         async with ActorSystem() as system:
             bound = Binding(system, "dict", "moving", replicas=3, write="majority", shards=1)
-            entries = Dict(bound, int, int)
+            entries = Dict(bound, int, int, 512)
             for i in range(600):
                 await entries.put(i, i)
             assert await bound.ref(table.actor).ask(table.Segments()) == 2
@@ -340,7 +339,7 @@ def describe_dict_entries() -> None:
     async def it_writes_as_much_to_add_a_key_to_a_large_dict_as_to_a_small_one() -> None:
         async with ActorSystem() as system:
             writes = system._writes()
-            entries = Dict(Binding(system, "dict", "flat", replicas=3, write="majority", shards=1), int, int)
+            entries = Dict(Binding(system, "dict", "flat", replicas=3, write="majority", shards=1), int, int, 512)
 
             async def written(keys: range) -> int:
                 total = 0
@@ -388,7 +387,7 @@ def describe_dict_entries() -> None:
             raw = Value(str, old.system).dump("key")
             value = Value(str, old.system).dump("saved")
             segment = old.ref(table_segment.actor, f"{old.shard(raw)}.0")
-            await segment.ask(table_segment.Add(raw, value))
+            await segment.ask(table_segment.Add(raw, value, 512))
 
             with pytest.raises(ConfigurationError):
                 await Collections(system).dict("old", key=str, value=str).get("key")
@@ -420,7 +419,7 @@ def describe_deleted_entries() -> None:
     async def it_keeps_no_state_of_the_keys_it_removed() -> None:
         async with ActorSystem() as system:
             bound = binding(system)
-            entries = Dict(bound, int, int)
+            entries = Dict(bound, int, int, 512)
             for i in range(10_000):
                 await entries.put(i, i)
             assert len(await stored_entries(system, bound)) == 10_000
@@ -438,7 +437,7 @@ def describe_deleted_entries() -> None:
     async def it_keeps_no_entry_for_a_key_that_was_only_read() -> None:
         async with ActorSystem(idle_after=timedelta(milliseconds=100)) as system:
             bound = binding(system)
-            entries = Dict(bound, str, str)
+            entries = Dict(bound, str, str, 512)
             assert await entries.get("never") == MISSING
             assert not await entries.contains("never")
 
@@ -451,7 +450,7 @@ def describe_deleted_entries() -> None:
         async with Harness.start(3) as harness:
             system = harness.nodes[0].system
             bound = Binding(system, "dict", "removed", replicas=3, write="majority", shards=4)
-            entries = Dict(bound, int, int)
+            entries = Dict(bound, int, int, 512)
             gate = asyncio.Semaphore(200)
 
             async def cycle(i: int) -> None:

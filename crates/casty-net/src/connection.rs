@@ -18,8 +18,6 @@ use crate::handshake::{self, Message};
 use crate::limits::Limits;
 use crate::mux::{CONTROL, MESSAGES, Mux, REPLICATION, Record};
 
-const CHUNK: usize = 256 * 1024;
-
 /// A socket, with or without TLS on top of it.
 pub trait Socket: AsyncRead + AsyncWrite + Unpin + Send + core::fmt::Debug + 'static {}
 
@@ -151,7 +149,7 @@ impl Greeting {
 
     /// The next handshake message from the peer. Frames after it stay buffered for the connection.
     pub async fn hear(&mut self) -> Result<Message, Broken> {
-        let mut buffer = vec![0_u8; CHUNK];
+        let mut buffer = vec![0_u8; self.limits.read_buffer];
         loop {
             while let Some(frame) = self.frames.frame()? {
                 if matches!(frame, Frame::GoAway) {
@@ -319,7 +317,7 @@ impl Connection {
         inbound: &mpsc::UnboundedSender<Incoming>,
         handle: &Arc<Connection>,
     ) -> Result<(), Broken> {
-        let mut buffer = vec![0_u8; CHUNK];
+        let mut buffer = vec![0_u8; limits.read_buffer];
         loop {
             loop {
                 let frame = {

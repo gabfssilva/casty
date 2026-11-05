@@ -13,14 +13,6 @@ use casty_net::pool::Target as Destination;
 
 use super::wire::{Cancel, Message, Routed};
 
-/// How long a command that came back waits before it goes again. The two nodes see the table apart, and the change
-/// that set them apart reaches the one behind within a few round trips.
-const RETRY: Backoff = Backoff {
-    first: Duration::from_millis(10),
-    limit: Duration::from_secs(1),
-    factor: 2.0,
-};
-
 /// Where a key is, as this node routes its messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Place {
@@ -71,14 +63,18 @@ pub enum Decision {
 #[derive(Debug)]
 pub struct Routing {
     node: NodeId,
+    /// How long a command that came back waits before it goes again. The two nodes see the table apart, and the
+    /// change that set them apart reaches the one behind within a few round trips.
+    reroute: Backoff,
     pub stopped: bool,
 }
 
 impl Routing {
     #[must_use]
-    pub fn new(node: NodeId) -> Self {
+    pub fn new(node: NodeId, reroute: Backoff) -> Self {
         Self {
             node,
+            reroute,
             stopped: false,
         }
     }
@@ -159,7 +155,7 @@ impl Routing {
         if self.stopped {
             return self.route(routed, place);
         }
-        if waited(routed.attempt, timeout) > timeout {
+        if waited(&self.reroute, routed.attempt, timeout) > timeout {
             return refuse(
                 routed.command,
                 Outcome::unreached,
@@ -167,7 +163,7 @@ impl Routing {
             );
         }
         Decision::Wait {
-            after: delay(routed.attempt),
+            after: delay(&self.reroute, routed.attempt),
             routed: Routed {
                 attempt: routed.attempt.saturating_add(1),
                 ..routed
@@ -179,27 +175,27 @@ impl Routing {
 /// How long a command waits after coming back from its `attempt`.
 ///
 /// The attempt comes from the wire, so the delay is grown only until it stops growing.
-fn delay(attempt: u32) -> Duration {
-    let mut held = RETRY.first;
+fn delay(reroute: &Backoff, attempt: u32) -> Duration {
+    let mut held = reroute.first;
     for _ in 1..attempt {
-        if held >= RETRY.limit {
+        if held >= reroute.limit {
             break;
         }
-        held = RETRY.next(held);
+        held = reroute.next(held);
     }
     held
 }
 
 /// How long a command has waited in all once it has come back from its `attempt`, counted until it passes `timeout`.
-fn waited(attempt: u32, timeout: Duration) -> Duration {
-    let mut held = RETRY.first;
+fn waited(reroute: &Backoff, attempt: u32, timeout: Duration) -> Duration {
+    let mut held = reroute.first;
     let mut total = Duration::ZERO;
     for _ in 0..attempt {
         total += held;
         if total > timeout {
             break;
         }
-        held = RETRY.next(held);
+        held = reroute.next(held);
     }
     total
 }
@@ -233,6 +229,7 @@ pub fn refuse(command: Command, outcome: fn(&str, &str) -> Outcome, why: &str) -
 mod tests {
     use std::time::Duration;
 
+    use casty_core::backoff::Backoff;
     use casty_core::chain::Chain;
     use casty_core::mailbox::{Command, Deliver};
     use casty_core::node::{NodeId, Target};
@@ -243,6 +240,11 @@ mod tests {
     use crate::routing::wire::{Cancel, Message, Routed};
 
     const TIMEOUT: Duration = Duration::from_secs(5);
+    const REROUTE: Backoff = Backoff {
+        first: Duration::from_millis(10),
+        limit: Duration::from_secs(1),
+        factor: 2.0,
+    };
 
     fn cancel(caller: &NodeId) -> Cancel {
         Cancel {
@@ -275,7 +277,7 @@ mod tests {
     #[test]
     fn a_cancellation_that_arrives_is_handed_here_whoever_owns_the_key() {
         let ids = Rolls::seeded(64).nodes(2);
-        let mut routing = Routing::new(ids[0].clone());
+        let mut routing = Routing::new(ids[0].clone(), REROUTE);
         let held = cancel(&ids[1]);
         for place in [
             Place::Here,
@@ -313,7 +315,7 @@ mod tests {
     #[test]
     fn a_command_for_a_key_held_here_waits_and_one_for_a_key_elsewhere_goes_back() {
         let ids = Rolls::seeded(66).nodes(2);
-        let routing = Routing::new(ids[0].clone());
+        let routing = Routing::new(ids[0].clone(), REROUTE);
         let routed = bounced(&ids[1], 1);
 
         for decision in [
@@ -344,10 +346,10 @@ mod tests {
     #[test]
     fn a_command_that_came_back_waits_longer_each_time_until_it_has_waited_the_timeout() {
         let ids = Rolls::seeded(67).nodes(2);
-        let routing = Routing::new(ids[0].clone());
+        let routing = Routing::new(ids[0].clone(), REROUTE);
         let place = Place::At(ids[1].clone());
-        assert_eq!(delay(1), Duration::from_millis(10));
-        assert_eq!(delay(2), Duration::from_millis(20));
+        assert_eq!(delay(&REROUTE, 1), Duration::from_millis(10));
+        assert_eq!(delay(&REROUTE, 2), Duration::from_millis(20));
 
         let mut attempt = 1;
         loop {
@@ -356,7 +358,7 @@ mod tests {
                 place.clone(),
                 TIMEOUT,
             );
-            if waited(attempt, TIMEOUT) > TIMEOUT {
+            if waited(&REROUTE, attempt, TIMEOUT) > TIMEOUT {
                 assert!(matches!(decision, Decision::Refuse { .. }), "{decision:?}");
                 break;
             }
@@ -364,7 +366,7 @@ mod tests {
                 decision,
                 Decision::Wait {
                     routed: bounced(&ids[0], attempt + 1),
-                    after: delay(attempt),
+                    after: delay(&REROUTE, attempt),
                 }
             );
             attempt += 1;
@@ -376,7 +378,7 @@ mod tests {
     #[test]
     fn a_node_on_its_way_out_sends_on_what_comes_back_until_the_owner_takes_it() {
         let ids = Rolls::seeded(65).nodes(2);
-        let mut routing = Routing::new(ids[0].clone());
+        let mut routing = Routing::new(ids[0].clone(), REROUTE);
         let routed = bounced(&ids[0], u32::MAX);
         let place = Place::At(ids[1].clone());
         assert!(matches!(

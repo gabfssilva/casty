@@ -22,11 +22,13 @@ const ITEMS: &str = "items";
 const TAKEN: &str = "taken";
 const SEALED: &str = "sealed";
 
-/// The items a segment takes before it is sealed.
+/// The items a segment takes before it is sealed, when the offer names none; the facade sends `segment_items` of the
+/// queue.
 const COUNT: usize = 1024;
 
-/// The bytes of items a segment takes before it is sealed, unless one item alone is larger. An offer writes the items
-/// of its segment, so this is what bounds its cost.
+/// The bytes of items a segment takes before it is sealed, unless one item alone is larger, when the offer names none;
+/// the facade sends `segment_bytes` of the queue. An offer writes the items of its segment, so this is what bounds its
+/// cost.
 const BYTES: usize = 64 * 1024;
 
 /// The index of a queue: the first segment that may hold items, and the segment offers go to.
@@ -104,7 +106,17 @@ impl Native for Segment {
         let before = Run::of(held);
         let mut run = before.clone();
         let answer = match tag {
-            "Offer" => truth(run.offer(read.value?)),
+            "Offer" => {
+                let given = |held: Option<i64>, default| {
+                    held.and_then(|held| usize::try_from(held).ok())
+                        .unwrap_or(default)
+                };
+                let (items, bytes) = (
+                    given(read.segment_items, COUNT),
+                    given(read.segment_bytes, BYTES),
+                );
+                truth(run.offer(read.value?, items, bytes))
+            }
             "Take" => {
                 // A negative limit is refused by the facade, and here it simply takes nothing.
                 let taken = run.take(usize::try_from(read.limit.unwrap_or(0)).unwrap_or(0));
@@ -172,19 +184,20 @@ impl Run {
         &self.items[self.taken.min(self.items.len())..]
     }
 
-    /// Append `item`, unless the segment is sealed. An item that would take a segment that holds something past
-    /// `BYTES` seals it instead and goes to the next one, so a segment is larger than that only with one item alone.
-    fn offer(&mut self, item: Vec<u8>) -> bool {
+    /// Append `item`, unless the segment is sealed, and seal it once it holds `items` or `bytes`. An item that would
+    /// take a segment that holds something past `bytes` seals it instead and goes to the next one, so a segment is
+    /// larger than that only with one item alone.
+    fn offer(&mut self, item: Vec<u8>, items: usize, bytes: usize) -> bool {
         if self.sealed {
             return false;
         }
-        let bytes = self.items.iter().map(Vec::len).sum::<usize>() + item.len();
-        if !self.items.is_empty() && bytes > BYTES {
+        let held = self.items.iter().map(Vec::len).sum::<usize>() + item.len();
+        if !self.items.is_empty() && held > bytes {
             self.sealed = true;
             return false;
         }
         self.items.push(item);
-        self.sealed = self.items.len() >= COUNT || bytes >= BYTES;
+        self.sealed = self.items.len() >= items || held >= bytes;
         true
     }
 
@@ -223,6 +236,8 @@ struct Held {
     tail: Option<i64>,
     index: Option<Target>,
     at: Option<i64>,
+    segment_items: Option<i64>,
+    segment_bytes: Option<i64>,
 }
 
 fn read(message: &[u8]) -> Option<(&str, Target, Held)> {
@@ -235,6 +250,8 @@ fn read(message: &[u8]) -> Option<(&str, Target, Held)> {
             "tail" => held.tail = Some(reading.int()?),
             "index" => held.index = Some(reading.target()?),
             "at" => held.at = Some(reading.int()?),
+            "segment_items" => held.segment_items = Some(reading.int()?),
+            "segment_bytes" => held.segment_bytes = Some(reading.int()?),
             _ => reading.skip()?,
         }
         Ok(())
@@ -395,6 +412,48 @@ mod tests {
             listed(&step(&Segment, &mut pages, &take(1)))?,
             (Vec::new(), true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn an_offer_that_names_its_bounds_seals_the_segment_at_them() -> Result<()> {
+        let bounded = |item: &[u8], items: i64, bytes: i64| {
+            message("queue_segment.Offer", 3, |writer| {
+                writer.name("value");
+                writer.bytes(item);
+                writer.name("segment_items");
+                writer.int(items);
+                writer.name("segment_bytes");
+                writer.int(bytes);
+            })
+        };
+        let mut counted = opened();
+        assert!(accepted(&step(
+            &Segment,
+            &mut counted,
+            &bounded(b"a", 2, 1024)
+        ))?);
+        assert!(accepted(&step(
+            &Segment,
+            &mut counted,
+            &bounded(b"b", 2, 1024)
+        ))?);
+        assert!(!accepted(&step(
+            &Segment,
+            &mut counted,
+            &bounded(b"c", 2, 1024)
+        ))?);
+        let mut weighed = opened();
+        assert!(accepted(&step(
+            &Segment,
+            &mut weighed,
+            &bounded(b"abc", 100, 4)
+        ))?);
+        assert!(!accepted(&step(
+            &Segment,
+            &mut weighed,
+            &bounded(b"de", 100, 4)
+        ))?);
         Ok(())
     }
 

@@ -29,6 +29,7 @@ from casty.model import Overlay as Overlay
 from casty.model import Placement as Placement
 from casty.model import Store as Store
 from casty.model import System as System
+from casty.model import Transport as Transport
 from casty.model import Write as Write
 from casty.model import address as address
 from casty.observer import Activation as Activation
@@ -135,9 +136,9 @@ class Ref[M](Protocol):
         Made by a body, from the task that read its message, an `ask` carries the keys whose bodies wait for its
         answer: those waiting on that message, and the body itself, until it reads again. The key it goes to raises
         `ReentrancyError` here at once when it is one of them: a body asking its own key, or two keys asking each
-        other. The chain names at most 16 keys, the most recent, so a longer
-        cycle ends at the deadline. A `tell`, an `ask` from outside a body, and one from a task the body started
-        beside it keep nobody waiting.
+        other. The chain names at most `reentrancy_depth` keys of the system that asks, 16 by default, the most
+        recent, so a longer cycle ends at the deadline. A `tell`, an `ask` from outside a body, and one from a task the
+        body started beside it keep nobody waiting.
         """
 
 class _Asked[M, R](Protocol):
@@ -522,7 +523,9 @@ class ActorSystem:
     with `Unavailable`. An object without `load`, `save` and `drop` methods raises `TypeError`.
 
     A negative period raises `ValueError`, here or, for a period of `cluster`, in `__aenter__`, which also refuses a
-    `heartbeat`, `anti_entropy`, `overlay.graft_after` or `overlay.shuffle_every` of zero: the node repeats them.
+    `heartbeat`, `anti_entropy`, `replica_retry`, `recheck_every`, `overlay.graft_after`, `overlay.shuffle_every`,
+    `overlay.forget_after`, period of `transport`, or first wait of `reroute`, `handoff_retry` or `transport.redial`
+    of zero: the node repeats them or waits for something by them.
 
     Parameters
     ----------
@@ -539,6 +542,10 @@ class ActorSystem:
         for the types that set none.
     leave_timeout
         How long an orderly shutdown waits for the nodes that replicate the keys of this one to take them.
+    reentrancy_depth
+        How many callers an `ask` from a body of this node names: the body and those waiting on the message it is on,
+        the most recent first. A cycle of up to that many keys raises `ReentrancyError` at once; a longer one ends at
+        the deadline. Each caller is carried in the message. Below 1 raises `ValueError`.
     observer
         What the events of this node are reported to. `None` is a `LoggingObserver`.
     store
@@ -557,6 +564,7 @@ class ActorSystem:
         ask_timeout: timedelta = timedelta(seconds=10),
         write_timeout: timedelta = timedelta(seconds=5),
         leave_timeout: timedelta = timedelta(seconds=30),
+        reentrancy_depth: int = 16,
         observer: Observer | None = None,
         store: Store | None = None,
         runtime: Runtime | None = None,
@@ -666,10 +674,22 @@ class Client:
         every dial, so what it answers may change from one dial to the next.
     limits
         Sizes of what crosses a connection, those of the cluster: `Limits()` when not given.
+    transport
+        Periods of the connections: `Transport()` when not given. A period of zero or a negative one raises
+        `ValueError`, and so does a `redial` whose first wait is zero.
     ask_timeout
         Deadline of an `ask`, for the types that set none. A negative one raises `ValueError`.
     sync_every
         How often the client asks a member for the member table it places keys by. Zero or a negative one raises
+        `ValueError`.
+    reroute
+        Wait before a message goes again after the node it went to sent it back, as for `Cluster.reroute`. A first wait
+        of zero raises `ValueError`.
+    recheck_every
+        How often the client looks again at the messages it holds, as for `Cluster.recheck_every`. Zero or a negative
+        one raises `ValueError`.
+    hold_limit
+        How many of those messages the client holds at most, as for `Cluster.hold_limit`. Below 1 raises
         `ValueError`.
     observer
         What the events of this client are reported to. `None` is a `LoggingObserver`.
@@ -687,8 +707,12 @@ class Client:
         compression: Compression = ...,
         address_map: Callable[[str], str] | None = None,
         limits: Limits = ...,
+        transport: Transport = ...,
         ask_timeout: timedelta = timedelta(seconds=10),
         sync_every: timedelta = timedelta(seconds=5),
+        reroute: Backoff = ...,
+        recheck_every: timedelta = timedelta(milliseconds=10),
+        hold_limit: int = 100_000,
         observer: Observer | None = None,
         runtime: Runtime | None = None,
     ) -> None: ...
@@ -791,6 +815,7 @@ __all__ = [
     "Stats",
     "Store",
     "System",
+    "Transport",
     "Unavailable",
     "UnknownActor",
     "Write",

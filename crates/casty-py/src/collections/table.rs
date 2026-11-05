@@ -27,8 +27,8 @@ const MODULUS: &str = "modulus";
 const ID: &str = "id";
 const VERSION: &str = "version";
 
-/// The keys a segment lists before a write to it asks for a split. A write rewrites its segment, so this is what
-/// bounds its cost.
+/// The keys a segment lists before a write to it asks for a split, when the write names none. A write rewrites its
+/// segment, so this is what bounds its cost; the facade sends its own, which is `segment_keys` of the collection.
 const KEYS: usize = 512;
 
 /// The bits of the hash that tell the segments of a shard apart, which is as far as a shard splits.
@@ -131,7 +131,20 @@ impl Native for Segment {
                 }
                 nil()
             }
-            tag => bucket.answer(tag, read.key, read.value, read.generation, read.position)?,
+            tag => {
+                let keys = read
+                    .segment_keys
+                    .and_then(|keys| usize::try_from(keys).ok())
+                    .unwrap_or(KEYS);
+                bucket.answer(
+                    tag,
+                    read.key,
+                    read.value,
+                    read.generation,
+                    read.position,
+                    keys,
+                )?
+            }
         };
         if bucket != before {
             // An adoption keeps the version of the segment the keys came from; every other write raises it.
@@ -198,6 +211,7 @@ impl Bucket {
         value: Option<Vec<u8>>,
         generation: Option<i64>,
         position: Option<i64>,
+        keys: usize,
     ) -> Option<Vec<u8>> {
         if let Some(key) = &key
             && !hashes(key, self.modulus, self.id)
@@ -212,7 +226,7 @@ impl Bucket {
                 if changed {
                     listed.push(value);
                 }
-                wrote(changed, self.full())
+                wrote(changed, self.full(keys))
             }
             ("Get", Some(key)) => listed(&self.entries, &key),
             ("Remove", Some(key)) => {
@@ -225,7 +239,7 @@ impl Bucket {
                 if !newer {
                     *listed = vec![number(generation)];
                 }
-                wrote(!newer, self.full())
+                wrote(!newer, self.full(keys))
             }
             ("Unlist", Some(key)) => {
                 let generation = generation?;
@@ -263,9 +277,9 @@ impl Bucket {
             .partition(|(key, _)| hashes(key, modulus, self.id))
     }
 
-    /// Whether a write should ask the directory for a split.
-    fn full(&self) -> bool {
-        self.entries.len() > KEYS
+    /// Whether a write should ask the directory for a split, past `keys` listed.
+    fn full(&self, keys: usize) -> bool {
+        self.entries.len() > keys
     }
 
     /// How many values are listed, which is the size of a set or of a multimap.
@@ -358,6 +372,7 @@ struct Held {
     version: Option<i64>,
     entries: Option<Entries>,
     position: Option<i64>,
+    segment_keys: Option<i64>,
 }
 
 fn read(message: &[u8]) -> Option<(&str, Target, Held)> {
@@ -375,6 +390,7 @@ fn read(message: &[u8]) -> Option<(&str, Target, Held)> {
             "version" => held.version = Some(reading.int()?),
             "entries" => held.entries = Some(read_entries(reading)?),
             "position" => held.position = Some(reading.int()?),
+            "segment_keys" => held.segment_keys = Some(reading.int()?),
             _ => reading.skip()?,
         }
         Ok(())
@@ -706,6 +722,26 @@ mod tests {
         }
         assert_eq!(added(&mut held, &all[KEYS])?, (true, true));
         assert_eq!(added(&mut held, &all[0])?, (false, true));
+        Ok(())
+    }
+
+    #[test]
+    fn a_write_that_names_its_bound_asks_for_a_split_past_it() -> Result<()> {
+        let mut held = Segment.initial();
+        let all = keys(1, 0, 3);
+        let bounded = |key: &[u8]| {
+            message("table_segment.Add", 3, |writer| {
+                writer.name("key");
+                writer.bytes(key);
+                writer.name("value");
+                writer.bytes(key);
+                writer.name("segment_keys");
+                writer.int(2);
+            })
+        };
+        assert_eq!(wrote(&on(&mut held, &bounded(&all[0])))?, (true, false));
+        assert_eq!(wrote(&on(&mut held, &bounded(&all[1])))?, (true, false));
+        assert_eq!(wrote(&on(&mut held, &bounded(&all[2])))?, (true, true));
         Ok(())
     }
 

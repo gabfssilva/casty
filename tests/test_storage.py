@@ -301,6 +301,18 @@ def describe_the_sql_store() -> None:
             with pytest.raises(RuntimeError, match="async with"):
                 await store.save("a", "k", _version(1), None)
 
+    def when_its_pool_has_one_connection() -> None:
+        async def it_runs_concurrent_calls_one_after_the_other(tmp_path: Path) -> None:
+            async with SQL(
+                f"sqlite://{tmp_path / 'records.db'}?mode=rwc",
+                max_connections=1,
+                acquire_timeout=timedelta(seconds=10),
+                idle_timeout=None,
+                max_lifetime=None,
+            ) as store:
+                await asyncio.gather(*(store.save("a", str(key), _version(1), b"x") for key in range(20)))
+                assert [await store.load("a", str(key)) for key in range(20)] == [(_version(1), b"x")] * 20
+
     def when_its_url_names_a_database_it_does_not_know() -> None:
         async def it_refuses_to_open() -> None:
             with pytest.raises(ValueError, match="redis"):

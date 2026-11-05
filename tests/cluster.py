@@ -28,6 +28,7 @@ class Timing:
     write_timeout: timedelta = timedelta(milliseconds=500)
     sync_every: timedelta = timedelta(milliseconds=100)
     leave_timeout: timedelta = timedelta(seconds=5)
+    replica_grace: timedelta = timedelta(milliseconds=200)
 
 
 FAST = Timing()
@@ -124,6 +125,7 @@ class Harness:
         self._proxies: dict[tuple[int, str], Proxy] = {}
         self._plumbing: set[asyncio.Task[None]] = set()
         self._blocked: set[tuple[int, str]] = set()
+        self._delay = timedelta(0)
         self._port = random.randrange(20_000, 30_000)
         self._ids = 0
 
@@ -208,6 +210,12 @@ class Harness:
         for proxy in self._proxies.values():
             await proxy.close()
 
+    def slow(self, delay: timedelta, /) -> None:
+        """Hold what crosses each pair of nodes for `delay` each way, the pairs a later dial opens included."""
+        self._delay = delay
+        for proxy in self._proxies.values():
+            proxy.slow(delay)
+
     def heal(self) -> None:
         """Let every pair exchange bytes again, delivering what the blocked proxies held."""
         self._blocked.clear()
@@ -235,6 +243,7 @@ class Harness:
             dead_after=self._timing.dead_after,
             remove_after=self._timing.remove_after,
             anti_entropy=self._timing.anti_entropy,
+            replica_grace=self._timing.replica_grace,
             overlay=replace(
                 self._overlay, shuffle_every=self._timing.shuffle_every, graft_after=self._timing.graft_after
             ),
@@ -322,6 +331,7 @@ class Harness:
         if proxy is None:
             proxy = self._proxies[source, target] = Proxy(self._spawn, target)
             proxy.block((source, target) in self._blocked)
+            proxy.slow(self._delay)
             self._spawn(proxy.serve())
         return proxy
 

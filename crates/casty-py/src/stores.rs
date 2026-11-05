@@ -59,9 +59,20 @@ struct Open {
 ///     The database, by the scheme of its driver: `postgres://user:password@host/database`,
 ///     `mysql://user:password@host/database`, or `sqlite://path?mode=rwc` for a file made when it does not exist.
 ///     Not `sqlite::memory:`: each connection of the store would open a database of its own.
+/// max_connections
+///     The most connections open at once, which bounds how many calls run against the database together.
+/// acquire_timeout
+///     How long a call waits for a connection while all of them are in use, before it raises `Unavailable`.
+/// idle_timeout
+///     How long a connection stays open unused before it is closed. `None` keeps it.
+/// max_lifetime
+///     How long a connection stays open before it is closed and replaced. `None` keeps it.
+// The docstring is Python's, whose NumPy sections name each parameter bare.
+#[allow(clippy::doc_markdown)]
 #[pyclass(frozen, module = "casty._casty", name = "SQL")]
 pub struct Sql {
     url: String,
+    pool: casty_store::Pool,
     open: Mutex<Option<Open>>,
 }
 
@@ -159,12 +170,42 @@ impl Sql {
 #[pymethods]
 impl Sql {
     #[new]
-    #[pyo3(signature = (url, /))]
-    fn new(url: String) -> Self {
-        Self {
-            url,
-            open: Mutex::new(None),
+    #[pyo3(signature = (
+        url,
+        /,
+        *,
+        max_connections = 10,
+        acquire_timeout = Duration::from_secs(30),
+        idle_timeout = Some(Duration::from_secs(10 * 60)),
+        max_lifetime = Some(Duration::from_secs(30 * 60)),
+    ))]
+    fn new(
+        url: String,
+        max_connections: u32,
+        acquire_timeout: Duration,
+        idle_timeout: Option<Duration>,
+        max_lifetime: Option<Duration>,
+    ) -> PyResult<Self> {
+        if max_connections == 0 {
+            return Err(PyValueError::new_err(
+                "max_connections is 0, and a store with no connection reaches no record",
+            ));
         }
+        if acquire_timeout.is_zero() {
+            return Err(PyValueError::new_err(
+                "acquire_timeout is zero, and a call that finds every connection in use would fail at once",
+            ));
+        }
+        Ok(Self {
+            url,
+            pool: casty_store::Pool {
+                max_connections,
+                acquire_timeout,
+                idle_timeout,
+                max_lifetime,
+            },
+            open: Mutex::new(None),
+        })
     }
 
     fn __aenter__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -175,7 +216,7 @@ impl Sql {
         let entered = running.call_method0("create_future")?;
         let inbox = Inbox::open(py, &running)?;
         let threads = Threads::start(Some(1))?;
-        let url = slf.get().url.clone();
+        let (url, pool) = (slf.get().url.clone(), slf.get().pool);
         let (store, answer, running) = (
             slf.clone().unbind(),
             entered.clone().unbind(),
@@ -183,7 +224,7 @@ impl Sql {
         );
         let held = Arc::clone(&threads);
         threads.handle().spawn(async move {
-            let opened = casty_store::Sql::open(&url).await;
+            let opened = casty_store::Sql::open(&url, pool).await;
             let reply = inbox.clone();
             reply.send(move |py| {
                 let (store, answer) = (store.bind(py), answer.bind(py));

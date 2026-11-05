@@ -1063,6 +1063,24 @@ def describe_actor_system() -> None:
             # Forty-one keys deep, an ask of the last would name sixteen: the most recent, itself last.
             assert chain == tuple(f"{hop.name}/{key}" for key in range(25, 41))
 
+        async def it_names_as_many_callers_as_the_reentrancy_depth_of_the_system() -> None:
+            @actor(initial=Account())
+            async def shallow(ctx: Context[Account, Descend]) -> None:
+                system = ctx.system
+                assert isinstance(system, ActorSystem)
+                async for msg in ctx.inbox:
+                    if msg.depth == 0:
+                        msg.reply_to.tell(tuple(system._chain()))
+                    else:
+                        below = system.ref(shallow, str(int(ctx.key) + 1))
+                        msg.reply_to.tell(await below.ask(Descend(msg.depth - 1)))
+
+            async with ActorSystem(reentrancy_depth=4) as system:
+                async with asyncio.timeout(5):
+                    chain = await system.ref(shallow, "0").ask(Descend(10))
+
+            assert chain == tuple(f"{shallow.name}/{key}" for key in range(7, 11))
+
         async def it_names_only_the_bodies_that_wait_for_the_answer() -> None:
             seen: dict[str, list[str]] = {}
 

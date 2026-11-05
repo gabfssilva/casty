@@ -64,6 +64,8 @@ them under the same names.
 
 ::: casty.Overlay
 
+::: casty.Transport
+
 ## Stored values
 
 ::: casty.Store

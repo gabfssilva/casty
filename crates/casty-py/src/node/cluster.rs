@@ -8,6 +8,7 @@
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
+use casty_core::backoff::Backoff;
 use casty_core::mailbox::Command;
 use casty_core::membership::views::Overlay;
 use casty_core::node::{NodeId, Target};
@@ -29,7 +30,7 @@ use super::inbox::Inbox;
 use super::observe::Observed;
 use super::storage::Store;
 use super::{Node, Op};
-use crate::actor::period;
+use crate::actor::{backed_off, period};
 use crate::lock::Locked;
 use crate::runtime::Threads;
 
@@ -565,8 +566,8 @@ impl Mapping {
     /// The address to dial, once the loop has said.
     ///
     /// The dial waits for the answer as a future, holding no thread. A map that raises, or an answer that does not
-    /// come within `ASKING`, leaves the address as it was for this dial only: the node is dialed directly instead of
-    /// through whatever the map would have put in between, and the next dial asks again.
+    /// come within `transport.address_map_timeout`, leaves the address as it was for this dial only: the node is
+    /// dialed directly instead of through whatever the map would have put in between, and the next dial asks again.
     fn dialed(self: &Arc<Self>, address: &str) -> Dialing {
         let (answer, answered) = tokio::sync::oneshot::channel();
         let (mapping, asked) = (Arc::clone(self), address.to_owned());
@@ -581,22 +582,15 @@ impl Mapping {
             Ok(())
         });
         let address = address.to_owned();
-        Box::pin(async move {
-            match tokio::time::timeout(ASKING, answered).await {
-                Ok(Ok(dialed)) => dialed,
-                _ => address,
-            }
-        })
+        Box::pin(async move { answered.await.unwrap_or(address) })
     }
 }
-
-/// How long a dial waits for the loop to say where the address goes.
-const ASKING: Duration = Duration::from_secs(5);
 
 /// Read the `Cluster` of the public API into what the node takes, with the timings of the system it belongs to.
 pub fn settings(cluster: &Bound<'_, PyAny>, system: &super::Settings) -> PyResult<Settings> {
     let overlay = cluster.getattr("overlay")?;
     let compression = cluster.getattr("compression")?;
+    let transport = cluster.getattr("transport")?;
     Ok(Settings {
         bind: cluster.getattr("bind")?.extract()?,
         advertise: cluster.getattr("advertise")?.extract()?,
@@ -613,31 +607,42 @@ pub fn settings(cluster: &Bound<'_, PyAny>, system: &super::Settings) -> PyResul
             anti_entropy: every("anti_entropy", &cluster.getattr("anti_entropy")?)?,
             graft_after: every("overlay.graft_after", &overlay.getattr("graft_after")?)?,
             shuffle_every: every("overlay.shuffle_every", &overlay.getattr("shuffle_every")?)?,
+            forget_after: every("overlay.forget_after", &overlay.getattr("forget_after")?)?,
+            forget_left_after: period("forget_left_after", &cluster.getattr("forget_left_after")?)?,
         },
         overlay: Overlay {
             active: overlay.getattr("active")?.extract()?,
             passive: overlay.getattr("passive")?.extract()?,
             join_walk: overlay.getattr("join_walk")?.extract()?,
             passive_walk: overlay.getattr("passive_walk")?.extract()?,
+            shuffle_active: overlay.getattr("shuffle_active")?.extract()?,
+            shuffle_passive: overlay.getattr("shuffle_passive")?.extract()?,
         },
         tls: tls(&cluster.getattr("tls")?)?,
         compression: compressed(&compression)?,
         min_compressed: compression.getattr("min_bytes")?.extract()?,
         address_map: None,
-        limits: limits(&cluster.getattr("limits")?)?,
+        limits: limits(&cluster.getattr("limits")?, &transport)?,
         write_timeout: system.write_timeout,
         leave_timeout: system.leave_timeout,
-        backoff: system.backoff,
+        handoff_retry: stepped("handoff_retry", &cluster.getattr("handoff_retry")?)?,
+        replica_grace: period("replica_grace", &cluster.getattr("replica_grace")?)?,
+        replica_retry: every("replica_retry", &cluster.getattr("replica_retry")?)?,
+        reroute: stepped("reroute", &cluster.getattr("reroute")?)?,
+        recheck_every: every("recheck_every", &cluster.getattr("recheck_every")?)?,
+        hold_limit: cluster.getattr("hold_limit")?.extract()?,
     })
 }
 
-/// What a client joins with: seeds and the table it asks for, with none of what a member gossips.
+/// What a client joins with: seeds and the table it asks for, with none of what a member gossips. How it routes is
+/// read by the caller, which has it only when `Client` was given it.
 pub fn dialling(
     seeds: Vec<String>,
     name: String,
     tls_of: &Bound<'_, PyAny>,
     compression: &Bound<'_, PyAny>,
     limits_of: &Bound<'_, PyAny>,
+    transport: &Bound<'_, PyAny>,
     sync_every: core::time::Duration,
 ) -> PyResult<Settings> {
     Ok(Settings {
@@ -646,7 +651,7 @@ pub fn dialling(
         tls: tls(tls_of)?,
         compression: compressed(compression)?,
         min_compressed: compression.getattr("min_bytes")?.extract()?,
-        limits: limits(limits_of)?,
+        limits: limits(limits_of, transport)?,
         // A client asks for the whole table on this period, which is the only clock it has.
         timings: Timings {
             anti_entropy: sync_every,
@@ -669,14 +674,45 @@ fn tls(held: &Bound<'_, PyAny>) -> PyResult<Option<Tls>> {
     }))
 }
 
-/// The sizes of a connection, as the `Limits` of the public API has them. The periods stay those of the transport.
-fn limits(held: &Bound<'_, PyAny>) -> PyResult<Limits> {
+/// What a connection goes by: its sizes, as the `Limits` of the public API has them, and its periods, as `Transport`
+/// has them. Every period is one the transport waits for something by, so none of them can be zero.
+fn limits(held: &Bound<'_, PyAny>, transport: &Bound<'_, PyAny>) -> PyResult<Limits> {
+    let waited = |name: &str| {
+        let held = transport.getattr(name)?;
+        let waited = period(&format!("transport.{name}"), &held)?;
+        if waited.is_zero() {
+            return Err(PyValueError::new_err(format!(
+                "transport.{name} is {held}, and nothing the transport waits for arrives within zero"
+            )));
+        }
+        Ok(waited)
+    };
     Ok(Limits {
         frame: held.getattr("frame")?.extract()?,
         message: held.getattr("message")?.extract()?,
         window: held.getattr("window")?.extract()?,
-        ..Limits::default()
+        keepalive_after: waited("keepalive_after")?,
+        keepalive_timeout: waited("keepalive_timeout")?,
+        handshake: waited("handshake")?,
+        dial: waited("dial")?,
+        redial: stepped("transport.redial", &transport.getattr("redial")?)?,
+        redial_jitter: transport.getattr("redial_jitter")?.extract()?,
+        mapping: waited("address_map_timeout")?,
+        read_buffer: transport.getattr("read_buffer")?.extract()?,
     })
+}
+
+/// A backoff the node waits by between two tries of one thing. A first wait of zero never grows, so it would try
+/// again at once, forever.
+pub fn stepped(name: &str, held: &Bound<'_, PyAny>) -> PyResult<Backoff> {
+    let backoff = backed_off(name, held)?;
+    if backoff.first.is_zero() {
+        return Err(PyValueError::new_err(format!(
+            "{name}.first is {}, and a wait of zero would never grow between two tries",
+            held.getattr("first")?
+        )));
+    }
+    Ok(backoff)
 }
 
 /// The compressors offered, in the order they are preferred. Nothing means every one this build has.

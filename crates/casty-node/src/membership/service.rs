@@ -26,6 +26,10 @@ pub struct Timings {
     pub anti_entropy: Duration,
     pub graft_after: Duration,
     pub shuffle_every: Duration,
+    /// How long an event of the broadcast is remembered after it was seen.
+    pub forget_after: Duration,
+    /// How long the `left` record of another member is kept after it was written.
+    pub forget_left_after: Duration,
 }
 
 impl Default for Timings {
@@ -38,6 +42,8 @@ impl Default for Timings {
             anti_entropy: Duration::from_secs(10),
             graft_after: Duration::from_millis(500),
             shuffle_every: Duration::from_secs(30),
+            forget_after: Duration::from_secs(60),
+            forget_left_after: Duration::from_secs(60),
         }
     }
 }
@@ -97,9 +103,14 @@ impl Membership {
                 types,
                 timings.dead_after.as_secs_f64(),
                 timings.remove_after.map(|after| after.as_secs_f64()),
+                timings.forget_left_after.as_secs_f64(),
             ),
             views: Views::new(node.clone(), overlay, Rolls::fresh()),
-            broadcast: Broadcaster::new(node.clone(), timings.graft_after.as_secs_f64()),
+            broadcast: Broadcaster::new(
+                node.clone(),
+                timings.graft_after.as_secs_f64(),
+                timings.forget_after.as_secs_f64(),
+            ),
             node,
             timings,
             seeds,

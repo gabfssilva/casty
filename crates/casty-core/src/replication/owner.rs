@@ -325,9 +325,27 @@ impl Owner {
         }
     }
 
-    /// Decide an activation that is still waiting for replicas, with the promises it has.
+    /// Stop waiting for every replica that is not dead, and decide with the promises it has once they are a read
+    /// quorum.
+    ///
+    /// Short of one while a replica it waited for has not answered, it waits on for the quorum alone: a replica that
+    /// is slow is not one that is gone, and what ends that wait is the deadline of the operation. Short of one with
+    /// every replica it waited for answered, nothing is left to wait for, and the activation ends.
     pub fn settle(&mut self) -> Step {
-        if !matches!(self.phase, Some(Phase::Preparing { .. })) {
+        let reads = self.quorums.reads;
+        let asked = self.replicas.len();
+        let Some(Phase::Preparing {
+            wanted, promises, ..
+        }) = &mut self.phase
+        else {
+            return Step::waiting();
+        };
+        let counted = promises
+            .values()
+            .filter(|promise| !promise.receiving)
+            .count();
+        if counted < reads && promises.len() < (*wanted).min(asked) {
+            *wanted = reads;
             return Step::waiting();
         }
         self.decide(true)
@@ -1341,14 +1359,51 @@ mod tests {
     }
 
     #[test]
-    fn an_activation_too_few_replicas_answered_ends_once_the_caller_stops_waiting() {
+    fn an_activation_short_of_a_quorum_waits_on_for_it_past_the_grace() {
         let mut cluster = Cluster::new(3, 38);
         let mut owner = cluster.owner(0, 0, Write::Majority);
         let sends = owner
             .activate(Some(pages(&[("balance", b"0")])), 3)
             .expect("it fits");
 
-        // One replica of the three answers, which is short of the read quorum of a majority.
+        // One replica of the three answers before the grace, which is short of the read quorum of a majority.
+        let mut sends = sends.into_iter();
+        let first = sends.next().expect("a replica to ask");
+        let at = cluster.at(&first.to);
+        let reply = cluster.replicas[at]
+            .receive(first.message, false)
+            .expect("it promised");
+        assert_eq!(owner.receive(reply).outcome, None);
+
+        // The two others are alive and slow: the activation waits for one more of them, not for both.
+        let settled = owner.settle();
+        assert_eq!(settled.outcome, None);
+        assert_eq!(settled.sends, []);
+        let second = sends.next().expect("another replica to ask");
+        let at = cluster.at(&second.to);
+        let reply = cluster.replicas[at]
+            .receive(second.message, false)
+            .expect("it promised");
+        let pending = owner.receive(reply).sends;
+
+        assert_eq!(
+            cluster.run(&mut owner, pending),
+            Some(Outcome::Activated {
+                state: pages(&[("balance", b"0")]),
+                created: true
+            })
+        );
+    }
+
+    #[test]
+    fn an_activation_short_of_a_quorum_with_every_live_replica_answered_ends_at_the_grace() {
+        let mut cluster = Cluster::new(3, 38);
+        let mut owner = cluster.owner(0, 0, Write::Majority);
+        // Two of the three replicas are dead, so the one that is not is all the activation waits for.
+        let sends = owner
+            .activate(Some(pages(&[("balance", b"0")])), 1)
+            .expect("it fits");
+
         let send = sends.into_iter().next().expect("a replica to ask");
         let at = cluster.at(&send.to);
         let reply = cluster.replicas[at]

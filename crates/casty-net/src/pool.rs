@@ -44,7 +44,7 @@ type Queued = (Target, String, Vec<u8>);
 
 /// What turns an advertised address into the one that is dialed: a tunnel, a NAT, or a proxy of a test. It answers
 /// with a future, so a map that has to ask someone else, like the event loop of a binding, holds no thread while it
-/// waits.
+/// waits. One that does not answer within `Limits::mapping` leaves the address as it was, for that dial only.
 pub type AddressMap = Arc<dyn Fn(&str) -> Dialing + Send + Sync>;
 
 /// The address a dial goes to, once the map has said.
@@ -358,7 +358,9 @@ impl Pool {
     async fn initiate(&self, address: &str) -> Result<(Greeting, Message), Broken> {
         let dialed = match &self.settings.address_map {
             None => address.to_owned(),
-            Some(map) => map(address).await,
+            Some(map) => tokio::time::timeout(self.settings.limits.mapping, map(address))
+                .await
+                .unwrap_or_else(|_| address.to_owned()),
         };
         let socket = tokio::time::timeout(self.settings.limits.dial, TcpStream::connect(&dialed))
             .await
@@ -533,15 +535,16 @@ impl Pool {
                     .collect()
             });
         let previous = state.backoff.get(address).copied();
-        let first = self.settings.limits.backoff_first;
-        let limit = self.settings.limits.backoff_limit;
-        let delay = previous.map_or(first, |backoff| (backoff.delay * 2).min(limit));
-        let jitter = u32::try_from(Rolls::fresh().between(750, 1250)).expect("at most 1250");
+        let redial = self.settings.limits.redial;
+        let delay = previous.map_or(redial.first, |backoff| redial.next(backoff.delay));
+        // A point of `-1..=1`, in thousandths, so that nodes that lost a peer at once do not all dial it again at once.
+        let drawn = u32::try_from(Rolls::fresh().between(0, 2000)).expect("at most 2000");
+        let spread = 1.0 + self.settings.limits.redial_jitter * (f64::from(drawn) / 1000.0 - 1.0);
         state.backoff.insert(
             address.to_owned(),
             Backoff {
                 delay,
-                retry_at: Instant::now() + delay * jitter / 1000,
+                retry_at: Instant::now() + delay.mul_f64(spread),
             },
         );
         dropped

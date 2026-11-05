@@ -24,6 +24,7 @@ pub fn quick() -> Timings {
         anti_entropy: Duration::from_millis(250),
         graft_after: Duration::from_millis(100),
         shuffle_every: Duration::from_millis(500),
+        ..Timings::default()
     }
 }
 

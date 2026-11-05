@@ -4,7 +4,8 @@ Each collection is a handful of actor types, configured by replicas and write le
 its own, so two collections of the same kind with different settings never share a key. The bodies of those types
 run in the core; what is here builds their messages and reads their answers.
 
-A set, a dict and a multimap list their keys in an index, sharded by key and cut into segments of about 512 keys.
+A set, a dict and a multimap list their keys in an index, sharded by key and cut into segments of about
+`segment_keys` keys, 512 by default.
 `scan` reads the index a segment at a time and holds only the segment it reads, whatever the size of the collection.
 It is not a snapshot: what is written or removed while it runs may be seen or not, what is there throughout is seen,
 and nothing is seen twice.
@@ -16,6 +17,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Hashable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import timedelta
 from functools import wraps
 from hashlib import blake2b
 from inspect import Signature
@@ -163,6 +165,7 @@ class Party:
     id: UUID
     reply_to: Ref[bool]
     until: float
+    remember: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -247,16 +250,17 @@ class table_segment:
 
     A message about a key the segment does not hold answers None and changes nothing, which is how a caller that has
     not seen a split learns of it. `Add` and `List` answer whether they changed the listing and whether the segment
-    lists more than 512 keys, which is the cue to ask the directory for a split. `Size` and `Clear` answer the modulus
-    first, which tells a walk whether the segment still held the keys a split moved. `Scan` answers the modulus and
-    the keys, and is refused like a key at a `position` whose hash the segment does not hold. The split itself runs in
-    the core, from the directory to the segment and from the segment to the new one.
+    lists more than `segment_keys`, which is the cue to ask the directory for a split. `Size` and `Clear` answer the
+    modulus first, which tells a walk whether the segment still held the keys a split moved. `Scan` answers the modulus
+    and the keys, and is refused like a key at a `position` whose hash the segment does not hold. The split itself runs
+    in the core, from the directory to the segment and from the segment to the new one.
     """
 
     @dataclass(frozen=True)
     class Add(Askable[tuple[bool, bool] | None]):
         key: bytes
         value: bytes
+        segment_keys: int
 
     @dataclass(frozen=True)
     class Get(Askable[tuple[bytes, ...] | None]):
@@ -273,6 +277,7 @@ class table_segment:
 
         key: bytes
         generation: int
+        segment_keys: int
 
     @dataclass(frozen=True)
     class Unlist(Askable[bool | None]):
@@ -384,9 +389,9 @@ class queue:
 class queue_segment:
     """Items of a queue in the order they were offered, under a key of their own.
 
-    A segment is sealed once it holds 1024 items or 64 KiB, and takes no offer after that: `Offer` answers whether it
-    took the item. `Take` and `Peek` answer the items and whether the segment is sealed, so that one that answers
-    fewer than asked for and is sealed is empty for good.
+    A segment is sealed once it holds `segment_items` items or `segment_bytes` bytes, and takes no offer after that:
+    `Offer` answers whether it took the item. `Take` and `Peek` answer the items and whether the segment is sealed, so
+    that one that answers fewer than asked for and is sealed is empty for good.
 
     A segment sealed and drained is deleted when its activation ends. `Offer`, `Take` and `Peek` name the index of the
     queue and the number of the segment, which a segment nothing wrote asks the index about: found below the tail,
@@ -398,6 +403,8 @@ class queue_segment:
         value: bytes
         index: Ref[queue.Message]
         at: int
+        segment_items: int
+        segment_bytes: int
 
     @dataclass(frozen=True)
     class Take(Askable[tuple[tuple[bytes, ...], bool]]):
@@ -480,9 +487,13 @@ class barrier:
 
     @dataclass(frozen=True)
     class Arrive(Askable[bool]):
+        """Wait at the barrier until `until`. A release is remembered `remember` seconds, so that the party asking
+        again in that time hears it went through."""
+
         id: UUID
         parties: int
         until: float
+        remember: float = 30.0
 
     @dataclass(frozen=True)
     class Cancel(Askable[bool]):
@@ -558,6 +569,19 @@ class Value[T]:
         return MISSING if raw is None else self.load(raw)
 
 
+@dataclass(frozen=True)
+class _Waits:
+    """How the waits of a semaphore, a lock and a barrier go, in seconds: see `Collections`."""
+
+    lease: float = 30.0
+    reask: float = 10.0
+    withdraw: float = 1.0
+    remember: float = 30.0
+
+
+_WAITS = _Waits()
+
+
 class Binding:
     """A named collection: the types its keys belong to, and the settings the first operation fixes.
 
@@ -574,6 +598,8 @@ class Binding:
         write: Write,
         shards: int = 1,
         signature: tuple[str, ...] = (),
+        probes: int = 64,
+        waits: _Waits = _WAITS,
     ) -> None:
         if shards < 1:
             raise ValueError("shards must be positive")
@@ -585,6 +611,8 @@ class Binding:
         self.replicas = replicas
         self.write: Write = write
         self.shards = shards
+        self.probes = probes
+        self.waits = waits
         self.settings: tuple[str | int, ...] = (kind, replicas, write, shards, *signature)
         self.confirmed = False
         self._metadata = system.ref(register.actor, f"{kind}:{len(name)}:{name}")
@@ -629,13 +657,8 @@ async def _each[I, T](operation: Callable[[I], Coroutine[object, object, T]], am
     return [task.result() for task in tasks]
 
 
-_PROBES = 64
-"""How many keys of a segment are asked at once. Enough to overlap the round trips to the nodes that own them, and a
-task for each of these workers, not for each key, is what reading a segment costs on the loop."""
-
-
-async def _pooled[I, T](operation: Callable[[I], Awaitable[T]], among: Sequence[I]) -> list[T]:
-    """`operation` on each of `among`, `_PROBES` at a time, answered in their order."""
+async def _pooled[I, T](operation: Callable[[I], Awaitable[T]], among: Sequence[I], probes: int) -> list[T]:
+    """`operation` on each of `among`, `probes` at a time, answered in their order."""
     found: dict[int, T] = {}
     pending = iter(enumerate(among))
 
@@ -643,8 +666,13 @@ async def _pooled[I, T](operation: Callable[[I], Awaitable[T]], among: Sequence[
         for at, item in pending:
             found[at] = await operation(item)
 
-    await _each(work, range(min(_PROBES, len(among))))
+    await _each(work, range(min(probes, len(among))))
     return [found[at] for at in range(len(among))]
+
+
+def _positive(name: str, value: int) -> None:
+    if value < 1:
+        raise ValueError(f"{name} is {value}, and a segment holds at least one")
 
 
 def _duration(value: float, name: str, *, zero: bool = False) -> None:
@@ -652,32 +680,25 @@ def _duration(value: float, name: str, *, zero: bool = False) -> None:
         raise ValueError(f"{name} must be {'nonnegative' if zero else 'positive'} and finite")
 
 
-_INTEREST = 30.0
-"""Seconds the owner keeps a wait after its last ask, which is how long an abandoned one lingers."""
-
-_REASK = 10.0
-"""Seconds one ask of a wait gets before it is sent again: well within `_INTEREST`, so the owner never drops it."""
-
-
-async def _wait[T](request: Callable[[float], Awaitable[T]]) -> T:
+async def _wait[T](request: Callable[[float], Awaitable[T]], waits: _Waits) -> T:
     """Ask again while the interest lasts: a lost reply is reattached, not turned into a second arrival."""
     while True:
-        until = time.time() + _INTEREST
+        until = time.time() + waits.lease
         try:
-            async with asyncio.timeout(_REASK):
+            async with asyncio.timeout(waits.reask):
                 return await request(until)
         except TimeoutError:
             if time.time() >= until:
                 raise
 
 
-async def _withdraw[T](cancel: Coroutine[object, object, T], unreached: T) -> T:
-    """What `cancel` answers within a second, or `unreached` when it does not reach the owner in time.
+async def _withdraw[T](cancel: Coroutine[object, object, T], unreached: T, waits: _Waits) -> T:
+    """What `cancel` answers within `waits.withdraw`, or `unreached` when it does not reach the owner in time.
 
-    A wait that is never withdrawn expires on its own, `_INTEREST` after its last ask.
+    A wait that is never withdrawn expires on its own, `waits.lease` after its last ask.
     """
     try:
-        async with asyncio.timeout(1.0):
+        async with asyncio.timeout(waits.withdraw):
             return await cancel
     except (TimeoutError, Unavailable):
         return unreached
@@ -771,14 +792,17 @@ class _Index:
     too, since obtaining one asks the owner to start the key.
     """
 
-    def __init__(self, binding: Binding) -> None:
+    def __init__(self, binding: Binding, segment_keys: int) -> None:
         self._binding = binding
+        self._segment_keys = segment_keys
         self._counts = [1] * binding.shards
         self._directories: dict[int, Ref[table.Message]] = {}
         self._segments: dict[tuple[int, int], Ref[table_segment.Message]] = {}
 
     async def add(self, raw: bytes, value: bytes) -> bool:
-        added, full = await self._keyed(raw, lambda segment: segment.ask(table_segment.Add(raw, value)))
+        added, full = await self._keyed(
+            raw, lambda segment: segment.ask(table_segment.Add(raw, value, self._segment_keys))
+        )
         if full:
             await self._grow(self._binding.shard(raw))
         return added
@@ -791,7 +815,9 @@ class _Index:
 
     async def list_under(self, raw: bytes, generation: int) -> bool:
         """List a dict key under `generation`, and whether it is listed under it: not when it is under a newer one."""
-        listed, full = await self._keyed(raw, lambda segment: segment.ask(table_segment.List(raw, generation)))
+        listed, full = await self._keyed(
+            raw, lambda segment: segment.ask(table_segment.List(raw, generation, self._segment_keys))
+        )
         if full:
             await self._grow(self._binding.shard(raw))
         return listed
@@ -904,9 +930,9 @@ class _Index:
 class _Table:
     """What a set and a multimap share: an index sharded by key, each shard in segments."""
 
-    def __init__(self, binding: Binding) -> None:
+    def __init__(self, binding: Binding, segment_keys: int) -> None:
         self._binding = binding
-        self._index = _Index(binding)
+        self._index = _Index(binding, segment_keys)
 
     async def size(self) -> int:
         """Count the values listed, with one ask to each segment of the index."""
@@ -925,9 +951,9 @@ class Dict[K, V]:
     time, and drop each listing they find without a value.
     """
 
-    def __init__(self, binding: Binding, key: type[K], value: type[V]) -> None:
+    def __init__(self, binding: Binding, key: type[K], value: type[V], segment_keys: int) -> None:
         self._binding = binding
-        self._index = _Index(binding)
+        self._index = _Index(binding, segment_keys)
         self._key = Value(key, binding.system)
         self._value = Value(value, binding.system)
         self._generation = Value(int, binding.system)
@@ -1011,7 +1037,7 @@ class Dict[K, V]:
     ) -> list[tuple[bytes, T]]:
         """What `probe` answers for every key of a segment and what the segment lists it under."""
         keys = list(listed)
-        found = await _pooled(lambda raw: probe(raw, listed[raw]), keys)
+        found = await _pooled(lambda raw: probe(raw, listed[raw]), keys, self._binding.probes)
         return list(zip(keys, found, strict=True))
 
     async def _value_of(self, raw: bytes, listing: tuple[bytes, ...]) -> bytes | None:
@@ -1047,8 +1073,8 @@ class Set[T: Hashable](_Table):
     about each member of this one.
     """
 
-    def __init__(self, binding: Binding, value: type[T]) -> None:
-        super().__init__(binding)
+    def __init__(self, binding: Binding, value: type[T], segment_keys: int) -> None:
+        super().__init__(binding, segment_keys)
         self._value = Value(value, binding.system)
 
     async def add(self, value: T) -> bool:
@@ -1100,15 +1126,15 @@ class Set[T: Hashable](_Table):
         """Every member of this set and whether `other` holds it, asking `other` about a segment's members together."""
         async for listed in self._index.scan():
             members = [self._value.load(raw) for raw in listed]
-            for member, held in zip(members, await _pooled(other.contains, members), strict=True):
+            for member, held in zip(members, await _pooled(other.contains, members, self._binding.probes), strict=True):
                 yield member, held
 
 
 class MultiMap[K, V](_Table):
     """Values listed under a key, each one unique for that key."""
 
-    def __init__(self, binding: Binding, key: type[K], value: type[V]) -> None:
-        super().__init__(binding)
+    def __init__(self, binding: Binding, key: type[K], value: type[V], segment_keys: int) -> None:
+        super().__init__(binding, segment_keys)
         self._key = Value(key, binding.system)
         self._value = Value(value, binding.system)
 
@@ -1154,10 +1180,12 @@ class Queue[T]:
     only the segments between the head and the tail stay.
     """
 
-    def __init__(self, binding: Binding, value: type[T]) -> None:
+    def __init__(self, binding: Binding, value: type[T], segment_items: int, segment_bytes: int) -> None:
         self._binding = binding
         self._value = Value(value, binding.system)
         self._index = binding.ref(queue.actor)
+        self._segment_items = segment_items
+        self._segment_bytes = segment_bytes
         # Where the head and the tail were last seen. They can only lag behind the index, and a segment they left is
         # sealed, which sends the call to the index to catch up.
         self._head = 0
@@ -1169,7 +1197,9 @@ class Queue[T]:
         raw = self._value.dump(value)
         while True:
             tail = self._tail
-            if await self._segment(tail).ask(queue_segment.Offer(raw, self._index, tail)):
+            if await self._segment(tail).ask(
+                queue_segment.Offer(raw, self._index, tail, self._segment_items, self._segment_bytes)
+            ):
                 return
             await self._advance(self._head, tail + 1)
 
@@ -1267,7 +1297,8 @@ class Semaphore:
     """FIFO waiters and renewable leases, over the actor `semaphore`. TTLs use wall clocks, which must be synchronized
     across nodes.
 
-    Times are seconds. A transport failure aborts a wait; abandoned requests expire within 30 seconds.
+    Times are seconds. A transport failure aborts a wait; abandoned requests expire within `wait_lease` of
+    `Collections`.
     Existing leases retain their expiry on failover. No automatic renewal is performed.
     """
 
@@ -1319,12 +1350,12 @@ class Semaphore:
         lease_id = str(uuid4())
 
         def acquiring(_: float) -> Awaitable[Acquired | Denied]:
-            return self._asked(lambda ref: ref.ask(semaphore.Acquire(n, ttl, _INTEREST, lease_id)))
+            return self._asked(lambda ref: ref.ask(semaphore.Acquire(n, ttl, self._binding.waits.lease, lease_id)))
 
         try:
             while True:
                 # Each ask renews the wait before it runs out, so the request keeps its place in line.
-                match await _wait(acquiring):
+                match await _wait(acquiring, self._binding.waits):
                     case Acquired(granted, token):
                         return Lease(granted, token, self._ref)
                     case Denied():
@@ -1381,7 +1412,8 @@ class Lock:
 
 
 class Barrier:
-    """Cyclic barrier. Dead participants expire within 30 seconds; failed transports abort their local wait."""
+    """Cyclic barrier. Dead participants expire within `wait_lease` of `Collections`; failed transports abort their
+    local wait."""
 
     def __init__(self, binding: Binding, parties: int) -> None:
         self._binding = binding
@@ -1396,15 +1428,18 @@ class Barrier:
         """Join this generation; asyncio.timeout bounds the wait and withdraws this arrival."""
         await self._binding.ready()
         id = uuid4()
+        waits = self._binding.waits
         try:
-            released = await _wait(lambda until: self._ref.ask(barrier.Arrive(id, self.parties, until)))
+            released = await _wait(
+                lambda until: self._ref.ask(barrier.Arrive(id, self.parties, until, waits.remember)), waits
+            )
             if not released:
                 raise TimeoutError("barrier wait timed out")
         except TimeoutError:
-            if not await _withdraw(self._ref.ask(barrier.Cancel(id)), False):
+            if not await _withdraw(self._ref.ask(barrier.Cancel(id)), False, waits):
                 raise
         except BaseException:
-            await _withdraw(self._ref.ask(barrier.Cancel(id)), False)
+            await _withdraw(self._ref.ask(barrier.Cancel(id)), False, waits)
             raise
 
     async def waiting(self) -> int:
@@ -1446,10 +1481,66 @@ class Collections:
     operation fixed the configuration of a name, other settings for it raise `ConfigurationError` here without asking
     the cluster. All of that lasts while something holds the object: one nobody holds is dropped, so a collection per
     entity name costs nothing once it is let go, and the one built in its place checks with the cluster again.
+
+    `segment_keys` of a set, a dict or a multimap is how many keys a segment of its index lists before a write asks
+    for a split, and `segment_items` and `segment_bytes` of a queue are what a segment holds before it is sealed: a
+    write rewrites its segment, so these bound its cost, and fewer, larger segments make a read of the whole
+    collection ask fewer keys. They are not part of the configuration the cluster checks: each write goes by the
+    values of the facade that makes it.
+
+    Parameters
+    ----------
+    system
+        The system or client the collections are reached through.
+    probes
+        How many keys `scan`, `items` and `clear` of a dict, and `intersection` and `difference` of a set, ask at once.
+    wait_lease
+        How long the owner of a semaphore, a lock or a barrier keeps a waiting request after its last ask, which is
+        how long one whose caller went away holds its place.
+    reask_every
+        How long one ask of a wait gets before it is sent again, renewing its lease. It is below `wait_lease`, or
+        the owner would drop the request between two asks.
+    withdraw_timeout
+        How long a wait that is given up, or a barrier wait that timed out, waits for the owner to take its
+        withdrawal. One that does not arrive leaves the request to expire after `wait_lease`.
+    release_memory
+        How long a barrier remembers a released generation, so that a party whose answer was lost and that asks
+        again in that time hears it went through.
     """
 
-    def __init__(self, system: System) -> None:
+    def __init__(
+        self,
+        system: System,
+        *,
+        probes: int = 64,
+        wait_lease: timedelta = timedelta(seconds=30),
+        reask_every: timedelta = timedelta(seconds=10),
+        withdraw_timeout: timedelta = timedelta(seconds=1),
+        release_memory: timedelta = timedelta(seconds=30),
+    ) -> None:
+        if probes < 1:
+            raise ValueError(f"probes is {probes}, and a read that asks no key at once never ends")
+        for name, period in (
+            ("wait_lease", wait_lease),
+            ("reask_every", reask_every),
+            ("withdraw_timeout", withdraw_timeout),
+            ("release_memory", release_memory),
+        ):
+            if period <= timedelta(0):
+                raise ValueError(f"{name} is {period}, and a wait of no time is over before it starts")
+        if reask_every >= wait_lease:
+            raise ValueError(
+                f"reask_every is {reask_every}, not below wait_lease of {wait_lease}: the owner would drop a request "
+                "between two asks"
+            )
         self._system = system
+        self._probes = probes
+        self._waits = _Waits(
+            wait_lease.total_seconds(),
+            reask_every.total_seconds(),
+            withdraw_timeout.total_seconds(),
+            release_memory.total_seconds(),
+        )
         # Weak: a binding lives as long as a facade that holds it.
         self._bindings: WeakValueDictionary[tuple[str, str], Binding] = WeakValueDictionary()
 
@@ -1485,9 +1576,11 @@ class Collections:
         index_shards: int = 16,
         replicas: int = 3,
         write: Write = "majority",
+        segment_keys: int = 512,
     ) -> Dict[K, V]:
+        _positive("segment_keys", segment_keys)
         binding = self._table("dict", name, index_shards, replicas, write, ("entry-v1", repr(key), repr(value)))
-        return Dict(binding, key, value)
+        return Dict(binding, key, value, segment_keys)
 
     @_kept
     def set[T: Hashable](
@@ -1498,8 +1591,10 @@ class Collections:
         shards: int = 16,
         replicas: int = 3,
         write: Write = "majority",
+        segment_keys: int = 512,
     ) -> Set[T]:
-        return Set(self._table("set", name, shards, replicas, write, (repr(value),)), value)
+        _positive("segment_keys", segment_keys)
+        return Set(self._table("set", name, shards, replicas, write, (repr(value),)), value, segment_keys)
 
     @_kept
     def multimap[K, V](
@@ -1511,8 +1606,11 @@ class Collections:
         shards: int = 16,
         replicas: int = 3,
         write: Write = "majority",
+        segment_keys: int = 512,
     ) -> MultiMap[K, V]:
-        return MultiMap(self._table("multimap", name, shards, replicas, write, (repr(key), repr(value))), key, value)
+        _positive("segment_keys", segment_keys)
+        binding = self._table("multimap", name, shards, replicas, write, (repr(key), repr(value)))
+        return MultiMap(binding, key, value, segment_keys)
 
     @_kept
     def queue[T](
@@ -1522,8 +1620,13 @@ class Collections:
         value: type[T],
         replicas: int = 3,
         write: Write = "majority",
+        segment_items: int = 1024,
+        segment_bytes: int = 64 * 1024,
     ) -> Queue[T]:
-        return Queue(self._table("queue", name, 1, replicas, write, (repr(value),)), value)
+        _positive("segment_items", segment_items)
+        _positive("segment_bytes", segment_bytes)
+        binding = self._table("queue", name, 1, replicas, write, (repr(value),))
+        return Queue(binding, value, segment_items, segment_bytes)
 
     @_kept
     def semaphore(self, name: str, *, capacity: int, replicas: int = 3) -> Semaphore:
@@ -1578,5 +1681,7 @@ class Collections:
             write=write,
             shards=shards,
             signature=signature,
+            probes=self._probes,
+            waits=self._waits,
         )
         return binding

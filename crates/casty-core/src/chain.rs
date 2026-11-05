@@ -14,22 +14,17 @@ pub struct Link {
     pub hold: u64,
 }
 
-/// The most callers a chain names. A cycle of up to this many keys is found however deep the chain above it is; a
-/// longer one ends at the deadline of its asks.
-pub const BOUND: usize = 16;
-
-/// The callers an `ask` keeps waiting, the one that sent it last. It never names more than `BOUND` of them: the
-/// oldest go first, so a deep chain does not grow the message without limit.
+/// The callers an `ask` keeps waiting, the one that sent it last. A body that asks names at most `depth` of them, its
+/// system's: the oldest go first, so a deep chain does not grow the message without limit. A cycle of up to that many
+/// keys is found however deep the chain above it is; a longer one ends at the deadline of its asks.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Chain(Vec<Link>);
 
 impl Chain {
-    /// A chain as it arrived, cut to its most recent `BOUND` callers.
+    /// A chain as it arrived. One longer than the depth of this system is kept whole, within the size of a message,
+    /// and cut to that depth when a body here asks down it.
     #[must_use]
-    pub fn of(mut links: Vec<Link>) -> Self {
-        if links.len() > BOUND {
-            links.drain(..links.len() - BOUND);
-        }
+    pub fn of(links: Vec<Link>) -> Self {
         Self(links)
     }
 
@@ -43,10 +38,10 @@ impl Chain {
         self.0.is_empty()
     }
 
-    /// This chain with `link` waiting on it too.
+    /// This chain with `link` waiting on it too, cut to its most recent `depth` callers.
     #[must_use]
-    pub fn then(&self, link: Link) -> Self {
-        let kept = self.0.len().min(BOUND - 1);
+    pub fn then(&self, link: Link, depth: usize) -> Self {
+        let kept = self.0.len().min(depth.saturating_sub(1));
         let mut links = Vec::with_capacity(kept + 1);
         links.extend_from_slice(&self.0[self.0.len() - kept..]);
         links.push(link);
@@ -77,7 +72,9 @@ impl Chain {
 
 #[cfg(test)]
 mod tests {
-    use super::{BOUND, Chain, Link};
+    use super::{Chain, Link};
+
+    const DEPTH: usize = 16;
 
     fn link(actor: &str, key: &str, hold: u64) -> Link {
         Link {
@@ -88,9 +85,9 @@ mod tests {
     }
 
     fn chain(links: &[Link]) -> Chain {
-        links
-            .iter()
-            .fold(Chain::default(), |chain, link| chain.then(link.clone()))
+        links.iter().fold(Chain::default(), |chain, link| {
+            chain.then(link.clone(), DEPTH)
+        })
     }
 
     #[test]
@@ -129,18 +126,22 @@ mod tests {
     }
 
     #[test]
-    fn the_chain_keeps_its_most_recent_callers_up_to_its_bound() {
+    fn the_chain_keeps_its_most_recent_callers_up_to_its_depth() {
         let deep: Vec<Link> = (0..40_u64)
             .map(|hop| link("hop", &hop.to_string(), hop))
             .collect();
         let grown = chain(&deep);
-        assert_eq!(grown.links(), &deep[40 - BOUND..]);
-        assert_eq!(Chain::of(deep.clone()), grown);
-        assert_eq!(Chain::of(deep[..3].to_vec()).links(), &deep[..3]);
+        assert_eq!(grown.links(), &deep[40 - DEPTH..]);
+        // One that arrived deeper is kept, and cut once a body asks down it.
+        let arrived = Chain::of(deep.clone());
+        assert_eq!(arrived.links(), &deep[..]);
+        let asked = arrived.then(link("a", "k", 1), 4);
+        assert_eq!(&asked.links()[..3], &deep[37..]);
+        assert_eq!(asked.links().len(), 4);
     }
 
     #[test]
-    fn a_cycle_within_the_bound_is_found_under_a_deep_chain() {
+    fn a_cycle_within_the_depth_is_found_under_a_deep_chain() {
         let mut deep: Vec<Link> = (0..40_u64)
             .map(|hop| link("hop", &hop.to_string(), hop))
             .collect();
@@ -150,9 +151,9 @@ mod tests {
             chain(&deep).closed("a", "k", Some(100)),
             Some("a/k -> b/k -> a/k".to_owned())
         );
-        // A cycle longer than the bound has lost its first caller, and ends at the deadline instead.
+        // A cycle longer than the depth has lost its first caller, and ends at the deadline instead.
         let mut long = vec![link("a", "k", 100)];
-        long.extend((0..BOUND).map(|hop| link("hop", &hop.to_string(), 0)));
+        long.extend((0..DEPTH).map(|hop| link("hop", &hop.to_string(), 0)));
         assert_eq!(chain(&long).closed("a", "k", Some(100)), None);
     }
 }

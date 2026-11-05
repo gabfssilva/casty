@@ -65,7 +65,7 @@ A register uses one actor key. `compare_and_set` compares encoded values and com
 
 Sets, dict indexes and multimaps divide their indexes into shards. Each shard has a directory actor and segment actors. A key is hashed to a shard, then to a segment within it.
 
-The segments grow through linear hashing. At the current 512-key threshold, the directory splits the next segment in order and moves part of its hash space into a new segment. It counts the split only after completion. A segment refuses keys outside its current hash range, allowing a caller with old directory information to refresh and retry placement.
+The segments grow through linear hashing. When a write finds its segment listing more than `segment_keys` keys (512 by default, a parameter of the factory), the directory splits the next segment in order and moves part of its hash space into a new segment. It counts the split only after completion. A segment refuses keys outside its current hash range, allowing a caller with old directory information to refresh and retry placement.
 
 A write therefore rewrites one segment rather than an entire unbounded shard. This index partitioning is distinct from physical-node placement: every directory, segment and entry is itself an actor key that the cluster can place and replicate.
 

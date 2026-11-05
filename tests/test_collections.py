@@ -527,6 +527,29 @@ print(system._encode(schema, values).hex())
             # A segment holds at most 64 KiB, where one page used to hold the whole queue.
             assert largest <= 64 * 1024
 
+    async def it_seals_queue_segments_at_the_bounds_the_queue_is_given() -> None:
+        async with ActorSystem() as system:
+            writes = system._writes()
+            queue = Collections(system).queue("small", value=bytes, segment_items=8, segment_bytes=1024)
+            for i in range(200):
+                await queue.offer(i.to_bytes(100))
+            # Eight items of a hundred bytes to a segment, where the defaults would have taken over six hundred.
+            assert max(map(len, writes.payloads)) <= 1024
+            assert await queue.drain(1_000) == [i.to_bytes(100) for i in range(200)]
+
+    async def it_splits_index_segments_past_the_keys_the_collection_is_given() -> None:
+        async with ActorSystem() as system:
+            collections = Collections(system)
+            largest: dict[int, int] = {}
+            for keys in (8, 512):
+                writes = system._writes()
+                members = collections.set(f"bounded-{keys}", value=int, shards=1, segment_keys=keys)
+                for i in range(300):
+                    await members.add(i)
+                largest[keys] = max(map(len, writes.payloads))
+                assert sorted(await members.items()) == list(range(300))
+            assert largest[8] * 10 < largest[512]
+
     async def it_writes_as_much_per_offer_to_a_long_queue_as_to_a_short_one() -> None:
         async with ActorSystem() as system:
             writes = system._writes()
@@ -576,7 +599,7 @@ print(system._encode(schema, values).hex())
 
             def facade() -> Queue[int]:
                 binding = Binding(system, "queue", "drained", replicas=3, write="majority", signature=(repr(int),))
-                return Queue(binding, int)
+                return Queue(binding, int, 1024, 64 * 1024)
 
             jobs, lagging = facade(), facade()
             await lagging.offer(-1)
@@ -774,6 +797,42 @@ print(system._encode(schema, values).hex())
                 group.create_task(barrier.wait())
             assert await barrier.waiting() == 0
 
+    async def it_keeps_a_wait_longer_than_its_lease_in_line_by_asking_again() -> None:
+        async with ActorSystem() as system:
+            collections = Collections(
+                system, wait_lease=timedelta(milliseconds=300), reask_every=timedelta(milliseconds=100)
+            )
+            permits = collections.semaphore("renewed", capacity=1)
+            held = await permits.acquire()
+            waiting = asyncio.create_task(permits.acquire())
+            await asyncio.sleep(1)
+            assert not waiting.done()
+            assert await permits.available() == 0
+            held.release()
+            async with asyncio.timeout(1):
+                (await waiting).release()
+
+    async def it_remembers_a_released_barrier_generation_as_long_as_the_arrival_says() -> None:
+        async with ActorSystem() as system:
+
+            async def again(name: str, remember: float) -> bool:
+                """Whether a party that went through, asking again after its deadline, hears that it did."""
+                round = system.ref(barrier.actor, name)
+                first, until = uuid4(), time.time() + 0.1
+                async with asyncio.TaskGroup() as group:
+                    for party in (first, uuid4()):
+                        group.create_task(round.ask(barrier.Arrive(party, 2, until, remember)))
+                await asyncio.sleep(0.3)
+                try:
+                    async with asyncio.timeout(0.1):
+                        return await round.ask(barrier.Arrive(first, 2, time.time() + 5, remember))
+                except TimeoutError:
+                    # Forgotten: a new arrival, which waits for a second party.
+                    return False
+
+            assert await again("remembered", 30.0)
+            assert not await again("forgotten", 0.05)
+
     async def it_expires_abandoned_requests_without_granting_or_counting_them() -> None:
         async with ActorSystem() as system:
             permits = system.ref(semaphore.actor, "raw", initial=SemaphoreState(capacity=1))
@@ -845,5 +904,5 @@ print(system._encode(schema, values).hex())
             return 123
 
         with pytest.raises(TimeoutError):
-            await kinds._wait(stalled)
+            await kinds._wait(stalled, kinds._Waits())
         assert attempts == 1

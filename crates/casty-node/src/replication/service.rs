@@ -291,14 +291,27 @@ pub struct Replication {
     limit: usize,
     write_timeout: Duration,
     linger: Duration,
+    grace: Duration,
+    retry: Duration,
 }
 
 impl Replication {
     /// `linger` is how long a tombstone stays before this node asks the other replicas of its key about it, and again
     /// after that while one of them has not answered: the time a copy older than the deletion may still take to reach
     /// a replica in a handover or a range.
+    ///
+    /// `grace` is how long taking a key over waits for every replica that is not dead before it decides with the
+    /// promises it has, or, short of a read quorum, waits on for the quorum alone; and `retry` how long it waits before it promises again: after another owner fenced it, or
+    /// while a replica that answered is still receiving the range of the key.
     #[must_use]
-    pub fn new(node: NodeId, limit: usize, write_timeout: Duration, linger: Duration) -> Self {
+    pub fn new(
+        node: NodeId,
+        limit: usize,
+        write_timeout: Duration,
+        linger: Duration,
+        grace: Duration,
+        retry: Duration,
+    ) -> Self {
         Self {
             replica: Replica::new(node.clone(), limit),
             node,
@@ -319,6 +332,8 @@ impl Replication {
             limit,
             write_timeout,
             linger,
+            grace,
+            retry,
         }
     }
 
@@ -635,7 +650,7 @@ impl Replication {
                 answer,
             },
             now + around.write_timeout.unwrap_or(self.write_timeout),
-            Some(now + GRACE),
+            Some(now + self.grace),
         );
         self.operations.insert(entity.clone(), operation);
         // A lease per activation, not per owner: an activation that reuses the owner of the one before it is still
@@ -738,7 +753,7 @@ impl Replication {
                 now + around
                     .and_then(|around| around.write_timeout)
                     .unwrap_or(self.write_timeout),
-                moved.then(|| now + GRACE),
+                moved.then(|| now + self.grace),
             ),
         );
         self.start(entity, started);
@@ -979,7 +994,7 @@ impl Replication {
             // what it is short of: what its answer needs is the range, and the operation asks again until it has it.
             if self.owners.get(&entity).is_some_and(Owner::receiving) {
                 if let Some(operation) = self.operations.get_mut(&entity) {
-                    operation.retry = Some(now + RETRY);
+                    operation.retry = Some(now + self.retry);
                 }
                 continue;
             }
@@ -1082,7 +1097,7 @@ impl Replication {
                 && let Some(operation) = self.operations.get_mut(entity)
                 && operation.retry.is_none()
             {
-                operation.retry = Some(Instant::now() + RETRY);
+                operation.retry = Some(Instant::now() + self.retry);
             }
             return;
         };
@@ -1102,7 +1117,7 @@ impl Replication {
             && matches!(operation.waiting, Waiting::Activate { .. })
         {
             operation.grace = None;
-            operation.retry = Some(Instant::now() + RETRY);
+            operation.retry = Some(Instant::now() + self.retry);
             return;
         }
         let ending = operation.waiting.ending();
@@ -1165,9 +1180,6 @@ impl Replication {
     }
 }
 
-const GRACE: Duration = Duration::from_millis(200);
-const RETRY: Duration = Duration::from_millis(50);
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1186,6 +1198,8 @@ mod tests {
     const KEY: &str = "key-1";
     const LIMIT: usize = 1024;
     const LINGER: Duration = Duration::from_secs(1);
+    const GRACE: Duration = Duration::from_millis(200);
+    const RETRY: Duration = Duration::from_millis(50);
 
     /// Deliver everything on the band until nothing is left, the requests this node sends itself going to its own
     /// replica and every answer back to it.
@@ -1219,8 +1233,14 @@ mod tests {
 
     /// A node that took the key over with `initial`, over its own replica and the two others.
     fn taken(ids: &[NodeId], replicas: &mut HashMap<NodeId, Replica>, now: Instant) -> Replication {
-        let mut replication =
-            Replication::new(ids[0].clone(), LIMIT, Duration::from_secs(5), LINGER);
+        let mut replication = Replication::new(
+            ids[0].clone(),
+            LIMIT,
+            Duration::from_secs(5),
+            LINGER,
+            GRACE,
+            RETRY,
+        );
         let (answer, mut activated) = oneshot::channel();
         replication.activate(ACTOR, KEY, Some(pages(b"one")), &around(ids), answer, now);
         settle(&mut replication, &ids[0], replicas);
@@ -1388,8 +1408,14 @@ mod tests {
     #[test]
     fn a_key_with_one_replica_forgets_its_tombstone_once_it_lingered() {
         let ids = Rolls::seeded(77).nodes(1);
-        let mut replication =
-            Replication::new(ids[0].clone(), LIMIT, Duration::from_secs(5), LINGER);
+        let mut replication = Replication::new(
+            ids[0].clone(),
+            LIMIT,
+            Duration::from_secs(5),
+            LINGER,
+            GRACE,
+            RETRY,
+        );
         let mut none = HashMap::new();
         let now = Instant::now();
         let (answer, _activated) = oneshot::channel();
@@ -1698,8 +1724,14 @@ mod tests {
         policy: Durable,
         now: Instant,
     ) -> Replication {
-        let mut replication =
-            Replication::new(ids[0].clone(), LIMIT, Duration::from_secs(5), LINGER);
+        let mut replication = Replication::new(
+            ids[0].clone(),
+            LIMIT,
+            Duration::from_secs(5),
+            LINGER,
+            GRACE,
+            RETRY,
+        );
         let (answer, mut activated) = oneshot::channel();
         replication.activate(
             ACTOR,
@@ -1735,8 +1767,14 @@ mod tests {
                 pages: Some(pages(b"kept")),
             },
         );
-        let mut replication =
-            Replication::new(ids[0].clone(), LIMIT, Duration::from_secs(5), LINGER);
+        let mut replication = Replication::new(
+            ids[0].clone(),
+            LIMIT,
+            Duration::from_secs(5),
+            LINGER,
+            GRACE,
+            RETRY,
+        );
         let (answer, mut activated) = oneshot::channel();
 
         replication.activate(
@@ -1764,8 +1802,14 @@ mod tests {
     fn an_activation_the_store_cannot_answer_fails_unavailable() {
         let ids = Rolls::seeded(83).nodes(3);
         let mut replicas = others(&ids);
-        let mut replication =
-            Replication::new(ids[0].clone(), LIMIT, Duration::from_secs(5), LINGER);
+        let mut replication = Replication::new(
+            ids[0].clone(),
+            LIMIT,
+            Duration::from_secs(5),
+            LINGER,
+            GRACE,
+            RETRY,
+        );
         let (answer, mut activated) = oneshot::channel();
         replication.activate(
             ACTOR,
@@ -2074,8 +2118,14 @@ mod tests {
             .iter()
             .map(|node| (node.clone(), Replica::new(node.clone(), LIMIT)))
             .collect();
-        let mut replication =
-            Replication::new(ids[0].clone(), LIMIT, Duration::from_secs(5), LINGER);
+        let mut replication = Replication::new(
+            ids[0].clone(),
+            LIMIT,
+            Duration::from_secs(5),
+            LINGER,
+            GRACE,
+            RETRY,
+        );
         let (answer, mut activated) = oneshot::channel();
         replication.activate(
             ACTOR,
@@ -2123,8 +2173,14 @@ mod tests {
             .iter()
             .map(|node| (node.clone(), Replica::new(node.clone(), LIMIT)))
             .collect();
-        let mut replication =
-            Replication::new(ids[0].clone(), LIMIT, Duration::from_secs(5), LINGER);
+        let mut replication = Replication::new(
+            ids[0].clone(),
+            LIMIT,
+            Duration::from_secs(5),
+            LINGER,
+            GRACE,
+            RETRY,
+        );
         let now = Instant::now();
         let (answer, mut activated) = oneshot::channel();
         replication.activate(ACTOR, KEY, Some(pages(b"one")), &around(&ids), answer, now);
@@ -2160,8 +2216,14 @@ mod tests {
     #[test]
     fn a_write_of_a_key_this_node_does_not_hold_is_reported() {
         let ids = Rolls::seeded(73).nodes(3);
-        let mut replication =
-            Replication::new(ids[0].clone(), LIMIT, Duration::from_secs(5), LINGER);
+        let mut replication = Replication::new(
+            ids[0].clone(),
+            LIMIT,
+            Duration::from_secs(5),
+            LINGER,
+            GRACE,
+            RETRY,
+        );
         let (answer, mut written) = oneshot::channel();
 
         replication.commit(
@@ -2195,8 +2257,14 @@ mod tests {
     #[test]
     fn an_activation_the_replicas_never_answer_is_reported_when_it_expires() {
         let ids = Rolls::seeded(74).nodes(3);
-        let mut replication =
-            Replication::new(ids[0].clone(), LIMIT, Duration::from_secs(5), LINGER);
+        let mut replication = Replication::new(
+            ids[0].clone(),
+            LIMIT,
+            Duration::from_secs(5),
+            LINGER,
+            GRACE,
+            RETRY,
+        );
         let now = Instant::now();
         let (answer, mut activated) = oneshot::channel();
 

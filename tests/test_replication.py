@@ -13,6 +13,14 @@ from tests.cluster import FAST, NARROW, WITHIN, Harness, Node
 from tests.support import eventually
 
 STUBBORN = replace(FAST, remove_after=None)
+DISTANT = replace(
+    FAST,
+    suspect_after=timedelta(seconds=3),
+    dead_after=timedelta(seconds=3),
+    write_timeout=timedelta(seconds=5),
+    ask_timeout=timedelta(seconds=10),
+)
+"""Links whose round trip is longer than the `replica_grace` of `FAST`, with a `write_timeout` that covers it."""
 
 
 @dataclass(frozen=True)
@@ -259,6 +267,17 @@ def describe_replication() -> None:
                         assert len(set(entries)) == len(entries), where
 
                 await eventually(every_node_answers_with_what_the_majority_confirmed, WITHIN)
+
+    def when_the_round_trip_between_nodes_is_longer_than_the_replica_grace() -> None:
+        async def it_activates_new_keys_by_waiting_on_for_the_quorum_past_the_grace() -> None:
+            async with Harness.start(3, timing=DISTANT) as harness:
+                a, *_ = harness.nodes
+                harness.slow(timedelta(milliseconds=150))
+                keys = [f"distant-{index}" for index in range(5)]
+
+                confirmed = await asyncio.gather(*(a.system.ref(ledger, key).ask(Append(1)) for key in keys))
+
+                assert confirmed == [True] * len(keys)
 
     def when_a_type_writes_with_one_replica() -> None:
         async def it_keeps_confirming_on_the_minority_side() -> None:

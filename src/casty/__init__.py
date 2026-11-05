@@ -26,6 +26,7 @@ from casty.model import (
     Placement,
     Store,
     System,
+    Transport,
     Write,
 )
 from casty.model import address as address
@@ -127,6 +128,7 @@ __all__ = [
     "Stats",
     "Store",
     "System",
+    "Transport",
     "Unavailable",
     "UnknownActor",
     "Write",

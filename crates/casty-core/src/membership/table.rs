@@ -68,14 +68,14 @@ pub struct Transition {
     pub previous: Option<Status>,
 }
 
-/// A `left` record is forgotten a minute after it was written.
-const TOMBSTONE: f64 = 60.0;
-
 #[derive(Debug)]
 pub struct MemberTable {
     node: NodeId,
     dead_after: f64,
     remove_after: Option<f64>,
+    /// How long a `left` record of another member is kept after it was written, which is how long it beats an older
+    /// record of that member arriving late.
+    forget_left_after: f64,
     records: HashMap<NodeId, Record>,
     since: HashMap<NodeId, f64>,
     moved: Vec<Transition>,
@@ -88,6 +88,7 @@ impl MemberTable {
         types: BTreeSet<String>,
         dead_after: f64,
         remove_after: Option<f64>,
+        forget_left_after: f64,
     ) -> Self {
         let mine = Record {
             node: node.clone(),
@@ -101,6 +102,7 @@ impl MemberTable {
             node,
             dead_after,
             remove_after,
+            forget_left_after,
             moved: Vec::new(),
         }
     }
@@ -220,7 +222,7 @@ impl MemberTable {
                         ..record.clone()
                     });
                 }
-                Status::Left if *node != self.node && elapsed >= TOMBSTONE => {
+                Status::Left if *node != self.node && elapsed >= self.forget_left_after => {
                     forgotten.push(node.clone());
                 }
                 _ => {}
@@ -302,7 +304,7 @@ mod tests {
     }
 
     fn table(me: &NodeId) -> MemberTable {
-        MemberTable::new(me.clone(), types(), 0.5, Some(1.0))
+        MemberTable::new(me.clone(), types(), 0.5, Some(1.0), 60.0)
     }
 
     fn seen(table: &MemberTable) -> BTreeMap<NodeId, (u64, Status)> {

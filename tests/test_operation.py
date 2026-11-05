@@ -6,7 +6,20 @@ from datetime import timedelta
 
 import pytest
 
-from casty import ActorSystem, Backoff, Client, Cluster, Context, NodeId, Overlay, Unavailable, actor
+from casty import (
+    ActorSystem,
+    Backoff,
+    Client,
+    Cluster,
+    Collections,
+    Context,
+    NodeId,
+    Overlay,
+    Transport,
+    Unavailable,
+    actor,
+)
+from casty.stores import SQL
 from tests import deploy
 from tests.app import LATCHES, Bump, Latch, Note, account, gated, notes
 from tests.cluster import FAST, Harness, Node
@@ -46,15 +59,55 @@ INVALID: list[tuple[Callable[[], object], str]] = [
     (lambda: ActorSystem(backoff=Backoff(first=timedelta(seconds=-1))), "backoff.first"),
     (lambda: Client(seeds=("10.0.0.4:7400",), ask_timeout=timedelta(seconds=-1)), "ask_timeout"),
     (lambda: Client(seeds=("10.0.0.4:7400",), sync_every=timedelta(0)), "sync_every"),
+    (lambda: Client(seeds=("10.0.0.4:7400",), transport=Transport(handshake=timedelta(0))), "transport.handshake"),
+    (
+        lambda: Client(seeds=("10.0.0.4:7400",), transport=Transport(redial=Backoff(first=timedelta(0)))),
+        "transport.redial.first",
+    ),
+    (lambda: Client(seeds=("10.0.0.4:7400",), reroute=Backoff(first=timedelta(0))), "reroute.first"),
+    (lambda: Client(seeds=("10.0.0.4:7400",), recheck_every=timedelta(0)), "recheck_every"),
+    (lambda: Client(seeds=("10.0.0.4:7400",), hold_limit=0), "hold_limit"),
+    (lambda: Cluster(bind="0.0.0.0:7400", hold_limit=0), "hold_limit"),
+    (lambda: Overlay(shuffle_active=-1), "overlay.shuffle_active"),
+    (lambda: Overlay(shuffle_active=0, shuffle_passive=0), "overlay.shuffle_active"),
+    (lambda: Transport(redial_jitter=1.5), "transport.redial_jitter"),
+    (lambda: Transport(redial_jitter=math.nan), "transport.redial_jitter"),
+    (lambda: Transport(read_buffer=0), "transport.read_buffer"),
+    (lambda: ActorSystem(reentrancy_depth=0), "reentrancy_depth"),
+    (lambda: SQL("sqlite://records.db", max_connections=0), "max_connections"),
+    (lambda: SQL("sqlite://records.db", acquire_timeout=timedelta(0)), "acquire_timeout"),
+    (lambda: Collections(ActorSystem(), probes=0), "probes"),
+    (lambda: Collections(ActorSystem(), wait_lease=timedelta(0)), "wait_lease"),
+    (lambda: Collections(ActorSystem(), withdraw_timeout=timedelta(seconds=-1)), "withdraw_timeout"),
+    (lambda: Collections(ActorSystem(), release_memory=timedelta(0)), "release_memory"),
+    (lambda: Collections(ActorSystem(), reask_every=timedelta(seconds=30)), "reask_every"),
+    (lambda: Collections(ActorSystem()).dict("d", key=str, value=int, segment_keys=0), "segment_keys"),
+    (lambda: Collections(ActorSystem()).set("s", value=int, segment_keys=0), "segment_keys"),
+    (lambda: Collections(ActorSystem()).multimap("m", key=str, value=int, segment_keys=0), "segment_keys"),
+    (lambda: Collections(ActorSystem()).queue("q", value=int, segment_items=0), "segment_items"),
+    (lambda: Collections(ActorSystem()).queue("q", value=int, segment_bytes=0), "segment_bytes"),
 ]
 
-#: Cluster timings that pass the dataclass and that the node refuses once it joins: the transport repeats the first
-#: three and would never wait between two rounds, and the last is a threshold that cannot be negative.
+#: Cluster timings that pass the dataclass and that the node refuses once it joins: the node repeats something by
+#: the ones of zero, or waits for it by them, and would never wait between two rounds; the negative ones are thresholds.
 REFUSED_ON_JOIN: list[tuple[Cluster, str]] = [
     (Cluster(bind="127.0.0.1:0", heartbeat=timedelta(0)), "heartbeat"),
     (Cluster(bind="127.0.0.1:0", anti_entropy=timedelta(0)), "anti_entropy"),
     (Cluster(bind="127.0.0.1:0", overlay=Overlay(graft_after=timedelta(0))), "overlay.graft_after"),
+    (Cluster(bind="127.0.0.1:0", overlay=Overlay(forget_after=timedelta(0))), "overlay.forget_after"),
+    (Cluster(bind="127.0.0.1:0", replica_retry=timedelta(0)), "replica_retry"),
+    (Cluster(bind="127.0.0.1:0", recheck_every=timedelta(0)), "recheck_every"),
+    (Cluster(bind="127.0.0.1:0", reroute=Backoff(first=timedelta(0))), "reroute.first"),
+    (Cluster(bind="127.0.0.1:0", handoff_retry=Backoff(first=timedelta(0))), "handoff_retry.first"),
+    (Cluster(bind="127.0.0.1:0", transport=Transport(dial=timedelta(0))), "transport.dial"),
+    (Cluster(bind="127.0.0.1:0", transport=Transport(keepalive_after=timedelta(0))), "transport.keepalive_after"),
+    (
+        Cluster(bind="127.0.0.1:0", transport=Transport(address_map_timeout=timedelta(0))),
+        "transport.address_map_timeout",
+    ),
     (Cluster(bind="127.0.0.1:0", dead_after=timedelta(seconds=-1)), "dead_after"),
+    (Cluster(bind="127.0.0.1:0", replica_grace=timedelta(seconds=-1)), "replica_grace"),
+    (Cluster(bind="127.0.0.1:0", forget_left_after=timedelta(seconds=-1)), "forget_left_after"),
 ]
 
 

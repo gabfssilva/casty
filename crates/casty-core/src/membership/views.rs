@@ -6,9 +6,6 @@
 use crate::node::{NodeId, Send};
 use crate::rolls::Rolls;
 
-const SHUFFLE_ACTIVE: usize = 3;
-const SHUFFLE_PASSIVE: usize = 4;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum View {
     Join,
@@ -42,13 +39,15 @@ pub enum Effect {
     NeighborDown(NodeId),
 }
 
-/// How large the views are and how far a walk goes.
+/// How large the views are, how far a walk goes, and how many of each view a shuffle sends.
 #[derive(Debug, Clone, Copy)]
 pub struct Overlay {
     pub active: usize,
     pub passive: usize,
     pub join_walk: u32,
     pub passive_walk: u32,
+    pub shuffle_active: usize,
+    pub shuffle_passive: usize,
 }
 
 impl Default for Overlay {
@@ -58,6 +57,8 @@ impl Default for Overlay {
             passive: 30,
             join_walk: 6,
             passive_walk: 3,
+            shuffle_active: 3,
+            shuffle_passive: 4,
         }
     }
 }
@@ -276,8 +277,8 @@ impl Views {
         if self.active.is_empty() {
             return Vec::new();
         }
-        let mut sample = self.sample(&self.active.clone(), SHUFFLE_ACTIVE);
-        sample.extend(self.sample(&self.passive.clone(), SHUFFLE_PASSIVE));
+        let mut sample = self.sample(&self.active.clone(), self.overlay.shuffle_active);
+        sample.extend(self.sample(&self.passive.clone(), self.overlay.shuffle_passive));
         let target = self.rolls.pick(&self.active.clone()).clone();
         vec![Effect::Send(Send {
             to: target,

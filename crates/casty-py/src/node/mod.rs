@@ -40,7 +40,7 @@ use cluster::{Ending, Entered, Joined, Taken};
 use observe::{Kind, Observed, Wanted};
 use replies::{Replies, Waiting};
 
-/// The periods a system runs by.
+/// The periods a system runs by, and how many callers an `ask` of one of its bodies names.
 #[derive(Debug, Clone, Copy)]
 pub struct Settings {
     pub idle_after: Duration,
@@ -48,6 +48,7 @@ pub struct Settings {
     pub write_timeout: Duration,
     pub leave_timeout: Duration,
     pub backoff: Backoff,
+    pub reentrancy_depth: usize,
 }
 
 /// What a node does to the state of a key. The replicas carry it out in a cluster; alone, the store of the system does
@@ -1242,6 +1243,7 @@ system_methods!(ActorSystem {
         ask_timeout = None,
         write_timeout = None,
         leave_timeout = None,
+        reentrancy_depth = 16,
         observer = None,
         store = None,
         runtime = None,
@@ -1256,16 +1258,25 @@ system_methods!(ActorSystem {
         ask_timeout: Option<&Bound<'_, PyAny>>,
         write_timeout: Option<&Bound<'_, PyAny>>,
         leave_timeout: Option<&Bound<'_, PyAny>>,
+        reentrancy_depth: usize,
         observer: Option<&Bound<'_, PyAny>>,
         store: Option<&Bound<'_, PyAny>>,
         runtime: Option<&Bound<'_, Runtime>>,
     ) -> PyResult<Self> {
+        if reentrancy_depth == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "reentrancy_depth is 0, and an ask from a body names at least the body that asks",
+            ));
+        }
         let settings = Settings {
             idle_after: timing("idle_after", idle_after, Duration::from_secs(60))?,
             ask_timeout: timing("ask_timeout", ask_timeout, Duration::from_secs(10))?,
             write_timeout: timing("write_timeout", write_timeout, Duration::from_secs(5))?,
             leave_timeout: timing("leave_timeout", leave_timeout, Duration::from_secs(30))?,
-            backoff: backoff.map_or(Ok(Backoff::default()), crate::actor::backed_off)?,
+            backoff: backoff.map_or(Ok(Backoff::default()), |backoff| {
+                crate::actor::backed_off("backoff", backoff)
+            })?,
+            reentrancy_depth,
         };
         let id = NodeId {
             address: None,
@@ -1746,8 +1757,12 @@ system_methods!(Client {
         compression = None,
         address_map = None,
         limits = None,
+        transport = None,
         ask_timeout = None,
         sync_every = None,
+        reroute = None,
+        recheck_every = None,
+        hold_limit = 100_000,
         observer = None,
         runtime = None,
     ))]
@@ -1760,8 +1775,12 @@ system_methods!(Client {
         compression: Option<&Bound<'_, PyAny>>,
         address_map: Option<&Bound<'_, PyAny>>,
         limits: Option<&Bound<'_, PyAny>>,
+        transport: Option<&Bound<'_, PyAny>>,
         ask_timeout: Option<&Bound<'_, PyAny>>,
         sync_every: Option<&Bound<'_, PyAny>>,
+        reroute: Option<&Bound<'_, PyAny>>,
+        recheck_every: Option<&Bound<'_, PyAny>>,
+        hold_limit: usize,
         observer: Option<&Bound<'_, PyAny>>,
         runtime: Option<&Bound<'_, Runtime>>,
     ) -> PyResult<Self> {
@@ -1783,18 +1802,35 @@ system_methods!(Client {
             Some(limits) if !limits.is_none() => limits.clone(),
             _ => py.import("casty")?.call_method0("Limits")?,
         };
+        let transport = match transport {
+            Some(transport) if !transport.is_none() => transport.clone(),
+            _ => py.import("casty")?.call_method0("Transport")?,
+        };
         let sync = match sync_every {
             Some(sync_every) => cluster::every("sync_every", sync_every)?,
             None => Duration::from_secs(5),
         };
-        let settings = cluster::dialling(
+        let mut settings = cluster::dialling(
             seeds,
             name.to_owned(),
             tls.unwrap_or(&none),
             &compression,
             &limits,
+            &transport,
             sync,
         )?;
+        if let Some(reroute) = reroute {
+            settings.reroute = cluster::stepped("reroute", reroute)?;
+        }
+        if let Some(recheck_every) = recheck_every {
+            settings.recheck_every = cluster::every("recheck_every", recheck_every)?;
+        }
+        if hold_limit == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "hold_limit is 0, and a client would refuse every message sent back to it",
+            ));
+        }
+        settings.hold_limit = hold_limit;
         // A client has no activation to idle out and no replica to write to: nothing of it waits for these.
         let held = Settings {
             idle_after: Duration::ZERO,
@@ -1802,6 +1838,7 @@ system_methods!(Client {
             write_timeout: Duration::ZERO,
             leave_timeout: Duration::ZERO,
             backoff: Backoff::default(),
+            reentrancy_depth: 1,
         };
         Ok(Self {
             node: Arc::new(Node::new(
