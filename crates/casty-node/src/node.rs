@@ -87,7 +87,7 @@ pub struct Cluster {
     /// How long a node that is leaving waits for the nodes that replicate its keys now to take them.
     pub leave_timeout: core::time::Duration,
     /// How long taking a key over waits for every replica that is not dead before it decides with the ones that
-    /// answered, if they are a read quorum; short of one, it waits on for the quorum alone.
+    /// answered, if they are a read quorum; short of one, it waits on for all of them.
     pub replica_grace: core::time::Duration,
     /// How long taking a key over waits before it promises again: after another owner fenced it, or while a replica
     /// that answered is still receiving the range of the key.

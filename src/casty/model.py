@@ -292,8 +292,7 @@ class Cluster:
     replica_grace
         How long an activation, or a write to replicas the ring just moved the key to, waits for every replica that
         is not `dead` before it decides with the ones that answered, if they are a read quorum. Short of one, it waits
-        on for the quorum alone while a replica that is not `dead` has not answered, until `write_timeout`; with all
-        of them answered, it fails with `Unavailable` at once.
+        on for all of them, until `write_timeout`; with all of them answered, it fails with `Unavailable` at once.
     replica_retry
         How long an activation waits before it asks the replicas again: after another owner promised a later epoch,
         or while a replica that answered is still receiving the range of the key.

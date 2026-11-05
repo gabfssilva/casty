@@ -301,7 +301,7 @@ impl Replication {
     /// a replica in a handover or a range.
     ///
     /// `grace` is how long taking a key over waits for every replica that is not dead before it decides with the
-    /// promises it has, or, short of a read quorum, waits on for the quorum alone; and `retry` how long it waits before it promises again: after another owner fenced it, or
+    /// promises it has, or, short of a read quorum, waits on for all of them; and `retry` how long it waits before it promises again: after another owner fenced it, or
     /// while a replica that answered is still receiving the range of the key.
     #[must_use]
     pub fn new(
