@@ -1,12 +1,14 @@
 import asyncio
+import socket
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AsyncExitStack
 from dataclasses import replace
 from datetime import timedelta
 
 import pytest
 
-from casty import Event, MemberChanged, NodeId, Observer, Overlay, Refused
+from casty import ActorSystem, Cluster, Event, MemberChanged, NodeId, Observer, Overlay, Refused
 from tests.cluster import FAST, WITHIN, Harness, Node
 from tests.support import eventually
 
@@ -28,6 +30,39 @@ def describe_membership() -> None:
                         assert alive == expected
 
                 await eventually(every_node_knows_the_eight_members, WITHIN)
+
+    def when_the_seed_that_starts_the_cluster_comes_up_after_the_nodes_that_join_through_it() -> None:
+        async def it_forms_one_cluster_and_not_one_each() -> None:
+            addresses = [_unused() for _ in range(4)]
+            opener, joiners = addresses[0], addresses[1:]
+
+            def system(address: str, seeds: tuple[str, ...]) -> ActorSystem:
+                return ActorSystem(
+                    cluster=Cluster(
+                        bind=address,
+                        seeds=seeds,
+                        heartbeat=FAST.heartbeat,
+                        suspect_after=FAST.suspect_after,
+                        dead_after=FAST.dead_after,
+                        anti_entropy=FAST.anti_entropy,
+                    )
+                )
+
+            async def alive(systems: Sequence[ActorSystem], count: int) -> None:
+                for each in systems:
+                    assert sum(member.status == "alive" for member in each.members) == count
+
+            async with AsyncExitStack() as stack:
+                # Every node but the first names all the others as seeds, the first among them, and the first none.
+                started = [
+                    system(address, tuple(other for other in addresses if other != address)) for address in joiners
+                ]
+                await asyncio.gather(*(stack.enter_async_context(each) for each in started))
+                await eventually(lambda: alive(started, 3), WITHIN)
+
+                started.append(await stack.enter_async_context(system(opener, ())))
+
+                await eventually(lambda: alive(started, 4), WITHIN)
 
     def when_the_seed_belongs_to_another_cluster() -> None:
         async def it_refuses_to_start() -> None:
@@ -215,3 +250,10 @@ def seen_as(other: NodeId, status: str | None, *nodes: Node) -> Callable[[], Awa
         assert [seen(node, other) for node in nodes] == [status] * len(nodes)
 
     return check
+
+
+def _unused() -> str:
+    """An address on loopback nothing listens on yet."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return f"127.0.0.1:{probe.getsockname()[1]}"

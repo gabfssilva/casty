@@ -73,6 +73,8 @@ pub struct Membership {
     views: Views,
     broadcast: Broadcaster,
     seeds: Vec<String>,
+    /// For each seed no member answers for, when it is asked again and how long the wait after that is.
+    recalls: HashMap<String, (f64, f64)>,
     seen: HashMap<NodeId, f64>,
     rolls: Rolls,
     leaving: bool,
@@ -114,6 +116,7 @@ impl Membership {
             node,
             timings,
             seeds,
+            recalls: HashMap::new(),
             seen: HashMap::new(),
             rolls: Rolls::fresh(),
             leaving: false,
@@ -121,6 +124,44 @@ impl Membership {
             joined,
             removed: false,
             changed: false,
+        }
+    }
+
+    /// Ask again to enter through each seed that no member of the table answers for.
+    ///
+    /// Nodes that joined each other through their seeds stop calling them once they have a neighbor, and the seed
+    /// that starts the cluster, coming up after them, has nobody to call: without this they stay two clusters. A seed
+    /// that is up joins this cluster to its own, and one that is not costs a dial the transport refuses. The wait
+    /// grows from `heartbeat` to `anti_entropy`, so a seed named by an address no member advertises, behind a balancer
+    /// say, is not asked for the whole table more often than the anti-entropy does.
+    fn recall(&mut self, now: f64) {
+        let present: BTreeSet<String> = self
+            .table
+            .records()
+            .filter(|record| {
+                matches!(
+                    record.status,
+                    Status::Alive | Status::Suspect | Status::Leaving
+                )
+            })
+            .filter_map(|record| record.node.address.clone())
+            .collect();
+        let (first, limit) = (
+            self.timings.heartbeat.as_secs_f64(),
+            self.timings.anti_entropy.as_secs_f64(),
+        );
+        for seed in self.seeds.clone() {
+            if present.contains(&seed) {
+                self.recalls.remove(&seed);
+                continue;
+            }
+            let (at, wait) = self.recalls.entry(seed.clone()).or_insert((now, first));
+            if now < *at {
+                continue;
+            }
+            *at = now + *wait;
+            *wait = (*wait * 2.0).min(limit.max(first));
+            self.send(Target::Seed(seed), Body::View(View::Join));
         }
     }
 }
@@ -272,6 +313,7 @@ impl Members for Membership {
         } else {
             let effects = self.views.promote();
             self.apply(effects, now);
+            self.recall(now);
         }
     }
 
@@ -610,6 +652,85 @@ mod tests {
         a.unreached(&b.node, 0.2);
 
         assert_eq!(status(a, &b.node), Some(Status::Leaving));
+    }
+
+    #[test]
+    fn nodes_that_joined_each_other_join_the_seed_that_starts_the_cluster_after_them() {
+        let opener = "10.0.0.1:7400";
+        let addresses = ["10.0.0.2:7400", "10.0.0.3:7400", "10.0.0.4:7400"];
+        let mut nodes: Vec<Membership> = addresses
+            .iter()
+            .map(|address| {
+                let seeds = [opener]
+                    .iter()
+                    .chain(addresses.iter())
+                    .filter(|seed| *seed != address)
+                    .map(|seed| (*seed).to_owned())
+                    .collect();
+                Membership::new(
+                    NodeId::fresh(Some((*address).to_owned())),
+                    BTreeSet::new(),
+                    seeds,
+                    timings(),
+                    Overlay::default(),
+                )
+            })
+            .collect();
+        for node in &mut nodes {
+            node.join();
+        }
+        exchange(&mut nodes, 0.0);
+        assert!(
+            nodes
+                .iter()
+                .all(|node| node.joined() && node.members().len() == 3)
+        );
+
+        // The node that starts the cluster comes up once the others have one of their own, and calls nobody.
+        nodes.push(Membership::new(
+            NodeId::fresh(Some(opener.to_owned())),
+            BTreeSet::new(),
+            Vec::new(),
+            timings(),
+            Overlay::default(),
+        ));
+        for tick in 1..=3_u32 {
+            let now = f64::from(tick) * 0.5;
+            for node in &mut nodes {
+                node.probe(now);
+            }
+            exchange(&mut nodes, now);
+        }
+
+        for node in &nodes {
+            assert_eq!(
+                node.members().len(),
+                4,
+                "{:?} sees {:?}",
+                node.node,
+                node.members()
+            );
+        }
+    }
+
+    #[test]
+    fn a_seed_no_member_answers_for_is_asked_less_and_less_often() {
+        let mut nodes = pair();
+        let missing = Target::Seed("10.0.0.9:7400".to_owned());
+        nodes[1].seeds.push("10.0.0.9:7400".to_owned());
+        let mut asked = Vec::new();
+        for tick in 0..40_u32 {
+            let now = f64::from(tick) * 0.5;
+            for node in &mut nodes {
+                node.probe(now);
+            }
+            if nodes[1].sends.iter().any(|out| out.to == missing) {
+                asked.push(now);
+            }
+            exchange(&mut nodes, now);
+        }
+        // From `heartbeat` (1 s), doubling up to `anti_entropy` (10 s).
+        assert_eq!(asked, vec![0.0, 1.0, 3.0, 7.0, 15.0]);
     }
 
     #[test]
