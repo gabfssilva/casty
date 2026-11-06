@@ -8,7 +8,8 @@ from datetime import timedelta
 
 import pytest
 
-from casty import ActorSystem, Cluster, Event, MemberChanged, NodeId, Observer, Overlay, Refused
+from casty import ActorSystem, Cluster, Event, Limits, MemberChanged, NodeId, Observer, Overlay, Refused
+from tests.app import Load, sink
 from tests.cluster import FAST, WITHIN, Harness, Node
 from tests.support import eventually
 
@@ -63,6 +64,25 @@ def describe_membership() -> None:
                 started.append(await stack.enter_async_context(system(opener, ())))
 
                 await eventually(lambda: alive(started, 4), WITHIN)
+
+    def when_large_messages_fill_a_slow_link() -> None:
+        async def it_keeps_every_member_alive_while_they_cross() -> None:
+            changes: defaultdict[int, list[MemberChanged]] = defaultdict(list)
+
+            async with Harness.start(3, limits=Limits(message=4 * 2**20), observer=recording(changes)) as harness:
+                # About 3 MB/s each way: each node queues seconds of messages to the others, ten times `suspect_after`.
+                harness.slow(timedelta(milliseconds=20))
+                payload = bytes(2 * 2**20)
+                sizes = await asyncio.gather(
+                    *(
+                        node.system.ref(sink, f"{node.id}-{index}").ask(Load(payload))
+                        for node in harness.nodes
+                        for index in range(4)
+                    )
+                )
+
+                assert sizes == [len(payload)] * 12
+                assert [change for seen in changes.values() for change in seen if change.status != "alive"] == []
 
     def when_the_seed_belongs_to_another_cluster() -> None:
         async def it_refuses_to_start() -> None:

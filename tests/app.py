@@ -59,6 +59,18 @@ class Pending:
 
 
 @dataclass(frozen=True)
+class Load(Askable[int]):
+    data: bytes
+
+
+@actor(replicas=1)
+async def sink(ctx: Context[None, Load]) -> None:
+    """Takes a payload and answers with its size, keeping nothing."""
+    async for msg in ctx.inbox:
+        msg.reply_to.tell(len(msg.data))
+
+
+@dataclass(frozen=True)
 class Paid:
     amount: int
 

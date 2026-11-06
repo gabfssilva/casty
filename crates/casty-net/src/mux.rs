@@ -11,12 +11,16 @@ use crate::limits::Limits;
 
 /// The handshake.
 pub const CONTROL: u32 = 1;
-/// Everything but replication, which shares one stream.
+/// Messages to actors and their answers, which share one stream so that they arrive in the order they were sent.
 pub const MESSAGES: u32 = 3;
 /// Replication on its own, so that moving state never delays a message to an actor.
 pub const REPLICATION: u32 = 5;
+/// Membership on its own: a heartbeat queued behind large messages would arrive only after them, and a peer whose
+/// link is busy but alive would be suspected for it.
+pub const MEMBERSHIP: u32 = 7;
 
-const STREAMS: [u32; 3] = [CONTROL, MESSAGES, REPLICATION];
+/// In the order `output` writes them, so that what membership has queued goes out first.
+const STREAMS: [u32; 4] = [CONTROL, MEMBERSHIP, MESSAGES, REPLICATION];
 const SIZE: usize = 4;
 
 /// An envelope received on `stream`. Its `credit` returns to the peer once the envelope is consumed.
@@ -33,7 +37,7 @@ pub struct Mux {
     pub compressor: Option<Name>,
     limits: Limits,
     min_compressed: usize,
-    streams: [Stream; 3],
+    streams: [Stream; STREAMS.len()],
     control: Vec<u8>,
 }
 
@@ -44,11 +48,7 @@ impl Mux {
             compressor: None,
             limits,
             min_compressed,
-            streams: [
-                Stream::new(limits.window),
-                Stream::new(limits.window),
-                Stream::new(limits.window),
-            ],
+            streams: core::array::from_fn(|_| Stream::new(limits.window)),
             control: Vec::new(),
         }
     }
@@ -279,7 +279,7 @@ impl Stream {
 
 #[cfg(test)]
 mod tests {
-    use super::{MESSAGES, Mux, REPLICATION, Record};
+    use super::{MEMBERSHIP, MESSAGES, Mux, REPLICATION, Record};
     use crate::compress::Name;
     use crate::frame::{Decoder, Frame};
     use crate::limits::Limits;
@@ -350,6 +350,23 @@ mod tests {
     }
 
     #[test]
+    fn membership_queued_behind_a_large_message_goes_out_first() {
+        let (mut a, mut b) = pair(Limits::default());
+        a.send(MESSAGES, "actors", &vec![1; 4 << 20]);
+        a.send(MEMBERSHIP, "membership", b"heartbeat");
+
+        let records = carry(&mut a, &mut b);
+
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| (record.stream, record.payload.as_slice()))
+                .collect::<Vec<_>>(),
+            [(MEMBERSHIP, b"heartbeat".as_slice())]
+        );
+    }
+
+    #[test]
     fn a_stream_that_writes_past_its_credit_is_refused() {
         let limits = Limits {
             window: 16,
@@ -410,12 +427,12 @@ mod tests {
 
         let error = mux
             .receive(Frame::Data {
-                stream: 7,
+                stream: 9,
                 payload: Vec::new(),
                 compressed: false,
             })
             .unwrap_err();
-        assert_eq!(error.to_string(), "unknown stream 7");
+        assert_eq!(error.to_string(), "unknown stream 9");
     }
 
     #[test]

@@ -74,7 +74,7 @@ The [agent-per-node example](https://github.com/gabfssilva/casty/tree/main/examp
 
 Connections exchange a handshake containing the cluster name, node identity, compression options and size limits. Cluster names and frame, message and window limits must agree. The frame protocol version must also match; a refused join raises `Refused`.
 
-The transport multiplexes control, application messages and replication on separate logical streams. Each stream has flow-control credit measured in uncompressed bytes. Replication has its own stream so transferring state does not consume application-message credit, although both still share the connection's bandwidth.
+The transport multiplexes control, membership, application messages and replication on separate logical streams. Each stream has flow-control credit measured in uncompressed bytes. Replication has its own stream so transferring state does not consume application-message credit, although both still share the connection's bandwidth. Membership has its own stream, written first, so a heartbeat waits for at most the credit already in flight on the others, never for large messages queued before it. Messages to actors and their answers share one stream, in order: a small message waits for the large ones sent before it on the same connection.
 
 `Cluster` supports mutual TLS, compression and message limits. `address_map` can translate advertised addresses to dialable addresses for NAT or tunnels. The [cluster API](casty.md#casty.Cluster) specifies these options.
 

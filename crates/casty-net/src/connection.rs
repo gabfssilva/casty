@@ -1,4 +1,4 @@
-//! One connection to a peer: a handshake on the control stream, then envelopes on the other two.
+//! One connection to a peer: a handshake on the control stream, then envelopes on the others.
 //!
 //! Reading and writing are separate tasks over the two halves of the socket, and the mux between them is what holds
 //! the credit of each stream. A single task would deadlock: a write that the peer is not draining would stop this
@@ -16,7 +16,7 @@ use crate::compress::Name;
 use crate::frame::{Decoder, Frame, GOODBYE, ProtocolError};
 use crate::handshake::{self, Message};
 use crate::limits::Limits;
-use crate::mux::{CONTROL, MESSAGES, Mux, REPLICATION, Record};
+use crate::mux::{CONTROL, MEMBERSHIP, MESSAGES, Mux, REPLICATION, Record};
 
 /// A socket, with or without TLS on top of it.
 pub trait Socket: AsyncRead + AsyncWrite + Unpin + Send + core::fmt::Debug + 'static {}
@@ -234,10 +234,10 @@ impl Connection {
 
     /// Queue an envelope. It goes out as the peer's credit allows, and is lost if the connection dies first.
     pub fn send(&self, name: &str, payload: &[u8]) {
-        let stream = if name == "replication" {
-            REPLICATION
-        } else {
-            MESSAGES
+        let stream = match name {
+            "replication" => REPLICATION,
+            "membership" => MEMBERSHIP,
+            _ => MESSAGES,
         };
         self.held().send(stream, name, payload);
         self.writable.notify_one();
