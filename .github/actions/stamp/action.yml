@@ -1,0 +1,14 @@
+name: stamp
+description: Write the version of the release's tag into Cargo.toml, which is where the version of the wheel and the sdist comes from. A manual run keeps the version of the checkout.
+runs:
+  using: composite
+  steps:
+    - if: github.event_name == 'release'
+      shell: bash
+      run: |
+        version="${TAG#v}"
+        sed -i.bak -E "/^\[workspace\.package\]$/,/^version = /s/^version = \"[^\"]+\"$/version = \"${version}\"/" Cargo.toml
+        rm Cargo.toml.bak
+        grep -n '^version = ' Cargo.toml
+      env:
+        TAG: ${{ github.event.release.tag_name }}

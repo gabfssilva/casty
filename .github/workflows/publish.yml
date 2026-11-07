@@ -23,6 +23,7 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/stamp
       # Linux builds run in the manylinux container, which carries its own interpreters, free-threaded ones included.
       - uses: actions/setup-python@v6
         if: runner.os != 'Linux'
@@ -47,6 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/stamp
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist
