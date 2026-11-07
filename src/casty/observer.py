@@ -136,7 +136,12 @@ class HandoffEnded:
 
 @dataclass(frozen=True)
 class ConnectionLost:
-    """A connection to `node` ended while this system was running. The next envelope for it dials again."""
+    """The connection to `node` ended while this system was running, and with it what was in flight on it.
+
+    A connection that breaks without a goodbye is not lost yet: it is reported once a new connection could not take it
+    up, because the dial failed, another incarnation answers, `node` came back without it or was declared dead. The
+    next envelope for it dials again.
+    """
 
     node: NodeId
 

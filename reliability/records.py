@@ -39,6 +39,12 @@ def number(raw: object) -> float:
     return float(raw)
 
 
+def flag(raw: object) -> bool:
+    if not isinstance(raw, bool):
+        raise ValueError(f"expected a boolean, found {raw!r}")
+    return raw
+
+
 def texts(raw: object) -> tuple[str, ...]:
     return tuple(text(item) for item in items(raw))
 

@@ -16,6 +16,8 @@ The planner keeps each fault within what the README promises to survive, since a
   an isolated machine is one replica of any key, so its isolation may run past that and see it removed and rejoin;
 - slow links stay well under `suspect_after`, and clock skew well under the TTLs of leases and barriers, which the
   README says need synchronized clocks;
+- a sever resets the connections of a machine a few times in a row, as the gateway of a cloud does, with nothing else
+  wrong: the connections are taken up again and nothing in flight is lost, so the audit after it expects everything;
 - at most one of the first three slots is down at a time, since they are the seeds of the clients;
 - an outage kills every machine at once and starts each again on its slot. The README promises nothing across it of
   the state held in memory only, so each workload stops expecting what it confirmed before it (`Workload.outage`), but
@@ -99,6 +101,16 @@ class Skew:
 
 
 @dataclass(frozen=True)
+class Sever:
+    """Reset every connection between `slot` and the other machines without a goodbye; `strand`ed, the side of the
+    other machine stays open and receives what was in flight on it `late` seconds after `slot` lost it."""
+
+    slot: int
+    strand: bool
+    late: float
+
+
+@dataclass(frozen=True)
 class Heal:
     """End every partition, isolation and slow link."""
 
@@ -108,7 +120,7 @@ class Audit:
     """Wait for the cluster to converge on the machines that are up, then check every invariant."""
 
 
-type Action = Crash | Leave | Start | Restart | Outage | Partition | Isolate | Slow | Skew | Heal | Audit
+type Action = Crash | Leave | Start | Restart | Outage | Partition | Isolate | Slow | Skew | Sever | Heal | Audit
 
 
 @dataclass(frozen=True)
@@ -120,7 +132,7 @@ class Step:
     action: Action
 
 
-FAULTS = ("crash", "restart", "leave", "join", "upgrade", "outage", "partition", "isolate", "slow", "skew")
+FAULTS = ("crash", "restart", "leave", "join", "upgrade", "outage", "partition", "isolate", "slow", "skew", "sever")
 """The kinds of fault the planner chooses from. `join` starts a machine on a free slot; `upgrade` is a step of a
 rolling deploy: a machine leaves and comes back running `reliability.deploy`; `outage` restarts the whole cluster."""
 
@@ -173,6 +185,8 @@ def kind(action: Action) -> str:
             return "slow"
         case Skew():
             return "skew"
+        case Sever():
+            return "sever"
         case Heal():
             return "heal"
         case Audit():
@@ -193,6 +207,8 @@ def described(action: Action) -> str:
             return f"slow slot {slot} by {delay * 1000:.0f} ms"
         case Skew(slot, offset):
             return f"skew slot {slot} by {offset:+.2f} s"
+        case Sever(slot, strand, late):
+            return f"strand slot {slot}, late by {late * 1000:.0f} ms" if strand else f"sever slot {slot}"
         case Outage() | Heal() | Audit():
             return kind(action)
         case _:
@@ -213,6 +229,8 @@ def encoded(step: Step) -> dict[str, object]:
             fields = {"slot": slot, "delay": delay}
         case Skew(slot, offset):
             fields = {"slot": slot, "offset": offset}
+        case Sever(slot, strand, late):
+            fields = {"slot": slot, "strand": strand, "late": late}
         case Outage() | Heal() | Audit():
             fields = {}
         case _:
@@ -243,6 +261,8 @@ def decoded(raw: object) -> Step:
             action = Slow(records.integer(held["slot"]), records.number(held["delay"]))
         case "skew":
             action = Skew(records.integer(held["slot"]), records.number(held["offset"]))
+        case "sever":
+            action = Sever(records.integer(held["slot"]), records.flag(held["strand"]), records.number(held["late"]))
         case "heal":
             action = Heal()
         case "audit":
@@ -315,6 +335,14 @@ def _episode(rng: random.Random, machines: _Machines, faults: Sequence[str], tim
         case "skew":
             offset = 0.0 if rng.random() < 0.25 else rng.uniform(-SKEW, SKEW)
             return [Step(pause, Skew(rng.choice(up), offset))]
+        case "sever":
+            slot = rng.choice(up)
+            strand = rng.random() < 0.5
+            cuts = [
+                Step(rng.uniform(0.5, 3.0) if index else pause, Sever(slot, strand, rng.uniform(0.0, 1.0)))
+                for index in range(3)
+            ]
+            return [*cuts, Step(0.0, Audit())]
         case other:
             raise AssertionError(f"no episode for {other!r}")
 
@@ -331,7 +359,7 @@ def _possible(fault: str, machines: _Machines) -> bool:
             return True
         case "partition":
             return len(machines.up) >= 5
-        case "isolate" | "slow" | "skew":
+        case "isolate" | "slow" | "skew" | "sever":
             return len(machines.up) >= 3
         case _:
             return False

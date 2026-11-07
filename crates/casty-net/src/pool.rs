@@ -7,6 +7,13 @@
 //!
 //! When two nodes dial each other at once, both keep the connection opened by the smaller incarnation: that node
 //! rejects the other hello as duplicate, and the other node hands the queue of its dial to the connection it accepts.
+//!
+//! What two nodes exchange is a session, which outlives the connection that carries it. A connection that breaks
+//! without a goodbye leaves its session waiting: the side that knows the address of the other dials it again at once,
+//! and a hello that names the session takes it up where it stopped, so a reconnection loses nothing that was in
+//! flight. A session ends as a connection used to, with the envelopes it holds: the peer said goodbye or broke the
+//! protocol, the dial that would take it up failed or reached another incarnation, the peer came back without it, the
+//! cluster gave the peer up (`forsake`), or the peer has no address and only it could dial again.
 
 use std::collections::{BTreeSet, HashMap};
 use std::pin::Pin;
@@ -18,9 +25,10 @@ use casty_core::rolls::Rolls;
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
 
-use crate::connection::{Broken, Bytes, Connection, Greeting, Incoming, Socket};
-use crate::handshake::{Hello, Message, answer};
+use crate::connection::{Broken, Bytes, Connection, Fence, Greeting, Incoming, Session, Socket};
+use crate::handshake::{Hello, Message, Resume, answer};
 use crate::limits::Limits;
+use crate::mux::Unsent;
 use crate::tls::Identity;
 
 /// Where an envelope goes: a node of a known incarnation, or whichever one answers at an address.
@@ -81,9 +89,29 @@ struct Backoff {
     retry_at: Instant,
 }
 
+impl State {
+    /// A dial to `address` for a session waiting on it, unless one is on its way already.
+    fn redial(&mut self, address: &str) -> Option<(String, Arc<Notify>)> {
+        if self.closed || self.dials.contains_key(address) {
+            return None;
+        }
+        let cancel = Arc::new(Notify::new());
+        self.dials.insert(
+            address.to_owned(),
+            Dial {
+                queue: Vec::new(),
+                cancel: Arc::clone(&cancel),
+            },
+        );
+        Some((address.to_owned(), cancel))
+    }
+}
+
 #[derive(Debug, Default)]
 struct State {
     links: HashMap<NodeId, Link>,
+    /// The session with each peer, whether a connection carries it now or it waits for one.
+    sessions: HashMap<NodeId, Arc<Session>>,
     addresses: HashMap<String, Arc<Connection>>,
     dials: HashMap<String, Dial>,
     backoff: HashMap<String, Backoff>,
@@ -174,6 +202,7 @@ impl Pool {
     ) {
         enum Next {
             Send(Arc<Connection>),
+            Waiting(Arc<Session>, Option<(String, Arc<Notify>)>),
             Dial(String, Arc<Notify>),
             Queued,
             Drop,
@@ -188,8 +217,20 @@ impl Pool {
                     .map(|link| Arc::clone(&link.connection)),
                 Target::Seed(address) => state.addresses.get(address).map(Arc::clone),
             };
+            let waiting = match target {
+                Target::Node(node) => state.sessions.get(node).map(Arc::clone),
+                Target::Seed(_) => None,
+            };
             match (held, target) {
                 (Some(connection), _) => Next::Send(connection),
+                // The session waits for a connection to take it up, which a dial to the peer brings.
+                (None, Target::Node(node)) if let Some(session) = waiting => {
+                    let dial = node
+                        .address
+                        .as_deref()
+                        .and_then(|address| state.redial(address));
+                    Next::Waiting(session, dial)
+                }
                 // Another incarnation answers at the address of the node, so this envelope has nowhere to go.
                 (None, Target::Node(node))
                     if node
@@ -230,6 +271,12 @@ impl Pool {
         };
         match next {
             Next::Send(connection) => connection.send(name, order, tag, payload),
+            Next::Waiting(session, dial) => {
+                session.send(name, order, tag, payload);
+                if let Some((address, cancel)) = dial {
+                    self.start(address, cancel);
+                }
+            }
             Next::Dial(address, cancel) => self.start(address, cancel),
             Next::Queued | Next::Drop => {}
             Next::Replaced(node) => self.tell(Peer::Unreached(node)),
@@ -248,15 +295,31 @@ impl Pool {
                     .retain(|(_, _, _, queued, _)| *queued != Some(tag));
             }
             match target {
-                Target::Node(node) => state
-                    .links
-                    .get(node)
-                    .map(|link| Arc::clone(&link.connection)),
-                Target::Seed(address) => state.addresses.get(address).map(Arc::clone),
+                Target::Node(node) => state.sessions.get(node).map(Arc::clone),
+                Target::Seed(address) => state
+                    .addresses
+                    .get(address)
+                    .map(|connection| Arc::clone(connection.session())),
             }
         };
-        if let Some(connection) = connection {
-            connection.retract(tag);
+        if let Some(session) = connection {
+            session.retract(tag);
+        }
+    }
+
+    /// Give up the session with `node`, which the cluster gave up, unless a connection carries it: nothing is waiting
+    /// for a dial that would take it up any more, and the connection it had is lost.
+    pub fn forsake(&self, node: &NodeId) {
+        let session = {
+            let mut state = self.held();
+            if state.links.contains_key(node) {
+                return;
+            }
+            state.sessions.remove(node)
+        };
+        if let Some(session) = session {
+            let _ = session.discard();
+            self.tell(Peer::Lost(node.clone()));
         }
     }
 
@@ -301,6 +364,10 @@ impl Pool {
             let mut state = self.held();
             state.closed = true;
             state.dials.clear();
+            for session in state.sessions.values() {
+                let _ = session.discard();
+            }
+            state.sessions.clear();
             state
                 .links
                 .values()
@@ -333,19 +400,47 @@ impl Pool {
         let Ok(Ok(Message::Hello(hello))) = heard else {
             return;
         };
-        let ack = match answer(&hello, &self.settings.local) {
+        let mut ack = match answer(&hello, &self.settings.local) {
             Err(reason) => return greeting.reject(&Message::Reject(reason)).await,
             Ok(_) if self.keeps_own(&hello.node) => {
                 return greeting.reject(&Message::Duplicate).await;
             }
             Ok(ack) => ack,
         };
+        let session = self.held().sessions.get(&hello.node).map(Arc::clone);
+        let resumed = match (&hello.resume, &session) {
+            (Some(resume), Some(session))
+                if resume.peer == self.settings.local.node.incarnation =>
+            {
+                session
+                    .fence()
+                    .filter(|fence| session.rewind(fence.turn, &resume.offsets))
+            }
+            _ => None,
+        };
+        // The peer came back without the session, or with one this side cannot take up: what it had in flight is lost.
+        let unsent = match &session {
+            Some(session) if resumed.is_none() => self.abandon(session, false),
+            _ => Unsent::default(),
+        };
+        ack.resumed = resumed.map(|fence| fence.offsets);
         let compression = ack.compression;
         if greeting.say(&Message::Ack(ack)).await.is_err() {
             return;
         }
         greeting.compress(compression);
-        let connection = greeting.run(hello.node.clone(), self.inbound.clone());
+        let connection = if let (Some(session), Some(fence)) = (session, resumed) {
+            // None when another connection took the session up meanwhile; the peer finds this one closed.
+            let Some(connection) = greeting.resume(&session, fence.turn, self.inbound.clone())
+            else {
+                return;
+            };
+            connection
+        } else {
+            let connection = greeting.run(hello.node.clone(), self.inbound.clone());
+            connection.session().requeue(unsent);
+            connection
+        };
         self.register(&connection, &hello.node, false, None);
     }
 
@@ -360,14 +455,56 @@ impl Pool {
         {
             tokio::time::sleep(wait).await;
         }
-        let Ok((mut greeting, message)) = self.initiate(&address).await else {
+        let waiting = self
+            .held()
+            .sessions
+            .values()
+            .find(|session| session.peer().address.as_deref() == Some(address.as_str()))
+            .map(Arc::clone);
+        let resuming: Option<(Arc<Session>, Fence)> =
+            waiting.and_then(|session| session.fence().map(|fence| (session, fence)));
+        let hello = Hello {
+            resume: resuming.as_ref().map(|(session, fence)| Resume {
+                peer: session.peer().incarnation,
+                offsets: fence.offsets,
+            }),
+            ..self.settings.local.clone()
+        };
+        let Ok((mut greeting, message)) = self.initiate(&address, hello).await else {
             return self.unreached(&address);
         };
         match message {
             Message::Ack(ack) => {
                 let peer = ack.node.clone();
                 greeting.compress(ack.compression);
-                let connection = greeting.run(peer.clone(), self.inbound.clone());
+                let connection = match (resuming, ack.resumed) {
+                    (Some((session, fence)), Some(theirs)) if *session.peer() == peer => {
+                        let resumed = session
+                            .rewind(fence.turn, &theirs)
+                            .then(|| greeting.resume(&session, fence.turn, self.inbound.clone()));
+                        let Some(Some(connection)) = resumed else {
+                            // The peer took up a session this side could not: dropping the connection makes it give
+                            // the session up when it dials again.
+                            return self.unreached(&address);
+                        };
+                        connection
+                    }
+                    // A peer that answers for a session it was not asked to resume broke the handshake.
+                    (_, Some(_)) => return self.unreached(&address),
+                    (resuming, None) => {
+                        let connection = greeting.run(peer.clone(), self.inbound.clone());
+                        if let Some((session, _)) = resuming {
+                            // What never left goes to the peer that came back without the session, and nowhere when
+                            // another incarnation answers.
+                            let same = *session.peer() == peer;
+                            let unsent = self.abandon(&session, !same);
+                            if same {
+                                connection.session().requeue(unsent);
+                            }
+                        }
+                        connection
+                    }
+                };
                 self.register(&connection, &peer, true, Some(&address));
             }
             Message::Duplicate => {
@@ -392,7 +529,7 @@ impl Pool {
         }
     }
 
-    async fn initiate(&self, address: &str) -> Result<(Greeting, Message), Broken> {
+    async fn initiate(&self, address: &str, hello: Hello) -> Result<(Greeting, Message), Broken> {
         let dialed = match &self.settings.address_map {
             None => address.to_owned(),
             Some(map) => tokio::time::timeout(self.settings.limits.mapping, map(address))
@@ -426,9 +563,7 @@ impl Pool {
             Arc::clone(&self.bytes),
         );
         let said = async {
-            greeting
-                .say(&Message::Hello(self.settings.local.clone()))
-                .await?;
+            greeting.say(&Message::Hello(hello)).await?;
             greeting.hear().await
         };
         let heard = tokio::time::timeout(self.settings.limits.handshake, said)
@@ -494,6 +629,9 @@ impl Pool {
                     initiated,
                 },
             );
+            state
+                .sessions
+                .insert(peer.clone(), Arc::clone(connection.session()));
             // Queued under the same lock that made the connection reachable: a send that arrives in between would
             // otherwise go out ahead of what was waiting for the dial to finish.
             let mut replaced = BTreeSet::new();
@@ -522,8 +660,13 @@ impl Pool {
         });
     }
 
-    fn forget(&self, peer: &NodeId, connection: &Arc<Connection>) {
-        let lost = {
+    fn forget(self: &Arc<Self>, peer: &NodeId, connection: &Arc<Connection>) {
+        enum Next {
+            Nothing,
+            Dial(String, Arc<Notify>),
+            Lost,
+        }
+        let next = {
             let mut state = self.held();
             let current = state
                 .links
@@ -535,12 +678,56 @@ impl Pool {
             state
                 .addresses
                 .retain(|_, held| !Arc::ptr_eq(held, connection));
-            // A connection another one replaced reaches the peer still, and one this node is closing is not lost.
-            current && !state.closed
+            let session = connection.session();
+            let held = state
+                .sessions
+                .get(peer)
+                .is_some_and(|held| Arc::ptr_eq(held, session));
+            // A connection another one replaced reaches the peer still, one whose session another connection is
+            // taking up hands it over, and one this node is closing is not lost.
+            if !current || !held || connection.superseded() || state.closed {
+                Next::Nothing
+            } else if connection.broken()
+                && let Some(address) = &peer.address
+            {
+                state
+                    .redial(address)
+                    .map_or(Next::Nothing, |(address, cancel)| {
+                        Next::Dial(address, cancel)
+                    })
+            } else {
+                state.sessions.remove(peer);
+                let _ = session.discard();
+                Next::Lost
+            }
         };
-        if lost {
-            self.tell(Peer::Lost(peer.clone()));
+        match next {
+            Next::Nothing => {}
+            Next::Dial(address, cancel) => self.start(address, cancel),
+            Next::Lost => self.tell(Peer::Lost(peer.clone())),
         }
+    }
+
+    /// Give up `session`, which no connection will take up: what it had in flight is lost, and with `unreached`, another
+    /// incarnation answers where its peer was. What it never started is given back.
+    fn abandon(&self, session: &Arc<Session>, unreached: bool) -> Unsent {
+        let peer = session.peer().clone();
+        {
+            let mut state = self.held();
+            if state
+                .sessions
+                .get(&peer)
+                .is_some_and(|held| Arc::ptr_eq(held, session))
+            {
+                state.sessions.remove(&peer);
+            }
+        }
+        let unsent = session.discard();
+        self.tell(Peer::Lost(peer.clone()));
+        if unreached {
+            self.tell(Peer::Unreached(peer));
+        }
+        unsent
     }
 
     fn tell(&self, peer: Peer) {
@@ -551,7 +738,28 @@ impl Pool {
 
     /// Give up a dial that reached no node, and tell of the nodes whose envelopes it drops.
     fn unreached(&self, address: &str) {
-        for node in self.fail(address) {
+        let mut dropped = self.fail(address);
+        let waiting: Vec<Arc<Session>> = {
+            let mut state = self.held();
+            let nodes: Vec<NodeId> = state
+                .sessions
+                .keys()
+                .filter(|node| {
+                    node.address.as_deref() == Some(address) && !state.links.contains_key(*node)
+                })
+                .cloned()
+                .collect();
+            nodes
+                .iter()
+                .filter_map(|node| state.sessions.remove(node))
+                .collect()
+        };
+        for session in waiting {
+            let _ = session.discard();
+            self.tell(Peer::Lost(session.peer().clone()));
+            dropped.insert(session.peer().clone());
+        }
+        for node in dropped {
             self.tell(Peer::Unreached(node));
         }
     }

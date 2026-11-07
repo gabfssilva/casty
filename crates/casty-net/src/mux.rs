@@ -13,6 +13,13 @@
 //! credited on arrival, so an envelope larger than the window cannot stall its stream. On top of the credit, what a
 //! connection sends is paced and held near what the link carries (`Congestion`): the control and membership streams
 //! go out ahead of that, and the others share it.
+//!
+//! A mux outlives the connection that carries it, so that the next connection between the same incarnations resumes
+//! where the last one stopped. Each side keeps every frame it sent until the peer credits it, and counts the bytes it
+//! received and the credit it gave on each stream since the mux started. A resumed connection starts with each side
+//! telling those counts (`offsets`), and each side sends again what the other did not receive (`resume`). A frame is
+//! counted when it is read, as a whole, and the envelopes it completes are handed over at once, so nothing is
+//! received twice and nothing received is lost with the connection.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -33,6 +40,9 @@ pub const MEMBERSHIP: u32 = 7;
 
 /// In the order `output` writes them.
 const STREAMS: [u32; 4] = [CONTROL, MEMBERSHIP, MESSAGES, REPLICATION];
+/// The streams a resumed connection takes up, which are all but the control stream: that carries only the handshake,
+/// and every connection has its own.
+pub const RESUMED: usize = STREAMS.len() - 1;
 /// The streams before this one go out ahead of the pace and the window: they are small, and late they fail a
 /// handshake or get a live peer suspected.
 const URGENT: usize = 2;
@@ -48,6 +58,19 @@ const OLDEST: usize = 4;
 /// written behind a long write.
 const BATCH: usize = 64 * 1024;
 const SIZE: usize = 4;
+
+/// Where one stream stands on the receiving side: the bytes `received` on it and the credit `given` for it, the window
+/// included, since the mux started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Offset {
+    pub received: u64,
+    pub given: u64,
+}
+
+/// The envelopes a mux queued and never started, taken out of it when its session is given up: none of their bytes
+/// reached the wire, so they may go out on the session that follows it with the same peer.
+#[derive(Debug, Default)]
+pub struct Unsent(Vec<(usize, Envelope)>);
 
 /// An envelope received on `stream`. Its `credit` returns to the peer once the envelope is consumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +166,7 @@ impl Mux {
                 } else {
                     payload
                 };
-                if payload.len() > self.streams[at].window {
+                if payload.len() > self.streams[at].window() {
                     return Err(ProtocolError::new(format!(
                         "stream {stream} exceeded its window"
                     )));
@@ -158,13 +181,13 @@ impl Mux {
                         "unknown lane {lane} on stream {stream}"
                     )));
                 }
-                self.streams[at].window -= payload.len();
+                self.streams[at].received += payload.len() as u64;
                 self.streams[at].due += 1;
                 self.records(stream, at, lane, data)
             }
             Frame::WindowUpdate { stream, credit } => {
                 let at = Self::stream(stream)?;
-                self.streams[at].credit += credit as usize;
+                self.streams[at].credited(credit, self.limits.window);
                 self.congestion.acked(at, credit as usize, now);
                 Ok(Vec::new())
             }
@@ -201,11 +224,14 @@ impl Mux {
                     credit: due as u32,
                 }
                 .write(&mut out);
-                self.streams[at].window += due;
+                self.streams[at].given += due as u64;
                 self.streams[at].due = 0;
             }
         }
         for at in 0..URGENT {
+            while let Some(frame) = self.streams[at].replay.pop_front() {
+                self.write(at, frame, now, &mut out);
+            }
             while self.whole(at, usize::MAX, now, &mut out) > 0 {}
             self.streams[at].activate(&mut self.started);
             for lane in 0..LANES {
@@ -216,6 +242,20 @@ impl Mux {
         // not wait for what large ones put in flight, as when the window shrinks to measure the round trip.
         let mut budget = self.congestion.paced(now).min(BATCH);
         for at in URGENT..STREAMS.len() {
+            // What is sent again goes out first and in its order, and nothing else of its stream passes it.
+            while let Some(size) = self.streams[at].replay.front().map(Vec::len) {
+                if size > budget {
+                    break;
+                }
+                let frame = self.streams[at]
+                    .replay
+                    .pop_front()
+                    .expect("a frame was in front");
+                budget -= self.write(at, frame, now, &mut out);
+            }
+            if !self.streams[at].replay.is_empty() {
+                continue;
+            }
             self.abandon(at, now, &mut out);
             loop {
                 let written = self.whole(at, budget, now, &mut out);
@@ -257,22 +297,82 @@ impl Mux {
     /// Whether anything is still waiting for credit, which is what a shutdown waits on.
     #[must_use]
     pub fn pending(&self) -> bool {
-        self.streams
-            .iter()
-            .any(|stream| !stream.pending.is_empty() || stream.lanes.iter().any(Option::is_some))
+        self.streams.iter().any(|stream| {
+            !stream.pending.is_empty()
+                || !stream.replay.is_empty()
+                || stream.lanes.iter().any(Option::is_some)
+        })
+    }
+
+    /// Take out the envelopes queued and not started, in the order queued on each stream.
+    pub fn unsent(&mut self) -> Unsent {
+        Unsent(
+            self.streams
+                .iter_mut()
+                .enumerate()
+                .skip(1)
+                .flat_map(|(at, stream)| {
+                    core::mem::take(&mut stream.pending)
+                        .into_iter()
+                        .map(move |envelope| (at, envelope))
+                })
+                .collect(),
+        )
+    }
+
+    /// Queue what another mux never started, ahead of what this one queued since.
+    pub fn requeue(&mut self, unsent: Unsent) {
+        for (at, envelope) in unsent.0.into_iter().rev() {
+            self.streams[at].pending.push_front(envelope);
+        }
+    }
+
+    /// Where each resumed stream stands on this side, for the handshake of a resumed connection. The credit not yet
+    /// announced is counted as given: the count, not a window update, is what tells the peer of it.
+    pub fn offsets(&mut self) -> [Offset; RESUMED] {
+        core::array::from_fn(|index| {
+            let stream = &mut self.streams[index + 1];
+            stream.given += stream.due as u64;
+            stream.due = 0;
+            Offset {
+                received: stream.received,
+                given: stream.given,
+            }
+        })
+    }
+
+    /// Take up a session on a new connection from where the peer says it stands: what it did not receive is sent
+    /// again ahead of anything else, and the credit is what it says it gave. What was in flight on the last connection
+    /// is no longer, and the measures of the link stay.
+    pub fn resume(&mut self, theirs: &[Offset; RESUMED]) -> Result<(), ProtocolError> {
+        for (stream, offset) in self.streams[1..].iter().zip(theirs) {
+            stream.resumable(offset)?;
+        }
+        for (index, offset) in theirs.iter().enumerate() {
+            let at = index + 1;
+            let stream = &mut self.streams[at];
+            stream.rewind(*offset);
+            let credited = stream.granted - self.limits.window as u64;
+            self.congestion.resume(at, stream.sent, credited);
+        }
+        // Pings and pongs of the last connection.
+        self.control.clear();
+        Ok(())
     }
 
     /// The lane of the streams that share the window that sends next, with what it would send: the envelope with the
     /// fewest bytes left, so that large envelopes finish one after another and smaller ones pass them, and every
     /// `OLDEST` quanta the one that started first, so that a large one is never passed for good.
     fn next_lane(&self) -> Option<(usize, usize, usize)> {
-        let sending = (URGENT..STREAMS.len()).flat_map(|at| {
-            (0..LANES).filter_map(move |lane| {
-                let size = self.streams[at].sendable(lane, self.limits.frame);
-                let active = self.streams[at].lanes[lane].as_ref()?;
-                (size > 0).then_some((at, lane, size, active))
-            })
-        });
+        let sending = (URGENT..STREAMS.len())
+            .filter(|&at| self.streams[at].replay.is_empty())
+            .flat_map(|at| {
+                (0..LANES).filter_map(move |lane| {
+                    let size = self.streams[at].sendable(lane, self.limits.frame);
+                    let active = self.streams[at].lanes[lane].as_ref()?;
+                    (size > 0).then_some((at, lane, size, active))
+                })
+            });
         let chosen = if self.turn % OLDEST == OLDEST - 1 {
             sending.min_by_key(|&(.., active)| active.started)
         } else {
@@ -283,29 +383,40 @@ impl Mux {
 
     /// The smallest frames the streams that share the window could send now, whole and on a lane, if any.
     fn ready(&self) -> (Option<usize>, Option<usize>) {
-        let whole = self.streams[URGENT..]
+        let (replaying, sending): (Vec<&Stream>, Vec<&Stream>) = self.streams[URGENT..]
+            .iter()
+            .partition(|stream| !stream.replay.is_empty());
+        let again = replaying
+            .iter()
+            .filter_map(|stream| stream.replay.front().map(Vec::len))
+            .min();
+        let whole = sending
             .iter()
             .flat_map(|stream| {
                 stream
                     .eligible()
                     .into_iter()
                     .map(|index| stream.pending[index].bytes.len())
-                    .filter(|&size| size <= QUANTUM && size < stream.credit)
+                    .filter(|&size| size <= QUANTUM && size < stream.credit())
             })
-            .min();
-        let lane = self.streams[URGENT..]
+            .min()
+            .map(|size| size + 1);
+        let lane = sending
             .iter()
             .flat_map(|stream| (0..LANES).map(|lane| stream.sendable(lane, self.limits.frame)))
             .filter(|&size| size > 0)
             .min();
-        (whole.map(|size| size + 1), lane.map(|size| size + 1))
+        (
+            whole.into_iter().chain(again).min(),
+            lane.map(|size| size + 1),
+        )
     }
 
     /// Frame whole the small envelopes of stream `at` that may go now, up to `most` bytes, giving back the frame's
     /// payload size.
     fn whole(&mut self, at: usize, most: usize, now: f64, out: &mut Vec<u8>) -> usize {
         let room = most
-            .min(self.streams[at].credit)
+            .min(self.streams[at].credit())
             .min(self.limits.frame)
             .min(QUANTUM + 1);
         let mut payload = vec![WHOLE];
@@ -341,7 +452,7 @@ impl Mux {
             let abandoned = self.streams[at].lanes[lane]
                 .as_ref()
                 .is_some_and(|active| active.abandoned);
-            if abandoned && self.streams[at].credit > 0 {
+            if abandoned && self.streams[at].credit() > 0 {
                 self.streams[at].lanes[lane] = None;
                 #[allow(clippy::cast_possible_truncation)]
                 self.write(at, vec![lane as u8], now, out);
@@ -374,7 +485,9 @@ impl Mux {
 
     fn write(&mut self, at: usize, payload: Vec<u8>, now: f64, out: &mut Vec<u8>) -> usize {
         let written = payload.len();
-        self.streams[at].credit -= written;
+        let stream = &mut self.streams[at];
+        stream.sent += written as u64;
+        stream.retained.push_back(payload.clone());
         self.congestion.sent(at, written, now);
         self.data(STREAMS[at], payload).write(out);
         written
@@ -497,14 +610,21 @@ fn parse(
     Ok((records, start))
 }
 
-/// `credit`: bytes this side may still send. `window`: bytes the peer may still send. `due`: credit to announce in
-/// the next output. `pending`: envelopes not started, in the order queued. `lanes`: the large envelope each lane is
-/// sending.
+/// Counted since the mux started: `granted`, the credit the peer gave, the window included, and `sent`, the bytes sent;
+/// `given`, the credit this side gave, and `received`, the bytes received. `due`: credit to announce in the next
+/// output. `retained`: the frames sent and not yet credited, the first of them starting at `kept`. `replay`: frames to
+/// send again, ahead of anything else of the stream. `pending`: envelopes not started, in the order queued. `lanes`:
+/// the large envelope each lane is sending.
 #[derive(Debug)]
 struct Stream {
-    credit: usize,
-    window: usize,
+    granted: u64,
+    sent: u64,
+    given: u64,
+    received: u64,
     due: usize,
+    retained: VecDeque<Vec<u8>>,
+    kept: u64,
+    replay: VecDeque<Vec<u8>>,
     pending: VecDeque<Envelope>,
     lanes: Vec<Option<Sending>>,
     inbound: Vec<Inbound>,
@@ -513,13 +633,75 @@ struct Stream {
 impl Stream {
     fn new(window: usize) -> Self {
         Self {
-            credit: window,
-            window,
+            granted: window as u64,
+            sent: 0,
+            given: window as u64,
+            received: 0,
             due: 0,
+            retained: VecDeque::new(),
+            kept: 0,
+            replay: VecDeque::new(),
             pending: VecDeque::new(),
             lanes: (0..LANES).map(|_| None).collect(),
             inbound: (0..LANES).map(|_| Inbound::default()).collect(),
         }
+    }
+
+    /// Bytes this side may still send.
+    fn credit(&self) -> usize {
+        usize::try_from(self.granted - self.sent).expect("credit is bounded by the window")
+    }
+
+    /// Bytes the peer may still send.
+    fn window(&self) -> usize {
+        usize::try_from(self.given - self.received).expect("a window is bounded by the window")
+    }
+
+    /// The peer gave `credit` more: the bytes it credits arrived, so the frames they end are no longer kept.
+    fn credited(&mut self, credit: u32, window: usize) {
+        self.granted += u64::from(credit);
+        let credited = self.granted - window as u64;
+        while let Some(size) = self.retained.front().map(|frame| frame.len() as u64)
+            && self.kept + size <= credited
+        {
+            self.retained.pop_front();
+            self.kept += size;
+        }
+    }
+
+    /// Whether the peer may take the stream up from `offset`: at the end of a frame this side still keeps, or of the
+    /// last one sent, with credit for every byte it received and every byte it was given before.
+    fn resumable(&self, offset: &Offset) -> Result<(), ProtocolError> {
+        let mut end = self.kept;
+        let mut ends = self.retained.iter().map(|frame| {
+            end += frame.len() as u64;
+            end
+        });
+        let boundary = offset.received == self.kept || ends.any(|end| end == offset.received);
+        if !boundary || offset.given < self.granted || offset.given < offset.received {
+            return Err(ProtocolError::new(format!(
+                "cannot resume from {} bytes received and {} given",
+                offset.received, offset.given
+            )));
+        }
+        Ok(())
+    }
+
+    /// Send again what follows `offset.received`, ahead of what was still to be sent again, with the credit the peer
+    /// says it gave.
+    fn rewind(&mut self, offset: Offset) {
+        while self.kept < offset.received {
+            let frame = self
+                .retained
+                .pop_front()
+                .expect("a resumable offset ends a frame that is kept");
+            self.kept += frame.len() as u64;
+        }
+        let mut replay = core::mem::take(&mut self.retained);
+        replay.append(&mut self.replay);
+        self.replay = replay;
+        self.sent = offset.received;
+        self.granted = offset.given;
     }
 
     /// The pending envelopes that may start now: none of their order is on a lane or queued before them.
@@ -565,7 +747,7 @@ impl Stream {
     fn sendable(&self, lane: usize, frame: usize) -> usize {
         self.lanes[lane].as_ref().map_or(0, |active| {
             (active.bytes.len() - active.sent)
-                .min(self.credit.saturating_sub(1))
+                .min(self.credit().saturating_sub(1))
                 .min(frame - 1)
                 .min(QUANTUM)
         })
@@ -845,6 +1027,162 @@ mod tests {
             .collect();
         assert_eq!(payloads, [b"after".to_vec(), vec![3; 1 << 20]]);
         assert!(!a.pending());
+    }
+
+    /// The records of the frames in `written` up to `frames` of them, as a connection that broke after them.
+    fn deliver(written: &[u8], frames: usize, to: &mut Mux) -> Vec<Record> {
+        let mut decoder = Decoder::new(1 << 20);
+        decoder.feed(written);
+        let mut records = Vec::new();
+        for _ in 0..frames {
+            let Some(frame) = decoder.frame().unwrap() else {
+                break;
+            };
+            records.extend(to.receive(frame, 0.0).unwrap());
+        }
+        for record in &records {
+            to.consume(record);
+        }
+        records
+    }
+
+    fn frames(written: &[u8]) -> usize {
+        let mut decoder = Decoder::new(1 << 20);
+        decoder.feed(written);
+        let mut count = 0;
+        while decoder.frame().unwrap().is_some() {
+            count += 1;
+        }
+        count
+    }
+
+    /// Both sides take the session up on a new connection, each from where the other stands.
+    fn resume(a: &mut Mux, b: &mut Mux) {
+        let (ours, theirs) = (a.offsets(), b.offsets());
+        a.resume(&theirs).unwrap();
+        b.resume(&ours).unwrap();
+    }
+
+    #[test]
+    fn a_resumed_session_delivers_each_envelope_once_and_in_order() {
+        let (mut a, mut b) = pair(Limits {
+            window: 1 << 20,
+            ..Limits::default()
+        });
+        let mut sent = Vec::new();
+        for index in 0..40_u32 {
+            let size = if index % 7 == 3 { 100_000 } else { 8 };
+            let mut payload = vec![u8::try_from(index).unwrap(); size];
+            payload[..4].copy_from_slice(&index.to_be_bytes());
+            a.send(MESSAGES, 1, None, "actors", &payload);
+            a.send(MEMBERSHIP, 0, None, "membership", &index.to_be_bytes());
+            sent.push(payload);
+        }
+
+        let mut received = Vec::new();
+        let mut cuts = 0;
+        while received.len() < 2 * sent.len() {
+            let written = a.output(0.0);
+            // Every other exchange, the connection breaks with half its frames on the wire.
+            if cuts < 6 && frames(&written) > 1 {
+                cuts += 1;
+                received.extend(deliver(&written, frames(&written) / 2, &mut b));
+                resume(&mut a, &mut b);
+            } else {
+                received.extend(deliver(&written, usize::MAX, &mut b));
+            }
+            carry(&mut b, &mut a);
+        }
+
+        assert_eq!(cuts, 6, "the connection never broke mid-way");
+        let messages: Vec<&[u8]> = received
+            .iter()
+            .filter(|record| record.stream == MESSAGES)
+            .map(|record| record.payload.as_slice())
+            .collect();
+        let expected: Vec<&[u8]> = sent.iter().map(Vec::as_slice).collect();
+        assert_eq!(messages, expected);
+        let beats: Vec<&[u8]> = received
+            .iter()
+            .filter(|record| record.stream == MEMBERSHIP)
+            .map(|record| record.payload.as_slice())
+            .collect();
+        assert_eq!(beats.len(), sent.len());
+        assert!(!a.pending());
+    }
+
+    #[test]
+    fn credit_lost_with_the_connection_comes_back_with_the_session() {
+        let limits = Limits {
+            window: 64 * 1024,
+            ..Limits::default()
+        };
+        let (mut a, mut b) = pair(limits);
+        let payload = vec![5; 1 << 20];
+        a.send(MESSAGES, 0, None, "actors", &payload);
+
+        let mut received = Vec::new();
+        for round in 0..200 {
+            received.extend(carry(&mut a, &mut b));
+            let credit = b.output(0.0);
+            // The window updates of every third exchange are lost with a connection that broke.
+            if round % 3 == 0 {
+                resume(&mut a, &mut b);
+            } else {
+                deliver(&credit, usize::MAX, &mut a);
+            }
+            if !received.is_empty() {
+                break;
+            }
+        }
+
+        assert_eq!(received.len(), 1, "the stream stalled for credit");
+        assert_eq!(received[0].payload, payload);
+    }
+
+    #[test]
+    fn an_envelope_retracted_while_the_connection_was_down_never_arrives() {
+        let (mut a, mut b) = pair(Limits {
+            window: 1 << 20,
+            ..Limits::default()
+        });
+        a.send(MESSAGES, 1, Some(7), "actors", &vec![1; 200_000]);
+        a.send(MESSAGES, 2, None, "actors", b"kept");
+        let written = a.output(0.0);
+        // The small one arrives, and the first quantum of the large one is lost with the connection.
+        let received = deliver(&written, 1, &mut b);
+        a.retract(7);
+        resume(&mut a, &mut b);
+
+        let mut received = received;
+        for _ in 0..50 {
+            received.extend(carry(&mut a, &mut b));
+            carry(&mut b, &mut a);
+        }
+
+        let payloads: Vec<&[u8]> = received
+            .iter()
+            .map(|record| record.payload.as_slice())
+            .collect();
+        assert_eq!(payloads, [b"kept".as_slice()]);
+        assert!(!a.pending());
+    }
+
+    #[test]
+    fn a_peer_that_stands_where_this_side_never_sent_is_refused() {
+        let (mut a, mut b) = pair(Limits::default());
+        a.send(MESSAGES, 0, None, "actors", &vec![1; 100_000]);
+        carry(&mut a, &mut b);
+        let mut theirs = b.offsets();
+
+        theirs[1].received += 1;
+        assert!(a.resume(&theirs).is_err(), "mid-frame");
+        theirs[1].received = 1 << 30;
+        assert!(a.resume(&theirs).is_err(), "past what was sent");
+        let mut short = b.offsets();
+        short[1].given = 0;
+        assert!(a.resume(&short).is_err(), "less credit than it gave");
+        assert_eq!(a.resume(&b.offsets()), Ok(()), "where it does stand");
     }
 
     #[test]

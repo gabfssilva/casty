@@ -5,14 +5,16 @@
 The argument is the `Launch` of the node: the address it advertises, the name the headless service of the run gives
 its pod; its seeds; the size of the cluster the periods of a chaos run are scaled to, or none for the periods casty has
 by default; the URL of the store every node of the run shares; and the `version` of the code it runs. It listens on
-every interface, on the port of its address. Its links are cut and slowed from outside, by Chaos Mesh, so it dials
-every address as it is. The deletion of its pod sends it SIGTERM, which is the leave.
+every interface, on the port of its address. Its links are cut and slowed from outside, by Chaos Mesh, and what it
+dials goes through a `Relay` in its own process, which resets connections as the gateway of a cloud does. The deletion
+of its pod sends it SIGTERM, which is the leave.
 
 It says `{"ready": <node>}` once it is in the cluster and `{"left": null}` once it is out, on stdout, which the runner
 reads from the log of the pod. The runner asks it things on the control port, one JSON object per line each way:
 `{"members": <question>}` is answered with its view, `{"network": ...}` sets its clock and is answered with `{}`, and
 `{"crash": null}` ends the process at once — by `os._exit`, since the first process of a container ignores a signal
-it sends itself.
+it sends itself. `{"cut": {"addresses": [...], "strand": <bool>, "late": <seconds>}}` cuts the connections it dialed to
+those addresses (`Relay.cut`) and is answered with `{"cut": <how many>}`.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from uuid import UUID
 from casty import ActorDefinition, ActorSystem, Cluster, NodeId, Overlay, Store
 from casty.stores import SQL
 from reliability import deploy, records
+from reliability.relay import Relay
 
 CONTROL = 7401
 """The port a pod of a run is asked things on."""
@@ -215,18 +218,21 @@ def say(kind: str, body: object, /) -> None:
     print(json.dumps({kind: body}), flush=True)
 
 
-def system(launch: Launch, /, *, store: Store | None) -> ActorSystem:
-    """The node `launch` describes, listening on every interface on the port of its address."""
+def system(launch: Launch, /, *, store: Store | None, relay: Relay) -> ActorSystem:
+    """The node `launch` describes, listening on every interface on the port of its address and dialing through
+    `relay`."""
     _, port = launch.address.rsplit(":", 1)
     bind = f"0.0.0.0:{port}"
     if launch.size is None:
-        node = ActorSystem(cluster=Cluster(bind=bind, advertise=launch.address, seeds=launch.seeds), store=store)
+        cluster = Cluster(bind=bind, advertise=launch.address, seeds=launch.seeds, address_map=relay.through)
+        node = ActorSystem(cluster=cluster, store=store)
     else:
         period = timing(launch.size)
         cluster = Cluster(
             bind=bind,
             advertise=launch.address,
             seeds=launch.seeds,
+            address_map=relay.through,
             heartbeat=period.heartbeat,
             suspect_after=period.suspect_after,
             dead_after=period.dead_after,
@@ -251,14 +257,15 @@ def system(launch: Launch, /, *, store: Store | None) -> ActorSystem:
 
 async def main(launch: Launch, /) -> None:
     clock = Clock()
+    relay = Relay()
     leave = asyncio.Event()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, leave.set)
     opened = nullcontext() if launch.store is None else SQL(launch.store)
     with patch.object(time, "time", clock.time):
         async with opened as store:
-            node = system(launch, store=store)
+            node = system(launch, store=store, relay=relay)
             async with node:
-                control = await asyncio.start_server(partial(_answer, node, clock), port=CONTROL)
+                control = await asyncio.start_server(partial(_answer, node, clock, relay), port=CONTROL)
                 say("ready", identity(node.node))
                 await leave.wait()
                 control.close()
@@ -266,7 +273,7 @@ async def main(launch: Launch, /) -> None:
 
 
 async def _answer(
-    node: ActorSystem, clock: Clock, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, /
+    node: ActorSystem, clock: Clock, relay: Relay, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, /
 ) -> None:
     try:
         while line := await reader.readline():
@@ -278,6 +285,11 @@ async def _answer(
             elif "network" in command:
                 clock.skew = Network.decoded(command["network"]).skew
                 answer = {}
+            elif "cut" in command:
+                cut = records.record(command["cut"])
+                addresses = frozenset(records.texts(cut["addresses"]))
+                strand, late = records.flag(cut["strand"]), records.number(cut["late"])
+                answer = {"cut": await asyncio.to_thread(relay.cut, addresses, strand=strand, late=late)}
             elif "crash" in command:
                 os._exit(137)
             else:

@@ -18,6 +18,7 @@ from itertools import count
 from pathlib import Path
 
 from casty import Client, NodeId
+from reliability import records
 from reliability.node import Launch, Network, Timing, Version, View
 from reliability.site import Kubernetes, Pod, Stuck
 from reliability.support import eventually
@@ -131,6 +132,22 @@ class Fleet:
     async def skew(self, slot: int, offset: float, /) -> None:
         self._skew[slot] = offset
         await self._push()
+
+    async def sever(self, slot: int, strand: bool, late: float, /) -> int:
+        """Reset the connections between `slot` and the other nodes up, each on the side that dialed it, and answer how
+        many there were."""
+        others = [other for other in self.up if other != slot]
+
+        async def cut(on: int, addresses: Iterable[str]) -> int:
+            asked: dict[str, object] = {"cut": {"addresses": sorted(addresses), "strand": strand, "late": late}}
+            answer = records.record(await self._machines[on].ask(asked, _ASKING))
+            return records.integer(answer["cut"])
+
+        cuts = await asyncio.gather(
+            cut(slot, (self.addresses[other] for other in others)),
+            *(cut(other, (self.addresses[slot],)) for other in others),
+        )
+        return sum(cuts)
 
     async def heal(self) -> None:
         """End every partition, isolation and slow link. Clocks stay as they are: they belong to the machines."""

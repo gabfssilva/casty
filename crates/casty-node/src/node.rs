@@ -1480,6 +1480,10 @@ fn flush(
             held.handoff.begin(&step, held.kinds.get(&step.actor));
         }
         held.unreachable(&seen);
+        // A session waiting for a dead member to come back waits no more.
+        for member in seen.iter().filter(|member| member.status == Status::Dead) {
+            sender.forsake(&member.node);
+        }
         let _ = members.send(seen.clone());
         held.host.members(seen);
         // After the table itself, so that an observer reading the members finds them as the event says.

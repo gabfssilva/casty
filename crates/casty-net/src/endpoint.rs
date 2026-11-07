@@ -139,6 +139,7 @@ impl Endpoint {
                 config.limits.message,
                 config.limits.window,
             ],
+            resume: None,
         };
         let pool = Pool::new(
             Settings {
@@ -358,5 +359,10 @@ impl Sender {
     /// envelope to this node itself was handed over already.
     pub fn retract(&self, to: &Target, tag: u64) {
         self.pool.retract(to, tag);
+    }
+
+    /// Give up the session with `node`, which the cluster gave up, unless a connection carries it.
+    pub fn forsake(&self, node: &NodeId) {
+        self.pool.forsake(node);
     }
 }

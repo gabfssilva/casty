@@ -6,8 +6,9 @@
 use core::fmt;
 
 // 2: the handshake became positional arrays and ping/pong lost their payload. 3: membership moved to a stream of its
-// own, which a version 2 node does not know. 4: a data frame starts with its lane. An older node is refused here.
-pub const VERSION: u8 = 4;
+// own, which a version 2 node does not know. 4: a data frame starts with its lane. 5: the hello and its ack carry
+// what resumes a session. An older node is refused here.
+pub const VERSION: u8 = 5;
 
 const DATA: u8 = 0;
 const WINDOW_UPDATE: u8 = 1;

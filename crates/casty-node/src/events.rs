@@ -35,7 +35,7 @@ pub enum Event {
     /// A leave stopped waiting for the nodes that replicate `keys` of `actor` now to take them, which ends the
     /// handoff out of `actor` with those keys not handed over.
     HandoffAbandoned { actor: String, keys: Vec<String> },
-    /// A connection to a peer ended while this node was running.
+    /// The connection to a peer ended while this node was running, and no new one took it up.
     ConnectionLost { node: NodeId },
     /// A message nobody waits for ended on this node without reaching its key.
     MessageDropped {

@@ -234,6 +234,24 @@ impl Congestion {
         }
     }
 
+    /// A new connection takes up `stream` with `sent` bytes sent on it and `acked` of them credited: what was in flight
+    /// on the last one is no longer, and only what the peer has not credited of what it received is. The round trip
+    /// and the rate measured stay, which is what spares a resumed connection the startup.
+    pub fn resume(&mut self, stream: usize, sent: u64, acked: u64) {
+        let track = &mut self.tracks[stream];
+        track.frames.clear();
+        track.sent = sent;
+        track.acked = acked;
+        self.in_flight = self
+            .tracks
+            .iter()
+            .map(|track| {
+                usize::try_from(track.sent - track.acked)
+                    .expect("in flight is bounded by the window")
+            })
+            .sum();
+    }
+
     /// The sender has nothing more to send while the window has room.
     pub fn idle(&mut self) {
         self.limited_until = (self.delivered + self.in_flight as u64).max(1);

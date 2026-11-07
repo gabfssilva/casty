@@ -462,6 +462,7 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
                 let ack = casty_net::handshake::Message::Ack(casty_net::handshake::Ack {
                     node: casty_core::node::NodeId::fresh(Some(listening.clone())),
                     compression: None,
+                    resumed: None,
                 });
                 let (name, payload) = casty_net::handshake::encode(&ack);
                 mux.send(casty_net::mux::CONTROL, 0, None, name, &payload);

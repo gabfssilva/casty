@@ -32,6 +32,7 @@ from reliability.chaos.schedule import (
     Outage,
     Partition,
     Restart,
+    Sever,
     Skew,
     Slow,
     Start,
@@ -380,6 +381,8 @@ async def _apply(
                     await fleet.slow(slot, delay)
                 case Skew(slot, offset):
                     await fleet.skew(slot, offset)
+                case Sever(slot, strand, late):
+                    note = f"{await fleet.sever(slot, strand, late)} connections cut"
                 case Heal():
                     await fleet.heal()
                     lasted = journal.now() - shaped

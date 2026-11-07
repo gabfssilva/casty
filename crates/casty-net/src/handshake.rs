@@ -5,12 +5,17 @@
 //!
 //! Each message is a msgpack array of its fields in the order they are declared, on the control stream under the
 //! name of the message.
+//!
+//! A node that lost its connection to a peer and still holds their session dials it again with `resume`, and the peer
+//! answers with its own offsets when it holds the same session, or without them when it does not, in which case both
+//! sides start afresh.
 
 use casty_core::node::NodeId;
 use casty_core::schema::msgpack::{self, Int, Kind, Reader};
 
 use crate::compress::Name;
 use crate::frame::ProtocolError;
+use crate::mux::{Offset, RESUMED};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
@@ -21,12 +26,23 @@ pub struct Hello {
     /// own, so a peer with other sizes would break the connection at the first frame, envelope or window past them:
     /// the handshake refuses it instead.
     pub sizes: [usize; 3],
+    pub resume: Option<Resume>,
+}
+
+/// The session a hello takes up: the incarnation of the node it was with, and where each resumed stream stands on the
+/// side that dials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resume {
+    pub peer: [u8; 16],
+    pub offsets: [Offset; RESUMED],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ack {
     pub node: NodeId,
     pub compression: Option<Name>,
+    /// Where each resumed stream stands on the side that accepts, when it took the session up.
+    pub resumed: Option<[Offset; RESUMED]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +77,7 @@ pub fn answer(hello: &Hello, local: &Hello) -> Result<Ack, String> {
     Ok(Ack {
         node: local.node.clone(),
         compression: crate::compress::chosen(&hello.compression, &local.compression),
+        resumed: None,
     })
 }
 
@@ -70,7 +87,7 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
     let mut out = Vec::new();
     let name = match message {
         Message::Hello(hello) => {
-            msgpack::write_array_len(&mut out, 7);
+            msgpack::write_array_len(&mut out, 8);
             msgpack::write_str(&mut out, &hello.cluster);
             write_node(&mut out, &hello.node);
             msgpack::write_array_len(&mut out, hello.compression.len());
@@ -80,12 +97,24 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
             for size in hello.sizes {
                 msgpack::write_int(&mut out, Int::Unsigned(size as u64));
             }
+            match &hello.resume {
+                None => msgpack::write_nil(&mut out),
+                Some(resume) => {
+                    msgpack::write_array_len(&mut out, 2);
+                    msgpack::write_bin(&mut out, &resume.peer);
+                    write_offsets(&mut out, &resume.offsets);
+                }
+            }
             "hello"
         }
         Message::Ack(ack) => {
-            msgpack::write_array_len(&mut out, 3);
+            msgpack::write_array_len(&mut out, 4);
             write_node(&mut out, &ack.node);
             write_optional(&mut out, ack.compression.map(Name::name));
+            match &ack.resumed {
+                None => msgpack::write_nil(&mut out),
+                Some(offsets) => write_offsets(&mut out, offsets),
+            }
             "hello-ack"
         }
         Message::Reject(reason) => {
@@ -108,7 +137,7 @@ pub fn decode(name: &str, payload: &[u8]) -> Result<Message, ProtocolError> {
 
 fn read(name: &str, reader: &mut Reader<'_>) -> Option<Message> {
     Some(match (name, reader.read_array_len().ok()?) {
-        ("hello", 7) => Message::Hello(Hello {
+        ("hello", 8) => Message::Hello(Hello {
             cluster: reader.read_str().ok()?.to_owned(),
             node: read_node(reader)?,
             compression: {
@@ -120,18 +149,73 @@ fn read(name: &str, reader: &mut Reader<'_>) -> Option<Message> {
                 names
             },
             sizes: [size(reader)?, size(reader)?, size(reader)?],
+            resume: if absent(reader)? {
+                None
+            } else {
+                if reader.read_array_len().ok()? != 2 {
+                    return None;
+                }
+                Some(Resume {
+                    peer: reader.read_bin().ok()?.try_into().ok()?,
+                    offsets: read_offsets(reader)?,
+                })
+            },
         }),
-        ("hello-ack", 3) => Message::Ack(Ack {
+        ("hello-ack", 4) => Message::Ack(Ack {
             node: read_node(reader)?,
             compression: match read_optional(reader).ok()? {
                 None => None,
                 Some(written) => Some(Name::of(written)?),
+            },
+            resumed: if absent(reader)? {
+                None
+            } else {
+                Some(read_offsets(reader)?)
             },
         }),
         ("hello-reject", 1) => Message::Reject(reader.read_str().ok()?.to_owned()),
         ("hello-duplicate", 0) => Message::Duplicate,
         _ => return None,
     })
+}
+
+/// Offsets go as an array of `[received, given]`, one for each resumed stream.
+fn write_offsets(out: &mut Vec<u8>, offsets: &[Offset; RESUMED]) {
+    msgpack::write_array_len(out, RESUMED);
+    for offset in offsets {
+        msgpack::write_array_len(out, 2);
+        msgpack::write_int(out, Int::Unsigned(offset.received));
+        msgpack::write_int(out, Int::Unsigned(offset.given));
+    }
+}
+
+fn read_offsets(reader: &mut Reader<'_>) -> Option<[Offset; RESUMED]> {
+    if reader.read_array_len().ok()? != RESUMED {
+        return None;
+    }
+    let mut offsets = [Offset {
+        received: 0,
+        given: 0,
+    }; RESUMED];
+    for offset in &mut offsets {
+        if reader.read_array_len().ok()? != 2 {
+            return None;
+        }
+        *offset = Offset {
+            received: count(reader)?,
+            given: count(reader)?,
+        };
+    }
+    Some(offsets)
+}
+
+/// Whether the next field is nil, which it reads.
+fn absent(reader: &mut Reader<'_>) -> Option<bool> {
+    if reader.kind().ok()? == Kind::None {
+        reader.read_nil().ok()?;
+        return Some(true);
+    }
+    Some(false)
 }
 
 /// A node takes two fields: its address or nil, and its incarnation.
@@ -162,9 +246,13 @@ fn read_optional<'a>(reader: &mut Reader<'a>) -> msgpack::Result<Option<&'a str>
 }
 
 fn size(reader: &mut Reader<'_>) -> Option<usize> {
+    usize::try_from(count(reader)?).ok()
+}
+
+fn count(reader: &mut Reader<'_>) -> Option<u64> {
     match reader.read_int().ok()? {
-        Int::Unsigned(size) => usize::try_from(size).ok(),
-        Int::Signed(_) => None,
+        Int::Unsigned(count) => Some(count),
+        Int::Signed(count) => u64::try_from(count).ok(),
     }
 }
 
@@ -172,9 +260,10 @@ fn size(reader: &mut Reader<'_>) -> Option<usize> {
 mod tests {
     use casty_core::node::NodeId;
 
-    use super::{Ack, Hello, Message, answer, decode, encode};
+    use super::{Ack, Hello, Message, Resume, answer, decode, encode};
     use crate::compress::{Name, PREFERENCE};
     use crate::limits::Limits;
+    use crate::mux::Offset;
 
     fn node(address: Option<&str>, tag: u8) -> NodeId {
         NodeId {
@@ -190,6 +279,7 @@ mod tests {
             node,
             compression: PREFERENCE.to_vec(),
             sizes: [limits.frame, limits.message, limits.window],
+            resume: None,
         }
     }
 
@@ -198,13 +288,22 @@ mod tests {
         let messages = [
             Message::Hello(hello("casty", node(Some("127.0.0.1:7400"), 1))),
             Message::Hello(hello("casty", node(None, 2))),
+            Message::Hello(Hello {
+                resume: Some(Resume {
+                    peer: [9; 16],
+                    offsets: [offset(1, 2), offset(0, 1 << 40), offset(7, 7)],
+                }),
+                ..hello("casty", node(Some("127.0.0.1:7401"), 5))
+            }),
             Message::Ack(Ack {
                 node: node(Some("10.0.0.1:1"), 3),
                 compression: Some(Name::Lz4),
+                resumed: None,
             }),
             Message::Ack(Ack {
                 node: node(None, 4),
                 compression: None,
+                resumed: Some([offset(3, 4), offset(5, 6), offset(0, 0)]),
             }),
             Message::Reject("cluster 'other' is not 'casty'".to_owned()),
             Message::Duplicate,
@@ -213,6 +312,10 @@ mod tests {
             let (name, payload) = encode(&message);
             assert_eq!(decode(name, &payload), Ok(message));
         }
+    }
+
+    fn offset(received: u64, given: u64) -> Offset {
+        Offset { received, given }
     }
 
     #[test]

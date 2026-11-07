@@ -41,7 +41,7 @@ Reply after the state write when the reply is intended to acknowledge that trans
 | `ActivationStarted`, `ActivationEnded`, `ActivationFailed` | An activation's lifecycle |
 | `WriteFailed` | An unsuccessful state operation |
 | `HandoffStarted`, `HandoffEnded` | A state-transfer lifecycle |
-| `ConnectionLost` | A transport connection ending |
+| `ConnectionLost` | A transport connection ending without a new one taking it up |
 | `MessageDropped` | A message or unhandled piped operation that could not be delivered |
 
 The runtime schedules observer calls on the Python event loop after the step that emitted the event. Transport threads enqueue the report through the asyncio bridge and never call the observer inside the interpreter themselves.
@@ -59,7 +59,7 @@ These values describe what one node currently knows; they are not a consensus sn
 ## Guarantees
 
 - Delivery is at most once. Messages from one node to one key arrive in order while that key's owner remains the same.
-- A connection that drops loses what it had not delivered, in both directions, and nothing resends it when the nodes reconnect: an ask on it fails at its deadline, or sooner if the cluster declares the node dead, and a tell is gone. Retrying is the caller's choice.
+- A connection that breaks without a goodbye, between two nodes that are still the same processes, is taken up by the next one: the side that knows the other's address dials again at once, and each side sends again only the bytes the other did not receive, so nothing in flight is lost or delivered twice. A connection that cannot be taken up loses what it had not delivered, in both directions: the dial fails or reaches another process, a node restarted, the cluster declares the node dead, or the peer is a client, which only it could dial again. An ask on it then fails at its deadline, or sooner if the cluster declares the node dead, and a tell is gone. Retrying is the caller's choice.
 - A caller that stops waiting, at its deadline or by cancelling, gives up the part of its request not yet sent, and the owner gives up the part of the answer it had not sent. A request given up before it arrived never runs.
 - An activation handles one inbox message at a time. Ownership changes can temporarily leave overlapping activations on different nodes.
 - Confirmed writes retain state within the failure tolerance of their write level. Majority quorums require more than half of the replica set; `one` can lose confirmed writes during ownership changes.

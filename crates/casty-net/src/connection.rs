@@ -3,6 +3,11 @@
 //! Reading and writing are separate tasks over the two halves of the socket, and the mux between them is what holds
 //! the credit of each stream. A single task would deadlock: a write that the peer is not draining would stop this
 //! side from draining what the peer is writing.
+//!
+//! The mux belongs to the `Session` with the peer, which one connection carries after another. A connection that
+//! takes a session up fences the one before it in the same lock it reads the offsets of the mux in: from then on the
+//! old one neither reads into the mux nor writes out of it, so bytes it still delivers late are dropped, and nothing
+//! counted in the offsets is received again.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,7 +23,9 @@ use crate::compress::Name;
 use crate::frame::{Decoder, Frame, GOODBYE, ProtocolError};
 use crate::handshake::{self, Message};
 use crate::limits::Limits;
-use crate::mux::{CONTROL, MEMBERSHIP, MESSAGES, Mux, REPLICATION, Record};
+use crate::mux::{
+    CONTROL, MEMBERSHIP, MESSAGES, Mux, Offset, REPLICATION, RESUMED, Record, Unsent,
+};
 
 /// A socket, with or without TLS on top of it.
 pub trait Socket: AsyncRead + AsyncWrite + Unpin + Send + core::fmt::Debug + 'static {}
@@ -191,7 +198,8 @@ impl Greeting {
         self.mux.compressor = name;
     }
 
-    /// Start exchanging envelopes with `peer`, the node the handshake named, giving back the handle the pool keeps.
+    /// Start exchanging envelopes with `peer`, the node the handshake named, in a session of their own, giving back the
+    /// handle the pool keeps.
     #[must_use]
     pub fn run(self, peer: NodeId, inbound: mpsc::UnboundedSender<Incoming>) -> Arc<Connection> {
         let Self {
@@ -202,12 +210,71 @@ impl Greeting {
             bytes,
             epoch,
         } = self;
-        let connection = Arc::new(Connection {
+        let writable = Arc::new(Notify::new());
+        let session = Arc::new(Session {
             peer,
-            mux: Mutex::new(mux),
+            held: Mutex::new(Carried {
+                mux,
+                turn: 0,
+                writable: Arc::clone(&writable),
+                over: false,
+            }),
             epoch,
-            writable: Notify::new(),
+        });
+        Self::start(socket, frames, limits, bytes, session, 0, writable, inbound)
+    }
+
+    /// Carry `session` from here on, which `Session::rewind` prepared under `turn`, unless another connection took it
+    /// up since or it was given up.
+    #[must_use]
+    pub fn resume(
+        self,
+        session: &Arc<Session>,
+        turn: u64,
+        inbound: mpsc::UnboundedSender<Incoming>,
+    ) -> Option<Arc<Connection>> {
+        let writable = Arc::new(Notify::new());
+        {
+            let mut carried = session.carried(turn)?;
+            carried.mux.compressor = self.mux.compressor;
+            carried.writable = Arc::clone(&writable);
+        }
+        let Self {
+            socket,
+            frames,
+            limits,
+            bytes,
+            ..
+        } = self;
+        Some(Self::start(
+            socket,
+            frames,
+            limits,
+            bytes,
+            Arc::clone(session),
+            turn,
+            writable,
+            inbound,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        socket: Box<dyn Socket>,
+        frames: Decoder,
+        limits: Limits,
+        bytes: Arc<Bytes>,
+        session: Arc<Session>,
+        turn: u64,
+        writable: Arc<Notify>,
+        inbound: mpsc::UnboundedSender<Incoming>,
+    ) -> Arc<Connection> {
+        let connection = Arc::new(Connection {
+            session,
+            turn,
+            writable,
             closing: AtomicBool::new(false),
+            broke: AtomicBool::new(false),
             over: watch::channel(false).0,
             bytes,
         });
@@ -217,23 +284,149 @@ impl Greeting {
         let reading = Arc::clone(&connection);
         let handle = Arc::clone(&connection);
         tokio::spawn(async move {
-            let _ = reading
+            match reading
                 .read(reader, frames, limits, &inbound, &handle)
-                .await;
-            reading.end();
+                .await
+            {
+                Ok(Ending::Broke) | Err(Broken::Io(_) | Broken::Timeout) => reading.broke(),
+                Ok(Ending::Ended) | Err(Broken::Protocol(_) | Broken::Closed) => reading.end(),
+            }
         });
         connection
     }
 }
 
+/// What a node and one peer exchange, carried by one connection after another while both are the incarnations they
+/// were: the envelopes queued, what was sent and not yet credited, what arrived of envelopes not yet complete, and the
+/// measures of the link.
+#[derive(Debug)]
+pub struct Session {
+    peer: NodeId,
+    held: Mutex<Carried>,
+    /// What the mux reads its clock against, for every connection that carries it.
+    epoch: Instant,
+}
+
+#[derive(Debug)]
+struct Carried {
+    mux: Mux,
+    /// Taken anew by each connection that takes the session up: one that carried it before reads and writes nothing
+    /// more.
+    turn: u64,
+    /// What wakes the writer of the connection that carries the session now.
+    writable: Arc<Notify>,
+    /// Given up: no connection takes it up again.
+    over: bool,
+}
+
+/// Where a session stood on this side when a connection took it up.
+#[derive(Debug, Clone, Copy)]
+pub struct Fence {
+    pub turn: u64,
+    pub offsets: [Offset; RESUMED],
+}
+
+impl Session {
+    /// The node at the other end.
+    #[must_use]
+    pub fn peer(&self) -> &NodeId {
+        &self.peer
+    }
+
+    /// Queue an envelope. It goes out as the peer's credit allows, on whichever connection carries the session then,
+    /// and is lost if the session is given up first. Envelopes of one `order` arrive in the order they were queued;
+    /// the others may overtake each other. One with a `tag` can be given up with `retract` until it has gone out whole.
+    pub fn send(&self, name: &str, order: u64, tag: Option<u64>, payload: &[u8]) {
+        let stream = match name {
+            "replication" => REPLICATION,
+            "membership" => MEMBERSHIP,
+            _ => MESSAGES,
+        };
+        let mut carried = self.held();
+        carried.mux.send(stream, order, tag, name, payload);
+        carried.writable.notify_one();
+    }
+
+    /// Give up what has not gone out of the envelopes queued with `tag`.
+    pub fn retract(&self, tag: u64) {
+        let mut carried = self.held();
+        carried.mux.retract(tag);
+        carried.writable.notify_one();
+    }
+
+    /// Return the credit of a received envelope, once it has been handed over.
+    pub fn consume(&self, record: &Record) {
+        let mut carried = self.held();
+        carried.mux.consume(record);
+        carried.writable.notify_one();
+    }
+
+    /// Fence whatever connection carries the session, and say where it stands on this side, unless it was given up.
+    pub fn fence(&self) -> Option<Fence> {
+        let mut carried = self.held();
+        if carried.over {
+            return None;
+        }
+        carried.turn += 1;
+        Some(Fence {
+            turn: carried.turn,
+            offsets: carried.mux.offsets(),
+        })
+    }
+
+    /// Send again what the peer did not receive, from where it says each stream stands. False when the session was
+    /// given up or fenced again since `turn`, or when the peer stands where this side never sent to.
+    pub fn rewind(&self, turn: u64, theirs: &[Offset; RESUMED]) -> bool {
+        self.carried(turn)
+            .is_some_and(|mut carried| carried.mux.resume(theirs).is_ok())
+    }
+
+    /// No connection takes the session up again, and the one that carries it, if any, reads and writes nothing more.
+    /// What it had queued and never started is given back.
+    pub fn discard(&self) -> Unsent {
+        let mut carried = self.held();
+        carried.over = true;
+        carried.turn += 1;
+        carried.writable.notify_one();
+        carried.mux.unsent()
+    }
+
+    /// Queue what a session given up with the same peer never started, ahead of what this one queued since.
+    pub fn requeue(&self, unsent: Unsent) {
+        let mut carried = self.held();
+        carried.mux.requeue(unsent);
+        carried.writable.notify_one();
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, Carried> {
+        self.held
+            .lock()
+            .expect("the session lock is never poisoned")
+    }
+
+    /// The session, if `turn` is the connection that carries it now.
+    fn carried(&self, turn: u64) -> Option<std::sync::MutexGuard<'_, Carried>> {
+        let carried = self.held();
+        (carried.turn == turn && !carried.over).then_some(carried)
+    }
+}
+
+/// How the reading side of a connection ended when it was not by an error: the peer said goodbye or this node let the
+/// connection go, or the socket closed without a goodbye.
+enum Ending {
+    Ended,
+    Broke,
+}
+
 /// A connection that is exchanging envelopes.
 #[derive(Debug)]
 pub struct Connection {
-    peer: NodeId,
-    mux: Mutex<Mux>,
-    epoch: Instant,
-    writable: Notify,
+    session: Arc<Session>,
+    turn: u64,
+    writable: Arc<Notify>,
     closing: AtomicBool,
+    /// It ended without the peer saying goodbye, which is what a session is taken up again after.
+    broke: AtomicBool,
     over: watch::Sender<bool>,
     bytes: Arc<Bytes>,
 }
@@ -242,38 +435,47 @@ impl Connection {
     /// The node at the other end.
     #[must_use]
     pub fn peer(&self) -> &NodeId {
-        &self.peer
+        &self.session.peer
     }
 
-    /// Queue an envelope. It goes out as the peer's credit allows, and is lost if the connection dies first.
-    /// Envelopes of one `order` arrive in the order they were queued; the others may overtake each other. One with a
-    /// `tag` can be given up with `retract` until it has gone out whole.
+    /// The session this connection carries, or carried.
+    #[must_use]
+    pub fn session(&self) -> &Arc<Session> {
+        &self.session
+    }
+
+    /// Whether the connection ended without a goodbye: the socket closed or failed, or the peer stopped answering.
+    #[must_use]
+    pub fn broken(&self) -> bool {
+        self.broke.load(Ordering::SeqCst)
+    }
+
+    /// Whether another connection took the session up since this one did, or the session was given up.
+    #[must_use]
+    pub fn superseded(&self) -> bool {
+        self.session.carried(self.turn).is_none()
+    }
+
+    /// Queue an envelope on the session, as `Session::send` does.
     pub fn send(&self, name: &str, order: u64, tag: Option<u64>, payload: &[u8]) {
-        let stream = match name {
-            "replication" => REPLICATION,
-            "membership" => MEMBERSHIP,
-            _ => MESSAGES,
-        };
-        self.held().send(stream, order, tag, name, payload);
-        self.writable.notify_one();
-    }
-
-    /// Give up what has not gone out of the envelopes queued with `tag`.
-    pub fn retract(&self, tag: u64) {
-        self.held().retract(tag);
-        self.writable.notify_one();
+        self.session.send(name, order, tag, payload);
     }
 
     /// Return the credit of a received envelope, once it has been handed over.
     pub fn consume(&self, record: &Record) {
-        self.held().consume(record);
-        self.writable.notify_one();
+        self.session.consume(record);
     }
 
     /// Write what the peer's credit allows, then go away.
     pub fn close(&self) {
         self.closing.store(true, Ordering::SeqCst);
         self.writable.notify_one();
+    }
+
+    /// End the connection now, without a goodbye, as one that broke: its session waits to be taken up.
+    fn broke(&self) {
+        self.broke.store(true, Ordering::SeqCst);
+        self.end();
     }
 
     /// End the connection now, losing what has not reached the socket.
@@ -292,10 +494,8 @@ impl Connection {
         let _ = self.over.subscribe().wait_for(|over| *over).await;
     }
 
-    fn held(&self) -> std::sync::MutexGuard<'_, Mux> {
-        self.mux
-            .lock()
-            .expect("the connection lock is never poisoned")
+    fn seconds(&self) -> f64 {
+        self.session.epoch.elapsed().as_secs_f64()
     }
 
     async fn write(&self, mut writer: impl AsyncWrite + Unpin + Send) {
@@ -304,7 +504,13 @@ impl Connection {
                 return;
             }
             loop {
-                let out = self.held().output(seconds(self.epoch));
+                let output = self
+                    .session
+                    .carried(self.turn)
+                    .map(|mut carried| carried.mux.output(self.seconds()));
+                let Some(out) = output else {
+                    return self.end();
+                };
                 if out.is_empty() {
                     break;
                 }
@@ -313,13 +519,19 @@ impl Connection {
                     () = self.over() => return,
                 };
                 if written.is_err() {
-                    self.end();
+                    self.broke();
                     return;
                 }
                 self.bytes.wrote(out.len());
             }
             // What the pace holds back goes out when it allows, without anything arriving to wake the writer.
-            let wake = self.held().wake();
+            let Some(wake) = self
+                .session
+                .carried(self.turn)
+                .map(|carried| carried.mux.wake())
+            else {
+                return self.end();
+            };
             if wake.is_none() && self.closing.load(Ordering::SeqCst) {
                 let _ = writer.write_all(&GOODBYE).await;
                 let _ = writer.shutdown().await;
@@ -328,7 +540,8 @@ impl Connection {
             let paced = async {
                 match wake {
                     Some(at) => {
-                        tokio::time::sleep_until(self.epoch + Duration::from_secs_f64(at)).await;
+                        tokio::time::sleep_until(self.session.epoch + Duration::from_secs_f64(at))
+                            .await;
                     }
                     None => core::future::pending().await,
                 }
@@ -348,7 +561,7 @@ impl Connection {
         limits: Limits,
         inbound: &mpsc::UnboundedSender<Incoming>,
         handle: &Arc<Connection>,
-    ) -> Result<(), Broken> {
+    ) -> Result<Ending, Broken> {
         let mut buffer = vec![0_u8; limits.read_buffer];
         loop {
             loop {
@@ -356,11 +569,16 @@ impl Connection {
                     let next = frames.frame()?;
                     match next {
                         None => break,
-                        Some(Frame::GoAway) => return Ok(()),
+                        Some(Frame::GoAway) => return Ok(Ending::Ended),
                         Some(frame) => frame,
                     }
                 };
-                let records = self.held().receive(frame, seconds(self.epoch))?;
+                // Counted and handed over in one lock: a connection that takes the session up meanwhile counts what
+                // this one read, and the envelopes reach the node in the order they were sent.
+                let Some(mut carried) = self.session.carried(self.turn) else {
+                    return Ok(Ending::Ended);
+                };
+                let records = carried.mux.receive(frame, self.seconds())?;
                 for record in records {
                     if record.stream == CONTROL {
                         return Err(
@@ -374,17 +592,17 @@ impl Connection {
                         }))
                         .is_err()
                     {
-                        return Ok(());
+                        return Ok(Ending::Ended);
                     }
                 }
             }
             self.writable.notify_one();
             let read = tokio::select! {
                 read = self.receive(&mut reader, &mut buffer, limits) => read?,
-                () = self.over() => return Ok(()),
+                () = self.over() => return Ok(Ending::Ended),
             };
             if read == 0 {
-                return Ok(());
+                return Ok(Ending::Broke);
             }
             self.bytes.read(read);
             frames.feed(&buffer[..read]);
@@ -401,7 +619,9 @@ impl Connection {
         if let Ok(read) = tokio::time::timeout(limits.keepalive_after, reader.read(buffer)).await {
             return Ok(read?);
         }
-        self.held().ping();
+        if let Some(mut carried) = self.session.carried(self.turn) {
+            carried.mux.ping();
+        }
         self.writable.notify_one();
         match tokio::time::timeout(limits.keepalive_timeout, reader.read(buffer)).await {
             Ok(read) => Ok(read?),
