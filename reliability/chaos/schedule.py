@@ -10,7 +10,9 @@ The planner keeps each fault within what the README promises to survive, since a
 - one machine is out at a time — crashed, restarted, leaving, joining — and the cluster converges and is audited before
   the next one goes, so a key never loses two of its replicas before the ring has replaced the first;
 - a partition ends before the majority side would remove the other one (`suspect_after + dead_after + remove_after`),
-  because a removal while two replicas of a key sit on the minority side rebuilds the key from the one that is left;
+  because a removal while two replicas of a key sit on the minority side rebuilds the key from the one that is left.
+  It is cut and healed pod by pod, which takes seconds each way, so it lasts at most half of that and leaves the rest
+  to the network; the run checks what it really lasted (`run.py`);
   an isolated machine is one replica of any key, so its isolation may run past that and see it removed and rejoin;
 - slow links stay well under `suspect_after`, and clock skew well under the TTLs of leases and barriers, which the
   README says need synchronized clocks;
@@ -111,7 +113,8 @@ type Action = Crash | Leave | Start | Restart | Outage | Partition | Isolate | S
 
 @dataclass(frozen=True)
 class Step:
-    """An action, `after` seconds after the previous step finished."""
+    """An action, `after` seconds after the previous step finished; a heal, after the fault before it began, which is
+    when the network started to change."""
 
     after: float
     action: Action
@@ -301,7 +304,7 @@ def _episode(rng: random.Random, machines: _Machines, faults: Sequence[str], tim
         case "partition":
             minority = sorted(rng.sample(up, rng.randint(2, (len(up) - 1) // 2)))
             rest = [slot for slot in up if slot not in minority]
-            lasting = rng.uniform(0.3, 0.7) * bound
+            lasting = rng.uniform(0.3, 0.5) * bound
             return [Step(pause, Partition((tuple(minority), tuple(rest)))), Step(lasting, Heal()), Step(0.0, Audit())]
         case "isolate":
             lasting = rng.uniform(0.3, 2.0) * bound

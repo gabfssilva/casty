@@ -78,14 +78,15 @@ def timing(size: int) -> Timing:
 
     A node pings its active view and one member outside it per heartbeat, so a member that is not a neighbour hears
     from it about once every `size` heartbeats: the time to suspect grows with the cluster, or a member merely far down
-    that round is taken for dead. Removal follows death closely, so that the ring heals between two faults.
+    that round is taken for dead. Removal comes long enough after death that a partition, cut and healed pod by pod
+    over seconds, ends before it, and soon enough that the ring heals between two faults.
     """
     heartbeat = timedelta(milliseconds=100)
     return Timing(
         heartbeat=heartbeat,
         suspect_after=max(timedelta(seconds=2), heartbeat * 3 * size),
         dead_after=timedelta(seconds=1),
-        remove_after=timedelta(seconds=2),
+        remove_after=timedelta(seconds=20),
         anti_entropy=timedelta(seconds=1),
         shuffle_every=timedelta(seconds=1),
         graft_after=timedelta(milliseconds=200),

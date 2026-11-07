@@ -310,7 +310,7 @@ async def _drive(settings: Settings, fleet: Fleet, journal: Journal, period: Tim
         for worker in range(settings.workers):
             traffic.create_task(_work(worker, settings, workloads, len(senders), stop))
         try:
-            failure = await _apply(settings, fleet, journal, workloads, report, recovery)
+            failure = await _apply(settings, fleet, journal, workloads, report, period, recovery)
         finally:
             stop.set()
     if failure is not None:
@@ -336,13 +336,19 @@ async def _apply(
     journal: Journal,
     workloads: Sequence[Workload],
     report: Report,
+    period: Timing,
     recovery: timedelta,
 ) -> str | None:
     """Apply every step of the schedule in turn; answer the first failure, and stop there."""
     within = timedelta(seconds=settings.within)
     audits = 0
+    # When the network last began to change, and whether a partition is what changed it.
+    shaped, partitioned = 0.0, False
     for index, step in enumerate(report.schedule):
-        await asyncio.sleep(step.after)
+        if isinstance(step.action, Heal):
+            await asyncio.sleep(max(0.0, shaped + step.after - journal.now()))
+        else:
+            await asyncio.sleep(step.after)
         began = journal.now()
         note = ""
         action = step.action
@@ -364,15 +370,30 @@ async def _apply(
                         workload.outage(dead)
                     await fleet.boot(slots, recovery + timedelta(seconds=len(slots)))
                 case Partition(groups):
+                    shaped, partitioned = began, True
                     await fleet.partition(groups)
                 case Isolate(slot):
+                    shaped = began
                     await fleet.isolate(slot)
                 case Slow(slot, delay):
+                    shaped = began
                     await fleet.slow(slot, delay)
                 case Skew(slot, offset):
                     await fleet.skew(slot, offset)
                 case Heal():
                     await fleet.heal()
+                    lasted = journal.now() - shaped
+                    note = f"the network was changed for {lasted:.1f}s"
+                    # Past the removal the minority side is rebuilt from what the majority holds, which the README
+                    # does not promise to survive: a violation after it would say nothing of casty.
+                    if partitioned and lasted >= removal(period):
+                        report.applied.append(Applied(index, step, began, journal.now() - began, note))
+                        print(report.applied[-1], flush=True)
+                        return (
+                            f"at step #{index}: the partition lasted {lasted:.1f}s, past the removal at "
+                            f"{removal(period):.1f}s; the network took too long to cut and heal"
+                        )
+                    partitioned = False
                 case Audit():
                     converged = await fleet.converged(recovery)
                     await asyncio.sleep(settings.settle)
