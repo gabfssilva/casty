@@ -6,6 +6,7 @@
 //! through the same channel.
 
 use std::collections::{BTreeSet, HashMap};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -977,8 +978,9 @@ impl Held {
     fn cancel(&mut self, sender: &Sender, cancel: Cancel) {
         if let Target::Reply { node, id } = &cancel.request
             && node == self.node.id()
+            && let Some((owner, _)) = self.toward.remove(id)
         {
-            self.toward.remove(id);
+            sender.retract(&Destination::Node(owner), tag(&cancel.request));
         }
         if self.waiting.cancel(&cancel) {
             return;
@@ -1079,7 +1081,13 @@ impl Held {
                     self.toward.insert(*id, (owner.clone(), failure));
                 }
                 // Never too large: `Node::route` measured the command in its largest form before it came in.
-                let _ = sender.send(&to, ACTORS, &routing::encode(&message));
+                let _ = sender.send(
+                    &to,
+                    ACTORS,
+                    order(&message),
+                    retractable(&message),
+                    &routing::encode(&message),
+                );
             }
             Decision::Hand(command) => {
                 let host = Arc::clone(&self.host);
@@ -1087,6 +1095,12 @@ impl Held {
             }
             Decision::Wait { routed, after } => self.wait(sender, routed, after),
             Decision::Cancel(cancel) => {
+                // The answer this node may be sending to a caller that gave up on it.
+                if let Target::Reply { node, .. } = &cancel.request
+                    && node != self.node.id()
+                {
+                    sender.retract(&Destination::Node(node.clone()), tag(&cancel.request));
+                }
                 self.waiting.cancel(&cancel);
                 self.host
                     .cancel(&cancel.actor, &cancel.key, &cancel.request);
@@ -1118,7 +1132,14 @@ impl Held {
         }
         let payload = routing::encode_answer(&Answer { id: *id, outcome });
         // Never too large: `Node::answer` replaced an answer that does not fit, and a refusal is a few names.
-        let _ = sender.send(&Destination::Node(node.clone()), REPLIES, &payload);
+        // Answers need no order among themselves.
+        let _ = sender.send(
+            &Destination::Node(node.clone()),
+            REPLIES,
+            id.cast_unsigned(),
+            Some(tag(target)),
+            &payload,
+        );
     }
 
     /// Bring a key back when a write from another node left the active mark on the copy kept here.
@@ -1432,7 +1453,13 @@ fn flush(
     entered: &mut Option<oneshot::Sender<Result<(), String>>>,
 ) {
     for out in held.membership.take() {
-        let _ = sender.send(&out.to, MEMBERSHIP, &membership::encode(&out.message));
+        let _ = sender.send(
+            &out.to,
+            MEMBERSHIP,
+            0,
+            None,
+            &membership::encode(&out.message),
+        );
     }
     // A write from another node left the active mark on a copy kept here: the key comes back if this node owns it.
     for (actor, key) in held.replication.arrived() {
@@ -1475,7 +1502,7 @@ fn flush(
     }
     for out in held.replication.take() {
         let payload = replication::encode(&out.message);
-        let _ = sender.send(&Destination::Node(out.to), REPLICATION, &payload);
+        let _ = sender.send(&Destination::Node(out.to), REPLICATION, 0, None, &payload);
     }
     // The host carries what the replication asks of the store out, and answers through the channel of the node.
     for request in held.replication.storing() {
@@ -1606,6 +1633,37 @@ impl casty_core::handoff::sweep::Placement for Where<'_> {
             self.joined,
             self.majority,
         )
+    }
+}
+
+/// The order a routing message keeps on the wire: that of its key, so that the messages from this node to one key
+/// arrive in the order they were sent, while those to other keys may overtake them.
+fn order(message: &routing::Message) -> u64 {
+    let (actor, key) = match message {
+        routing::Message::Routed(routed) | routing::Message::WrongOwner(routed) => {
+            (routed.command.actor(), routed.command.key())
+        }
+        routing::Message::Cancel(cancel) => (cancel.actor.as_str(), cancel.key.as_str()),
+    };
+    let mut hasher = DefaultHasher::new();
+    (actor, key).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// What names on the wire a request and its answer, which are given up together when the caller stops waiting.
+fn tag(request: &Target) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    request.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The tag of a routing message the caller may still give up on: a request that waits for its answer.
+fn retractable(message: &routing::Message) -> Option<u64> {
+    match message {
+        routing::Message::Routed(routed) | routing::Message::WrongOwner(routed) => {
+            routed.command.reply().map(tag)
+        }
+        routing::Message::Cancel(_) => None,
     }
 }
 

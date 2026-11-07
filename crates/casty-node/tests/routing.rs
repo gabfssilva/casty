@@ -358,7 +358,7 @@ async fn a_message_of_a_kind_the_node_does_not_know_is_dropped_and_what_follows_
     unknown.tagged("Unheard", 1);
     unknown.name("actor");
     unknown.text(ACTOR);
-    peer.send(&node, "actors", &unknown.finish())
+    peer.send(&node, "actors", 0, None, &unknown.finish())
         .expect("it fits");
     let request = Routed {
         command: Command::Deliver(Deliver {
@@ -374,7 +374,7 @@ async fn a_message_of_a_kind_the_node_does_not_know_is_dropped_and_what_follows_
         origin: peer.node().clone(),
         attempt: 1,
     };
-    peer.send(&node, "actors", &encode(&Message::Routed(request)))
+    peer.send(&node, "actors", 0, None, &encode(&Message::Routed(request)))
         .expect("it fits");
     let received = tokio::time::timeout(WITHIN, peer.recv())
         .await
@@ -442,6 +442,8 @@ async fn a_node_that_has_not_joined_holds_what_it_is_routed_and_takes_none_of_it
     seed.send(
         &Address::Node(joiner),
         "actors",
+        0,
+        None,
         &encode(&Message::Routed(request)),
     )
     .expect("it fits");

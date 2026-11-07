@@ -7,10 +7,12 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use casty_core::node::NodeId;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc, watch};
+use tokio::time::Instant;
 
 use crate::compress::Name;
 use crate::frame::{Decoder, Frame, GOODBYE, ProtocolError};
@@ -111,6 +113,8 @@ pub struct Greeting {
     limits: Limits,
     /// What the transport counts the bytes of this socket in, from the handshake on.
     bytes: Arc<Bytes>,
+    /// What the mux reads its clock against.
+    epoch: Instant,
 }
 
 impl Greeting {
@@ -127,14 +131,15 @@ impl Greeting {
             frames: Decoder::new(limits.frame),
             limits,
             bytes,
+            epoch: Instant::now(),
         }
     }
 
     /// Write a handshake message, ahead of any envelope queued after it.
     pub async fn say(&mut self, message: &Message) -> Result<(), Broken> {
         let (name, payload) = handshake::encode(message);
-        self.mux.send(CONTROL, name, &payload);
-        let out = self.mux.output();
+        self.mux.send(CONTROL, 0, None, name, &payload);
+        let out = self.mux.output(seconds(self.epoch));
         self.socket.write_all(&out).await?;
         self.bytes.wrote(out.len());
         Ok(())
@@ -156,7 +161,12 @@ impl Greeting {
                     return Err(Broken::Closed);
                 }
                 // A handshake message is one record, and whatever came with it is the peer breaking the order.
-                if let Some(record) = self.mux.receive(frame)?.into_iter().next() {
+                if let Some(record) = self
+                    .mux
+                    .receive(frame, seconds(self.epoch))?
+                    .into_iter()
+                    .next()
+                {
                     if record.stream != CONTROL {
                         return Err(ProtocolError::new(format!(
                             "envelope on stream {} before the handshake",
@@ -190,10 +200,12 @@ impl Greeting {
             frames,
             limits,
             bytes,
+            epoch,
         } = self;
         let connection = Arc::new(Connection {
             peer,
             mux: Mutex::new(mux),
+            epoch,
             writable: Notify::new(),
             closing: AtomicBool::new(false),
             over: watch::channel(false).0,
@@ -219,6 +231,7 @@ impl Greeting {
 pub struct Connection {
     peer: NodeId,
     mux: Mutex<Mux>,
+    epoch: Instant,
     writable: Notify,
     closing: AtomicBool,
     over: watch::Sender<bool>,
@@ -233,13 +246,21 @@ impl Connection {
     }
 
     /// Queue an envelope. It goes out as the peer's credit allows, and is lost if the connection dies first.
-    pub fn send(&self, name: &str, payload: &[u8]) {
+    /// Envelopes of one `order` arrive in the order they were queued; the others may overtake each other. One with a
+    /// `tag` can be given up with `retract` until it has gone out whole.
+    pub fn send(&self, name: &str, order: u64, tag: Option<u64>, payload: &[u8]) {
         let stream = match name {
             "replication" => REPLICATION,
             "membership" => MEMBERSHIP,
             _ => MESSAGES,
         };
-        self.held().send(stream, name, payload);
+        self.held().send(stream, order, tag, name, payload);
+        self.writable.notify_one();
+    }
+
+    /// Give up what has not gone out of the envelopes queued with `tag`.
+    pub fn retract(&self, tag: u64) {
+        self.held().retract(tag);
         self.writable.notify_one();
     }
 
@@ -283,7 +304,7 @@ impl Connection {
                 return;
             }
             loop {
-                let out = self.held().output();
+                let out = self.held().output(seconds(self.epoch));
                 if out.is_empty() {
                     break;
                 }
@@ -297,13 +318,24 @@ impl Connection {
                 }
                 self.bytes.wrote(out.len());
             }
-            if self.closing.load(Ordering::SeqCst) {
+            // What the pace holds back goes out when it allows, without anything arriving to wake the writer.
+            let wake = self.held().wake();
+            if wake.is_none() && self.closing.load(Ordering::SeqCst) {
                 let _ = writer.write_all(&GOODBYE).await;
                 let _ = writer.shutdown().await;
                 return;
             }
+            let paced = async {
+                match wake {
+                    Some(at) => {
+                        tokio::time::sleep_until(self.epoch + Duration::from_secs_f64(at)).await;
+                    }
+                    None => core::future::pending().await,
+                }
+            };
             tokio::select! {
                 () = self.writable.notified() => {}
+                () = paced => {}
                 () = self.over() => return,
             }
         }
@@ -328,7 +360,7 @@ impl Connection {
                         Some(frame) => frame,
                     }
                 };
-                let records = self.held().receive(frame)?;
+                let records = self.held().receive(frame, seconds(self.epoch))?;
                 for record in records {
                     if record.stream == CONTROL {
                         return Err(
@@ -376,4 +408,8 @@ impl Connection {
             Err(_) => Err(Broken::Timeout),
         }
     }
+}
+
+fn seconds(epoch: Instant) -> f64 {
+    epoch.elapsed().as_secs_f64()
 }

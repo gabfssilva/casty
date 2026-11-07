@@ -209,9 +209,23 @@ impl Endpoint {
         self.sender.clone()
     }
 
-    /// Queue an envelope. It never waits, and it is lost if the connection it needs never opens.
-    pub fn send(&self, to: &Target, name: &str, payload: &[u8]) -> Result<(), TooLarge> {
-        self.sender.send(to, name, payload)
+    /// Queue an envelope. It never waits, and it is lost if the connection it needs never opens. Envelopes of one
+    /// `order` reach a node in the order they were queued; the others may overtake each other. One with a `tag` can be
+    /// given up with `retract` until it has gone out whole.
+    pub fn send(
+        &self,
+        to: &Target,
+        name: &str,
+        order: u64,
+        tag: Option<u64>,
+        payload: &[u8],
+    ) -> Result<(), TooLarge> {
+        self.sender.send(to, name, order, tag, payload)
+    }
+
+    /// Give up what has not gone out of the envelopes queued for `to` with `tag`, as `Sender::retract` does.
+    pub fn retract(&self, to: &Target, tag: u64) {
+        self.sender.retract(to, tag);
     }
 
     /// The next envelope for this node, or the refusal of a seed that would not have it.
@@ -313,8 +327,15 @@ impl Sender {
         &self.node
     }
 
-    /// Queue an envelope. It never waits, and it is lost if the connection it needs never opens.
-    pub fn send(&self, to: &Target, name: &str, payload: &[u8]) -> Result<(), TooLarge> {
+    /// Queue an envelope, as `Endpoint::send` does.
+    pub fn send(
+        &self,
+        to: &Target,
+        name: &str,
+        order: u64,
+        tag: Option<u64>,
+        payload: &[u8],
+    ) -> Result<(), TooLarge> {
         if payload.len() > self.message {
             return Err(TooLarge(format!(
                 "payload of {} bytes exceeds the limit of {}",
@@ -329,7 +350,13 @@ impl Sender {
             });
             return Ok(());
         }
-        self.pool.send(to, name, payload);
+        self.pool.send(to, name, order, tag, payload);
         Ok(())
+    }
+
+    /// Give up what has not gone out of the envelopes queued for `to` with `tag`: nobody waits for them any more. An
+    /// envelope to this node itself was handed over already.
+    pub fn retract(&self, to: &Target, tag: u64) {
+        self.pool.retract(to, tag);
     }
 }

@@ -4,6 +4,7 @@
 //! format, which every node of a cluster writes the same way.
 
 pub mod compress;
+pub mod congestion;
 pub mod connection;
 pub mod endpoint;
 pub mod frame;

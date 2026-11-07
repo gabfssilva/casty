@@ -59,6 +59,8 @@ These values describe what one node currently knows; they are not a consensus sn
 ## Guarantees
 
 - Delivery is at most once. Messages from one node to one key arrive in order while that key's owner remains the same.
+- A connection that drops loses what it had not delivered, in both directions, and nothing resends it when the nodes reconnect: an ask on it fails at its deadline, or sooner if the cluster declares the node dead, and a tell is gone. Retrying is the caller's choice.
+- A caller that stops waiting, at its deadline or by cancelling, gives up the part of its request not yet sent, and the owner gives up the part of the answer it had not sent. A request given up before it arrived never runs.
 - An activation handles one inbox message at a time. Ownership changes can temporarily leave overlapping activations on different nodes.
 - Confirmed writes retain state within the failure tolerance of their write level. Majority quorums require more than half of the replica set; `one` can lose confirmed writes during ownership changes.
 - A failed operation may have committed, and an unconfirmed write may be recovered later.

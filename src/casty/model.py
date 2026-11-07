@@ -97,8 +97,10 @@ class Limits:
     between replicas. A message or an initial state over it raises `MessageTooLarge` where it is sent, and an answer
     over it reaches the caller as `MessageTooLarge`, also when the key is on the node that sends it. `frame` bounds
     each piece an envelope is cut into on the wire, and `window` is how much of a stream may be in flight before the
-    receiver has taken it. Every node and client of a cluster has the same limits: the handshake refuses a peer whose
-    limits differ.
+    receiver has taken it. The window is a ceiling: a connection paces itself to the link and keeps about what the
+    link holds in a round trip in flight, so on a long or slow link a window over bandwidth times round trip lets it
+    fill the link without queueing more. Every node and client of a cluster has the same limits: the handshake refuses
+    a peer whose limits differ.
     """
 
     frame: int = 256 * 1024

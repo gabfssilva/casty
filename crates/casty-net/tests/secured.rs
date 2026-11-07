@@ -113,6 +113,8 @@ async fn two_nodes_of_the_same_authority_reach_each_other_with_every_compressor(
             .send(
                 &Target::Seed(receiver.node().address.clone().unwrap()),
                 "actors",
+                0,
+                None,
                 &payload,
             )
             .unwrap();
@@ -145,11 +147,17 @@ async fn a_node_of_another_authority_reaches_nothing() {
         .unwrap();
 
     stranger
-        .send(&Target::Seed(address.clone()), "actors", b"let me in")
+        .send(
+            &Target::Seed(address.clone()),
+            "actors",
+            0,
+            None,
+            b"let me in",
+        )
         .unwrap();
     // Whatever the stranger does, the one with a certificate of the right authority still gets through.
     known
-        .send(&Target::Seed(address), "actors", b"i belong here")
+        .send(&Target::Seed(address), "actors", 0, None, b"i belong here")
         .unwrap();
 
     let arrived = tokio::time::timeout(WITHIN, member.recv()).await;
@@ -178,7 +186,7 @@ async fn without_a_client_certificate_the_server_still_answers_when_it_does_not_
         .unwrap();
 
     other
-        .send(&Target::Seed(address), "actors", b"hello")
+        .send(&Target::Seed(address), "actors", 0, None, b"hello")
         .unwrap();
 
     let arrived = tokio::time::timeout(WITHIN, member.recv()).await;

@@ -40,7 +40,7 @@ impl Target {
     }
 }
 
-type Queued = (Target, String, Vec<u8>);
+type Queued = (Target, String, u64, Option<u64>, Vec<u8>);
 
 /// What turns an advertised address into the one that is dialed: a tunnel, a NAT, or a proxy of a test. It answers
 /// with a future, so a map that has to ask someone else, like the event loop of a binding, holds no thread while it
@@ -164,7 +164,14 @@ impl Pool {
     ///
     /// Looking a peer up and queueing for it happen under one lock: between them, a dial that has just finished
     /// would take the queue with it and leave this envelope on a connection that is about to be dropped.
-    pub fn send(self: &Arc<Self>, target: &Target, name: &str, payload: &[u8]) {
+    pub fn send(
+        self: &Arc<Self>,
+        target: &Target,
+        name: &str,
+        order: u64,
+        tag: Option<u64>,
+        payload: &[u8],
+    ) {
         enum Next {
             Send(Arc<Connection>),
             Dial(String, Arc<Notify>),
@@ -196,7 +203,13 @@ impl Pool {
                     None => Next::Drop,
                     Some(_) if state.closed => Next::Drop,
                     Some(address) => {
-                        let queued = (target.clone(), name.to_owned(), payload.to_vec());
+                        let queued = (
+                            target.clone(),
+                            name.to_owned(),
+                            order,
+                            tag,
+                            payload.to_vec(),
+                        );
                         if let Some(dial) = state.dials.get_mut(address) {
                             dial.queue.push(queued);
                             Next::Queued
@@ -216,10 +229,34 @@ impl Pool {
             }
         };
         match next {
-            Next::Send(connection) => connection.send(name, payload),
+            Next::Send(connection) => connection.send(name, order, tag, payload),
             Next::Dial(address, cancel) => self.start(address, cancel),
             Next::Queued | Next::Drop => {}
             Next::Replaced(node) => self.tell(Peer::Unreached(node)),
+        }
+    }
+
+    /// Give up what has not gone out of the envelopes queued for `target` with `tag`, on its connection or its dial.
+    pub fn retract(&self, target: &Target, tag: u64) {
+        let connection = {
+            let mut state = self.held();
+            if let Some(dial) = target
+                .address()
+                .and_then(|address| state.dials.get_mut(address))
+            {
+                dial.queue
+                    .retain(|(_, _, _, queued, _)| *queued != Some(tag));
+            }
+            match target {
+                Target::Node(node) => state
+                    .links
+                    .get(node)
+                    .map(|link| Arc::clone(&link.connection)),
+                Target::Seed(address) => state.addresses.get(address).map(Arc::clone),
+            }
+        };
+        if let Some(connection) = connection {
+            connection.retract(tag);
         }
     }
 
@@ -342,7 +379,7 @@ impl Pool {
                 let seeded = self.held().dials.get(&address).is_some_and(|dial| {
                     dial.queue
                         .iter()
-                        .any(|(target, _, _)| matches!(target, Target::Seed(_)))
+                        .any(|(target, ..)| matches!(target, Target::Seed(_)))
                 });
                 if seeded {
                     let _ = self.inbound.send(Incoming::Refused(format!(
@@ -460,12 +497,12 @@ impl Pool {
             // Queued under the same lock that made the connection reachable: a send that arrives in between would
             // otherwise go out ahead of what was waiting for the dial to finish.
             let mut replaced = BTreeSet::new();
-            for (target, name, payload) in queue {
+            for (target, name, order, tag, payload) in queue {
                 match target {
                     Target::Node(node) if node != *peer => {
                         replaced.insert(node);
                     }
-                    _ => connection.send(&name, &payload),
+                    _ => connection.send(&name, order, tag, &payload),
                 }
             }
             (previous, replaced)
@@ -528,7 +565,7 @@ impl Pool {
             .map_or_else(BTreeSet::new, |dial| {
                 dial.queue
                     .into_iter()
-                    .filter_map(|(target, _, _)| match target {
+                    .filter_map(|(target, ..)| match target {
                         Target::Node(node) => Some(node),
                         Target::Seed(_) => None,
                     })

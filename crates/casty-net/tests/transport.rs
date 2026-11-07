@@ -67,13 +67,13 @@ async fn it_delivers_everything_intact_and_in_order_per_pair_and_name() {
         let big = big.clone();
         sending.push(tokio::spawn(async move {
             for to in &addresses {
-                sender.send(to, "actors", &[]).unwrap();
-                sender.send(to, "replication", &big).unwrap();
+                sender.send(to, "actors", 0, None, &[]).unwrap();
+                sender.send(to, "replication", 0, None, &big).unwrap();
                 for index in 0..1_000_u32 {
                     let name = if index % 2 == 0 { "actors" } else { "replies" };
                     let mut payload = vec![u8::try_from(from).unwrap()];
                     payload.extend_from_slice(&index.to_be_bytes());
-                    sender.send(to, name, &payload).unwrap();
+                    sender.send(to, name, 0, None, &payload).unwrap();
                 }
             }
         }));
@@ -129,7 +129,7 @@ async fn it_never_blocks_the_sender_and_delivers_everything_later() {
     for index in 0..rounds {
         let mut one = payload.clone();
         one[..4].copy_from_slice(&u32::try_from(index).unwrap().to_be_bytes());
-        sender.send(&to, "actors", &one).unwrap();
+        sender.send(&to, "actors", 0, None, &one).unwrap();
     }
     let queued = started.elapsed();
 
@@ -168,10 +168,16 @@ async fn it_drops_envelopes_for_the_old_incarnation_and_delivers_to_a_seed() {
     assert_ne!(second.node().incarnation, old.incarnation);
 
     sender
-        .send(&Target::Node(old), "actors", b"for the old one")
+        .send(&Target::Node(old), "actors", 0, None, b"for the old one")
         .unwrap();
     sender
-        .send(&Target::Seed(address), "actors", b"for whoever answers")
+        .send(
+            &Target::Seed(address),
+            "actors",
+            0,
+            None,
+            b"for whoever answers",
+        )
         .unwrap();
 
     let arrived = take(&mut second, 1).await;
@@ -193,7 +199,7 @@ async fn refusal(seed: Config) -> String {
     let mut joining = node().await;
 
     joining
-        .send(&Target::Seed(address), "actors", b"hello")
+        .send(&Target::Seed(address), "actors", 0, None, b"hello")
         .unwrap();
 
     let refused = tokio::time::timeout(WITHIN, joining.recv()).await.unwrap();
@@ -236,9 +242,11 @@ async fn a_small_envelope_passes_a_transfer_of_state_that_is_still_going() {
     let big = vec![3_u8; 1024 * 1024];
 
     for _ in 0..30 {
-        sender.send(&to, "replication", &big).unwrap();
+        sender.send(&to, "replication", 0, None, &big).unwrap();
     }
-    sender.send(&to, "actors", b"let me through").unwrap();
+    sender
+        .send(&to, "actors", 0, None, b"let me through")
+        .unwrap();
 
     let mut before = 0;
     let arrived = tokio::time::timeout(WITHIN, async {
@@ -265,10 +273,10 @@ async fn a_payload_past_the_limit_never_reaches_the_wire() {
     let to = Target::Node(receiver.node().clone());
     let limits = Limits::default();
 
-    let refused = sender.send(&to, "actors", &vec![0_u8; limits.message + 1]);
+    let refused = sender.send(&to, "actors", 0, None, &vec![0_u8; limits.message + 1]);
     assert!(refused.is_err(), "a payload past the limit was taken");
     sender
-        .send(&to, "actors", &vec![1_u8; limits.message])
+        .send(&to, "actors", 0, None, &vec![1_u8; limits.message])
         .unwrap();
 
     let arrived = take(&mut receiver, 1).await;
@@ -293,8 +301,14 @@ async fn a_peer_that_breaks_the_wire_loses_its_connection_and_nothing_else() {
     );
 
     // The node still works: it takes an envelope from itself and hands it over.
-    node.send(&Target::Node(node.node().clone()), "actors", b"still here")
-        .unwrap();
+    node.send(
+        &Target::Node(node.node().clone()),
+        "actors",
+        0,
+        None,
+        b"still here",
+    )
+    .unwrap();
     assert_eq!(take(&mut node, 1).await[0].payload, b"still here");
     node.close(true).await;
 }
@@ -344,7 +358,7 @@ async fn what_it_compresses_is_what_crosses_the_wire() {
     let payload = b"a line that repeats itself. ".repeat(40_000);
 
     sender
-        .send(&Target::Seed(address), "actors", &payload)
+        .send(&Target::Seed(address), "actors", 0, None, &payload)
         .unwrap();
 
     let arrived = take(&mut receiver, 1).await;
@@ -415,11 +429,11 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
     .unwrap();
     let to = Target::Node(receiver.node().clone());
 
-    sender.send(&to, "actors", b"first").unwrap();
+    sender.send(&to, "actors", 0, None, b"first").unwrap();
     assert_eq!(take(&mut receiver, 1).await[0].payload, b"first");
     // Several keepalive periods with nothing to carry: the pings keep the connection, they do not end it.
     tokio::time::sleep(Duration::from_millis(900)).await;
-    sender.send(&to, "actors", b"second").unwrap();
+    sender.send(&to, "actors", 0, None, b"second").unwrap();
 
     assert_eq!(take(&mut receiver, 1).await[0].payload, b"second");
     sender.close(true).await;
@@ -439,7 +453,7 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
             frames.feed(&buffer[..read]);
             let mut said = None;
             while let Some(frame) = frames.frame().unwrap() {
-                for record in mux.receive(frame).unwrap() {
+                for record in mux.receive(frame, 0.0).unwrap() {
                     said =
                         Some(casty_net::handshake::decode(&record.name, &record.payload).unwrap());
                 }
@@ -450,8 +464,8 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
                     compression: None,
                 });
                 let (name, payload) = casty_net::handshake::encode(&ack);
-                mux.send(casty_net::mux::CONTROL, name, &payload);
-                let out = mux.output();
+                mux.send(casty_net::mux::CONTROL, 0, None, name, &payload);
+                let out = mux.output(0.0);
                 socket.write_all(&out).await.unwrap();
                 break;
             }
@@ -468,7 +482,7 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
     .await
     .unwrap();
     talker
-        .send(&Target::Seed(address), "actors", b"anyone there")
+        .send(&Target::Seed(address), "actors", 0, None, b"anyone there")
         .unwrap();
 
     let given_up = tokio::time::timeout(Duration::from_secs(5), deaf).await;
@@ -496,8 +510,14 @@ async fn it_reports_the_peer_of_a_connection_that_ended() {
     let (mut watching, mut heard) = reporting(Some("127.0.0.1:0")).await;
     let peer = node().await;
     let gone = peer.node().clone();
-    peer.send(&Target::Node(watching.node().clone()), "actors", b"hello")
-        .unwrap();
+    peer.send(
+        &Target::Node(watching.node().clone()),
+        "actors",
+        0,
+        None,
+        b"hello",
+    )
+    .unwrap();
     take(&mut watching, 1).await;
 
     peer.close(true).await;
@@ -519,7 +539,13 @@ async fn it_reports_a_peer_whose_address_no_longer_answers() {
     peer.close(true).await;
 
     watching
-        .send(&Target::Node(gone.clone()), "actors", b"anyone there")
+        .send(
+            &Target::Node(gone.clone()),
+            "actors",
+            0,
+            None,
+            b"anyone there",
+        )
         .unwrap();
 
     let reported = tokio::time::timeout(WITHIN, heard.recv()).await;
@@ -547,8 +573,14 @@ async fn an_endpoint_dropped_without_closing_ends_everything_it_started() {
         .clone()
         .expect("a node that listens has an address");
     let released = peer.released().expect("a node that listens has a listener");
-    peer.send(&Target::Node(watching.node().clone()), "actors", b"hello")
-        .unwrap();
+    peer.send(
+        &Target::Node(watching.node().clone()),
+        "actors",
+        0,
+        None,
+        b"hello",
+    )
+    .unwrap();
     take(&mut watching, 1).await;
     assert!(alive() > before);
 
@@ -605,7 +637,13 @@ async fn it_counts_the_connections_it_holds_and_the_bytes_they_carry() {
     let size = payload.len() as u64;
 
     sender
-        .send(&Target::Node(receiver.node().clone()), "actors", &payload)
+        .send(
+            &Target::Node(receiver.node().clone()),
+            "actors",
+            0,
+            None,
+            &payload,
+        )
         .unwrap();
     take(&mut receiver, 1).await;
 
@@ -629,5 +667,177 @@ async fn it_counts_the_connections_it_holds_and_the_bytes_they_carry() {
         "a connection that ended is still counted"
     );
     assert!(gone.received >= into.received, "a count went back");
+    receiver.close(true).await;
+}
+
+/// A proxy for the connections dialed to it that holds each read for `delay` and then forwards it at `rate` bytes a
+/// second, keeping whatever arrives faster, as a relay with deep buffers does.
+async fn slow_link(target: String, rate: f64, delay: Duration) -> String {
+    async fn pipe(
+        mut from: tokio::net::tcp::OwnedReadHalf,
+        mut to: tokio::net::tcp::OwnedWriteHalf,
+        rate: f64,
+        delay: Duration,
+    ) {
+        let (held, mut queued) = unbounded_channel::<(tokio::time::Instant, Vec<u8>)>();
+        tokio::spawn(async move {
+            let mut buffer = vec![0; 64 * 1024];
+            while let Ok(read @ 1..) = from.read(&mut buffer).await {
+                if held
+                    .send((tokio::time::Instant::now(), buffer[..read].to_vec()))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        // When the last byte forwarded leaves the bottleneck: a sleep that wakes late does not slow the link down.
+        let mut free = tokio::time::Instant::now();
+        while let Some((at, data)) = queued.recv().await {
+            #[allow(clippy::cast_precision_loss)]
+            let serialized = Duration::from_secs_f64(data.len() as f64 / rate);
+            free = free.max(at + delay) + serialized;
+            tokio::time::sleep_until(free).await;
+            if to.write_all(&data).await.is_err() {
+                return;
+            }
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        while let Ok((inbound, _)) = listener.accept().await {
+            let outbound = TcpStream::connect(&target).await.unwrap();
+            inbound.set_nodelay(true).unwrap();
+            outbound.set_nodelay(true).unwrap();
+            let (inbound_read, inbound_write) = inbound.into_split();
+            let (outbound_read, outbound_write) = outbound.into_split();
+            tokio::spawn(pipe(inbound_read, outbound_write, rate, delay));
+            tokio::spawn(pipe(outbound_read, inbound_write, rate, delay));
+        }
+    });
+    address
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_small_envelope_crosses_a_slow_link_full_of_large_ones_within_a_few_round_trips() {
+    // A window far larger than the link holds, so that only pacing keeps the relay's buffer from filling.
+    let limits = Limits {
+        window: 16 << 20,
+        ..Limits::default()
+    };
+    let slow = || Config {
+        limits,
+        compression: Some(Vec::new()),
+        ..config(Some("127.0.0.1:0"))
+    };
+    let mut sender = Endpoint::start(slow()).await.unwrap();
+    let mut receiver = Endpoint::start(slow()).await.unwrap();
+    let rate = 4.0 * 1024.0 * 1024.0;
+    let through = slow_link(
+        receiver.node().address.clone().unwrap(),
+        rate,
+        Duration::from_millis(25),
+    )
+    .await;
+    let to = Target::Seed(through);
+    sender.send(&to, "actors", 0, None, b"hello").unwrap();
+    take(&mut receiver, 1).await;
+    let sending = sender.node().clone();
+    let echoing = tokio::spawn(async move {
+        let mut large = 0;
+        while large < 8 {
+            match receiver.recv().await {
+                Some(Ok(envelope)) if envelope.payload.len() > 8 => large += 1,
+                Some(Ok(envelope)) => receiver
+                    .send(
+                        &Target::Node(sending.clone()),
+                        "replies",
+                        0,
+                        None,
+                        &envelope.payload,
+                    )
+                    .unwrap(),
+                _ => panic!("the receiver stopped"),
+            }
+        }
+        receiver
+    });
+
+    // Four seconds of large envelopes at the rate of the link, each of its own order, then a ping every 100 ms.
+    let started = tokio::time::Instant::now();
+    for order in 0..8 {
+        sender
+            .send(&to, "actors", order, None, &vec![1; 2 << 20])
+            .unwrap();
+    }
+    let mut trips = Vec::new();
+    let mut next = started;
+    while !echoing.is_finished() {
+        let ping = started.elapsed().as_secs_f64();
+        sender
+            .send(&to, "actors", 100, None, &ping.to_be_bytes())
+            .unwrap();
+        next += Duration::from_millis(100);
+        while let Ok(Some(Ok(envelope))) = tokio::time::timeout_at(next, sender.recv()).await {
+            let sent = f64::from_be_bytes(envelope.payload.try_into().unwrap());
+            trips.push(started.elapsed().as_secs_f64() - sent);
+        }
+    }
+    let receiver = echoing.await.unwrap();
+
+    let took = started.elapsed().as_secs_f64();
+    let slowest = trips.iter().copied().fold(0.0, f64::max);
+    assert!(
+        trips.len() >= 20,
+        "{} pings came back in {took} s",
+        trips.len()
+    );
+    assert!(
+        slowest < 0.6,
+        "a ping took {slowest} s over a 50 ms round trip, while the large envelopes crossed in {took} s"
+    );
+    sender.close(true).await;
+    receiver.close(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retracted_envelope_stops_taking_the_link_and_what_follows_it_crosses_at_once() {
+    let sender = Endpoint::start(config(Some("127.0.0.1:0"))).await.unwrap();
+    let mut receiver = Endpoint::start(config(Some("127.0.0.1:0"))).await.unwrap();
+    let through = slow_link(
+        receiver.node().address.clone().unwrap(),
+        4.0 * 1024.0 * 1024.0,
+        Duration::from_millis(25),
+    )
+    .await;
+    let to = Target::Seed(through);
+    sender.send(&to, "actors", 0, None, b"hello").unwrap();
+    take(&mut receiver, 1).await;
+
+    // A second of the link, given up a moment after it started, and then one envelope of the same order.
+    sender
+        .send(&to, "actors", 1, Some(7), &vec![1; 4 << 20])
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    sender.retract(&to, 7);
+    let retracted = tokio::time::Instant::now();
+    sender.send(&to, "actors", 1, None, b"after").unwrap();
+
+    let after = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("the envelope after the retracted one waited for it")
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.payload, b"after");
+    let crossed = retracted.elapsed();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), receiver.recv())
+            .await
+            .is_err(),
+        "the retracted envelope arrived"
+    );
+    assert!(crossed < Duration::from_millis(600), "it took {crossed:?}");
+    sender.close(true).await;
     receiver.close(true).await;
 }
