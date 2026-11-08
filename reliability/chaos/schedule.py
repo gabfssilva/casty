@@ -18,6 +18,10 @@ The planner keeps each fault within what the README promises to survive, since a
   README says need synchronized clocks;
 - a sever resets the connections of a machine a few times in a row, as the gateway of a cloud does, with nothing else
   wrong: the connections are taken up again and nothing in flight is lost, so the audit after it expects everything;
+- a tear cuts the connections between two machines halfway through answers of 25 MiB each way, with small answers
+  behind them, and the first dials after it fail on both sides, as a tunnel that reconnects to its gateway: every
+  answer arrives whole, before the deadline of its ask, which the run checks at once. The dials fail for less than
+  `dead_after`, since a dial that fails gets the peer suspected;
 - a crawl slows what reaches a machine to a trickle for longer than `suspect_after + dead_after`, with the bytes
   still arriving: nobody may suspect anybody for it, which the run watches while it lasts;
 - at most one of the first three slots is down at a time, since they are the seeds of the clients;
@@ -124,6 +128,20 @@ class Crawl:
 
 
 @dataclass(frozen=True)
+class Tear:
+    """Pull `size` bytes each way between `slot` and `peer`, with small pulls behind them, over their link carried at
+    `rate` bytes a second; `at` seconds in, reset its connections, and close the dials of both sides for `refusing`
+    seconds."""
+
+    slot: int
+    peer: int
+    size: int
+    rate: float
+    at: float
+    refusing: float
+
+
+@dataclass(frozen=True)
 class Heal:
     """End every partition, isolation and slow link."""
 
@@ -134,7 +152,7 @@ class Audit:
 
 
 type Action = (
-    Crash | Leave | Start | Restart | Outage | Partition | Isolate | Slow | Skew | Sever | Crawl | Heal | Audit
+    Crash | Leave | Start | Restart | Outage | Partition | Isolate | Slow | Skew | Sever | Crawl | Tear | Heal | Audit
 )
 
 
@@ -160,10 +178,13 @@ FAULTS = (
     "skew",
     "sever",
     "crawl",
+    "tear",
 )
 """The kinds of fault the planner chooses from. `join` starts a machine on a free slot; `upgrade` is a step of a
 rolling deploy: a machine leaves and comes back running `reliability.deploy`; `outage` restarts the whole cluster."""
 
+TORN = 25 * 1024 * 1024
+"""Bytes of each large answer of a tear."""
 SKEW = 1.5
 """The furthest a clock is set off, in seconds."""
 
@@ -217,6 +238,8 @@ def kind(action: Action) -> str:
             return "sever"
         case Crawl():
             return "crawl"
+        case Tear():
+            return "tear"
         case Heal():
             return "heal"
         case Audit():
@@ -242,6 +265,11 @@ def described(action: Action) -> str:
             return f"{cut}, deaf for {deaf:.1f} s" if deaf else cut
         case Crawl(slot, rate, seconds):
             return f"crawl toward slot {slot} at {rate / 1024:.0f} KiB/s for {seconds:.1f} s"
+        case Tear(slot, peer, size, rate, at, refusing):
+            return (
+                f"tear slots {slot} and {peer} {at:.2f} s into {size / 2**20:.0f} MiB each way at "
+                f"{rate / 2**20:.0f} MiB/s, refusing dials for {refusing:.2f} s"
+            )
         case Outage() | Heal() | Audit():
             return kind(action)
         case _:
@@ -266,6 +294,8 @@ def encoded(step: Step) -> dict[str, object]:
             fields = {"slot": slot, "strand": strand, "late": late, "deaf": deaf}
         case Crawl(slot, rate, seconds):
             fields = {"slot": slot, "rate": rate, "seconds": seconds}
+        case Tear(slot, peer, size, rate, at, refusing):
+            fields = {"slot": slot, "peer": peer, "size": size, "rate": rate, "at": at, "refusing": refusing}
         case Outage() | Heal() | Audit():
             fields = {}
         case _:
@@ -305,6 +335,15 @@ def decoded(raw: object) -> Step:
             )
         case "crawl":
             action = Crawl(records.integer(held["slot"]), records.number(held["rate"]), records.number(held["seconds"]))
+        case "tear":
+            action = Tear(
+                records.integer(held["slot"]),
+                records.integer(held["peer"]),
+                records.integer(held["size"]),
+                records.number(held["rate"]),
+                records.number(held["at"]),
+                records.number(held["refusing"]),
+            )
         case "heal":
             action = Heal()
         case "audit":
@@ -393,6 +432,13 @@ def _episode(rng: random.Random, machines: _Machines, faults: Sequence[str], tim
             silent = (timing.suspect_after + timing.dead_after).total_seconds()
             crawl = Crawl(rng.choice(up), rng.uniform(16.0, 64.0) * 1024, rng.uniform(1.5, 3.0) * silent)
             return [Step(pause, crawl), Step(0.0, Audit())]
+        case "tear":
+            slot, peer = rng.sample(up, 2)
+            # The answers take about a second each way, and the cut comes partway through them.
+            rate = 32.0 * 2**20
+            at = rng.uniform(0.2, 0.6) * TORN / rate
+            refusing = rng.uniform(0.2, 0.5) * timing.dead_after.total_seconds()
+            return [Step(pause, Tear(slot, peer, TORN, rate, at, refusing)), Step(0.0, Audit())]
         case other:
             raise AssertionError(f"no episode for {other!r}")
 
@@ -409,7 +455,7 @@ def _possible(fault: str, machines: _Machines) -> bool:
             return True
         case "partition":
             return len(machines.up) >= 5
-        case "isolate" | "slow" | "skew" | "sever" | "crawl":
+        case "isolate" | "slow" | "skew" | "sever" | "crawl" | "tear":
             return len(machines.up) >= 3
         case _:
             return False

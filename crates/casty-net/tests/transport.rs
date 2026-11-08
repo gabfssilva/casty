@@ -491,7 +491,8 @@ async fn an_idle_connection_stays_up_and_a_peer_that_stops_answering_loses_it() 
     talker.close(true).await;
 }
 
-/// A node that tells what it hears of its peers to the receiver it comes with.
+/// A node that tells what it hears of its peers to the receiver it comes with. A session whose connection broke waits
+/// under a second for another to take it up.
 async fn reporting(bind: Option<&str>) -> (Endpoint, UnboundedReceiver<Peer>) {
     let (told, heard) = unbounded_channel();
     let reporting: Heard = Arc::new(move |peer: Peer| {
@@ -499,11 +500,31 @@ async fn reporting(bind: Option<&str>) -> (Endpoint, UnboundedReceiver<Peer>) {
     });
     let endpoint = Endpoint::start(Config {
         heard: Some(reporting),
+        limits: Limits {
+            keepalive_after: Duration::from_millis(200),
+            keepalive_timeout: Duration::from_millis(200),
+            ..Limits::default()
+        },
         ..config(bind)
     })
     .await
     .unwrap();
     (endpoint, heard)
+}
+
+/// The first peer reported lost, past the dials that failed to take its session up.
+async fn lost(heard: &mut UnboundedReceiver<Peer>) -> Option<Peer> {
+    tokio::time::timeout(WITHIN, async {
+        loop {
+            match heard.recv().await? {
+                Peer::Unreached(_) => {}
+                lost @ Peer::Lost(_) => return Some(lost),
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -523,10 +544,9 @@ async fn it_reports_the_peer_of_a_connection_that_ended() {
 
     peer.close(true).await;
 
-    let reported = tokio::time::timeout(WITHIN, heard.recv()).await;
     assert_eq!(
-        reported,
-        Ok(Some(Peer::Lost(gone))),
+        lost(&mut heard).await,
+        Some(Peer::Lost(gone)),
         "the lost connection was not reported"
     );
     watching.close(true).await;
@@ -593,10 +613,9 @@ async fn an_endpoint_dropped_without_closing_ends_everything_it_started() {
     TcpListener::bind(&address)
         .await
         .expect("the address is free to bind again");
-    let reported = tokio::time::timeout(WITHIN, heard.recv()).await;
     assert_eq!(
-        reported,
-        Ok(Some(Peer::Lost(gone))),
+        lost(&mut heard).await,
+        Some(Peer::Lost(gone)),
         "the peer did not see the connection end"
     );
     let settled = tokio::time::timeout(WITHIN, async {

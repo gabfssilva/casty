@@ -38,6 +38,7 @@ from reliability.chaos.schedule import (
     Slow,
     Start,
     Step,
+    Tear,
     decoded,
     described,
     encoded,
@@ -393,6 +394,17 @@ async def _apply(
                         print(report.applied[-1], flush=True)
                         return f"at step #{index} ({described(action)}): a member was suspected: {suspected[0]}"
                     note = "nobody suspected"
+                case Tear(slot, peer, size, rate, at, refusing):
+                    pulls = await fleet.tear(slot, peer, size, rate, at, refusing)
+                    # The large pulls come first, and each of the small ones that follow is told only if it failed.
+                    note = "; ".join(line for line, _ in pulls[:2])
+                    note += f"; {sum(whole for _, whole in pulls[2:])} of {len(pulls) - 2} small pulls whole"
+                    # Everything in flight when the connection broke is taken up again: nothing fails, nothing waits
+                    # out its deadline.
+                    if torn := [line for line, whole in pulls if not whole]:
+                        report.applied.append(Applied(index, step, began, journal.now() - began, note))
+                        print(report.applied[-1], flush=True)
+                        return f"at step #{index} ({described(action)}): a pull did not arrive whole: {torn[0]}"
                 case Heal():
                     await fleet.heal()
                     lasted = journal.now() - shaped

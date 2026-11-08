@@ -12,7 +12,9 @@ two ways (`cut`):
   the peer later, on that old connection, `late` seconds after the node lost it.
 
 Either way the relay can then be `deaf` for a while: a connection the node dials meanwhile is accepted and goes nowhere,
-as a relay whose way out does not open, and is reset when that time is over. The dials of the peer still arrive.
+as a relay whose way out does not open, and is reset when that time is over. The dials of the peer still arrive. Or it
+can be `refusing` for a while: a connection the node dials meanwhile is accepted and reset at once, as a tunnel that is
+reconnecting to its gateway.
 
 Apart from a cut, the relay can make what crosses it one way `crawl` for a while, a few kilobytes at a time at a given
 rate, as a link that slows down under a transfer and keeps carrying it (`crawl`).
@@ -31,7 +33,9 @@ from functools import partial
 STRANDED = 0.3
 """Seconds a stranded connection holds what the node writes before the node loses it."""
 CRAWLED = 4 * 1024
-"""Bytes a crawling connection delivers at once."""
+"""The fewest bytes a crawling connection delivers at once."""
+STEPS = 100
+"""Pieces a second a crawling connection delivers at most: at a fast crawl, a piece is that much of its rate."""
 
 
 class Relay:
@@ -46,6 +50,7 @@ class Relay:
         self._carried: set[_Carried] = set()
         self._servers: list[asyncio.Server] = []
         self._deaf: dict[str, float] = {}
+        self._refusing: dict[str, float] = {}
         # `(address, outward)` to the rate it crawls at and until when.
         self._crawling: dict[tuple[str, bool], tuple[float, float]] = {}
 
@@ -63,10 +68,12 @@ class Relay:
                 asyncio.run_coroutine_threadsafe(self._serve(listener, address), self._loop).result()
         return local
 
-    def cut(self, addresses: frozenset[str], /, *, strand: bool, late: float, deaf: float) -> int:
-        """Cut every connection carried to one of `addresses`, stay `deaf` to them for that many seconds, and answer
-        how many connections there were."""
-        cutting = asyncio.run_coroutine_threadsafe(self._cut(addresses, strand, late, deaf), self._loop)
+    def cut(
+        self, addresses: frozenset[str], /, *, strand: bool, late: float, deaf: float, refusing: float = 0.0
+    ) -> int:
+        """Cut every connection carried to one of `addresses`, stay `deaf` to them or keep `refusing` them for that
+        many seconds, and answer how many connections there were."""
+        cutting = asyncio.run_coroutine_threadsafe(self._cut(addresses, strand, late, deaf, refusing), self._loop)
         return cutting.result()
 
     def crawl(self, addresses: frozenset[str], /, *, rate: float, seconds: float, outward: bool) -> None:
@@ -88,6 +95,9 @@ class Relay:
         self._servers.append(await asyncio.start_server(partial(self._carry, address), sock=listener))
 
     async def _carry(self, address: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, /) -> None:
+        if self._refusing.get(address, 0.0) > time.monotonic():
+            writer.transport.abort()
+            return
         if (deaf := self._deaf.get(address, 0.0) - time.monotonic()) > 0:
             await asyncio.sleep(deaf)
             writer.transport.abort()
@@ -105,10 +115,11 @@ class Relay:
         finally:
             self._carried.discard(carried)
 
-    async def _cut(self, addresses: frozenset[str], strand: bool, late: float, deaf: float, /) -> int:
-        until = time.monotonic() + deaf
+    async def _cut(self, addresses: frozenset[str], strand: bool, late: float, deaf: float, refusing: float, /) -> int:
+        now = time.monotonic()
         for address in addresses:
-            self._deaf[address] = until
+            self._deaf[address] = now + deaf
+            self._refusing[address] = now + refusing
         cut = [carried for carried in self._carried if carried.address in addresses]
         for carried in cut:
             if strand:
@@ -176,8 +187,9 @@ class _Carried:
                     await writer.drain()
                     continue
                 # Crawling: a piece at a time, so that the peer reads a trickle and not a burst now and then.
-                for start in range(0, len(data), CRAWLED):
-                    piece = data[start : start + CRAWLED]
+                step = max(CRAWLED, int(rate / STEPS))
+                for start in range(0, len(data), step):
+                    piece = data[start : start + step]
                     await asyncio.sleep(len(piece) / rate)
                     writer.write(piece)
                     await writer.drain()

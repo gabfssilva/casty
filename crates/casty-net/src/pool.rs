@@ -15,9 +15,12 @@
 //! What two nodes exchange is a session, which outlives the connection that carries it. A connection that breaks
 //! without a goodbye leaves its session waiting: the side that knows the address of the other dials it again at once,
 //! and a hello that names the session takes it up where it stopped, so a reconnection loses nothing that was in
-//! flight. A session ends as a connection used to, with the envelopes it holds: the peer said goodbye or broke the
-//! protocol, the dial that would take it up failed or reached another incarnation, the peer came back without it, the
-//! cluster gave the peer up (`forsake`), or the peer has no address and only it could dial again.
+//! flight. A dial that fails meanwhile tells of the peer as unreached and is tried again after the backoff, since a
+//! tunnel or a gateway that is reconnecting fails the first dials; a peer without an address is waited for to dial
+//! again itself. A session ends as a connection used to, with the envelopes it holds: the peer said goodbye or broke
+//! the protocol, the dial that would take it up reached another incarnation or was refused by the peer, the peer came
+//! back without it, the cluster gave the peer up (`forsake`), or no connection took it up in the time either side may
+//! take to notice the break and get a dial through (`wait`).
 
 use std::collections::{BTreeSet, HashMap};
 use std::pin::Pin;
@@ -500,7 +503,7 @@ impl Pool {
             ..self.settings.local.clone()
         };
         let Ok((mut greeting, message)) = self.initiate(&address, hello).await else {
-            return self.unreached(&address);
+            return self.missed(&address, resuming.map(|(session, _)| session));
         };
         match message {
             Message::Ack(ack) => {
@@ -729,7 +732,7 @@ impl Pool {
     fn forget(self: &Arc<Self>, peer: &NodeId, connection: &Arc<Connection>) {
         enum Next {
             Nothing,
-            Dial(String, Arc<Notify>),
+            Wait(Option<(String, Arc<Notify>)>),
             Lost,
         }
         let next = {
@@ -753,14 +756,12 @@ impl Pool {
             // taking up hands it over, and one this node is closing is not lost.
             if !current || !held || connection.superseded() || state.closed {
                 Next::Nothing
-            } else if connection.broken()
-                && let Some(address) = &peer.address
-            {
-                state
-                    .redial(address)
-                    .map_or(Next::Nothing, |(address, cancel)| {
-                        Next::Dial(address, cancel)
-                    })
+            } else if connection.broken() {
+                Next::Wait(
+                    peer.address
+                        .as_deref()
+                        .and_then(|address| state.redial(address)),
+                )
             } else {
                 state.sessions.remove(peer);
                 let _ = session.discard();
@@ -769,9 +770,50 @@ impl Pool {
         };
         match next {
             Next::Nothing => {}
-            Next::Dial(address, cancel) => self.start(address, cancel),
+            Next::Wait(dial) => {
+                self.wait(peer, connection.session());
+                if let Some((address, cancel)) = dial {
+                    self.start(address, cancel);
+                }
+            }
             Next::Lost => self.tell(Peer::Lost(peer.clone())),
         }
+    }
+
+    /// Keep the session whose connection broke for as long as it may take either side to notice, `keepalive_after` and
+    /// `keepalive_timeout`, and as long again to get a dial through: then give it up, unless a connection took it up
+    /// or the cluster gave the peer up first.
+    fn wait(self: &Arc<Self>, peer: &NodeId, session: &Arc<Session>) {
+        // Weak, so that waiting keeps neither the pool nor what it holds from being dropped.
+        let pool = Arc::downgrade(self);
+        let (peer, session) = (peer.clone(), Arc::clone(session));
+        let limits = self.settings.limits;
+        let patience = 2 * (limits.keepalive_after + limits.keepalive_timeout);
+        tokio::spawn(async move {
+            tokio::select! {
+                () = tokio::time::sleep(patience) => {}
+                () = session.discarded() => return,
+            }
+            let Some(pool) = pool.upgrade() else {
+                return;
+            };
+            let waiting = {
+                let mut state = pool.held();
+                let waiting = !state.links.contains_key(&peer)
+                    && state
+                        .sessions
+                        .get(&peer)
+                        .is_some_and(|held| Arc::ptr_eq(held, &session));
+                if waiting {
+                    state.sessions.remove(&peer);
+                }
+                waiting
+            };
+            if waiting {
+                let _ = session.discard();
+                pool.tell(Peer::Lost(peer));
+            }
+        });
     }
 
     /// Give up `session`, which no connection will take up: what it had in flight is lost, and with `unreached`, another
@@ -799,6 +841,33 @@ impl Pool {
     fn tell(&self, peer: Peer) {
         if let Some(heard) = &self.settings.heard {
             heard(peer);
+        }
+    }
+
+    /// A dial that reached no node, for `session` if it was to take one up. The peer is told unreached, but while the
+    /// session waits the address is dialed again after the backoff: a tunnel or a gateway that is reconnecting fails
+    /// the first dials, and giving the session up for them would lose what it had in flight. It is given up when the
+    /// cluster gives up its peer, or once it has waited long enough (`wait`).
+    fn missed(self: &Arc<Self>, address: &str, session: Option<Arc<Session>>) {
+        let waiting = session.filter(|session| {
+            let state = self.held();
+            !state.links.contains_key(session.peer())
+                && state
+                    .sessions
+                    .get(session.peer())
+                    .is_some_and(|held| Arc::ptr_eq(held, session))
+        });
+        let Some(session) = waiting else {
+            return self.unreached(address);
+        };
+        let mut dropped = self.fail(address);
+        dropped.insert(session.peer().clone());
+        for node in dropped {
+            self.tell(Peer::Unreached(node));
+        }
+        let redial = self.held().redial(address);
+        if let Some((address, cancel)) = redial {
+            self.start(address, cancel);
         }
     }
 

@@ -220,6 +220,7 @@ impl Greeting {
                 over: false,
                 theirs: 0,
             }),
+            discarded: watch::channel(false).0,
             epoch,
         });
         Self::start(socket, frames, limits, bytes, session, 0, writable, inbound)
@@ -305,6 +306,8 @@ impl Greeting {
 pub struct Session {
     peer: NodeId,
     held: Mutex<Carried>,
+    /// Set once the session is given up.
+    discarded: watch::Sender<bool>,
     /// What the mux reads its clock against, for every connection that carries it.
     epoch: Instant,
 }
@@ -406,7 +409,13 @@ impl Session {
         carried.over = true;
         carried.turn += 1;
         carried.writable.notify_one();
+        self.discarded.send_replace(true);
         carried.mux.unsent()
+    }
+
+    /// Return once the session is given up, at once if it already is.
+    pub async fn discarded(&self) {
+        let _ = self.discarded.subscribe().wait_for(|over| *over).await;
     }
 
     /// Queue what a session given up with the same peer never started, ahead of what this one queued since.

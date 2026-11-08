@@ -13,8 +13,9 @@ It says `{"ready": <node>}` once it is in the cluster and `{"left": null}` once 
 reads from the log of the pod. The runner asks it things on the control port, one JSON object per line each way:
 `{"members": <question>}` is answered with its view, `{"network": ...}` sets its clock and is answered with `{}`, and
 `{"crash": null}` ends the process at once — by `os._exit`, since the first process of a container ignores a signal
-it sends itself. `{"cut": {"addresses": [...], "strand": <bool>, "late": <seconds>, "deaf": <seconds>}}` cuts the
-connections it dialed to those addresses (`Relay.cut`) and is answered with `{"cut": <how many>}`.
+it sends itself. `{"cut": {"addresses": [...], "strand": <bool>, "late": <seconds>, "deaf": <seconds>, "refusing":
+<seconds>}}` cuts the connections it dialed to those addresses (`Relay.cut`) and is answered with
+`{"cut": <how many>}`.
 `{"crawl": {"addresses": [...], "rate": <bytes a second>, "seconds": <seconds>, "outward": <bool>}}` slows what those
 connections carry one way (`Relay.crawl`) and is answered with `{}`.
 """
@@ -36,7 +37,7 @@ from typing import Literal
 from unittest.mock import patch
 from uuid import UUID
 
-from casty import ActorDefinition, ActorSystem, Cluster, NodeId, Overlay, Store
+from casty import ActorDefinition, ActorSystem, Cluster, Limits, NodeId, Overlay, Store
 from casty.stores import SQL
 from reliability import deploy, records
 from reliability.relay import Relay
@@ -58,6 +59,11 @@ def version(raw: object) -> Version:
             return "deploy"
         case other:
             raise ValueError(f"unknown version {other!r}")
+
+
+LIMITS = Limits(message=64 * 1024 * 1024, window=16 * 1024 * 1024)
+"""The limits of the nodes and clients of a chaos run: answers of tens of MiB, sixteen of them in flight on a stream, as
+a cluster that moves the weights of a model has."""
 
 
 @dataclass(frozen=True)
@@ -235,6 +241,7 @@ def system(launch: Launch, /, *, store: Store | None, relay: Relay) -> ActorSyst
             advertise=launch.address,
             seeds=launch.seeds,
             address_map=relay.through,
+            limits=LIMITS,
             heartbeat=period.heartbeat,
             suspect_after=period.suspect_after,
             dead_after=period.dead_after,
@@ -290,12 +297,14 @@ async def _answer(
             elif "cut" in command:
                 cut = records.record(command["cut"])
                 addresses = frozenset(records.texts(cut["addresses"]))
-                strand, late, deaf = (
+                strand, late, deaf, refusing = (
                     records.flag(cut["strand"]),
                     records.number(cut["late"]),
                     records.number(cut["deaf"]),
+                    records.number(cut.get("refusing", 0.0)),
                 )
-                answer = {"cut": await asyncio.to_thread(relay.cut, addresses, strand=strand, late=late, deaf=deaf)}
+                cutting = partial(relay.cut, addresses, strand=strand, late=late, deaf=deaf, refusing=refusing)
+                answer = {"cut": await asyncio.to_thread(cutting)}
             elif "crawl" in command:
                 crawl = records.record(command["crawl"])
                 await asyncio.to_thread(

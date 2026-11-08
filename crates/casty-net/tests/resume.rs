@@ -2,7 +2,7 @@
 //! a relay that cuts or freezes the connections passing through it.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,18 +35,25 @@ struct Gateway {
     passing: Arc<Mutex<Vec<watch::Sender<Mode>>>>,
     /// Connections accepted from now on are held open and go nowhere: a local relay whose way out never opens.
     deaf: Arc<AtomicBool>,
+    /// This many connections accepted from now on are closed at once: a relay whose way out is not up yet.
+    refusing: Arc<AtomicUsize>,
 }
 
+/// Bytes a second a relay carries each way, if it is a slow link.
+type Rate = Option<f64>;
+
 impl Gateway {
-    async fn to(target: String) -> Self {
+    async fn to(target: String, rate: Rate) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let gateway = Self {
             address: listener.local_addr().unwrap().to_string(),
             passing: Arc::new(Mutex::new(Vec::new())),
             deaf: Arc::new(AtomicBool::new(false)),
+            refusing: Arc::new(AtomicUsize::new(0)),
         };
         let passing = Arc::clone(&gateway.passing);
         let deaf = Arc::clone(&gateway.deaf);
+        let refusing = Arc::clone(&gateway.refusing);
         tokio::spawn(async move {
             let mut held = Vec::new();
             while let Ok((inbound, _)) = listener.accept().await {
@@ -54,12 +61,17 @@ impl Gateway {
                     held.push(inbound);
                     continue;
                 }
+                // Only this loop takes from the count.
+                if refusing.load(Ordering::SeqCst) > 0 {
+                    refusing.fetch_sub(1, Ordering::SeqCst);
+                    continue;
+                }
                 let Ok(outbound) = TcpStream::connect(&target).await else {
                     continue;
                 };
                 let (mode, watched) = watch::channel(Mode::Open);
                 passing.lock().unwrap().push(mode);
-                tokio::spawn(relay(inbound, outbound, watched));
+                tokio::spawn(relay(inbound, outbound, watched, rate));
             }
         });
         gateway
@@ -91,7 +103,13 @@ impl Frozen {
     }
 }
 
-async fn relay(mut a: TcpStream, mut b: TcpStream, mut mode: watch::Receiver<Mode>) {
+async fn relay(mut a: TcpStream, mut b: TcpStream, mut mode: watch::Receiver<Mode>, rate: Rate) {
+    let paced = |read: usize| async move {
+        if let Some(rate) = rate {
+            #[allow(clippy::cast_precision_loss)]
+            tokio::time::sleep(Duration::from_secs_f64(read as f64 / rate)).await;
+        }
+    };
     let (mut a_read, mut a_write) = a.split();
     let (mut b_read, mut b_write) = b.split();
     let (mut to_b, mut to_a) = (Vec::new(), Vec::new());
@@ -117,13 +135,13 @@ async fn relay(mut a: TcpStream, mut b: TcpStream, mut mode: watch::Receiver<Mod
                 Ok(0) | Err(_) if frozen => a_open = false,
                 Ok(0) | Err(_) => return,
                 Ok(read) if frozen => to_b.extend_from_slice(&a_buffer[..read]),
-                Ok(read) => if b_write.write_all(&a_buffer[..read]).await.is_err() { return },
+                Ok(read) => { paced(read).await; if b_write.write_all(&a_buffer[..read]).await.is_err() { return } },
             },
             read = b_read.read(&mut b_buffer), if b_open => match read {
                 Ok(0) | Err(_) if frozen => b_open = false,
                 Ok(0) | Err(_) => return,
                 Ok(read) if frozen => to_a.extend_from_slice(&b_buffer[..read]),
-                Ok(read) => if a_write.write_all(&b_buffer[..read]).await.is_err() { return },
+                Ok(read) => { paced(read).await; if a_write.write_all(&b_buffer[..read]).await.is_err() { return } },
             },
             changed = mode.changed() => if changed.is_err() { return },
         }
@@ -131,10 +149,11 @@ async fn relay(mut a: TcpStream, mut b: TcpStream, mut mode: watch::Receiver<Mod
 }
 
 /// A node whose dials to the addresses in `through` go to the gateway in front of each, which tells what it hears of
-/// its peers to the receiver it comes with.
+/// its peers to the receiver it comes with. A `client` has no address.
 async fn node(
     limits: Limits,
     through: Arc<Mutex<HashMap<String, String>>>,
+    client: bool,
 ) -> (Endpoint, UnboundedReceiver<Peer>) {
     let (told, heard) = unbounded_channel();
     let reporting: Heard = Arc::new(move |peer: Peer| {
@@ -150,7 +169,7 @@ async fn node(
         Box::pin(async move { dialed })
     });
     let endpoint = Endpoint::start(Config {
-        bind: Some("127.0.0.1:0".to_owned()),
+        bind: (!client).then(|| "127.0.0.1:0".to_owned()),
         limits,
         heard: Some(reporting),
         address_map: Some(map),
@@ -161,7 +180,8 @@ async fn node(
     (endpoint, heard)
 }
 
-/// Two nodes that reach each other only through a gateway in front of each: `a`'s in front of `a`, `b`'s of `b`.
+/// Two nodes that reach each other only through a gateway in front of each: `a`'s in front of `a`, `b`'s of `b`. When
+/// `b` is a client, nothing can dial it, and its gateway, in front of `a` too, carries nothing.
 struct Pair {
     a: Endpoint,
     b: Endpoint,
@@ -173,17 +193,31 @@ struct Pair {
 
 impl Pair {
     async fn start(limits_a: Limits, limits_b: Limits) -> Self {
+        Self::through(limits_a, limits_b, None, false).await
+    }
+
+    async fn through(limits_a: Limits, limits_b: Limits, rate: Rate, client: bool) -> Self {
         let through = Arc::new(Mutex::new(HashMap::new()));
-        let (a, heard_a) = node(limits_a, Arc::clone(&through)).await;
-        let (b, heard_b) = node(limits_b, Arc::clone(&through)).await;
+        let (a, heard_a) = node(limits_a, Arc::clone(&through), false).await;
+        let (b, heard_b) = node(limits_b, Arc::clone(&through), client).await;
         let address_a = a.node().address.clone().unwrap();
-        let address_b = b.node().address.clone().unwrap();
-        let gateway_a = Gateway::to(address_a.clone()).await;
-        let gateway_b = Gateway::to(address_b.clone()).await;
-        through.lock().unwrap().extend([
-            (address_a, gateway_a.address.clone()),
-            (address_b, gateway_b.address.clone()),
-        ]);
+        let address_b = b
+            .node()
+            .address
+            .clone()
+            .unwrap_or_else(|| address_a.clone());
+        let gateway_a = Gateway::to(address_a.clone(), rate).await;
+        let gateway_b = Gateway::to(address_b.clone(), rate).await;
+        through
+            .lock()
+            .unwrap()
+            .insert(address_a, gateway_a.address.clone());
+        if !client {
+            through
+                .lock()
+                .unwrap()
+                .insert(address_b, gateway_b.address.clone());
+        }
         Self {
             a,
             b,
@@ -353,4 +387,93 @@ async fn the_smaller_incarnation_takes_the_dial_that_arrives_when_its_own_never_
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_larger_incarnation_takes_the_dial_that_arrives_when_its_own_never_does() {
     crossed_with_a_dial_that_never_arrives(false).await;
+}
+
+/// Each side sends the other an envelope of 25 MB over a slow link, and small ones of other orders behind it, and the
+/// connection is cut halfway through the large ones; the first dials after the cut find the gateway not up yet, as a
+/// tunnel that reconnects. Everything arrives once, and no peer is reported lost. With `client`, `b` has no address, so
+/// only it can dial again.
+async fn cut_in_the_middle_of_a_large_envelope(client: bool) {
+    let limits = Limits {
+        window: 16 << 20,
+        message: 64 << 20,
+        ..Limits::default()
+    };
+    let mut pair = Pair::through(limits, limits, Some(8e6), client).await;
+    let to_b = Target::Node(pair.b.node().clone());
+    let to_a = Target::Node(pair.a.node().clone());
+    // A client is reachable only once it has dialed.
+    pair.b.send(&to_a, "actors", 0, None, b"hi").unwrap();
+    let hi = tokio::time::timeout(WITHIN, pair.a.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(hi.payload, b"hi");
+    // Bytes that do not compress, as a model's weights.
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let large: Vec<u8> = (0..25 << 20)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed.to_be_bytes()[0]
+        })
+        .collect();
+    pair.a.send(&to_b, "actors", 1, None, &large).unwrap();
+    pair.b.send(&to_a, "actors", 1, None, &large).unwrap();
+    let count = 40_u32;
+    for index in 0..count {
+        let order = 2 + u64::from(index);
+        pair.a
+            .send(&to_b, "actors", order, None, &index.to_be_bytes())
+            .unwrap();
+        pair.b
+            .send(&to_a, "actors", order, None, &index.to_be_bytes())
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if index == 30 {
+            for gateway in [&pair.gateway_a, &pair.gateway_b] {
+                gateway.refusing.store(3, Ordering::SeqCst);
+                gateway.set(Mode::Cut);
+            }
+        }
+    }
+    for endpoint in [&mut pair.a, &mut pair.b] {
+        let mut small = Vec::new();
+        let mut larges = 0;
+        let taken = tokio::time::timeout(Duration::from_secs(60), async {
+            while small.len() < count as usize || larges == 0 {
+                let envelope = endpoint.recv().await.unwrap().unwrap();
+                if envelope.payload.len() == 4 {
+                    small.push(u32::from_be_bytes(
+                        envelope.payload[..4].try_into().unwrap(),
+                    ));
+                } else {
+                    assert_eq!(envelope.payload, large);
+                    larges += 1;
+                }
+            }
+        })
+        .await;
+        small.sort_unstable();
+        assert!(taken.is_ok(), "{larges} large and {small:?} arrived");
+        assert_eq!(small, (0..count).collect::<Vec<_>>());
+    }
+    // A dial that failed tells of the peer it was for, and the session is never lost.
+    for heard in [&mut pair.heard_a, &mut pair.heard_b] {
+        while let Ok(peer) = heard.try_recv() {
+            assert!(matches!(peer, Peer::Unreached(_)), "{peer:?} was reported");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_connection_cut_in_the_middle_of_a_large_envelope_delivers_it_and_what_followed_it() {
+    cut_in_the_middle_of_a_large_envelope(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cut_in_the_middle_of_a_large_envelope_takes_its_session_up_when_it_dials_again() {
+    cut_in_the_middle_of_a_large_envelope(true).await;
 }

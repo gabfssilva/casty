@@ -205,9 +205,12 @@ class Harness:
         """Make the machine of `node` disappear: it keeps running, and nothing reaches it or leaves it."""
         self._block(pair for other in self._nodes if other is not node for pair in self._both_ways(node, other))
 
-    async def sever(self) -> None:
-        """Reset every connection the proxies carry, as a network that drops them does, and keep accepting new ones."""
+    async def sever(self, *, refusing: int = 0) -> None:
+        """Reset every connection the proxies carry, as a network that drops them does, and keep accepting new ones;
+        the first `refusing` each proxy accepts from then on are closed at once, as a tunnel that is reconnecting
+        closes them."""
         for proxy in self._proxies.values():
+            proxy.refusing = refusing
             await proxy.close()
 
     def slow(self, delay: timedelta, /) -> None:
@@ -423,6 +426,8 @@ class Proxy:
         self._throttled = asyncio.Event()
         self.forwarded = 0
         """Bytes this pair put on the wire, both ways."""
+        self.refusing = 0
+        """Connections still to close as soon as they are accepted."""
 
     def block(self, blocked: bool, /) -> None:
         if blocked:
@@ -470,6 +475,9 @@ class Proxy:
         self._spawn(self._forward(reader, writer)).add_done_callback(lambda _: writer.close())
 
     async def _forward(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self.refusing:
+            self.refusing -= 1
+            return
         host, _, port = self._target.rpartition(":")
         # Blocked, the pair does not even reach the other side: a machine nobody can reach accepts no connection.
         await self._opened()

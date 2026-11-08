@@ -140,6 +140,27 @@ def describe_routing() -> None:
                 # What was on its way when the asks failed still arrives, and not the three megabytes nobody reads.
                 assert harness.forwarded - before < 2**20
 
+    def when_the_connection_is_cut_with_a_large_answer_on_its_way() -> None:
+        async def it_delivers_it_and_the_asks_behind_it_once_a_dial_gets_through() -> None:
+            # Long enough for the answers to wait out the dials that fail, and for nobody to be declared dead.
+            patient = replace(FAST, dead_after=timedelta(seconds=30), ask_timeout=timedelta(minutes=1))
+
+            async with Harness.start(2, timing=patient) as harness:
+                a, b = harness.nodes
+                fetching = b.system.ref(source, "s", at=a.system.node)
+                assert len(await fetching.ask(Fetch(1024))) == 1024
+
+                harness.throttle(b, 2**20)
+                sizes = (2**21, *(16 for _ in range(8)))
+                asked = [asyncio.ensure_future(fetching.ask(Fetch(size))) for size in sizes]
+                await asyncio.sleep(0.5)
+                # Halfway through the large answer, and the first dials after the cut find the way closed.
+                await harness.sever(refusing=3)
+
+                async with asyncio.timeout(WITHIN.total_seconds()):
+                    answers = await asyncio.gather(*asked)
+                assert [len(answer) for answer in answers] == list(sizes)
+
     def when_the_node_that_asked_leaves_with_the_ask_in_flight() -> None:
         async def it_fails_the_ask_with_unavailable_before_the_ask_timeout() -> None:
             patient = replace(FAST, ask_timeout=timedelta(minutes=1))

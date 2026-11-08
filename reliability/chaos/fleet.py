@@ -17,9 +17,10 @@ from datetime import timedelta
 from itertools import count
 from pathlib import Path
 
-from casty import Client, NodeId
+from casty import Client, NodeId, Unavailable
 from reliability import records
-from reliability.node import Launch, Network, Timing, Version, View
+from reliability.actors import Pull, puller
+from reliability.node import LIMITS, Launch, Network, Timing, Version, View
 from reliability.site import Kubernetes, Pod, Stuck
 from reliability.support import eventually
 
@@ -59,6 +60,8 @@ class Fleet:
         self._skew: dict[int, float] = {}
         self._questions = count(1)
         self._clients = AsyncExitStack()
+        self._started: list[Client] = []
+        self._tears = count()
 
     @property
     def up(self) -> tuple[int, ...]:
@@ -91,9 +94,12 @@ class Fleet:
         seeds = tuple(self.addresses[slot] for slot in self.up[:_SEEDS])
         started: list[Client] = []
         for _ in range(number):
-            client = Client(seeds=seeds, ask_timeout=self.timing.ask_timeout, sync_every=self.timing.sync_every)
+            client = Client(
+                seeds=seeds, ask_timeout=self.timing.ask_timeout, sync_every=self.timing.sync_every, limits=LIMITS
+            )
             async with asyncio.timeout(_JOIN):
                 started.append(await self._clients.enter_async_context(client))
+        self._started += started
         return tuple(started)
 
     async def start(self, slot: int, version: Version, /) -> None:
@@ -164,6 +170,67 @@ class Fleet:
             crawl(slot, (self.addresses[other] for other in others), False),
             *(crawl(other, (self.addresses[slot],), True) for other in others),
         )
+
+    async def tear(
+        self, slot: int, peer: int, size: int, rate: float, at: float, refusing: float, /
+    ) -> list[tuple[str, bool]]:
+        """Pull `size` bytes each way between `slot` and `peer`, and small pulls behind them, over the link between
+        them carried at `rate` bytes a second; `at` seconds in, reset its connections and close the dials of both
+        sides for `refusing` seconds. Answer, for each pull, what it came to and when, and whether it came whole.
+
+        Each pull is a pinned `puller` of its own, so they cross the link side by side and none waits for another.
+        """
+        ends = ((slot, peer), (peer, slot))
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+
+        async def carry(rate: float, seconds: float) -> None:
+            await asyncio.gather(
+                *(
+                    self._machines[on].ask(
+                        {
+                            "crawl": {
+                                "addresses": [self.addresses[to]],
+                                "rate": rate,
+                                "seconds": seconds,
+                                "outward": way,
+                            }
+                        },
+                        _ASKING,
+                    )
+                    for on, to in ends
+                    for way in (True, False)
+                )
+            )
+
+        async def pull(into: int, out_of: int, pulled: int) -> tuple[str, bool]:
+            ref = self._started[0].ref(puller, f"tear-{next(self._tears)}", at=self.addresses[into])
+            came: int | str
+            try:
+                came = await ref.ask(Pull(self.addresses[out_of], pulled))
+            except (Unavailable, TimeoutError) as error:
+                came = f"{type(error).__name__}: {error}"
+            return f"slot {out_of} -> {into}, {pulled} bytes: {came} at {loop.time() - began:.2f}s", came == pulled
+
+        await carry(rate, _LASTING)
+        try:
+            pulls = [asyncio.ensure_future(pull(into, out_of, size)) for into, out_of in ends]
+            await asyncio.sleep(at)
+            # Small pulls go out as the connection breaks, and more while the dials fail: the first are in flight on
+            # the old connection, the others wait for the next one.
+            pulls += [asyncio.ensure_future(pull(into, out_of, _SMALL)) for into, out_of in ends * _BEHIND]
+
+            def cut(to: int) -> dict[str, object]:
+                addresses = [self.addresses[to]]
+                return {
+                    "cut": {"addresses": addresses, "strand": False, "late": 0.0, "deaf": 0.0, "refusing": refusing}
+                }
+
+            await asyncio.gather(*(self._machines[on].ask(cut(to), _ASKING) for on, to in ends))
+            pulls += [asyncio.ensure_future(pull(into, out_of, _SMALL)) for into, out_of in ends * _BEHIND]
+            return list(await asyncio.gather(*pulls))
+        finally:
+            await carry(rate, 0.0)
 
     async def suspicions(self, seconds: float, /) -> list[str]:
         """Watch the views of the nodes up for `seconds`, and answer every member one of them saw other than alive."""
@@ -289,5 +356,11 @@ _ASKING = 5.0
 """Seconds a node has to answer on its control port."""
 _POLL = 0.25
 """Seconds between two rounds of questions while the cluster converges."""
+_LASTING = 60.0
+"""Seconds a tear carries its link slowly at most, which it ends sooner."""
+_SMALL = 1024
+"""Bytes of each small pull behind the large ones of a tear."""
+_BEHIND = 4
+"""Small pulls each way as a tear cuts the connection, and as many again right after."""
 _GRACE = 15.0
 """Seconds past its `leave_timeout` a leaving node has to be gone."""
