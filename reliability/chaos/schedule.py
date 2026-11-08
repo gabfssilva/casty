@@ -103,11 +103,13 @@ class Skew:
 @dataclass(frozen=True)
 class Sever:
     """Reset every connection between `slot` and the other machines without a goodbye; `strand`ed, the side of the
-    other machine stays open and receives what was in flight on it `late` seconds after `slot` lost it."""
+    other machine stays open and receives what was in flight on it `late` seconds after `slot` lost it. For `deaf`
+    seconds after, what `slot` dials goes nowhere, and only the dials of the others reach it."""
 
     slot: int
     strand: bool
     late: float
+    deaf: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -207,8 +209,9 @@ def described(action: Action) -> str:
             return f"slow slot {slot} by {delay * 1000:.0f} ms"
         case Skew(slot, offset):
             return f"skew slot {slot} by {offset:+.2f} s"
-        case Sever(slot, strand, late):
-            return f"strand slot {slot}, late by {late * 1000:.0f} ms" if strand else f"sever slot {slot}"
+        case Sever(slot, strand, late, deaf):
+            cut = f"strand slot {slot}, late by {late * 1000:.0f} ms" if strand else f"sever slot {slot}"
+            return f"{cut}, deaf for {deaf:.1f} s" if deaf else cut
         case Outage() | Heal() | Audit():
             return kind(action)
         case _:
@@ -229,8 +232,8 @@ def encoded(step: Step) -> dict[str, object]:
             fields = {"slot": slot, "delay": delay}
         case Skew(slot, offset):
             fields = {"slot": slot, "offset": offset}
-        case Sever(slot, strand, late):
-            fields = {"slot": slot, "strand": strand, "late": late}
+        case Sever(slot, strand, late, deaf):
+            fields = {"slot": slot, "strand": strand, "late": late, "deaf": deaf}
         case Outage() | Heal() | Audit():
             fields = {}
         case _:
@@ -262,7 +265,12 @@ def decoded(raw: object) -> Step:
         case "skew":
             action = Skew(records.integer(held["slot"]), records.number(held["offset"]))
         case "sever":
-            action = Sever(records.integer(held["slot"]), records.flag(held["strand"]), records.number(held["late"]))
+            action = Sever(
+                records.integer(held["slot"]),
+                records.flag(held["strand"]),
+                records.number(held["late"]),
+                records.number(held.get("deaf", 0.0)),
+            )
         case "heal":
             action = Heal()
         case "audit":
@@ -338,8 +346,11 @@ def _episode(rng: random.Random, machines: _Machines, faults: Sequence[str], tim
         case "sever":
             slot = rng.choice(up)
             strand = rng.random() < 0.5
+            # Half the time the dials of the slot go nowhere for longer than a handshake, as through a relay whose
+            # way out does not open, and the pair must take up the dial of the other side.
+            deaf = rng.uniform(6.0, 10.0) if rng.random() < 0.5 else 0.0
             cuts = [
-                Step(rng.uniform(0.5, 3.0) if index else pause, Sever(slot, strand, rng.uniform(0.0, 1.0)))
+                Step(rng.uniform(0.5, 3.0) if index else pause, Sever(slot, strand, rng.uniform(0.0, 1.0), deaf))
                 for index in range(3)
             ]
             return [*cuts, Step(0.0, Audit())]

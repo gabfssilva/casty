@@ -29,11 +29,19 @@ pub struct Hello {
     pub resume: Option<Resume>,
 }
 
-/// The session a hello takes up: the incarnation of the node it was with, and where each resumed stream stands on the
-/// side that dials.
+/// The session a hello takes up: the incarnation of the node it was with, the turn the side that dials fenced it at,
+/// and where each resumed stream stands on that side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resume {
     pub peer: [u8; 16],
+    pub turn: u64,
+    pub offsets: [Offset; RESUMED],
+}
+
+/// How the side that accepts took a session up: the turn it fenced it at, and where each resumed stream stands there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resumed {
+    pub turn: u64,
     pub offsets: [Offset; RESUMED],
 }
 
@@ -41,8 +49,8 @@ pub struct Resume {
 pub struct Ack {
     pub node: NodeId,
     pub compression: Option<Name>,
-    /// Where each resumed stream stands on the side that accepts, when it took the session up.
-    pub resumed: Option<[Offset; RESUMED]>,
+    /// How the side that accepts took the session up, when it did.
+    pub resumed: Option<Resumed>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,8 +108,9 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
             match &hello.resume {
                 None => msgpack::write_nil(&mut out),
                 Some(resume) => {
-                    msgpack::write_array_len(&mut out, 2);
+                    msgpack::write_array_len(&mut out, 3);
                     msgpack::write_bin(&mut out, &resume.peer);
+                    msgpack::write_int(&mut out, Int::Unsigned(resume.turn));
                     write_offsets(&mut out, &resume.offsets);
                 }
             }
@@ -113,7 +122,11 @@ pub fn encode(message: &Message) -> (&'static str, Vec<u8>) {
             write_optional(&mut out, ack.compression.map(Name::name));
             match &ack.resumed {
                 None => msgpack::write_nil(&mut out),
-                Some(offsets) => write_offsets(&mut out, offsets),
+                Some(resumed) => {
+                    msgpack::write_array_len(&mut out, 2);
+                    msgpack::write_int(&mut out, Int::Unsigned(resumed.turn));
+                    write_offsets(&mut out, &resumed.offsets);
+                }
             }
             "hello-ack"
         }
@@ -152,11 +165,12 @@ fn read(name: &str, reader: &mut Reader<'_>) -> Option<Message> {
             resume: if absent(reader)? {
                 None
             } else {
-                if reader.read_array_len().ok()? != 2 {
+                if reader.read_array_len().ok()? != 3 {
                     return None;
                 }
                 Some(Resume {
                     peer: reader.read_bin().ok()?.try_into().ok()?,
+                    turn: count(reader)?,
                     offsets: read_offsets(reader)?,
                 })
             },
@@ -170,7 +184,13 @@ fn read(name: &str, reader: &mut Reader<'_>) -> Option<Message> {
             resumed: if absent(reader)? {
                 None
             } else {
-                Some(read_offsets(reader)?)
+                if reader.read_array_len().ok()? != 2 {
+                    return None;
+                }
+                Some(Resumed {
+                    turn: count(reader)?,
+                    offsets: read_offsets(reader)?,
+                })
             },
         }),
         ("hello-reject", 1) => Message::Reject(reader.read_str().ok()?.to_owned()),
@@ -260,7 +280,7 @@ fn count(reader: &mut Reader<'_>) -> Option<u64> {
 mod tests {
     use casty_core::node::NodeId;
 
-    use super::{Ack, Hello, Message, Resume, answer, decode, encode};
+    use super::{Ack, Hello, Message, Resume, Resumed, answer, decode, encode};
     use crate::compress::{Name, PREFERENCE};
     use crate::limits::Limits;
     use crate::mux::Offset;
@@ -291,6 +311,7 @@ mod tests {
             Message::Hello(Hello {
                 resume: Some(Resume {
                     peer: [9; 16],
+                    turn: 3,
                     offsets: [offset(1, 2), offset(0, 1 << 40), offset(7, 7)],
                 }),
                 ..hello("casty", node(Some("127.0.0.1:7401"), 5))
@@ -303,7 +324,10 @@ mod tests {
             Message::Ack(Ack {
                 node: node(None, 4),
                 compression: None,
-                resumed: Some([offset(3, 4), offset(5, 6), offset(0, 0)]),
+                resumed: Some(Resumed {
+                    turn: 1 << 33,
+                    offsets: [offset(3, 4), offset(5, 6), offset(0, 0)],
+                }),
             }),
             Message::Reject("cluster 'other' is not 'casty'".to_owned()),
             Message::Duplicate,

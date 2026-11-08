@@ -10,6 +10,9 @@ two ways (`cut`):
 - `strand` holds what the node writes for a moment, resets the socket of the node alone, and leaves the one of the peer
   open: the peer still holds a connection that looks alive, while the node dials it again, and what was held reaches
   the peer later, on that old connection, `late` seconds after the node lost it.
+
+Either way the relay can then be `deaf` for a while: a connection the node dials meanwhile is accepted and goes nowhere,
+as a relay whose way out does not open, and is reset when that time is over. The dials of the peer still arrive.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import asyncio
 import contextlib
 import socket
 import threading
+import time
 from functools import partial
 
 STRANDED = 0.3
@@ -35,6 +39,7 @@ class Relay:
         # Touched on the loop of the relay alone.
         self._carried: set[_Carried] = set()
         self._servers: list[asyncio.Server] = []
+        self._deaf: dict[str, float] = {}
 
     def through(self, address: str, /) -> str:
         """The address the node dials to reach `address`: a listener of this relay, made the first time."""
@@ -50,15 +55,20 @@ class Relay:
                 asyncio.run_coroutine_threadsafe(self._serve(listener, address), self._loop).result()
         return local
 
-    def cut(self, addresses: frozenset[str], /, *, strand: bool, late: float) -> int:
-        """Cut every connection carried to one of `addresses`, and answer how many there were."""
-        cutting = asyncio.run_coroutine_threadsafe(self._cut(addresses, strand, late), self._loop)
+    def cut(self, addresses: frozenset[str], /, *, strand: bool, late: float, deaf: float) -> int:
+        """Cut every connection carried to one of `addresses`, stay `deaf` to them for that many seconds, and answer
+        how many connections there were."""
+        cutting = asyncio.run_coroutine_threadsafe(self._cut(addresses, strand, late, deaf), self._loop)
         return cutting.result()
 
     async def _serve(self, listener: socket.socket, address: str, /) -> None:
         self._servers.append(await asyncio.start_server(partial(self._carry, address), sock=listener))
 
     async def _carry(self, address: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, /) -> None:
+        if (deaf := self._deaf.get(address, 0.0) - time.monotonic()) > 0:
+            await asyncio.sleep(deaf)
+            writer.transport.abort()
+            return
         host, port = address.rsplit(":", 1)
         try:
             upstream = await asyncio.open_connection(host, int(port))
@@ -72,7 +82,10 @@ class Relay:
         finally:
             self._carried.discard(carried)
 
-    async def _cut(self, addresses: frozenset[str], strand: bool, late: float, /) -> int:
+    async def _cut(self, addresses: frozenset[str], strand: bool, late: float, deaf: float, /) -> int:
+        until = time.monotonic() + deaf
+        for address in addresses:
+            self._deaf[address] = until
         cut = [carried for carried in self._carried if carried.address in addresses]
         for carried in cut:
             if strand:

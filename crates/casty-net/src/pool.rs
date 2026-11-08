@@ -5,8 +5,12 @@
 //! seed reaches whichever incarnation answers. Dial failures drop the queued envelopes, and the next dial to the same
 //! address waits with exponential backoff and jitter.
 //!
-//! When two nodes dial each other at once, both keep the connection opened by the smaller incarnation: that node
-//! rejects the other hello as duplicate, and the other node hands the queue of its dial to the connection it accepts.
+//! When two nodes dial each other at once, both keep the connection opened by the smaller incarnation, provided its
+//! handshake completes: a dial counts once it has, never while it is on its way, since a relay or a tunnel may accept
+//! it and never reach the peer. The larger incarnation takes the other hello and gives its own dial up. The smaller
+//! one holds the other hello until its own dial ends, for at most half the handshake: a duplicate if the dial got
+//! through, taken otherwise (`crossed`). A hello that takes up a session at an older turn than one this side already
+//! took up from the peer crossed the connection that won, and is a duplicate too.
 //!
 //! What two nodes exchange is a session, which outlives the connection that carries it. A connection that breaks
 //! without a goodbye leaves its session waiting: the side that knows the address of the other dials it again at once,
@@ -23,10 +27,10 @@ use std::time::{Duration, Instant};
 use casty_core::node::NodeId;
 use casty_core::rolls::Rolls;
 use tokio::net::TcpStream;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::connection::{Broken, Bytes, Connection, Fence, Greeting, Incoming, Session, Socket};
-use crate::handshake::{Hello, Message, Resume, answer};
+use crate::handshake::{Hello, Message, Resume, Resumed, answer};
 use crate::limits::Limits;
 use crate::mux::Unsent;
 use crate::tls::Identity;
@@ -81,6 +85,8 @@ struct Link {
 struct Dial {
     queue: Vec<Queued>,
     cancel: Arc<Notify>,
+    /// Dropped with the dial, however it ends, which is what a hello that crossed it waits for.
+    ended: watch::Sender<()>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,6 +107,7 @@ impl State {
             Dial {
                 queue: Vec::new(),
                 cancel: Arc::clone(&cancel),
+                ended: watch::channel(()).0,
             },
         );
         Some((address.to_owned(), cancel))
@@ -261,6 +268,7 @@ impl Pool {
                                 Dial {
                                     queue: vec![queued],
                                     cancel: Arc::clone(&cancel),
+                                    ended: watch::channel(()).0,
                                 },
                             );
                             Next::Dial(address.to_owned(), cancel)
@@ -402,7 +410,7 @@ impl Pool {
         };
         let mut ack = match answer(&hello, &self.settings.local) {
             Err(reason) => return greeting.reject(&Message::Reject(reason)).await,
-            Ok(_) if self.keeps_own(&hello.node) => {
+            Ok(_) if self.crossed(&hello).await => {
                 return greeting.reject(&Message::Duplicate).await;
             }
             Ok(ack) => ack,
@@ -414,7 +422,7 @@ impl Pool {
             {
                 session
                     .fence()
-                    .filter(|fence| session.rewind(fence.turn, &resume.offsets))
+                    .filter(|fence| session.rewind(fence.turn, resume.turn, &resume.offsets))
             }
             _ => None,
         };
@@ -423,7 +431,10 @@ impl Pool {
             Some(session) if resumed.is_none() => self.abandon(session, false),
             _ => Unsent::default(),
         };
-        ack.resumed = resumed.map(|fence| fence.offsets);
+        ack.resumed = resumed.map(|fence| Resumed {
+            turn: fence.turn,
+            offsets: fence.offsets,
+        });
         let compression = ack.compression;
         if greeting.say(&Message::Ack(ack)).await.is_err() {
             return;
@@ -466,6 +477,7 @@ impl Pool {
         let hello = Hello {
             resume: resuming.as_ref().map(|(session, fence)| Resume {
                 peer: session.peer().incarnation,
+                turn: fence.turn,
                 offsets: fence.offsets,
             }),
             ..self.settings.local.clone()
@@ -479,8 +491,9 @@ impl Pool {
                 greeting.compress(ack.compression);
                 let connection = match (resuming, ack.resumed) {
                     (Some((session, fence)), Some(theirs)) if *session.peer() == peer => {
+                        let (their_turn, theirs) = (theirs.turn, theirs.offsets);
                         let resumed = session
-                            .rewind(fence.turn, &theirs)
+                            .rewind(fence.turn, their_turn, &theirs)
                             .then(|| greeting.resume(&session, fence.turn, self.inbound.clone()));
                         let Some(Some(connection)) = resumed else {
                             // The peer took up a session this side could not: dropping the connection makes it give
@@ -572,25 +585,61 @@ impl Pool {
         Ok((greeting, heard))
     }
 
-    /// Whether a connection this node opened, or is opening, to `peer` wins over the one `peer` opened.
-    fn keeps_own(&self, peer: &NodeId) -> bool {
+    /// Whether `hello` crossed a connection this node keeps instead, which the peer keeps too, so that it is refused as
+    /// a duplicate. Only a connection whose handshake completed is kept over it: a dial still on its way may never
+    /// arrive, through a relay that accepted it and has nowhere to take it.
+    ///
+    /// A hello that takes the session up at a turn this side has seen a later one of was sent before the peer took up
+    /// a connection this side holds. One at a later turn is the peer that lost its connection, which it replaces. A
+    /// first hello crosses the connection the smaller incarnation opened, when that one is up. When this node is the
+    /// smaller one and its own dial is on its way, the hello waits for that dial, up to half the handshake, so that
+    /// the peer, which keeps this node's dial when it arrives, still hears back before its own handshake ends: it is a
+    /// duplicate if the dial got through, and taken otherwise.
+    async fn crossed(&self, hello: &Hello) -> bool {
+        let peer = &hello.node;
+        let session = self.held().sessions.get(peer).map(Arc::clone);
+        if let (Some(resume), Some(session)) = (&hello.resume, &session)
+            && resume.peer == self.settings.local.node.incarnation
+        {
+            if session.stale(resume.turn) {
+                return true;
+            }
+        } else if self
+            .held()
+            .links
+            .get(peer)
+            .is_some_and(|link| link.initiated)
+            && self.settings.local.node.incarnation < peer.incarnation
+        {
+            return true;
+        }
         if self.settings.local.node.incarnation >= peer.incarnation {
             return false;
         }
-        let state = self.held();
-        if let Some(link) = state.links.get(peer) {
-            return link.initiated;
-        }
-        let Some(address) = &peer.address else {
+        let pending = {
+            let state = self.held();
+            let Some(address) = &peer.address else {
+                return false;
+            };
+            let waiting = state
+                .backoff
+                .get(address)
+                .is_some_and(|backoff| backoff.retry_at > Instant::now());
+            match state.dials.get(address) {
+                Some(dial) if !state.links.contains_key(peer) && !waiting => {
+                    Some(dial.ended.subscribe())
+                }
+                _ => None,
+            }
+        };
+        let Some(mut ended) = pending else {
             return false;
         };
-        if !state.dials.contains_key(address) {
-            return false;
-        }
-        state
-            .backoff
-            .get(address)
-            .is_none_or(|backoff| backoff.retry_at <= Instant::now())
+        let _ = tokio::time::timeout(self.settings.limits.handshake / 2, ended.changed()).await;
+        self.held()
+            .links
+            .get(peer)
+            .is_some_and(|link| link.initiated)
     }
 
     /// Put `connection` in the place of whatever reached `peer` until now, and hand it what was queued for it.

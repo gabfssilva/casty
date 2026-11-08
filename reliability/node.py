@@ -13,7 +13,8 @@ It says `{"ready": <node>}` once it is in the cluster and `{"left": null}` once 
 reads from the log of the pod. The runner asks it things on the control port, one JSON object per line each way:
 `{"members": <question>}` is answered with its view, `{"network": ...}` sets its clock and is answered with `{}`, and
 `{"crash": null}` ends the process at once — by `os._exit`, since the first process of a container ignores a signal
-it sends itself. `{"cut": {"addresses": [...], "strand": <bool>, "late": <seconds>}}` cuts the connections it dialed to
+it sends itself. `{"cut": {"addresses": [...], "strand": <bool>, "late": <seconds>, "deaf": <seconds>}}` cuts the
+connections it dialed to
 those addresses (`Relay.cut`) and is answered with `{"cut": <how many>}`.
 """
 
@@ -288,8 +289,12 @@ async def _answer(
             elif "cut" in command:
                 cut = records.record(command["cut"])
                 addresses = frozenset(records.texts(cut["addresses"]))
-                strand, late = records.flag(cut["strand"]), records.number(cut["late"])
-                answer = {"cut": await asyncio.to_thread(relay.cut, addresses, strand=strand, late=late)}
+                strand, late, deaf = (
+                    records.flag(cut["strand"]),
+                    records.number(cut["late"]),
+                    records.number(cut["deaf"]),
+                )
+                answer = {"cut": await asyncio.to_thread(relay.cut, addresses, strand=strand, late=late, deaf=deaf)}
             elif "crash" in command:
                 os._exit(137)
             else:

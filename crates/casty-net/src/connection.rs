@@ -218,6 +218,7 @@ impl Greeting {
                 turn: 0,
                 writable: Arc::clone(&writable),
                 over: false,
+                theirs: 0,
             }),
             epoch,
         });
@@ -317,6 +318,9 @@ struct Carried {
     writable: Arc<Notify>,
     /// Given up: no connection takes it up again.
     over: bool,
+    /// The newest turn the peer took the session up at, as far as this side has seen: a hello fenced at it or before is
+    /// one the peer sent before it took up a connection this side holds.
+    theirs: u64,
 }
 
 /// Where a session stood on this side when a connection took it up.
@@ -374,11 +378,24 @@ impl Session {
         })
     }
 
-    /// Send again what the peer did not receive, from where it says each stream stands. False when the session was
-    /// given up or fenced again since `turn`, or when the peer stands where this side never sent to.
-    pub fn rewind(&self, turn: u64, theirs: &[Offset; RESUMED]) -> bool {
-        self.carried(turn)
-            .is_some_and(|mut carried| carried.mux.resume(theirs).is_ok())
+    /// Send again what the peer did not receive, from where it says each stream stands as of `their_turn`, the turn it
+    /// took the session up at. False when the session was given up or fenced again since `turn`, or when the peer
+    /// stands where this side never sent to.
+    pub fn rewind(&self, turn: u64, their_turn: u64, theirs: &[Offset; RESUMED]) -> bool {
+        self.carried(turn).is_some_and(|mut carried| {
+            let resumed = carried.mux.resume(theirs).is_ok();
+            if resumed {
+                carried.theirs = carried.theirs.max(their_turn);
+            }
+            resumed
+        })
+    }
+
+    /// Whether a hello that took the session up at `turn` was sent before the peer took up a connection this side
+    /// holds: two nodes that dialed each other at once, and the later dial arrived after the earlier one won.
+    #[must_use]
+    pub fn stale(&self, turn: u64) -> bool {
+        turn <= self.held().theirs
     }
 
     /// No connection takes the session up again, and the one that carries it, if any, reads and writes nothing more.

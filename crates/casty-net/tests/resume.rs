@@ -2,6 +2,7 @@
 //! a relay that cuts or freezes the connections passing through it.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -32,6 +33,8 @@ enum Mode {
 struct Gateway {
     address: String,
     passing: Arc<Mutex<Vec<watch::Sender<Mode>>>>,
+    /// Connections accepted from now on are held open and go nowhere: a local relay whose way out never opens.
+    deaf: Arc<AtomicBool>,
 }
 
 impl Gateway {
@@ -40,10 +43,17 @@ impl Gateway {
         let gateway = Self {
             address: listener.local_addr().unwrap().to_string(),
             passing: Arc::new(Mutex::new(Vec::new())),
+            deaf: Arc::new(AtomicBool::new(false)),
         };
         let passing = Arc::clone(&gateway.passing);
+        let deaf = Arc::clone(&gateway.deaf);
         tokio::spawn(async move {
+            let mut held = Vec::new();
             while let Ok((inbound, _)) = listener.accept().await {
+                if deaf.load(Ordering::SeqCst) {
+                    held.push(inbound);
+                    continue;
+                }
                 let Ok(outbound) = TcpStream::connect(&target).await else {
                     continue;
                 };
@@ -270,4 +280,77 @@ async fn bytes_a_half_open_connection_delivers_late_are_never_received_twice() {
         }
     })
     .await;
+}
+
+/// Both connections of a pair are cut at once and both nodes dial again, but the dials of one of them, the one with
+/// the smaller incarnation or the other, go into a relay that accepts them and never reaches the peer. The pair must
+/// take its session up over the dial that does arrive: nothing sent meanwhile is lost, and neither node hears of a
+/// lost or unreached peer.
+async fn crossed_with_a_dial_that_never_arrives(smaller_is_deaf: bool) {
+    let mut pair = Pair::start(Limits::default(), Limits::default()).await;
+    let (a, b) = (pair.a.node().clone(), pair.b.node().clone());
+    // A gateway sits in front of the node it reaches: the deaf one is in front of the peer of the deaf node.
+    let deaf = if (a.incarnation < b.incarnation) == smaller_is_deaf {
+        pair.gateway_b.clone()
+    } else {
+        pair.gateway_a.clone()
+    };
+    let to_b = Target::Node(b.clone());
+    let to_a = Target::Node(a.clone());
+    pair.a
+        .send(&to_b, "actors", 1, None, &u32::MAX.to_be_bytes())
+        .unwrap();
+    pair.b
+        .send(&to_a, "actors", 1, None, &u32::MAX.to_be_bytes())
+        .unwrap();
+    for endpoint in [&mut pair.a, &mut pair.b] {
+        let first = tokio::time::timeout(WITHIN, endpoint.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.payload, u32::MAX.to_be_bytes());
+    }
+
+    deaf.deaf.store(true, Ordering::SeqCst);
+    pair.gateway_a.set(Mode::Cut);
+    pair.gateway_b.set(Mode::Cut);
+    // Both keep sending, every 200 ms, for longer than a dial takes to give up.
+    let count = 60_u32;
+    for index in 0..count {
+        pair.a
+            .send(&to_b, "actors", 1, None, &index.to_be_bytes())
+            .unwrap();
+        pair.b
+            .send(&to_a, "actors", 1, None, &index.to_be_bytes())
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    for endpoint in [&mut pair.a, &mut pair.b] {
+        let mut got = Vec::new();
+        let taken = tokio::time::timeout(WITHIN, async {
+            while got.len() < count as usize {
+                let envelope = endpoint.recv().await.unwrap().unwrap();
+                got.push(u32::from_be_bytes(
+                    envelope.payload[..4].try_into().unwrap(),
+                ));
+            }
+        })
+        .await;
+        assert!(taken.is_ok(), "only {got:?} arrived");
+        assert_eq!(got, (0..count).collect::<Vec<_>>());
+    }
+    for heard in [&mut pair.heard_a, &mut pair.heard_b] {
+        assert!(heard.try_recv().is_err(), "a peer was reported");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_smaller_incarnation_takes_the_dial_that_arrives_when_its_own_never_does() {
+    crossed_with_a_dial_that_never_arrives(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_larger_incarnation_takes_the_dial_that_arrives_when_its_own_never_does() {
+    crossed_with_a_dial_that_never_arrives(false).await;
 }

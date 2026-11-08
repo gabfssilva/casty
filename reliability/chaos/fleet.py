@@ -133,13 +133,15 @@ class Fleet:
         self._skew[slot] = offset
         await self._push()
 
-    async def sever(self, slot: int, strand: bool, late: float, /) -> int:
-        """Reset the connections between `slot` and the other nodes up, each on the side that dialed it, and answer how
-        many there were."""
+    async def sever(self, slot: int, strand: bool, late: float, deaf: float, /) -> int:
+        """Reset the connections between `slot` and the other nodes up, each on the side that dialed it, leave the dials
+        of `slot` going nowhere for `deaf` seconds, and answer how many connections there were."""
         others = [other for other in self.up if other != slot]
 
         async def cut(on: int, addresses: Iterable[str]) -> int:
-            asked: dict[str, object] = {"cut": {"addresses": sorted(addresses), "strand": strand, "late": late}}
+            silent = deaf if on == slot else 0.0
+            cutting = {"addresses": sorted(addresses), "strand": strand, "late": late, "deaf": silent}
+            asked: dict[str, object] = {"cut": cutting}
             answer = records.record(await self._machines[on].ask(asked, _ASKING))
             return records.integer(answer["cut"])
 

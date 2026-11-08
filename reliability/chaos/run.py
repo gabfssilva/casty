@@ -381,8 +381,8 @@ async def _apply(
                     await fleet.slow(slot, delay)
                 case Skew(slot, offset):
                     await fleet.skew(slot, offset)
-                case Sever(slot, strand, late):
-                    note = f"{await fleet.sever(slot, strand, late)} connections cut"
+                case Sever(slot, strand, late, deaf):
+                    note = f"{await fleet.sever(slot, strand, late, deaf)} connections cut"
                 case Heal():
                     await fleet.heal()
                     lasted = journal.now() - shaped
