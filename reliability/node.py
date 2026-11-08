@@ -14,8 +14,9 @@ reads from the log of the pod. The runner asks it things on the control port, on
 `{"members": <question>}` is answered with its view, `{"network": ...}` sets its clock and is answered with `{}`, and
 `{"crash": null}` ends the process at once — by `os._exit`, since the first process of a container ignores a signal
 it sends itself. `{"cut": {"addresses": [...], "strand": <bool>, "late": <seconds>, "deaf": <seconds>}}` cuts the
-connections it dialed to
-those addresses (`Relay.cut`) and is answered with `{"cut": <how many>}`.
+connections it dialed to those addresses (`Relay.cut`) and is answered with `{"cut": <how many>}`.
+`{"crawl": {"addresses": [...], "rate": <bytes a second>, "seconds": <seconds>, "outward": <bool>}}` slows what those
+connections carry one way (`Relay.crawl`) and is answered with `{}`.
 """
 
 from __future__ import annotations
@@ -295,6 +296,16 @@ async def _answer(
                     records.number(cut["deaf"]),
                 )
                 answer = {"cut": await asyncio.to_thread(relay.cut, addresses, strand=strand, late=late, deaf=deaf)}
+            elif "crawl" in command:
+                crawl = records.record(command["crawl"])
+                await asyncio.to_thread(
+                    relay.crawl,
+                    frozenset(records.texts(crawl["addresses"])),
+                    rate=records.number(crawl["rate"]),
+                    seconds=records.number(crawl["seconds"]),
+                    outward=records.flag(crawl["outward"]),
+                )
+                answer = {}
             elif "crash" in command:
                 os._exit(137)
             else:

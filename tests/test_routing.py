@@ -7,7 +7,22 @@ from datetime import timedelta
 import pytest
 
 from casty import ActorSystem, Context, NodeId, Unavailable, UnknownActor, actor
-from tests.app import Deposit, Entries, Gate, Hold, Locate, Note, Notes, Where, account, gate, ledger, notes
+from tests.app import (
+    Deposit,
+    Entries,
+    Fetch,
+    Gate,
+    Hold,
+    Locate,
+    Note,
+    Notes,
+    Where,
+    account,
+    gate,
+    ledger,
+    notes,
+    source,
+)
 from tests.cluster import FAST, WITHIN, Harness, Node
 from tests.support import eventually
 
@@ -97,6 +112,33 @@ def describe_routing() -> None:
                     # never reaches the assertion.
                     async with asyncio.timeout(WITHIN.total_seconds()):
                         await waiting
+
+    def when_the_owner_is_declared_dead_while_still_connected() -> None:
+        async def it_stops_sending_the_answers_of_the_asks_it_failed() -> None:
+            patient = replace(FAST, ask_timeout=timedelta(minutes=1))
+
+            async with Harness.start(2, timing=patient) as harness:
+                a, b = harness.nodes
+                fetching = b.system.ref(source, "s", at=a.system.node)
+                assert len(await fetching.ask(Fetch(1024))) == 1024
+
+                # Nothing reaches `b` until it declares `a` dead, with the answers of `a` queued behind the hold.
+                harness.throttle(b, 0)
+                for outcome in await asyncio.gather(
+                    *(fetching.ask(Fetch(2**20)) for _ in range(3)), return_exceptions=True
+                ):
+                    assert isinstance(outcome, Unavailable)
+                before = harness.forwarded
+                harness.throttle(b, None)
+
+                async def alive_again() -> None:
+                    assert all(member.status == "alive" for member in b.system.members)
+
+                await eventually(alive_again, WITHIN)
+                assert len(await fetching.ask(Fetch(1024))) == 1024
+                await asyncio.sleep(1)
+                # What was on its way when the asks failed still arrives, and not the three megabytes nobody reads.
+                assert harness.forwarded - before < 2**20
 
     def when_the_node_that_asked_leaves_with_the_ask_in_flight() -> None:
         async def it_fails_the_ask_with_unavailable_before_the_ask_timeout() -> None:

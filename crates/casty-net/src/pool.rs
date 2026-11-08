@@ -315,6 +315,23 @@ impl Pool {
         }
     }
 
+    /// The peers whose connections read anything since the last time this was asked.
+    #[must_use]
+    pub fn heard(&self) -> Vec<NodeId> {
+        self.held()
+            .links
+            .iter()
+            .filter(|(_, link)| link.connection.heard())
+            .map(|(node, _)| node.clone())
+            .collect()
+    }
+
+    /// Whether a connection reaches `node` now.
+    #[must_use]
+    pub fn linked(&self, node: &NodeId) -> bool {
+        self.held().links.contains_key(node)
+    }
+
     /// Give up the session with `node`, which the cluster gave up, unless a connection carries it: nothing is waiting
     /// for a dial that would take it up any more, and the connection it had is lost.
     pub fn forsake(&self, node: &NodeId) {

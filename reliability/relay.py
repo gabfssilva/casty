@@ -13,6 +13,9 @@ two ways (`cut`):
 
 Either way the relay can then be `deaf` for a while: a connection the node dials meanwhile is accepted and goes nowhere,
 as a relay whose way out does not open, and is reset when that time is over. The dials of the peer still arrive.
+
+Apart from a cut, the relay can make what crosses it one way `crawl` for a while, a few kilobytes at a time at a given
+rate, as a link that slows down under a transfer and keeps carrying it (`crawl`).
 """
 
 from __future__ import annotations
@@ -22,10 +25,13 @@ import contextlib
 import socket
 import threading
 import time
+from collections.abc import Callable
 from functools import partial
 
 STRANDED = 0.3
 """Seconds a stranded connection holds what the node writes before the node loses it."""
+CRAWLED = 4 * 1024
+"""Bytes a crawling connection delivers at once."""
 
 
 class Relay:
@@ -40,6 +46,8 @@ class Relay:
         self._carried: set[_Carried] = set()
         self._servers: list[asyncio.Server] = []
         self._deaf: dict[str, float] = {}
+        # `(address, outward)` to the rate it crawls at and until when.
+        self._crawling: dict[tuple[str, bool], tuple[float, float]] = {}
 
     def through(self, address: str, /) -> str:
         """The address the node dials to reach `address`: a listener of this relay, made the first time."""
@@ -61,6 +69,21 @@ class Relay:
         cutting = asyncio.run_coroutine_threadsafe(self._cut(addresses, strand, late, deaf), self._loop)
         return cutting.result()
 
+    def crawl(self, addresses: frozenset[str], /, *, rate: float, seconds: float, outward: bool) -> None:
+        """For `seconds`, carry at `rate` bytes a second what goes to `addresses` (`outward`) or comes back from them,
+        on the connections carried now and on those dialed meanwhile."""
+        asyncio.run_coroutine_threadsafe(self._crawl(addresses, rate, seconds, outward), self._loop).result()
+
+    async def _crawl(self, addresses: frozenset[str], rate: float, seconds: float, outward: bool, /) -> None:
+        until = time.monotonic() + seconds
+        for address in addresses:
+            self._crawling[address, outward] = (rate, until)
+
+    def _rate(self, address: str, outward: bool, /) -> float | None:
+        """The rate what crosses toward `address` (`outward`) or back from it crawls at now, if it does."""
+        rate, until = self._crawling.get((address, outward), (0.0, 0.0))
+        return rate if until > time.monotonic() else None
+
     async def _serve(self, listener: socket.socket, address: str, /) -> None:
         self._servers.append(await asyncio.start_server(partial(self._carry, address), sock=listener))
 
@@ -75,7 +98,7 @@ class Relay:
         except OSError:
             writer.transport.abort()
             return
-        carried = _Carried(address, (reader, writer), upstream)
+        carried = _Carried(address, (reader, writer), upstream, partial(self._rate, address))
         self._carried.add(carried)
         try:
             await carried.run()
@@ -101,8 +124,9 @@ type _Pair = tuple[asyncio.StreamReader, asyncio.StreamWriter]
 class _Carried:
     """One connection the node dialed: its end on the node's side and its end on the peer's."""
 
-    def __init__(self, address: str, node: _Pair, peer: _Pair, /) -> None:
+    def __init__(self, address: str, node: _Pair, peer: _Pair, rate: Callable[[bool], float | None], /) -> None:
         self.address = address
+        self._rate = rate
         self._node = node
         self._peer = peer
         self._held: bytearray | None = None
@@ -147,8 +171,16 @@ class _Carried:
                     if outward:
                         self._held += data
                     continue
-                writer.write(data)
-                await writer.drain()
+                if (rate := self._rate(outward)) is None:
+                    writer.write(data)
+                    await writer.drain()
+                    continue
+                # Crawling: a piece at a time, so that the peer reads a trickle and not a burst now and then.
+                for start in range(0, len(data), CRAWLED):
+                    piece = data[start : start + CRAWLED]
+                    await asyncio.sleep(len(piece) / rate)
+                    writer.write(piece)
+                    await writer.drain()
         except OSError:
             pass
         if self._held is None:

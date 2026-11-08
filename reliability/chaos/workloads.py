@@ -24,7 +24,7 @@ from itertools import count, pairwise
 
 from casty import Collections, DefaultedActor, NodeId
 from casty.collections import Lease, Missing
-from reliability.actors import Append, Entries, Ledger, LedgerMsg, Stamp, durable_ledger, ledger, stamped
+from reliability.actors import Append, Entries, Ledger, LedgerMsg, Pull, Stamp, durable_ledger, ledger, puller, stamped
 from reliability.chaos.journal import Operation, Stage, Verdict, Workload, ambiguous, settles
 from reliability.chaos.schedule import SKEW
 
@@ -170,6 +170,51 @@ class Pinned:
         return [
             Verdict("pinned: applied only by the node at its address", self._stamped, (*self._broken,)),
             Verdict("pinned: a read holds what the incarnation answering it confirmed, once each", len(keys), failures),
+        ]
+
+    async def rest(self, reader: int, within: timedelta, /) -> list[Verdict]:
+        return await self.audit(reader, within)
+
+
+class Bulk:
+    """Large answers between the machines up: one node pulls up to a few MiB from another, at the ask of a sender.
+
+    It keeps the links busy with transfers that take many heartbeats, which a fault that slows a link must not turn
+    into a suspicion. A pull answers the size it asked for, or -1 when the transfer failed.
+    """
+
+    def __init__(self, stage: Stage, /) -> None:
+        self.name = "bulk"
+        self._stage = stage
+        self._pulled = 0
+        self._broken: list[str] = []
+
+    async def operate(self, sender: int, rng: random.Random, /) -> None:
+        up = self._stage.up()
+        if len(up) < 2:
+            return
+        into, out_of = rng.sample(up, 2)
+        size = rng.randint(256 * 1024, 2 * 1024 * 1024)
+        journal = self._stage.journal
+        operation = journal.begin(self.name, f"{out_of} -> {into}", "pull", size)
+        try:
+            pulled = await self._stage.senders[sender].ref(puller, "puller", at=into).ask(Pull(out_of, size))
+        except Exception as error:
+            if not ambiguous(error):
+                raise
+            journal.fail(operation, error)
+            return
+        journal.confirm(operation, pulled)
+        self._pulled += 1
+        if pulled not in (size, -1):
+            self._broken.append(f"{operation} pulled {pulled} bytes")
+
+    def outage(self, dead: float, /) -> None:
+        """Nothing to forget: a pull keeps nothing."""
+
+    async def audit(self, reader: int, within: timedelta, /) -> list[Verdict]:
+        return [
+            Verdict("bulk: a pull answers the size it asked for, or that it failed", self._pulled, (*self._broken,))
         ]
 
     async def rest(self, reader: int, within: timedelta, /) -> list[Verdict]:
@@ -828,6 +873,7 @@ WORKLOADS: Mapping[str, Callable[[Stage], Workload]] = {
     "ledger": Ledgers,
     "durable": durable,
     "pinned": Pinned,
+    "bulk": Bulk,
     "counter": Counters,
     "dict": Dicts,
     "set": Sets,

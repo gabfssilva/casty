@@ -361,6 +361,18 @@ impl Sender {
         self.pool.retract(to, tag);
     }
 
+    /// The peers that sent anything since the last time this was asked, whole envelopes or not.
+    #[must_use]
+    pub fn heard(&self) -> Vec<NodeId> {
+        self.pool.heard()
+    }
+
+    /// Whether a connection reaches `node` now, so that what is sent to it goes out without a dial.
+    #[must_use]
+    pub fn linked(&self, node: &NodeId) -> bool {
+        self.pool.linked(node)
+    }
+
     /// Give up the session with `node`, which the cluster gave up, unless a connection carries it.
     pub fn forsake(&self, node: &NodeId) {
         self.pool.forsake(node);

@@ -216,6 +216,16 @@ class Harness:
         for proxy in self._proxies.values():
             proxy.slow(delay)
 
+    def throttle(self, toward: Node, rate: float | None, /) -> None:
+        """Let what the others send `toward` cross at `rate` bytes a second, none at all at 0, or freely with `None`:
+        a link that slows down one way while the other way, and every other pair, stay as they were. A pair a later
+        dial opens is not throttled."""
+        for (source, target), proxy in self._proxies.items():
+            if target == toward.address:
+                proxy.throttle(rate, outward=True)
+            elif source == toward.id:
+                proxy.throttle(rate, outward=False)
+
     def heal(self) -> None:
         """Let every pair exchange bytes again, delivering what the blocked proxies held."""
         self._blocked.clear()
@@ -409,6 +419,8 @@ class Proxy:
         self._open = asyncio.Event()
         self._open.set()
         self._delay = 0.0
+        self._rates: dict[bool, float | None] = {True: None, False: None}
+        self._throttled = asyncio.Event()
         self.forwarded = 0
         """Bytes this pair put on the wire, both ways."""
 
@@ -421,6 +433,12 @@ class Proxy:
     def slow(self, delay: timedelta, /) -> None:
         """Hold what each read brings for `delay` before forwarding it: a link that much longer, both ways."""
         self._delay = delay.total_seconds()
+
+    def throttle(self, rate: float | None, /, *, outward: bool) -> None:
+        """Forward at `rate` bytes a second what goes to the target (`outward`) or comes back from it; hold it at 0."""
+        self._rates[outward] = rate
+        self._throttled.set()
+        self._throttled = asyncio.Event()
 
     async def close(self) -> None:
         """Close every connection and wait for it.
@@ -461,10 +479,22 @@ class Proxy:
             self._writers.add(answers)
             try:
                 async with asyncio.TaskGroup() as pumps:
-                    pumps.create_task(self._pump(reader, answers))
-                    pumps.create_task(self._pump(upstream, writer))
+                    pumps.create_task(self._pump(reader, answers, outward=True))
+                    pumps.create_task(self._pump(upstream, writer, outward=False))
             finally:
                 answers.close()
+
+    async def _paced(self, size: int, outward: bool, /) -> None:
+        # Woken when the rate changes, so that bytes held at 0, or crawling, go on at the new rate at once.
+        while (rate := self._rates[outward]) is not None:
+            changed = self._throttled
+            if rate > 0:
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(changed.wait(), size / rate)
+                if not changed.is_set():
+                    return
+            else:
+                await changed.wait()
 
     async def _opened(self) -> None:
         # `set` wakes every waiter even when `clear` follows in the same step, as `heal` then `isolate` does: without
@@ -472,7 +502,7 @@ class Proxy:
         while not self._open.is_set():
             await self._open.wait()
 
-    async def _pump(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def _pump(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, /, *, outward: bool) -> None:
         # A node that died breaks its pipe, which is how this half of the pair ends.
         with suppress(OSError):
             while data := await reader.read(_CHUNK):
@@ -481,9 +511,14 @@ class Proxy:
                 if self._delay:
                     await asyncio.sleep(self._delay)
                     await self._opened()
-                self.forwarded += len(data)
-                writer.write(data)
-                await writer.drain()
+                # A throttled pair delivers in small pieces, as a slow link does, not a read's worth once in a while.
+                step = len(data) if self._rates[outward] is None else _PIECE
+                for start in range(0, len(data), step):
+                    piece = data[start : start + step]
+                    await self._paced(len(piece), outward)
+                    self.forwarded += len(piece)
+                    writer.write(piece)
+                    await writer.drain()
         writer.close()
 
 
@@ -498,3 +533,4 @@ def _seeds(addresses: tuple[str, ...], mine: str | None) -> tuple[str, ...]:
 _SEEDS = 3
 _JOIN = timedelta(seconds=10)
 _CHUNK = 64 * 1024
+_PIECE = 4 * 1024

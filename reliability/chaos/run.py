@@ -26,6 +26,7 @@ from reliability.chaos.schedule import (
     FAULTS,
     Audit,
     Crash,
+    Crawl,
     Heal,
     Isolate,
     Leave,
@@ -383,6 +384,15 @@ async def _apply(
                     await fleet.skew(slot, offset)
                 case Sever(slot, strand, late, deaf):
                     note = f"{await fleet.sever(slot, strand, late, deaf)} connections cut"
+                case Crawl(slot, rate, seconds):
+                    await fleet.crawl(slot, rate, seconds)
+                    # What crawls in still arrives, which is a sign of life: nobody is suspected for the wait.
+                    if suspected := await fleet.suspicions(seconds):
+                        note = "; ".join(suspected)
+                        report.applied.append(Applied(index, step, began, journal.now() - began, note))
+                        print(report.applied[-1], flush=True)
+                        return f"at step #{index} ({described(action)}): a member was suspected: {suspected[0]}"
+                    note = "nobody suspected"
                 case Heal():
                     await fleet.heal()
                     lasted = journal.now() - shaped

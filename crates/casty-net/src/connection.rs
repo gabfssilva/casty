@@ -278,6 +278,7 @@ impl Greeting {
             broke: AtomicBool::new(false),
             over: watch::channel(false).0,
             bytes,
+            read: AtomicBool::new(false),
         });
         let (reader, writer) = tokio::io::split(socket);
         let writing = Arc::clone(&connection);
@@ -446,6 +447,8 @@ pub struct Connection {
     broke: AtomicBool,
     over: watch::Sender<bool>,
     bytes: Arc<Bytes>,
+    /// Whether anything was read from the peer since `heard` was last asked.
+    read: AtomicBool,
 }
 
 impl Connection {
@@ -459,6 +462,13 @@ impl Connection {
     #[must_use]
     pub fn session(&self) -> &Arc<Session> {
         &self.session
+    }
+
+    /// Whether anything arrived from the peer since the last time this was asked: bytes of an envelope still on its
+    /// way show the peer alive as well as a whole one does.
+    #[must_use]
+    pub fn heard(&self) -> bool {
+        self.read.swap(false, Ordering::Relaxed)
     }
 
     /// Whether the connection ended without a goodbye: the socket closed or failed, or the peer stopped answering.
@@ -622,6 +632,7 @@ impl Connection {
                 return Ok(Ending::Broke);
             }
             self.bytes.read(read);
+            self.read.store(true, Ordering::Relaxed);
             frames.feed(&buffer[..read]);
         }
     }

@@ -1,6 +1,7 @@
 """Actors used by more than one test file."""
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -68,6 +69,18 @@ async def sink(ctx: Context[None, Load]) -> None:
     """Takes a payload and answers with its size, keeping nothing."""
     async for msg in ctx.inbox:
         msg.reply_to.tell(len(msg.data))
+
+
+@dataclass(frozen=True)
+class Fetch(Askable[bytes]):
+    size: int
+
+
+@actor(pinned=True)
+async def source(ctx: Context[None, Fetch]) -> None:
+    """Answers with as many random bytes as asked for, which compression cannot shrink."""
+    async for msg in ctx.inbox:
+        msg.reply_to.tell(os.urandom(msg.size))
 
 
 @dataclass(frozen=True)

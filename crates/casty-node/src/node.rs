@@ -802,8 +802,8 @@ struct Held {
     told: bool,
     /// Whether this node acts as the owner of the keys the ring gives it.
     standing: Standing,
-    /// The node each request went to, and how it ends if that node never answers.
-    toward: HashMap<i64, (NodeId, Outcome)>,
+    /// The node each request of this node went to, and the actor and key it went to there.
+    toward: HashMap<i64, (NodeId, Cancel)>,
     /// The messages that wait on this node until their key has an owner that takes them.
     waiting: Waiting,
 }
@@ -1077,8 +1077,15 @@ impl Held {
                     && routed.origin == *self.node.id()
                     && let Some(Target::Reply { id, .. }) = routed.command.reply()
                 {
-                    let failure = Outcome::unreached(routed.command.actor(), routed.command.key());
-                    self.toward.insert(*id, (owner.clone(), failure));
+                    let cancel = Cancel {
+                        actor: routed.command.actor().to_owned(),
+                        key: routed.command.key().to_owned(),
+                        request: Target::Reply {
+                            node: self.node.id().clone(),
+                            id: *id,
+                        },
+                    };
+                    self.toward.insert(*id, (owner.clone(), cancel));
                 }
                 // Never too large: `Node::route` measured the command in its largest form before it came in.
                 let _ = sender.send(
@@ -1155,7 +1162,7 @@ impl Held {
     }
 
     /// What the transport says of a peer.
-    fn heard(&mut self, peer: Peer, now: f64) {
+    fn heard(&mut self, sender: &Sender, peer: Peer, now: f64) {
         match peer {
             Peer::Lost(node) => {
                 self.membership.lost(&node);
@@ -1165,35 +1172,51 @@ impl Held {
             // still wait on it.
             Peer::Unreached(node) => {
                 if self.membership.unreached(&node, now) {
-                    self.forsake(&[node]);
+                    self.forsake(sender, &[node]);
                 }
             }
         }
     }
 
     /// Fail every request sent to a node the cluster gave up on, instead of waiting for the deadline.
-    fn unreachable(&mut self, members: &[Member]) {
+    fn unreachable(&mut self, sender: &Sender, members: &[Member]) {
         let gone: Vec<NodeId> = members
             .iter()
             .filter(|member| member.status == Status::Dead)
             .map(|member| member.node.clone())
             .collect();
-        self.forsake(&gone);
+        self.forsake(sender, &gone);
     }
 
     /// Fail the requests sent toward `gone`, whose answers will not come.
-    fn forsake(&mut self, gone: &[NodeId]) {
+    ///
+    /// A node declared dead may still be connected and working: one whose link is busy, or slow to answer, is declared
+    /// dead as well. What was not sent of a request goes no further, and a node still connected hears that nobody waits
+    /// for the answer, so that it stops sending it: an answer that nobody reads would hold the link for as long as it
+    /// takes, ahead of the requests sent after it.
+    fn forsake(&mut self, sender: &Sender, gone: &[NodeId]) {
         if gone.is_empty() {
             return;
         }
-        let failed: Vec<(i64, Outcome)> = self
+        let failed: Vec<(i64, (NodeId, Cancel))> = self
             .toward
-            .iter()
-            .filter(|(_, (node, _))| gone.contains(node))
-            .map(|(id, (_, failure))| (*id, failure.clone()))
+            .extract_if(|_, (node, _)| gone.contains(node))
             .collect();
-        for (id, failure) in failed {
-            self.toward.remove(&id);
+        for (id, (owner, cancel)) in failed {
+            let linked = sender.linked(&owner);
+            let to = Destination::Node(owner);
+            sender.retract(&to, tag(&cancel.request));
+            let failure = Outcome::unreached(&cancel.actor, &cancel.key);
+            if linked {
+                let message = routing::Message::Cancel(cancel);
+                let _ = sender.send(
+                    &to,
+                    ACTORS,
+                    order(&message),
+                    None,
+                    &routing::encode(&message),
+                );
+            }
             self.host.settle(id, failure);
         }
     }
@@ -1235,6 +1258,11 @@ async fn run(
                 None => break,
             },
             _ = heartbeat.tick() => {
+                // A peer whose envelope is still arriving is talking, however long the envelope takes: a heartbeat
+                // behind it on the same connection waits for it, and the peer would be suspected for that wait.
+                for peer in sender.heard() {
+                    held.membership.heard(&peer, now());
+                }
                 held.membership.probe(now());
                 held.membership.expire(now());
             }
@@ -1386,7 +1414,7 @@ fn asked(sender: &Sender, held: &mut Held, ask: Ask, now: f64) -> bool {
                 let _ = handed.send(owed);
             }
         }
-        Ask::Heard(peer) => held.heard(peer, now),
+        Ask::Heard(peer) => held.heard(sender, peer, now),
         Ask::Leave => {
             held.routing.stopped = true;
             held.membership.leave(now);
@@ -1479,7 +1507,7 @@ fn flush(
         for step in held.placement.update(&seen, &held.counts) {
             held.handoff.begin(&step, held.kinds.get(&step.actor));
         }
-        held.unreachable(&seen);
+        held.unreachable(sender, &seen);
         // A session waiting for a dead member to come back waits no more.
         for member in seen.iter().filter(|member| member.status == Status::Dead) {
             sender.forsake(&member.node);

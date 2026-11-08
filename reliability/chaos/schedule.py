@@ -18,6 +18,8 @@ The planner keeps each fault within what the README promises to survive, since a
   README says need synchronized clocks;
 - a sever resets the connections of a machine a few times in a row, as the gateway of a cloud does, with nothing else
   wrong: the connections are taken up again and nothing in flight is lost, so the audit after it expects everything;
+- a crawl slows what reaches a machine to a trickle for longer than `suspect_after + dead_after`, with the bytes
+  still arriving: nobody may suspect anybody for it, which the run watches while it lasts;
 - at most one of the first three slots is down at a time, since they are the seeds of the clients;
 - an outage kills every machine at once and starts each again on its slot. The README promises nothing across it of
   the state held in memory only, so each workload stops expecting what it confirmed before it (`Workload.outage`), but
@@ -113,6 +115,15 @@ class Sever:
 
 
 @dataclass(frozen=True)
+class Crawl:
+    """For `seconds`, carry what the other machines send to `slot` at `rate` bytes a second, a few KiB at a time."""
+
+    slot: int
+    rate: float
+    seconds: float
+
+
+@dataclass(frozen=True)
 class Heal:
     """End every partition, isolation and slow link."""
 
@@ -122,7 +133,9 @@ class Audit:
     """Wait for the cluster to converge on the machines that are up, then check every invariant."""
 
 
-type Action = Crash | Leave | Start | Restart | Outage | Partition | Isolate | Slow | Skew | Sever | Heal | Audit
+type Action = (
+    Crash | Leave | Start | Restart | Outage | Partition | Isolate | Slow | Skew | Sever | Crawl | Heal | Audit
+)
 
 
 @dataclass(frozen=True)
@@ -134,7 +147,20 @@ class Step:
     action: Action
 
 
-FAULTS = ("crash", "restart", "leave", "join", "upgrade", "outage", "partition", "isolate", "slow", "skew", "sever")
+FAULTS = (
+    "crash",
+    "restart",
+    "leave",
+    "join",
+    "upgrade",
+    "outage",
+    "partition",
+    "isolate",
+    "slow",
+    "skew",
+    "sever",
+    "crawl",
+)
 """The kinds of fault the planner chooses from. `join` starts a machine on a free slot; `upgrade` is a step of a
 rolling deploy: a machine leaves and comes back running `reliability.deploy`; `outage` restarts the whole cluster."""
 
@@ -189,6 +215,8 @@ def kind(action: Action) -> str:
             return "skew"
         case Sever():
             return "sever"
+        case Crawl():
+            return "crawl"
         case Heal():
             return "heal"
         case Audit():
@@ -212,6 +240,8 @@ def described(action: Action) -> str:
         case Sever(slot, strand, late, deaf):
             cut = f"strand slot {slot}, late by {late * 1000:.0f} ms" if strand else f"sever slot {slot}"
             return f"{cut}, deaf for {deaf:.1f} s" if deaf else cut
+        case Crawl(slot, rate, seconds):
+            return f"crawl toward slot {slot} at {rate / 1024:.0f} KiB/s for {seconds:.1f} s"
         case Outage() | Heal() | Audit():
             return kind(action)
         case _:
@@ -234,6 +264,8 @@ def encoded(step: Step) -> dict[str, object]:
             fields = {"slot": slot, "offset": offset}
         case Sever(slot, strand, late, deaf):
             fields = {"slot": slot, "strand": strand, "late": late, "deaf": deaf}
+        case Crawl(slot, rate, seconds):
+            fields = {"slot": slot, "rate": rate, "seconds": seconds}
         case Outage() | Heal() | Audit():
             fields = {}
         case _:
@@ -271,6 +303,8 @@ def decoded(raw: object) -> Step:
                 records.number(held["late"]),
                 records.number(held.get("deaf", 0.0)),
             )
+        case "crawl":
+            action = Crawl(records.integer(held["slot"]), records.number(held["rate"]), records.number(held["seconds"]))
         case "heal":
             action = Heal()
         case "audit":
@@ -354,6 +388,11 @@ def _episode(rng: random.Random, machines: _Machines, faults: Sequence[str], tim
                 for index in range(3)
             ]
             return [*cuts, Step(0.0, Audit())]
+        case "crawl":
+            # Long enough that a peer taken for silent while its bytes crawl in would be declared dead.
+            silent = (timing.suspect_after + timing.dead_after).total_seconds()
+            crawl = Crawl(rng.choice(up), rng.uniform(16.0, 64.0) * 1024, rng.uniform(1.5, 3.0) * silent)
+            return [Step(pause, crawl), Step(0.0, Audit())]
         case other:
             raise AssertionError(f"no episode for {other!r}")
 
@@ -370,7 +409,7 @@ def _possible(fault: str, machines: _Machines) -> bool:
             return True
         case "partition":
             return len(machines.up) >= 5
-        case "isolate" | "slow" | "skew" | "sever":
+        case "isolate" | "slow" | "skew" | "sever" | "crawl":
             return len(machines.up) >= 3
         case _:
             return False

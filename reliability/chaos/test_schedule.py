@@ -51,6 +51,7 @@ def describe_plan() -> None:
             "slow",
             "skew",
             "sever",
+            "crawl",
             "heal",
             "audit",
         }

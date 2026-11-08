@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import assert_never
 
-from casty import Askable, Context, NodeId, actor
+from casty import Askable, Context, NodeId, Unavailable, actor
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,37 @@ async def stamped(ctx: Context[Ledger, StampMsg]) -> None:
                 reply_to.tell(Listing(ctx.state.value.entries, ctx.system.node))
             case _:
                 assert_never(msg)
+
+
+@dataclass(frozen=True)
+class Blob(Askable[bytes]):
+    size: int
+
+
+@actor(pinned=True)
+async def blob(ctx: Context[None, Blob]) -> None:
+    """Answers with as many random bytes as asked for, which compression cannot shrink."""
+    async for msg in ctx.inbox:
+        msg.reply_to.tell(os.urandom(msg.size))
+
+
+@dataclass(frozen=True)
+class Pull(Askable[int]):
+    """Ask the `blob` at `address` for `size` bytes, and answer how many came, or -1 when none did."""
+
+    address: str
+    size: int
+
+
+@actor(pinned=True)
+async def puller(ctx: Context[None, Pull]) -> None:
+    """What moves large answers between two nodes: a ref outside the cluster asks one node to pull from another."""
+    async for msg in ctx.inbox:
+        try:
+            pulled = len(await ctx.system.ref(blob, "blob", at=msg.address).ask(Blob(msg.size)))
+        except (Unavailable, TimeoutError):
+            pulled = -1
+        msg.reply_to.tell(pulled)
 
 
 @dataclass(frozen=True)

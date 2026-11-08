@@ -39,7 +39,7 @@ Members exchange records through gossip and periodically exchange their tables t
 
 Two incarnation values serve different purposes. `NodeId.incarnation` identifies one process lifetime and changes on restart. The membership record's incarnation number orders announcements about that same process. Merge precedence uses the newer membership incarnation, then status; a `left` record overrides any incarnation for the removed identity.
 
-Failure detection uses elapsed silence and the configured heartbeat and failure intervals. Its observations are local: membership is not a consensus-backed inventory, and two nodes can temporarily have different views.
+Failure detection uses elapsed silence and the configured heartbeat and failure intervals. Its observations are local: membership is not a consensus-backed inventory, and two nodes can temporarily have different views. Silence means that nothing at all arrives from the peer: the bytes of a large message still on its way count as much as a heartbeat, so a heartbeat queued behind a transfer on a slow link does not get the sender suspected while the transfer keeps arriving.
 
 A node that stops seeing a majority of members alive eventually steps down from ordinary actor ownership. It allows a grace period to avoid repeatedly ending activations when observations briefly cross the majority threshold. The current grace is half `dead_after`, leaving the remainder for step-down before peers declare the node dead.
 

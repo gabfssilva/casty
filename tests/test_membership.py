@@ -8,8 +8,18 @@ from datetime import timedelta
 
 import pytest
 
-from casty import ActorSystem, Cluster, Event, Limits, MemberChanged, NodeId, Observer, Overlay, Refused
-from tests.app import Load, sink
+from casty import (
+    ActorSystem,
+    Cluster,
+    Event,
+    Limits,
+    MemberChanged,
+    NodeId,
+    Observer,
+    Overlay,
+    Refused,
+)
+from tests.app import Fetch, Load, sink, source
 from tests.cluster import FAST, WITHIN, Harness, Node
 from tests.support import eventually
 
@@ -82,6 +92,23 @@ def describe_membership() -> None:
                 )
 
                 assert sizes == [len(payload)] * 12
+                assert [change for seen in changes.values() for change in seen if change.status != "alive"] == []
+
+    def when_the_link_toward_a_node_slows_to_a_crawl_under_a_large_answer() -> None:
+        async def it_keeps_hearing_the_peer_whose_answer_is_still_arriving() -> None:
+            changes: defaultdict[int, list[MemberChanged]] = defaultdict(list)
+
+            async with Harness.start(2, observer=recording(changes)) as harness:
+                a, b = harness.nodes
+                fetching = b.system.ref(source, "s", at=a.system.node)
+                assert len(await fetching.ask(Fetch(1024))) == 1024
+
+                # The answer and whatever queues behind it take seconds to arrive, many times `suspect_after`, and
+                # the heartbeats of `a` wait behind them.
+                harness.throttle(b, 64 * 1024)
+                fetched = await fetching.ask(Fetch(192 * 1024))
+
+                assert len(fetched) == 192 * 1024
                 assert [change for seen in changes.values() for change in seen if change.status != "alive"] == []
 
     def when_the_seed_belongs_to_another_cluster() -> None:

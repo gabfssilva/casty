@@ -151,6 +151,37 @@ class Fleet:
         )
         return sum(cuts)
 
+    async def crawl(self, slot: int, rate: float, seconds: float, /) -> None:
+        """For `seconds`, carry what the other nodes up send to `slot` at `rate` bytes a second, on the relay of
+        whichever side dialed each connection."""
+        others = [other for other in self.up if other != slot]
+
+        async def crawl(on: int, addresses: Iterable[str], outward: bool) -> None:
+            crawling = {"addresses": sorted(addresses), "rate": rate, "seconds": seconds, "outward": outward}
+            await self._machines[on].ask({"crawl": crawling}, _ASKING)
+
+        await asyncio.gather(
+            crawl(slot, (self.addresses[other] for other in others), False),
+            *(crawl(other, (self.addresses[slot],), True) for other in others),
+        )
+
+    async def suspicions(self, seconds: float, /) -> list[str]:
+        """Watch the views of the nodes up for `seconds`, and answer every member one of them saw other than alive."""
+        loop = asyncio.get_running_loop()
+        until = loop.time() + seconds
+        seen: list[str] = []
+        while loop.time() < until:
+            slots = self.up
+            views = await asyncio.gather(*(self._members(slot) for slot in slots))
+            for slot, view in zip(slots, views, strict=True):
+                seen += [
+                    f"slot {slot} saw {node.address} {status}"
+                    for node, status in sorted(view.table, key=str)
+                    if status != "alive" and f"slot {slot} saw {node.address} {status}" not in seen
+                ]
+            await asyncio.sleep(_POLL)
+        return seen
+
     async def heal(self) -> None:
         """End every partition, isolation and slow link. Clocks stay as they are: they belong to the machines."""
         self._sides.clear()
